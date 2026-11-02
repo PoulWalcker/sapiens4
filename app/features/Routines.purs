@@ -108,9 +108,37 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     [link (if single then "← History" else "← All routines") (if single then M.RoutineHistory id else M.RoutineList false)
     ,V.div "routine-heading routine-page-heading" [V.textNode "h1" [] $ title routine,V.div "routine-actions" $ if D.b "deleted" r then [badge "Deleted"] else [runButton routine] <> scheduleControl routine <> [menu routine]]
     ,V.p "routine-muted" $ whenText routine
-    ,V.node "nav" [V.cls "routine-tabs",V.label "Routine views"] [V.control [V.cls $ "routine-link" <> if not history then " selected" else "",V.attr "aria-current" $ if not history then "page" else "false"] "Latest result" (RoutineNavigate $ M.RoutineLatest id),V.control [V.cls $ "routine-link" <> if history then " selected" else "",V.attr "aria-current" $ if history then "page" else "false"] "History" (RoutineNavigate $ M.RoutineHistory id)]]
+    ,V.node "nav" [V.cls "routine-tabs",V.label "Routine views"] [V.control [V.cls $ "routine-link" <> if not history then " selected" else "",V.attr "aria-current" $ if not history then "page" else "false"] "Latest result" (RoutineNavigate $ M.RoutineLatest id),V.control [V.cls $ "routine-link" <> if history then " selected" else "",V.attr "aria-current" $ if history then "page" else "false"] "History" (RoutineNavigate $ M.RoutineHistory id)]
+    ,V.when (managed routine) $ analysisPanel routine]
     where r = record routine
           id = D.s "id" r
+  analysisPanel routine = V.div "routine-notice" $
+    [V.textNode "h3" [] "Automation analysis"
+    ,V.p "" $ case current of
+      "Ready" -> "Ready for later preparation"
+      "NeedMoreEvidence" -> "More evidence needed"
+      "Decline" -> "Automation declined"
+      "queued" -> "Analysis queued"
+      "running" -> "Analysis in progress"
+      "stale" -> "Analysis needs reconsideration"
+      "blocked" -> "Analysis unavailable"
+      "failed" -> "Analysis failed"
+      "interrupted" -> "Analysis interrupted"
+      "stopped" -> "Analysis stopped"
+      _ -> "Awaiting an accepted result"
+    ,V.when (D.s "reason" analysis /= "") $ V.p "routine-muted" $ D.s "reason" analysis] <>
+    (if current == "Ready" then [V.p "" $ D.s "automatablePart" analysis,V.p "routine-muted" "This is the owner’s assessment; code has not been prepared or activated."] <> map (\parameter -> V.p "routine-muted" $ D.s "name" parameter <> ": " <> D.s "description" parameter) (D.rows "parameters" analysis) else []) <>
+    (if current == "NeedMoreEvidence" then map (V.p "" <<< D.str) (D.rows "missingObservations" analysis) else []) <>
+    (if current == "Decline" then [V.p "" $ D.s "reconsiderCondition" analysis] else []) <>
+    [V.when (D.s "id" analysis /= "") $ V.node "details" [] [V.node "summary" [] [V.text "Analysis usage"],V.p "routine-muted" $ if D.b "conflict" usage then "Purpose: automation analysis · Usage unknown: provider reports conflict." else "Purpose: automation analysis · Input tokens: " <> known "inputTokens" usage <> " · Output tokens: " <> known "outputTokens" usage,V.p "routine-muted" $ "Duration (ms): " <> known "durationMs" analysis <> " · Price: Unknown"]] <>
+    (if D.b "deleted" r then [] else if A.elem current ["queued","running"] then
+      [V.button "routine-link" "Stop analysis…" $ OpenDialog M.RoutineStopAnalysis $ D.put "analysis" (D.get "id" analysis) r]
+     else if A.null (runs routine) then [] else [V.button "routine-link" "Reconsider automation…" $ OpenDialog M.RoutineAnalyze r])
+    where
+    r = record routine
+    analysis = D.get "analysis" r
+    current = D.s "status" analysis
+    usage = D.get "usage" analysis
   result routine run =
     [V.p "routine-muted" $ status (D.s "status" run) <> " · " <> formatDate (timestamp run) <> " · " <> triggerLabel run
     ,V.when (managed routine) $ V.p "routine-muted" $ "Assessment: " <> D.s "status" (D.get "assessment" run) <> if D.b "historical" run then " · Historical revision" else ""

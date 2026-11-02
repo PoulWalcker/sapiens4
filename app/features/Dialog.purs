@@ -35,6 +35,8 @@ make kind record m = {kind,title,record,fields,content:D.null,error:"",busy:fals
     M.DecisionPrompts -> "Decision prompts"
     M.GroupTask -> if D.s "id" record == "" then "Create Group task" else "Edit Group task"
     M.RoutineStop -> "Stop this run?"
+    M.RoutineAnalyze -> "Analyze saved evidence"
+    M.RoutineStopAnalysis -> "Stop analysis?"
     M.RoutineReject -> "Reject this result?"
     M.RoutineDiscard -> "Discard changes?"
     M.RoutineRun -> "Run " <> D.s "title" record
@@ -102,6 +104,10 @@ body m d = case d.kind of
     ,V.p "form-hint" "Your feedback stays with this run and its original instructions. The original assessment is preserved. This does not start another run."]
   M.RoutineStop -> form "Stop run"
     [V.p "" "This stops this run and its delegated work. Completed external actions cannot be undone. Other runs are unchanged."]
+  M.RoutineAnalyze -> form "Analyze evidence"
+    [V.p "" "The owner will make a new analysis of saved results and feedback. This uses a model call and does not start a routine run."]
+  M.RoutineStopAnalysis -> form "Stop analysis"
+    [V.p "" "Stop the current analysis. Saved results and the routine schedule stay available."]
   M.RoutineDiscard -> form "Discard changes"
     [V.p "" "Your changes have not been saved."]
   M.RoutineRun -> form "Run now"
