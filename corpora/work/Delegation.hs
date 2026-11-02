@@ -82,10 +82,10 @@ frontierCalls work = filter (\call -> not (any ((==Just (callIdentity call)) . c
 -- No files, model calls or nested transactions cross this admission interface.
 admitRoutineOn :: SQL.Connection -> AgentId -> Turn -> Value -> Maybe TaskSpec -> IO ()
 admitRoutineOn db owner turn snapshot accepted = do
- let work=routineWorkload owner turn snapshot accepted
-     message=obj [("role",str "user"),("content",str (turnInput turn)),("turn",toJSON (turnId turn)),("time",turnField turn "created"),("origin",turnField turn "origin")]
+ work<-selectRoutineCodeOn db owner (routineWorkload owner turn snapshot accepted) snapshot accepted
+ let message=obj [("role",str "user"),("content",str (turnInput turn)),("turn",toJSON (turnId turn)),("time",turnField turn "created"),("origin",turnField turn "origin")]
  SQL.execute db "INSERT INTO workloads(id,value) VALUES (?,?)" (workloadId work,jsonText (toJSON work))
- Managed.enrollOn db (agentIdText owner) turn message (turnInput turn) []
+ Managed.enrollOn db (agentIdText owner) (if has (toJSON work) "codeExecution" then withTurnFields (put "codeBound" (Bool True)) turn else turn) message (turnInput turn) []
 routineWorkload :: AgentId -> Turn -> Value -> Maybe TaskSpec -> Workload
 routineWorkload owner turn snapshot accepted =
  let identity=runIdText (turnId turn)
@@ -95,6 +95,102 @@ routineWorkload owner turn snapshot accepted =
   [("bindingSchema",num 1),("originalIntent",str (turnInput turn)),("task",obj [("taskId",str ("task_"<>identity)),("taskType",str "automated"),("specification",maybe Null toJSON accepted)])
   ,("origin",turnField turn "origin"),("routineSnapshot",maybe snapshot (\spec -> put "acceptedTask" (toJSON spec) snapshot) accepted),("executionGate",toJSON ExecutionOpen)
   ,("created",turnField turn "created"),("decisions",arr []),("outcome",Null)])
+-- Admission owns selection and the trial claim in its caller's existing SQL
+-- transaction. The newest prepared watermark is independent of trial activity.
+selectRoutineCodeOn :: SQL.Connection -> AgentId -> Workload -> Value -> Maybe TaskSpec -> IO Workload
+selectRoutineCodeOn _ _ work _ Nothing = pure work
+selectRoutineCodeOn db owner work snapshot (Just accepted) = do
+ rows<-DB.queryRowsOn db "SELECT value FROM workloads ORDER BY rowid" ["value"] []
+ works<-traverse (DB.decodeStored . (`at` "value") >=> decodeValue 500) rows
+ let applicable prepared = let pin=workField prepared "preparationPin" in get pin "owner"==toJSON owner && get pin "routine"==get snapshot "id" && get pin "contractGeneration"==get snapshot "contractGeneration"
+     prepared=[old | old<-works,applicable old,at (workField old "preparation") "status"=="awaiting_occurrence"]
+     newest=listToMaybe (reverse prepared)
+     activeTrial old=case find ((==at (get (workField old "preparation") "trial") "run") . workloadId) works of
+      Just trial->any ((`notElem` [CallCompleted,CallFailed,CallUnresolved,CallInterrupted,CallCancelled]) . callState) (workCalls trial)
+      Nothing->has (get (workField old "preparation") "trial") "run"
+     busy=any activeTrial [old | old<-works,applicable old]
+     active=get snapshot "activeCode"
+     reference value=get (get (workField value "preparation") "version") "reference"
+ operations<-DB.routineOperationsOn db
+ eligible<-case newest of
+  Nothing->pure False
+  Just candidate->do
+   pin<-decodeValue 409 (workField candidate "preparationPin")
+   pure (DB.analysisFeedbackIds operations snapshot (map toJSON works) (analysisSources pin)==analysisFeedback pin)
+ let chosen=case newest of
+      Just candidate | eligible && not busy && not (has (get (workField candidate "preparation") "trial") "run") -> Just (reference candidate,CandidateTrial,Just candidate)
+      _ | at active "status"=="active" && get active "contractGeneration"==get snapshot "contractGeneration" -> Just (get active "reference",ActiveCode,Nothing)
+      _ -> Nothing
+ case chosen of
+  Nothing->pure work
+  Just (raw,role,candidate)->do
+   reference_<-decodeValue 409 raw
+   void (resolveCandidateFrom works owner snapshot accepted reference_)
+   let initial=NE.head (workCalls work)
+       binding=ScriptBinding owner RoutineSnapshotSource reference_ role
+       code=obj [("reference",toJSON reference_),("role",toJSON role),("status",str "queued"),("operations",arr [])]
+       changed=setWorkField "codeExecution" code work {workCalls=setCallFields [("executionBinding",toJSON binding)] initial :| NE.tail (workCalls work)}
+   forM_ candidate $ \preparedWork->do
+    let claim=obj [("run",str (workloadId work)),("reference",toJSON reference_),("status",str "claimed")]
+    DB.putValueOn db DB.Workloads (workloadId preparedWork) (toJSON (setWorkField "preparation" (put "trial" claim (workField preparedWork "preparation")) preparedWork))
+   pure changed
+
+-- Both preparation checks and business execution resolve the exact persisted bytes.
+resolveCandidateBytes :: AgentId -> Workload -> CandidateReference -> IO Value
+resolveCandidateBytes owner source reference@(CandidateReference refOwner preparation digest) = do
+ let version=get (workField source "preparation") "version"
+ require (refOwner==owner && workloadId source==runIdText preparation && get (workField source "preparationPin") "owner"==toJSON owner) 409 "Candidate reference belongs to another preparation or owner"
+ require (get version "reference"==toJSON reference && canonicalHash (remove ["reference"] version)==digest && sourceHash (at version "source")==at version "sourceHash") 409 "Pinned candidate content or reference changed"
+ pure version
+
+resolveCandidateFrom :: [Workload] -> AgentId -> Value -> TaskSpec -> CandidateReference -> IO Value
+resolveCandidateFrom works owner snapshot accepted reference@(CandidateReference _ preparation _) = do
+ source<-maybe (failure 409 "Pinned candidate preparation is missing") pure (find ((==runIdText preparation) . workloadId) works)
+ version<-resolveCandidateBytes owner source reference
+ let prepared=workField source "preparation"
+     pin=workField source "preparationPin"
+ require (get pin "owner"==toJSON owner && get pin "routine"==get snapshot "id" && get pin "contractGeneration"==get snapshot "contractGeneration" && get version "contractGeneration"==get snapshot "contractGeneration") 409 "Candidate does not belong to this accepted consumer contract"
+ original<-decodeValue 409 (get version "contract")
+ require (sameSemanticContract original accepted) 409 "Candidate cannot replace accepted task criteria"
+ require (at version "interface"=="json-stdin-result-v1" && at version "language"=="python" && get version "dependencies"==arr [] && get version "capabilities"==arr []) 409 "Candidate execution interface is unsupported"
+ require (at prepared "status"=="awaiting_occurrence" && get (get prepared "review") "accepted"==Bool True && not (null (items prepared "checks"))
+   && all (\check->get check "matched"==Bool True && get check "version"==toJSON reference && get check "sourceHash"==get version "sourceHash") (items prepared "checks")) 409 "Candidate lacks completed checks for this exact version"
+ pure version
+
+sameSemanticContract :: TaskSpec -> TaskSpec -> Bool
+sameSemanticContract left right = specObjective left==specObjective right && specOutputs left==specOutputs right && specCriteria left==specCriteria right
+
+resolveCandidate :: Service -> Workload -> WorkCall -> IO (Value,CodeRole)
+resolveCandidate s work call = do
+ binding<-decodeValue 409 (callField call "executionBinding")
+ case binding of
+  OrdinaryBinding _ _->failure 409 "This occurrence is not pinned to code"
+  ScriptBinding owner _ reference role->do
+   require (owner==callOwner call) 409 "Code binding belongs to another call owner"
+   accepted<-executionContract work call >>= maybe (failure 409 "Code execution requires a pinned task contract") pure
+   works<-readWorks s
+   version<-resolveCandidateFrom works owner (workField work "routineSnapshot") accepted reference
+   require (get (workField work "codeExecution") "reference"==toJSON reference && get (workField work "codeExecution") "role"==toJSON role) 409 "Code occurrence metadata differs from its immutable binding"
+   case role of
+    CandidateTrial->do
+     let CandidateReference _ preparation _=reference
+     source<-maybe (failure 409 "Trial owner preparation is missing") pure (find ((==runIdText preparation) . workloadId) works)
+     let claim=get (workField source "preparation") "trial"
+     require (get claim "run"==str (workloadId work) && get claim "reference"==toJSON reference) 409 "This occurrence does not own the candidate trial"
+    ActiveCode->do
+     let admitted=get (workField work "routineSnapshot") "activeCode"
+     require (get admitted "reference"==toJSON reference && at admitted "status"=="active") 409 "This occurrence has no accepted active-code binding"
+   pure (version,role)
+
+codeProjection :: Value -> Value
+codeProjection Null = Null
+codeProjection code = mergeFields [("runtimeResult",maybe Null (`get` "result") (listToMaybe (reverse [op | op<-items code "operations",at op "purpose"=="code_execution"]))),("verification",codeVerification code)] code
+codeVerification :: Value -> Value
+codeVerification code=fromMaybe Null (find (\op->get op "id"==get (get code "verification") "id") (items code "operations"))
+
+generatedCleanupPending :: Workload -> Bool
+generatedCleanupPending work=any (\key->at (workField work key) "status"=="cleanup_pending") ["preparation","codeExecution"]
+
 routineSpecPinned :: Workload -> Bool
 routineSpecPinned work = has (workField work "routineSnapshot") "criteria"
 
@@ -120,7 +216,8 @@ executionContract work call = do
   require (marker==Null || not expected) 409 "Accepted execution binding is missing"
   pure Nothing
  else do
-  OrdinaryBinding owner source <- decodeValue 409 (callField call "executionBinding")
+  binding <- decodeValue 409 (callField call "executionBinding")
+  let (owner,source)=bindingContract binding
   require (owner==callOwner call) 409 "Execution binding belongs to another owner"
   case source of
    RoutineSnapshotSource -> do

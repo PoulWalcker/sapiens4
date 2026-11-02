@@ -78,6 +78,7 @@ openService path = do
       saveDirectory s $ foldl (\dir row -> let a=at row "id"; entry=get dir a in put a (put "parent" (if a==chief then Null else get entry "parent" `fallback` str chief) entry) dir) d agents
       mapM_ (E.recover s . (`at` "id")) agents
       Composer.recover s
+      E.recoverCode s
       prefs <- DB.singleton s DB.Preferences
       let panel=at prefs "panel"; updated=if panel=="mindmap" then put "panel" (str "notes") prefs else if panel `elem` ["cron","log"] then put "panel" (str "chat") prefs else prefs
       DB.saveSingleton s DB.Preferences (remove ["work_views"] updated)

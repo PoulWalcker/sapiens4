@@ -160,7 +160,7 @@ a failed or interrupted attempt needs a new explicit operation.
 Preparation designs hidden expected results before generating code, executes the
 actual code against those inputs, then requests separate review. Success is
 `awaiting_occurrence`: it does not activate code, publish a Kit entry, or perform
-another business occurrence. Ordinary routine execution remains unchanged.
+another business occurrence. Preparation remains an explicit API operation.
 Editing the goal or criteria, deleting the routine, or stopping preparation
 prevents further promotion. Historical evidence remains inspectable.
 
@@ -182,6 +182,31 @@ start. After a host crash, restart reconciles only the matching owned containers
 without replaying the attempt. If cleanup is uncertain, preparation remains
 `cleanup_pending`; restore the runtime and restart the app before another
 preparation. Ordinary work remains available.
+
+### Running a prepared routine
+
+The next authorized Run now or scheduled occurrence can claim the newest checked
+candidate for a single trial. The candidate reference, accepted task and actual
+inputs are pinned at admission. Other admitted runs keep their existing bindings.
+A pending trial prevents a second concurrent trial, and a consumed trial never
+causes an older untried candidate to be selected automatically.
+
+The script performs the pure computation in the verified external runtime above.
+Each code occurrence then uses one response-only model call to assess the original
+completion criteria. The first trial also returns distinct activation-audit facts
+from that same invocation; this is shared evidence, not a second independent call.
+Only an accepted result and affirmative audit, with the current contract and source
+feedback still applicable, activate the exact version for future admissions.
+
+A failed or unknown trial retains its actual output and does not immediately launch
+an ordinary replacement. A later occurrence uses a still-valid prior active version
+or ordinary execution; trying another candidate requires a newer preparation.
+A proven code or semantic failure suspends only the matching active version.
+Interruption, unavailable runtime or unknown verification do not themselves
+quarantine an active version. Generic Retry is unavailable for code-bound runs;
+start a new authorized occurrence instead. Ordinary Retry is unchanged.
+Owned-container uncertainty blocks further generated-code starts until runtime
+restoration and app restart reconcile ownership; ordinary work remains available.
 
 ### Opt-in managed calls
 

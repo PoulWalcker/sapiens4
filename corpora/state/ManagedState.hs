@@ -36,6 +36,8 @@ revision :: Value -> Value
 revision v = get (get v "managed") "revision"
 validateCommand :: Value -> Value -> IO ()
 validateCommand turn command = do
+ when (at command "action"=="retry" && boolean (get turn "codeBound")) $
+  check False "Code-run evidence is retained; start a new authorized occurrence instead of Retry"
  when (at command "action"=="retry" && (has (get turn "origin") "analysis" || has (get turn "origin") "preparation")) $
   check False "Use a new explicit Routine analysis or preparation; interrupted maintenance cannot be replayed"
  check (keys command `allIn` ["id","action","revision"] && length (keys command)==3 && not (T.null (at command "id")) && T.length (at command "id")<=128 && get command "action" `elem` map str ["cancel","retry"]) "Invalid managed command; expected id, action and revision"

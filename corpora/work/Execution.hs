@@ -8,6 +8,8 @@ import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
 import Data.Aeson hiding (pairs)
+import qualified Data.Text.Encoding as TE
+import qualified Database.SQLite.Simple as SQL
 import qualified Data.ByteString.Lazy as BL
 import Data.IORef
 import Data.List (find,nub)
@@ -27,6 +29,7 @@ import Population
 import Workspace
 import qualified Delegation as D
 import qualified Routines as R
+import qualified GeneratedCode as Code
 import qualified Composer
 import qualified Automation
 import Provider
@@ -97,6 +100,7 @@ turnCommand s a identity rawAction external = do
  turn <- maybe (failure 404 "Unknown active turn") pure (find ((==RunId identity) . turnId) (agentTurns state))
  when (rawAction=="retry") $ do
   require (not (has (turnField turn "origin") "analysis" || has (turnField turn "origin") "preparation")) 409 "Use explicit Routine reconsideration for a new analysis"
+  require (not (boolean (turnField turn "codeBound"))) 409 "Code-run evidence is retained; start a new authorized occurrence instead of Retry"
   D.requireCallAllowed s turn
  work <- D.findWork s (RunId identity)
  require (not (maybe False (any ((==Just (RunId identity)) . D.callParent) . D.workCalls . fst) work)) 409 "This request was delegated; use the recipient call controls"
@@ -190,7 +194,7 @@ launch s a batch tick slot batching = do
  DB.pulseCall s tick a "chatInput" slot (nub [at (turnField t "origin") "group" | t <- NE.toList batch,has (turnField t "origin") "group"])
  DB.project s a
  void $ forkIO $ do
-  result <- try (withActor s a (Just "chatInput") (if has (turnField execution "origin") "group" then G.runGroup s run execution else if has (turnField execution "origin") "preparation" then Composer.run s run execution else D.runDecision s run execution snapshot))
+  result <- try (withActor s a (Just "chatInput") (if has (turnField execution "origin") "group" then G.runGroup s run execution else if has (turnField execution "origin") "preparation" then Composer.run s run execution else dispatchOrdinary s run execution snapshot))
   locked s $ finish s run execution result `finally` do
    lease <- readIORef (serviceLease s)
    when (lease==Just (AgentId a,i)) $ writeIORef (serviceLease s) Nothing
@@ -198,6 +202,195 @@ launch s a batch tick slot batching = do
    D.pendingWorks s
    G.reconcileGroups s
    G.dispatchGroups s
+-- Implementation is pinned at admission; the model does not dispatch code runs.
+dispatchOrdinary :: Service -> Run -> Turn -> AgentState -> IO (Text,[Value])
+dispatchOrdinary s running turn snapshot = do
+ found<-D.findWork s (turnId turn)
+ if maybe False (\(work,call)->has (toJSON work) "codeExecution" || at (D.callField call "executionBinding") "mode"=="script") found
+  then runCode s running turn else D.runDecision s running turn snapshot
+
+data SemanticVerdict = SemanticallyAccepted | SemanticallyRejected | SemanticallyUnknown deriving (Eq,Show)
+instance FromJSON SemanticVerdict where
+ parseJSON value=case text value of "accepted"->pure SemanticallyAccepted; "rejected"->pure SemanticallyRejected; "unknown"->pure SemanticallyUnknown; _->fail "Expected accepted, rejected or unknown semantic verdict"
+instance ToJSON SemanticVerdict where
+ toJSON value=str (case value of SemanticallyAccepted->"accepted"; SemanticallyRejected->"rejected"; SemanticallyUnknown->"unknown")
+data CodeRunError = ProvenCodeFault Text | VerificationUnknown Text deriving (Show)
+instance Exception CodeRunError
+
+codeUpdate :: Service -> Run -> (Value -> Value) -> IO ()
+codeUpdate s running transform = locked s $ do
+ (work,_)<-D.getWork s (runId running)
+ D.saveWork s (D.setWorkField "codeExecution" (transform (D.workField work "codeExecution")) work)
+codeGuard :: Service -> Run -> IO ()
+codeGuard s running = do
+ requireActive s (agentIdText (runOwner running))
+ cancelled<-readIORef (runCancel running)
+ require (not cancelled) 409 "Code occurrence stopped"
+ (work,call)<-D.getWork s (runId running)
+ DB.requireOccurrence s (D.workField work "origin")
+ void (D.resolveCandidate s work call)
+ works<-D.readWorks s
+ require (not (any D.generatedCleanupPending works)) 503 "Owned code cleanup is unresolved; restore the runtime and restart the app"
+
+runCode :: Service -> Run -> Turn -> IO (Text,[Value])
+runCode s running turn = do
+ locked s (D.begin s (runOwner running) turn)
+ result<-try (executeCode s running) :: IO (Either SomeException Text)
+ case result of
+  Right reply->pure (reply,[])
+  Left exception->do
+   let asynchronous=isJust (fromException exception :: Maybe SomeAsyncException) || isJust (fromException exception :: Maybe AsyncCancelled)
+   cancelled<-readIORef (runCancel running)
+   permitted<-DB.occurrenceAllowed s (turnField turn "origin")
+   let terminal=if asynchronous || cancelled || not permitted then "interrupted" else "failed"
+   let interrupted code =
+        let container=get code "container"
+            pending=has container "name" && at container "status"/="removed"
+            operations=[if at op "status"=="running" then mergeFields [("status",str terminal),("error",str (D.exceptionText exception))] op else op | op<-items code "operations"]
+        in mergeFields [("status",str (if pending then "cleanup_pending" else terminal)),("operations",arr operations),("error",str (D.exceptionText exception))] code
+   codeUpdate s running interrupted
+   case fromException exception of
+    Just (ProvenCodeFault reason)->when (not (asynchronous || cancelled) && permitted) (markCodeFault s running reason)
+    Just (VerificationUnknown _)->pure ()
+    Nothing->pure ()
+   throwIO exception
+
+executeCode :: Service -> Run -> IO Text
+executeCode s running = do
+ codeGuard s running
+ (work,call)<-D.getWork s (runId running)
+ (version,role)<-D.resolveCandidate s work call
+ spec<-D.executionContract work call >>= maybe (failure 409 "Code run has no accepted contract") pure
+ let input=case D.specInputs spec of
+      []->Null
+      [raw]->either (const (str raw)) id (eitherDecodeStrict (TE.encodeUtf8 raw))
+      values->toJSON values
+     reference=get version "reference"
+ environmentId<-newId
+ began<-getMonotonicTimeNSec
+ codeUpdate s running (appendItems "operations" [obj [("id",str environmentId),("purpose",str "environment"),("status",str "running")]])
+ environmentResult<-try (do
+  profile<-Code.available
+  require (Code.profileJSON profile==get version "runtime") 409 "Pinned code runtime identity is unavailable"
+  pure profile) :: IO (Either APIError Code.Profile)
+ environmentEnd<-getMonotonicTimeNSec
+ let environmentFields=case environmentResult of Right profile->[("status",str "completed"),("runtime",Code.profileJSON profile)]; Left (APIError _ reason)->[("status",str "failed"),("error",str reason)]
+ codeUpdate s running (\code->put "operations" (arr [if at op "id"==environmentId then mergeFields (("durationMs",toJSON ((environmentEnd-began) `div` 1000000)):environmentFields) op else op | op<-items code "operations"]) code)
+ profile<-either throwIO pure environmentResult
+ nonce<-newId
+ started<-now
+ let reserved=Code.businessReservation profile (agentIdText (runOwner running)) (runIdText (runId running)) nonce
+     operation=obj [("id",str nonce),("purpose",str "code_execution"),("status",str "running"),("started",str started),("durationMs",Null),("reference",reference),("inputHash",str (canonicalHash input))]
+ codeUpdate s running (mergeFields [("input",input),("status",str "running"),("container",reserved)] . appendItems "operations" [operation])
+ result<-Code.runFixture profile running reserved (at version "source") input (\receipt->do
+  when (at receipt "status"/="removed") (codeGuard s running)
+  codeUpdate s running (put "container" receipt))
+ let actual=parseJSONText (at result "output")
+     runtime=mergeFields [("actual",actual),("reference",reference),("sourceHash",get version "sourceHash"),("inputHash",str (canonicalHash input))] result
+ let runtimeStatus=if at result "status"=="stopped" then "interrupted" else if at result "status"=="exited" && get result "exitCode"==num 0 && not (boolean (get result "wasRunning")) then "completed" else "failed"
+ codeUpdate s running (\code->put "operations" (arr [if at op "id"==nonce then mergeFields [("status",str runtimeStatus),("result",runtime),("durationMs",get runtime "durationMs")] op else op | op<-items code "operations"]) code)
+ codeGuard s running
+ when (at result "status" `elem` ["output_limit","timeout"] || boolean (get result "oomKilled")) (throwIO (ProvenCodeFault "Candidate exceeded its verified runtime budget"))
+ require (at result "status"=="exited" && not (boolean (get result "wasRunning"))) 503 "Runtime attachment ended without an established process result"
+ when (get result "exitCode"/=num 0) (throwIO (ProvenCodeFault "Candidate body exited unsuccessfully"))
+ unless ((at actual "status"=="ok" && has actual "value") || (at actual "status"=="rejected" && not (T.null (at actual "error")))) (throwIO (ProvenCodeFault "Candidate returned an invalid result envelope"))
+ invocation<-newId
+ let purpose=if role==CandidateTrial then "code_acceptance_and_activation_audit" else "code_acceptance"
+     context=obj [("selfId",toJSON (runOwner running)),("contract",toJSON spec),("input",input),("result",actual),("runtime",runtime),("version",version),("initialTrial",Bool (role==CandidateTrial))]
+ instruction<-prompt s "code-assessment"
+ envelope<-prompt s "preparation-envelope"
+ let rendered=render envelope [("node","CodeAssessment"),("instruction",instruction),("context",jsonText context)]
+ let verification=obj [("id",str invocation),("purpose",str purpose),("status",str "running"),("promptHash",str (sourceHash rendered))]
+     saveVerification fields=codeUpdate s running (\code->put "operations" (arr [if at op "id"==invocation then merge op fields else op | op<-items code "operations"]) code)
+ codeUpdate s running (mergeFields [("status",str "assessment"),("verification",obj [("id",str invocation)])] . appendItems "operations" [verification])
+ raw<-invokeAnalysisObserved s running rendered (\evidence->saveVerification (obj [("evidence",toJSON evidence)]))
+ let response=parseJSONText raw
+ saveVerification (obj [("status",str "completed"),("response",response)])
+ parsed<-try $ do
+  verdict<-field 422 response "verdict"
+  decision<-parseValue 422 (D.parseDecision D.Execution) (mergeFields [("event",str "Outcome"),("outcome",get response "acceptance")] (select ["reply","reason","evidence"] response))
+  case D.decisionBody decision of
+   D.ReportOutcome _ outcome->do
+    D.validateOutcome decision outcome (NE.toList (D.specCriteria spec))
+    require (case verdict of SemanticallyAccepted->D.outcomeStatus outcome==D.Completed; SemanticallyRejected->D.outcomeStatus outcome==D.Unresolved && not (null (D.decisionEvidence decision)); SemanticallyUnknown->D.outcomeStatus outcome==D.Unresolved) 422 "Semantic verdict contradicts the task outcome"
+    pure (verdict,decision,outcome)
+   _->failure 422 "Code assessment has no outcome"
+ case parsed of
+  Left (APIError _ reason)->throwIO (VerificationUnknown reason)
+  Right (verdict,decision,outcome)->do
+   let audit=get response "activationAudit"
+       validAudit=case get audit "accepted" of Bool _->not (T.null (T.strip (at audit "reason"))); _->False
+       auditFact=if role==CandidateTrial then if validAudit then put "invocation" (str invocation) audit else obj [("status",str "unknown"),("invocation",str invocation),("reason",str "Activation audit is missing or malformed")] else Null
+       acceptance=obj [("verdict",toJSON verdict),("outcome",get (D.decisionRaw decision) "outcome"),("invocation",str invocation),("reason",str (D.decisionReason decision))]
+   codeUpdate s running (mergeFields [("acceptance",acceptance),("activationAudit",auditFact)])
+   commitCodeOutcome s running version role invocation verdict decision outcome auditFact
+   when (verdict==SemanticallyRejected) (markCodeFault s running (D.decisionReason decision))
+   case D.decisionBody decision of D.ReportOutcome reply _->pure reply; _->failure 500 "Invalid code assessment transition"
+
+commitCodeOutcome :: Service -> Run -> Value -> CodeRole -> Text -> SemanticVerdict -> D.DecisionResponse -> D.Outcome -> Value -> IO ()
+commitCodeOutcome s running version role invocation verdict response outcome audit = locked s $ do
+ codeGuard s running
+ decidedAt<-now
+ DB.connection s $ \db->SQL.withTransaction db $ do
+  rows<-DB.queryRowsOn db "SELECT value FROM workloads ORDER BY rowid" ["value"] []
+  works<-traverse (DB.decodeStored . (`at` "value") >=> decodeValue 500) rows
+  current<-maybe (failure 409 "Code occurrence disappeared") pure (find ((==runIdText (runId running)) . D.workloadId) works)
+  let call=NE.head (D.workCalls current)
+      reference=get version "reference"
+  require (D.workField current "executionGate"==toJSON ExecutionOpen && get (D.workField current "codeExecution") "reference"==reference) 409 "Code occurrence was stopped or rebound"
+  spec<-D.executionContract current call >>= maybe (failure 409 "Accepted task is missing") pure
+  typedReference<-decodeValue 409 reference
+  void (D.resolveCandidateFrom works (runOwner running) (D.workField current "routineSnapshot") spec typedReference)
+  definitions<-DB.queryRowsOn db "SELECT value FROM scheduled_routines ORDER BY sequence" ["value"] [] >>= traverse (DB.decodeStored . (`at` "value"))
+  let CandidateReference _ preparationId _=typedReference
+  sourcePreparation<-maybe (failure 409 "Candidate preparation disappeared") pure (find ((==runIdText preparationId) . D.workloadId) works)
+  pin<-decodeValue 409 (D.workField sourcePreparation "preparationPin")
+  feedback<-DB.routineOperationsOn db
+  let snapshot=D.workField current "routineSnapshot"
+      definition=find (\d->get d "id"==get snapshot "id" && get d "owner"==toJSON (runOwner running)) definitions
+      applicable=maybe False (\d->not (boolean (get d "deleted")) && get d "contractGeneration"==get snapshot "contractGeneration" && DB.analysisFeedbackIds feedback d (map toJSON works) (analysisSources pin)==analysisFeedback pin) definition
+      accepted=verdict==SemanticallyAccepted && D.outcomeStatus outcome==D.Completed
+      activating=role==CandidateTrial && accepted && get audit "accepted"==Bool True && applicable
+      activationReason=if role==ActiveCode then "Previously activated version; no new activation required" else if not applicable then "Current routine contract or source feedback changed; candidate was not activated" else if not accepted then "Task result was not accepted; candidate was not activated" else if get audit "accepted"/=Bool True then "Activation audit did not approve this candidate" else at audit "reason"
+      activation=obj [("status",str (if role==ActiveCode then "not_required" else if activating then "activated" else "not_activated")),("reference",reference),("run",toJSON (runId running)),("invocation",str invocation),("decidedAt",str decidedAt),("reason",str activationReason)]
+      saved=mergeFields [("reply",get (D.decisionRaw response) "reply"),("evidence",toJSON (D.decisionEvidence response)),("author",toJSON (runOwner running))] (get (D.decisionRaw response) "outcome")
+      assessment=put "decisionId" (str invocation) (assessmentValue (if accepted then AssessmentAccepted else if verdict==SemanticallyRejected then AssessmentRejected else AssessmentUnresolved) "model_contract_assessment" (D.decisionReason response))
+      record=obj [("decisionId",str invocation),("callId",toJSON (runId running)),("node",str "CodeAssessment"),("accepted",Bool True),("response",D.decisionRaw response),("assessment",assessment),("evidenceOperation",str invocation)]
+      finished=D.withDecisionRecord record (D.setWorkField "outcome" saved (D.setWorkField "codeExecution" (mergeFields [("status",str "completed"),("activation",activation)] (D.workField current "codeExecution")) current))
+      complete=finished {D.workCalls=fmap (\c->c {D.callState=if accepted then D.CallCompleted else D.CallUnresolved,D.callOutput=Just (at saved "reply")}) (D.workCalls finished)}
+  when activating $ forM_ definition $ \d->void (DB.saveRoutineOn db (put "activeCode" (mergeFields [("status",str "active"),("contractGeneration",get snapshot "contractGeneration")] activation) d))
+  when (role==CandidateTrial) $ do
+   let CandidateReference _ preparation _=typedReference
+   source<-maybe (failure 409 "Trial preparation disappeared") pure (find ((==runIdText preparation) . D.workloadId) works)
+   let prepared=D.workField source "preparation"; claim=get prepared "trial"
+   require (get claim "run"==toJSON (runId running) && get claim "reference"==reference) 409 "Candidate trial claim changed"
+   DB.putValueOn db DB.Workloads (D.workloadId source) (toJSON (D.setWorkField "preparation" (put "trial" (merge claim activation) prepared) source))
+  DB.putValueOn db DB.Workloads (D.workloadId complete) (toJSON complete)
+
+markCodeFault :: Service -> Run -> Text -> IO ()
+markCodeFault s running reason = locked s $ do
+ (work,_)<-D.getWork s (runId running)
+ let reference=get (D.workField work "codeExecution") "reference"
+ cancelled<-readIORef (runCancel running)
+ allowed<-DB.occurrenceAllowed s (D.workField work "origin")
+ unless (cancelled || not allowed) $ DB.connection s $ \db->SQL.withTransaction db $ do
+  definitions<-DB.queryRowsOn db "SELECT value FROM scheduled_routines ORDER BY sequence" ["value"] [] >>= traverse (DB.decodeStored . (`at` "value"))
+  forM_ [d | d<-definitions,get d "id"==get (D.workField work "routineSnapshot") "id",get d "owner"==toJSON (runOwner running),get (get d "activeCode") "reference"==reference] $ \definition->
+   void (DB.saveRoutineOn db (put "activeCode" (mergeFields [("status",str "suspect"),("reason",str reason),("failedRun",toJSON (runId running))] (get definition "activeCode")) definition))
+
+recoverCode :: Service -> IO ()
+recoverCode s = do
+ works<-D.readWorks s
+ forM_ works $ \work->when (has (toJSON work) "codeExecution") $ do
+  let code=D.workField work "codeExecution"; container=get code "container"
+  recovered<-if has container "name" && at container "status"/="removed" then do
+   result<-try (Code.reconcile container) :: IO (Either APIError ())
+   pure (case result of Right ()->mergeFields [("status",str "interrupted"),("container",put "status" (str "removed") container)] code; Left (APIError _ reason)->mergeFields [("status",str "cleanup_pending"),("error",str reason)] code)
+   else pure (if at code "status" `elem` ["running","assessment"] then put "status" (str "interrupted") code else code)
+  let terminal=if at recovered "status"=="cleanup_pending" then "uncertain" else "interrupted"
+      finalized=put "operations" (arr [if at op "status"=="running" then put "status" (str terminal) op else op | op<-items recovered "operations"]) recovered
+  when (finalized/=code) (D.saveWork s (D.setWorkField "codeExecution" finalized work))
+
 publish :: Service -> Text -> Pulse -> IO ()
 publish s a tick = forM_ [1,2] $ \slot -> do
  state <- agentState s a

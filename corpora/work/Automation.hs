@@ -34,6 +34,7 @@ ordinary :: R.Definition -> D.Workload -> Bool
 ordinary definition work = at (D.workField work "origin") "routine"==R.definitionId definition
  && D.callOwner (NE.head (D.workCalls work))==AgentId (R.definitionOwner definition)
  && not (has (toJSON work) "analysisPin")
+ && not (has (toJSON work) "codeExecution")
 currentOrdinary :: R.Definition -> D.Workload -> Bool
 currentOrdinary definition work = ordinary definition work && DB.sameRoutineContract (toJSON definition) (toJSON work)
 terminal :: D.Workload -> Bool

@@ -65,7 +65,7 @@ consumer definition work = let pin=D.workField work "preparationPin" in at pin "
 requestOn :: SQL.Connection -> R.Definition -> RunId -> RunId -> Text -> IO Value
 requestOn db definition analysis identity time = do
  works<-readOn db
- require (not (any (\w->at (D.workField w "preparation") "status"=="cleanup_pending") works)) 503 "Owned container cleanup remains unresolved; restore the runtime and restart the app before another preparation"
+ require (not (any D.generatedCleanupPending works)) 503 "Owned container cleanup remains unresolved; restore the runtime and restart the app before another preparation"
  source<-maybe (failure 404 "Unknown Ready analysis") pure (find ((==runIdText analysis) . D.workloadId) works)
  pin<-decodeValue 409 (D.workField source "analysisPin") :: IO AnalysisPin
  require (analysisOwner pin==AgentId (R.definitionOwner definition) && analysisRoutine pin==R.definitionId definition && analysisGeneration pin==R.contractGeneration definition && not (R.definitionDeleted definition)) 409 "Analysis does not belong to the current Routine contract"
@@ -126,7 +126,7 @@ ask s running node purpose context = do
  let rendered=render envelope [("node",node),("instruction",template),("context",jsonText (put "selfId" (toJSON (runOwner running)) context))]
  identity<-newId
  started<-now
- let operation=obj [("id",str identity),("purpose",str purpose),("status",str "running"),("started",str started),("promptHash",str (Code.sourceHash rendered))]
+ let operation=obj [("id",str identity),("purpose",str purpose),("status",str "running"),("started",str started),("promptHash",str (sourceHash rendered))]
      save fields=update s (runIdText (runId running)) (\p->put "operations" (arr [if at op "id"==identity then merge op fields else op | op<-items p "operations"]) p)
  update s (runIdText (runId running)) (appendItems "operations" [operation])
  (do
@@ -170,7 +170,7 @@ environment s running = do
 requireCleanRuntime :: Service -> IO ()
 requireCleanRuntime s = do
  works<-D.readWorks s
- require (not (any (\work->at (D.workField work "preparation") "status"=="cleanup_pending") works)) 503 "Owned container cleanup remains unresolved; restore the runtime and restart the app"
+ require (not (any D.generatedCleanupPending works)) 503 "Owned container cleanup remains unresolved; restore the runtime and restart the app"
 
 prepare :: Service -> Run -> IO ()
 prepare s running = do
@@ -190,8 +190,8 @@ prepare s running = do
  phase s running Generation
  candidate<-ask s running "PreparationGeneration" "candidate_generation" (mergeFields [("availableProfiles",arr [Code.profileJSON profile]),("interface",str "json-stdin-result-v1")] (select ["contract","sourceEvidence","parameters"] saved))
  Candidate source<-decodeValue 422 candidate
- let content=mergeFields [("runtime",Code.profileJSON profile),("contract",get saved "contract"),("contractGeneration",get (D.workField work "preparationPin") "contractGeneration"),("sourceHash",str (Code.sourceHash source))] (select ["source","language","interface","dependencies","capabilities"] candidate)
-     reference=obj [("owner",toJSON (runOwner running)),("preparation",str identity),("digest",str (Code.canonicalHash content))]
+ let content=mergeFields [("runtime",Code.profileJSON profile),("contract",get saved "contract"),("contractGeneration",get (D.workField work "preparationPin") "contractGeneration"),("sourceHash",str (sourceHash source))] (select ["source","language","interface","dependencies","capabilities"] candidate)
+     reference=obj [("owner",toJSON (runOwner running)),("preparation",str identity),("digest",str (canonicalHash content))]
      version=put "reference" reference content
  update s identity (put "version" version)
  checkedProfile<-environment s running
@@ -204,7 +204,7 @@ prepare s running = do
   nonce<-newId
   let reserved=Code.reservation checkedProfile (agentIdText (runOwner running)) identity nonce
   started<-now
-  let operation=obj [("id",str nonce),("purpose",str "fixture_check"),("status",str "running"),("started",str started),("inputHash",str (Code.canonicalHash (get fixture "input"))),("sourceHash",get stored "sourceHash"),("version",reference),("durationMs",Null)]
+  let operation=obj [("id",str nonce),("purpose",str "fixture_check"),("status",str "running"),("started",str started),("inputHash",str (canonicalHash (get fixture "input"))),("sourceHash",get stored "sourceHash"),("version",reference),("durationMs",Null)]
       saveOperation fields=update s identity (\p->put "operations" (arr [if at op "id"==nonce then merge op fields else op | op<-items p "operations"]) p)
   update s identity (put "container" reserved . appendItems "operations" [operation])
   result<-(Code.runFixture checkedProfile running reserved (at stored "source") (get fixture "input") (\receipt->do
@@ -216,7 +216,7 @@ prepare s running = do
      throwIO exception)
   let actual=parseJSONText (at result "output")
       matched=at result "status"=="exited" && get result "exitCode"==num 0 && not (boolean (get result "wasRunning")) && actual==get fixture "expected"
-      receipt=mergeFields [("inputHash",str (Code.canonicalHash (get fixture "input"))),("sourceHash",get stored "sourceHash"),("version",reference),("actual",actual),("expected",get fixture "expected"),("matched",Bool matched)] result
+      receipt=mergeFields [("inputHash",str (canonicalHash (get fixture "input"))),("sourceHash",get stored "sourceHash"),("version",reference),("actual",actual),("expected",get fixture "expected"),("matched",Bool matched)] result
   update s identity (\p->put "operations" (arr [if at op "id"==nonce then merge op (put "status" (str (if matched then "completed" else if at result "status"=="stopped" then "interrupted" else "failed")) receipt) else op | op<-items p "operations"]) (appendItems "checks" [receipt] p))
   require matched 422 "Candidate failed independent fixture comparison"
  phase s running Review
@@ -230,11 +230,8 @@ prepare s running = do
 resolveVersion :: Service -> Run -> Value -> IO Value
 resolveVersion s running expected = do
  current<-load s (runIdText (runId running))
- let stored=get (D.workField current "preparation") "version"
-     reference=get stored "reference"
- require (reference==expected && at reference "owner"==agentIdText (runOwner running) && at reference "preparation"==runIdText (runId running)
-   && Code.canonicalHash (remove ["reference"] stored)==at reference "digest" && Code.sourceHash (at stored "source")==at stored "sourceHash") 409 "Immutable candidate reference or content changed"
- pure stored
+ reference<-decodeValue 409 expected
+ D.resolveCandidateBytes (runOwner running) current reference
 
 recover :: Service -> IO ()
 recover s = do
@@ -262,7 +259,7 @@ detail s owner routine identity = do
  require (at pin "owner"==owner && at pin "routine"==routine) 404 "Unknown preparation in this Sapi context"
  renderDetail s work
 projection :: Service -> R.Definition -> [D.Workload] -> IO Value
-projection s definition works = maybe (pure Null) (fmap (select ["id","status","analysis","owner","routine","contractGeneration","error"]) . renderDetail s) (listToMaybe (reverse (filter (consumer definition) works)))
+projection s definition works = maybe (pure Null) (fmap (\detail_ -> put "reference" (get (get detail_ "version") "reference") (select ["id","status","analysis","owner","routine","contractGeneration","error","trial"] detail_)) . renderDetail s) (listToMaybe (reverse (filter (consumer definition) works)))
 renderDetail :: Service -> D.Workload -> IO Value
 renderDetail s work = do
  allowed<-DB.occurrenceAllowed s (D.workField work "origin")

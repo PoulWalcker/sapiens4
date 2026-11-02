@@ -232,7 +232,9 @@ snapshot s = do
   history <- traverse (renderRun RunSummary operations (definitionRevision d)) [w|w<-works,at (D.workField w "origin") "routine"==definitionId d]
   preparation <- Composer.projection s d works
   analysis <- Automation.projection s d works
-  pure (merge (toJSON d) (obj [("preparation",preparation),("analysis",analysis),("trigger",str (maybe "manual" (const "interval") (definitionSchedule d))),("title",str (R.definitionTitle d)),("goal",str (R.definitionGoal d)),("criteria",maybe Null toJSON (R.definitionCriteria d)),("revision",toJSON (definitionRevision d)),("deleted",Bool (definitionDeleted d)),("runs",arr history)]))
+  let active=get (toJSON d) "activeCode"
+      visibleActive=if has active "reference" && get active "contractGeneration"/=get (toJSON d) "contractGeneration" then put "status" (str "stale") active else active
+  pure (merge (toJSON d) (obj [("activeCode",visibleActive),("preparation",preparation),("analysis",analysis),("trigger",str (maybe "manual" (const "interval") (definitionSchedule d))),("title",str (R.definitionTitle d)),("goal",str (R.definitionGoal d)),("criteria",maybe Null toJSON (R.definitionCriteria d)),("revision",toJSON (definitionRevision d)),("deleted",Bool (definitionDeleted d)),("runs",arr history)]))
  pure (obj [("definitions",arr rendered),("errors",arr [remove ["request"] op|op<-reverse operations,int (get op "code")>=400])])
 
 detail :: Service -> Text -> Text -> Text -> IO Value
@@ -261,7 +263,7 @@ renderRun projection operations revision work = do
  let original=maybe Null (`get` "assessment") (listToMaybe (reverse (D.workItems work "decisions"))) `fallback` assessmentValue AssessmentUnresolved "application_observation" "No recorded contract assessment"
      feedback=DB.workFeedback operations (toJSON work)
      assessment=DB.workAssessment operations (toJSON work)
-     invocations=[select ["decisionId","callId","node","evidence","assessment"] entry | entry<-D.workItems work "decisions",has entry "evidence"]
+     invocations=[select ["decisionId","callId","node","evidence","assessment"] (if has entry "evidenceOperation" then put "evidence" (get operation "evidence") entry else entry) | entry<-D.workItems work "decisions",let operation=fromMaybe Null (find (\op->get op "id"==get entry "evidenceOperation") (items (D.workField work "codeExecution") "operations")),has entry "evidence" || has operation "evidence"]
      reported=get (maybe Null (`get` "response") (listToMaybe (reverse (D.workItems work "decisions")))) "outcome"
      criteriaAssessment=[obj [("criterion",criterion),("status",str (if criterion `elem` items reported "satisfiedCriteria" then "Model reports satisfied" else if has (get reported "notApplicableCriteria") (text criterion) then "Model reports not applicable" else "Unresolved")),("reason",get (get reported "notApplicableCriteria") (text criterion)),("source",str "model_statement")] | criterion<-items (D.workField work "routineSnapshot") "criteria"]
      observations=obj [("source",str "model_statement"),("statements",get (D.workField work "outcome") "evidence" `fallback` arr []),("independent",Bool False)]
@@ -271,5 +273,5 @@ renderRun projection operations revision work = do
      version=jsonText (arr [str status,lastDecision,lastFeedback,toJSON revision])
      details=case projection of
       RunSummary -> []
-      RunDetail -> [("executionBinding",binding),("criteriaAssessment",arr criteriaAssessment),("invocations",arr invocations),("observations",observations),("feedback",arr feedback),("rejection",fromMaybe Null (listToMaybe feedback)),("outcome",D.workField work "outcome")]
+      RunDetail -> [("codeExecution",D.codeProjection (D.workField work "codeExecution")),("executionBinding",binding),("criteriaAssessment",arr criteriaAssessment),("invocations",arr invocations),("observations",observations),("feedback",arr feedback),("rejection",fromMaybe Null (listToMaybe feedback)),("outcome",D.workField work "outcome")]
  pure (obj (details++[("assessment",assessment),("originalAssessment",original),("detailVersion",str version),("invocationCount",num (length invocations)),("currentRevision",toJSON revision),("historical",Bool (get (D.workField work "routineSnapshot") "revision"/=toJSON revision)),("id",str (D.workloadId work)),("created",D.workField work "created"),("trigger",get (D.workField work "origin") "trigger"),("snapshot",D.workField work "routineSnapshot"),("status",str status),("result",if gate==ExecutionStopped then Null else get (D.workField work "outcome") "reply"),("message",if gate==ExecutionOpen && D.callState call==D.CallWaiting then toJSON (D.callOutput call) else Null),("error",D.callField call "error"),("currentOwner",toJSON (D.callOwner call))]))

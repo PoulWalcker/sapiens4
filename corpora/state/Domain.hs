@@ -10,8 +10,11 @@ import Data.Aeson.Types (Parser)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
-import Data.Char (isAscii, isAlphaNum)
-import Data.List (find)
+import Data.Char (isAscii, isAlphaNum, isHexDigit)
+import Data.List (find,sortOn)
+import Crypto.Hash.SHA256 (hash)
+import qualified Data.ByteString as BS
+import Numeric (showHex)
 import Data.Maybe
 import qualified Data.Map.Strict as M
 import Data.Scientific (toBoundedInteger)
@@ -24,22 +27,54 @@ newtype AgentId = AgentId { agentIdText :: Text } deriving (Eq, Ord, Show, FromJ
 newtype RunId = RunId { runIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
 
 data OrdinarySource = RoutineSnapshotSource | TaskDecisionSource Text deriving (Eq, Show)
-data OrdinaryBinding = OrdinaryBinding AgentId OrdinarySource deriving (Eq, Show)
-instance FromJSON OrdinaryBinding where
+data CandidateReference = CandidateReference AgentId RunId Text deriving (Eq,Show)
+instance FromJSON CandidateReference where
  parseJSON value = do
-  onlyFields ["schema","mode","owner","source"] value
-  unless (get value "schema"==num 1 && at value "mode"=="ordinary") (fail "Unsupported ordinary binding format")
+  onlyFields ["owner","preparation","digest"] value
+  owner<-AgentId <$> textFieldP "owner" 128 value
+  preparation<-RunId <$> textFieldP "preparation" 128 value
+  digest<-textFieldP "digest" 64 value
+  unless (T.length digest==64 && T.all isHexDigit digest) (fail "Invalid candidate content identity")
+  pure (CandidateReference owner preparation digest)
+instance ToJSON CandidateReference where
+ toJSON (CandidateReference owner preparation digest)=obj [("owner",toJSON owner),("preparation",toJSON preparation),("digest",str digest)]
+data CodeRole = CandidateTrial | ActiveCode deriving (Eq,Show)
+instance ToJSON CodeRole where
+ toJSON value=str (case value of CandidateTrial->"trial"; ActiveCode->"active")
+instance FromJSON CodeRole where
+ parseJSON value=case text value of "trial"->pure CandidateTrial; "active"->pure ActiveCode; _->fail "Unknown code execution role"
+data ExecutionBinding = OrdinaryBinding AgentId OrdinarySource | ScriptBinding AgentId OrdinarySource CandidateReference CodeRole deriving (Eq, Show)
+bindingContract :: ExecutionBinding -> (AgentId,OrdinarySource)
+bindingContract value=case value of OrdinaryBinding owner source->(owner,source); ScriptBinding owner source _ _->(owner,source)
+instance FromJSON ExecutionBinding where
+ parseJSON value = do
+  let script=at value "mode"=="script"
+  onlyFields (["schema","mode","owner","source"]++if script then ["reference","role"] else []) value
+  unless (get value "schema"==num 1 && at value "mode" `elem` ["ordinary","script"]) (fail "Unsupported execution binding format")
   owner <- parseJSON (get value "owner")
   let source=get value "source"
   kind <- case at source "kind" of
    "routine_snapshot" -> onlyFields ["kind"] source >> pure RoutineSnapshotSource
    "task_decision" -> onlyFields ["kind","decisionId"] source >> TaskDecisionSource <$> textFieldP "decisionId" 128 source
-   _ -> fail "Unknown ordinary contract source"
-  pure (OrdinaryBinding owner kind)
-instance ToJSON OrdinaryBinding where
- toJSON (OrdinaryBinding owner source) = obj [("schema",num 1),("mode",str "ordinary"),("owner",toJSON owner),("source",case source of
+   _ -> fail "Unknown accepted contract source"
+  if script then ScriptBinding owner kind <$> parseJSON (get value "reference") <*> parseJSON (get value "role") else pure (OrdinaryBinding owner kind)
+instance ToJSON ExecutionBinding where
+ toJSON value = obj ([("schema",num 1),("mode",str mode),("owner",toJSON owner),("source",case source of
   RoutineSnapshotSource -> obj [("kind",str "routine_snapshot")]
-  TaskDecisionSource identity -> obj [("kind",str "task_decision"),("decisionId",str identity)])]
+  TaskDecisionSource identity -> obj [("kind",str "task_decision"),("decisionId",str identity)])]++extra)
+  where
+  (owner,source)=bindingContract value
+  (mode,extra)=case value of OrdinaryBinding _ _->("ordinary",[]); ScriptBinding _ _ reference role->("script",[("reference",toJSON reference),("role",toJSON role)])
+
+sourceHash :: Text -> Text
+sourceHash = hex . hash . TE.encodeUtf8
+ where hex = T.pack . concatMap (\b -> let v=showHex b "" in if length v==1 then '0':v else v) . BS.unpack
+canonicalHash :: Value -> Text
+canonicalHash = sourceHash . TE.decodeUtf8 . BL.toStrict . canonical
+ where
+ canonical (Object fields) = "{" <> BL.intercalate "," [encode (K.toText key)<> ":" <>canonical value | (key,value)<-sortOn (K.toText . fst) (KM.toList fields)] <> "}"
+ canonical (Array values) = "[" <> BL.intercalate "," (map canonical (V.toList values)) <> "]"
+ canonical value = encode value
 
 newtype ContractGeneration = ContractGeneration Int deriving (Eq, Show, ToJSON)
 instance FromJSON ContractGeneration where

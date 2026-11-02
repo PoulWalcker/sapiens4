@@ -1,27 +1,22 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module GeneratedCode (Profile, profileJSON, available, reservation, runFixture, reconcile, canonicalHash, sourceHash) where
+module GeneratedCode (Profile, profileJSON, available, reservation, businessReservation, runFixture, reconcile) where
 
 import Control.Concurrent
 import Control.Concurrent.Async hiding (wait)
 import Control.Exception
 import Control.Monad
-import Crypto.Hash.SHA256 (hash)
 import Data.Aeson
-import qualified Data.Aeson.Key as K
-import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import Data.Char (isHexDigit)
 import Data.IORef
-import Data.List (sortOn)
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
 import GHC.Clock
-import Numeric (showHex)
 import System.Directory
 import System.Environment
 import System.Exit
@@ -42,15 +37,10 @@ profileJSON :: Profile -> Value
 profileJSON (Profile _ _ config) = obj [("profile",str "python-3.13.15-linux-arm64"),("image",str image),("imageConfig",str config),("platform",str "linux/arm64"),("hostTarget",str "macos/arm64"),("languageVersion",str "3.13.15"),("engineVersion",str "29.4.0"),("dependencies",arr []),("capabilities",arr []),("limits",obj [("memoryBytes",num 134217728),("swapBytes",num 0),("pids",num 16),("cpus",num 1),("cpuSeconds",num 3),("wallMs",num 5000),("sourceBytes",num 65536),("inputBytes",num 65536),("outputBytes",num 65536),("tmpfsBytes",num 16777216),("shmBytes",num 1048576)])]
 reservation :: Profile -> Text -> Text -> Text -> Value
 reservation (Profile _ socket config) owner preparation nonce = obj [("name",str ("sapiens-"<>nonce)),("nonce",str nonce),("owner",str owner),("preparation",str preparation),("socket",str socket),("imageConfig",str config),("status",str "reserved")]
-sourceHash :: Text -> Text
-sourceHash = hex . hash . TE.encodeUtf8
- where hex = T.pack . concatMap (\b -> let v=showHex b "" in if length v==1 then '0':v else v) . B.unpack
-canonicalHash :: Value -> Text
-canonicalHash = sourceHash . TE.decodeUtf8 . BL.toStrict . canonical
- where
- canonical (Object fields) = "{" <> BL.intercalate "," [encode (K.toText key)<> ":" <>canonical value | (key,value)<-sortOn (K.toText . fst) (KM.toList fields)] <> "}"
- canonical (Array values) = "[" <> BL.intercalate "," (map canonical (V.toList values)) <> "]"
- canonical value = encode value
+businessReservation :: Profile -> Text -> Text -> Text -> Value
+businessReservation profile owner workload nonce = remove ["preparation"] (mergeFields [("kind",str "occurrence"),("workload",str workload)] (reservation profile owner workload nonce))
+ownershipKey :: Value -> Text
+ownershipKey value=if at value "kind"=="occurrence" then "workload" else "preparation"
 
 configuration :: IO (FilePath,Text)
 configuration = do
@@ -109,7 +99,9 @@ instance FromJSON Ownership where
   name<-fields .: "name"
   nonce<-fields .: "nonce"
   owner<-fields .: "owner"
-  preparation<-fields .: "preparation"
+  kind<-fields .:? "kind" .!= ("" :: Text)
+  unless (kind `elem` ["","occurrence"]) (fail "Unknown container ownership kind")
+  preparation<-if kind=="occurrence" then fields .: "workload" else fields .: "preparation"
   socket<-fields .: "socket"
   config<-fields .: "imageConfig"
   identity<-fields .:? "id"
@@ -132,7 +124,8 @@ inspectOwned docker socket ownership = do
   descriptor<-case rows of [row]->pure row; _->failure 409 "Owned container inspection is malformed"
   let labels=get (get descriptor "Config") "Labels"
   require (at descriptor "Name"=="/"<>at ownership "name"
-    && at labels "sapiens.preparation"==at ownership "preparation"
+    && at labels ("sapiens."<>ownershipKey ownership)==at ownership (ownershipKey ownership)
+    && at labels "sapiens.kind"==at ownership "kind"
     && at labels "sapiens.owner"==at ownership "owner"
     && at labels "sapiens.nonce"==at ownership "nonce"
     && at descriptor "Image"==at ownership "imageConfig"
@@ -156,7 +149,7 @@ runFixture :: Profile -> Run -> Value -> Text -> Value -> (Value -> IO ()) -> IO
 runFixture (Profile docker socket _) running reserved source input persist = do
  require (B.length (TE.encodeUtf8 source)<=65536 && BL.length (encode input)<=65536) 413 "Generated source or fixture input exceeds 64 KiB"
  let name=at reserved "name"
-     arguments=["create","--name",T.unpack name,"--label","sapiens.preparation="++T.unpack (at reserved "preparation"),"--label","sapiens.owner="++T.unpack (at reserved "owner"),"--label","sapiens.nonce="++T.unpack (at reserved "nonce"),"--platform","linux/arm64","--pull","never","--network","none","--read-only","--user","65534:65534","--cap-drop","ALL","--security-opt","no-new-privileges=true","--pids-limit","16","--cpus","1","--ulimit","cpu=3:3","--memory","128m","--memory-swap","128m","--tmpfs","/tmp:rw,noexec,nosuid,size=16m","--shm-size","1m","--log-driver","none","--interactive","--entrypoint","python3",T.unpack image,"-I","-c",T.unpack source]
+     arguments=["create","--name",T.unpack name,"--label",T.unpack ("sapiens."<>ownershipKey reserved<>"="<>at reserved (ownershipKey reserved)),"--label","sapiens.kind="++T.unpack (at reserved "kind"),"--label","sapiens.owner="++T.unpack (at reserved "owner"),"--label","sapiens.nonce="++T.unpack (at reserved "nonce"),"--platform","linux/arm64","--pull","never","--network","none","--read-only","--user","65534:65534","--cap-drop","ALL","--security-opt","no-new-privileges=true","--pids-limit","16","--cpus","1","--ulimit","cpu=3:3","--memory","128m","--memory-swap","128m","--tmpfs","/tmp:rw,noexec,nosuid,size=16m","--shm-size","1m","--log-driver","none","--interactive","--entrypoint","python3",T.unpack image,"-I","-c",T.unpack source]
  ownership<-newIORef reserved
  let cleanup=do
       current<-readIORef ownership
