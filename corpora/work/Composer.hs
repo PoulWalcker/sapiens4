@@ -5,7 +5,7 @@ module Composer (requestOn, stopOn, detail, projection, run, recover ) where
 import Control.Exception
 import Control.Monad
 import Data.Aeson
-import Data.Aeson.Types (Parser)
+import Data.Aeson.Types (Parser,parseEither)
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
 import Data.IORef
@@ -51,10 +51,13 @@ data Candidate = Candidate Text deriving (Eq,Show)
 instance FromJSON Candidate where
  parseJSON value = do
   source <- withObject "Candidate" (.: "source") value :: Parser Text
-  unless (keys value `allIn` ["source","language","profile","interface","dependencies","capabilities"]
+  unless (keys value `allIn` ["source","language","profile","interface","dependencies","capabilities","explanation"]
     && at value "language"=="python" && at value "profile"=="python-3.13.15-linux-arm64"
     && at value "interface"=="json-stdin-result-v1" && get value "dependencies"==arr [] && get value "capabilities"==arr []) (fail "Unsupported candidate runtime, dependency or interface")
   unless (not (T.null source) && B.length (TE.encodeUtf8 source)<=65536) (fail "Candidate source must contain 1–65536 UTF8 bytes")
+  when (has value "explanation") $ do
+   onlyFields ["instruction"] (get value "explanation")
+   void (textFieldP "instruction" 16000 (get value "explanation"))
   pure (Candidate source)
   where allIn values allowed=all (`elem` allowed) values
 
@@ -119,23 +122,28 @@ phaseChecked s running value validate = locked s $ do
  D.saveWork s promoted
 
 ask :: Service -> Run -> Text -> Text -> Value -> IO Value
-ask s running node purpose context = do
+ask s running node purpose context = snd <$> askConfigured s running node purpose context Nothing
+
+askConfigured :: Service -> Run -> Text -> Text -> Value -> Maybe Explanation -> IO (Text,Value)
+askConfigured s running node purpose context explanation = do
+ let settings=explanationModel <$> explanation
  checkGate s running
- template<-prompt s (case node of "PreparationFixtures"->"preparation-fixtures"; "PreparationGeneration"->"preparation-generation"; _->"preparation-review")
- envelope<-prompt s "preparation-envelope"
+ (template,envelope)<-case explanation of
+  Just selected->Provider.explanationTemplates s selected
+  Nothing->(,) <$> prompt s (case node of "PreparationFixtures"->"preparation-fixtures"; "PreparationGeneration"->"preparation-generation"; "PreparationRubricReview"->"hybrid-rubric-review"; _->"preparation-review") <*> prompt s "preparation-envelope"
  let rendered=render envelope [("node",node),("instruction",template),("context",jsonText (put "selfId" (toJSON (runOwner running)) context))]
  identity<-newId
  started<-now
- let operation=obj [("id",str identity),("purpose",str purpose),("status",str "running"),("started",str started),("promptHash",str (sourceHash rendered))]
+ let operation=obj (concat [[("modelSettings",toJSON selected),("input",context),("inputHash",str (canonicalHash context)),("reference",get context "reference"),("implementationHash",get context "implementationHash")] | selected<-maybeToList settings]++[("id",str identity),("purpose",str purpose),("status",str "running"),("started",str started),("promptHash",str (sourceHash rendered))])
      save fields=update s (runIdText (runId running)) (\p->put "operations" (arr [if at op "id"==identity then merge op fields else op | op<-items p "operations"]) p)
  update s (runIdText (runId running)) (appendItems "operations" [operation])
  (do
-  raw<-Provider.invokeAnalysisObserved s running rendered (\evidence->save (obj [("evidence",toJSON evidence)]))
-  checkGate s running
+  raw<-(maybe (Provider.invokeAnalysisObserved s running) (Provider.invokeResponseOnlyObservedWith s running) settings) rendered (\evidence->save (obj [("evidence",toJSON evidence)]))
   let result=parseJSONText raw
   require (case result of Object _->True; _->False) 422 "Preparation model response must be a JSON object"
-  save (obj [("status",str "completed"),("response",result)])
-  pure result) `catch` (\(exception::SomeException)->do
+  save (obj [("status",str (if isJust explanation then "validating" else "completed")),("response",result)])
+  checkGate s running
+  pure (identity,result)) `catch` (\(exception::SomeException)->do
    cancelled<-readIORef (runCancel running)
    permitted<-DB.occurrenceAllowed s (obj [("preparation",toJSON (runId running))])
    save (obj [("status",str (if cancelled || not permitted then "interrupted" else "failed")),("error",str (D.exceptionText exception))])
@@ -178,19 +186,28 @@ prepare s running = do
  work<-load s identity
  let saved=D.workField work "preparation"
  require (at saved "status"=="queued") 409 "Preparation already started; request a new explicit attempt"
+ spec<-decodeValue 422 (get saved "contract")
  phase s running Fixtures
- oracle<-ask s running "PreparationFixtures" "fixture_design" (select ["contract","sourceEvidence","parameters"] saved)
+ oracle<-ask s running "PreparationFixtures" "fixture_design" (put "criteria" (D.criterionContext spec) (select ["contract","sourceEvidence","parameters"] saved))
  typedFixtures<-field 422 oracle "fixtures" :: IO [Fixture]
  let fixtures=map toJSON typedFixtures
      observedInputs=get (get (get saved "sourceEvidence") "source") "inputs"
      observedJSON=case observedInputs of String input->parseJSONText input; _->observedInputs
  require (not (null fixtures) && any (\fixture->get fixture "input"/=observedJSON) fixtures) 422 "Preparation requires independent examples on new inputs"
- update s identity (put "fixtures" (arr fixtures))
+ when (has oracle "rubric") (void (D.candidateRubric spec (get oracle "rubric")))
+ update s identity (mergeFields [("fixtures",arr fixtures),("rubric",get oracle "rubric")])
  profile<-environment s running
  phase s running Generation
  candidate<-ask s running "PreparationGeneration" "candidate_generation" (mergeFields [("availableProfiles",arr [Code.profileJSON profile]),("interface",str "json-stdin-result-v1")] (select ["contract","sourceEvidence","parameters"] saved))
  Candidate source<-decodeValue 422 candidate
- let content=mergeFields [("runtime",Code.profileJSON profile),("contract",get saved "contract"),("contractGeneration",get (D.workField work "preparationPin") "contractGeneration"),("sourceHash",str (sourceHash source))] (select ["source","language","interface","dependencies","capabilities"] candidate)
+ hybridFields<-if not (has candidate "explanation") then pure [] else do
+  rubric<-D.candidateRubric spec (get oracle "rubric")
+  settings<-Provider.verifiedResponseSettings s running
+  template<-prompt s "hybrid-explanation"
+  envelope<-prompt s "preparation-envelope"
+  let explanation=mergeFields [("templateHash",str (sourceHash template)),("envelopeHash",str (sourceHash envelope)),("model",toJSON settings),("policy",str "response_only")] (get candidate "explanation")
+  pure [("composition",hybridComposition),("structureHash",str (canonicalHash hybridComposition)),("rubric",toJSON rubric),("explanation",put "implementationHash" (str (canonicalHash explanation)) explanation)]
+ let content=mergeFields (hybridFields++ [("runtime",Code.profileJSON profile),("contract",get saved "contract"),("contractGeneration",get (D.workField work "preparationPin") "contractGeneration"),("sourceHash",str (sourceHash source))]) (select ["source","language","interface","dependencies","capabilities"] candidate)
      reference=obj [("owner",toJSON (runOwner running)),("preparation",str identity),("digest",str (canonicalHash content))]
      version=put "reference" reference content
  update s identity (put "version" version)
@@ -219,8 +236,24 @@ prepare s running = do
       receipt=mergeFields [("inputHash",str (canonicalHash (get fixture "input"))),("sourceHash",get stored "sourceHash"),("version",reference),("actual",actual),("expected",get fixture "expected"),("matched",Bool matched)] result
   update s identity (\p->put "operations" (arr [if at op "id"==nonce then merge op (put "status" (str (if matched then "completed" else if at result "status"=="stopped" then "interrupted" else "failed")) receipt) else op | op<-items p "operations"]) (appendItems "checks" [receipt] p))
   require matched 422 "Candidate failed independent fixture comparison"
- phase s running Review
+  explanation<-either (failure 422 . T.pack) pure (parseEither candidateExplanation stored)
+  forM_ explanation $ \selected->when (at actual "status"=="ok") $ do
+   let context=obj [("instruction",str (explanationInstruction selected)),("acceptedInput",get fixture "input"),("facts",get actual "value"),("criteria",D.criterionContext spec),("reference",reference),("implementationHash",get (get stored "explanation") "implementationHash")]
+   (explainId,narrative)<-askConfigured s running "PreparationExplanation" "fixture_explanation" context (Just selected)
+   let parsedNarrative=parseEither narrativeText narrative
+   update s identity (\p->put "operations" (arr [if at op "id"==explainId then mergeFields [("status",str (either (const "failed") (const "completed") parsedNarrative))] op else op | op<-items p "operations"]) p)
+   text_<-either (failure 422 . T.pack) pure parsedNarrative
+   (reviewId,assessment)<-askConfigured s running "PreparationRubricReview" "fixture_semantic_review" (mergeFields [("rubric",get stored "rubric"),("expected",get fixture "expected"),("explanation",str text_)] context) Nothing
+   verdicts<-D.criterionAssessments spec (get assessment "criteria")
+   decision<-parseValue 422 (D.parseDecision D.Execution) (obj [("event",str "Outcome"),("reply",str text_),("reason",str "Independent hybrid fixture rubric"),("evidence",arr [str evidence | CriterionAssessment _ _ evidence<-verdicts]),("outcome",D.criteriaOutcome spec verdicts)])
+   accepted<-case D.decisionBody decision of
+    D.ReportOutcome _ outcome->D.validateOutcome decision outcome (NE.toList (D.specCriteria spec)) >> pure (D.outcomeStatus outcome==D.Completed)
+    _->failure 422 "Hybrid rubric has no criterion outcome"
+   update s identity (\p->put "checks" (arr [if get check "inputHash"==get receipt "inputHash" then mergeFields [("explanationOperation",str explainId),("rubricReviewOperation",str reviewId),("rubricAccepted",Bool accepted)] check else check | check<-items p "checks"]) p)
+   require accepted 422 "Hybrid explanation failed independent original-criteria rubric"
  current<-load s identity
+ when (has version "explanation") $ require (any (\check->get check "rubricAccepted"==Bool True && has check "explanationOperation") (items (D.workField current "preparation") "checks")) 422 "Hybrid preparation requires an actual successful explanation and independent rubric check"
+ phase s running Review
  let prepared=D.workField current "preparation"
  review<-ask s running "PreparationReview" "candidate_review" (select ["contract","version","fixtures","checks"] prepared)
  update s identity (put "review" review)
@@ -248,7 +281,7 @@ recover s = do
  where
  finalizeInterrupted prepared =
   let terminal=if at prepared "status"=="cleanup_pending" then "uncertain" else "interrupted"
-      operations=[if at op "status"=="running" then put "status" (str terminal) op else op | op<-items prepared "operations"]
+      operations=[if at op "status" `elem` ["running","validating"] then put "status" (str terminal) op else op | op<-items prepared "operations"]
       status=if at prepared "status"=="cleanup_pending" then prepared else put "status" (str "interrupted") prepared
   in put "operations" (arr operations) status
 

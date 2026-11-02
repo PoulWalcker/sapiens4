@@ -9,7 +9,7 @@ import Control.Exception
 import Control.Monad
 import Crypto.Hash.SHA256 (hash)
 import Data.Aeson hiding (pairs)
-import Data.Aeson.Types (Parser)
+import Data.Aeson.Types (Parser,parseEither)
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Aeson.Key
 import Data.List.NonEmpty (NonEmpty(..))
@@ -125,10 +125,10 @@ selectRoutineCodeOn db owner work snapshot (Just accepted) = do
   Nothing->pure work
   Just (raw,role,candidate)->do
    reference_<-decodeValue 409 raw
-   void (resolveCandidateFrom works owner snapshot accepted reference_)
+   version<-resolveCandidateFrom works owner snapshot accepted reference_
    let initial=NE.head (workCalls work)
        binding=ScriptBinding owner RoutineSnapshotSource reference_ role
-       code=obj [("reference",toJSON reference_),("role",toJSON role),("status",str "queued"),("operations",arr [])]
+       code=obj ([("reference",toJSON reference_),("role",toJSON role),("status",str "queued"),("operations",arr [])]++[("structureHash",get version "structureHash") | has version "structureHash"])
        changed=setWorkField "codeExecution" code work {workCalls=setCallFields [("executionBinding",toJSON binding)] initial :| NE.tail (workCalls work)}
    forM_ candidate $ \preparedWork->do
     let claim=obj [("run",str (workloadId work)),("reference",toJSON reference_),("status",str "claimed")]
@@ -141,6 +141,7 @@ resolveCandidateBytes owner source reference@(CandidateReference refOwner prepar
  let version=get (workField source "preparation") "version"
  require (refOwner==owner && workloadId source==runIdText preparation && get (workField source "preparationPin") "owner"==toJSON owner) 409 "Candidate reference belongs to another preparation or owner"
  require (get version "reference"==toJSON reference && canonicalHash (remove ["reference"] version)==digest && sourceHash (at version "source")==at version "sourceHash") 409 "Pinned candidate content or reference changed"
+ void (either (failure 409 . T.pack) pure (parseEither candidateExplanation version))
  pure version
 
 resolveCandidateFrom :: [Workload] -> AgentId -> Value -> TaskSpec -> CandidateReference -> IO Value
@@ -151,11 +152,41 @@ resolveCandidateFrom works owner snapshot accepted reference@(CandidateReference
      pin=workField source "preparationPin"
  require (get pin "owner"==toJSON owner && get pin "routine"==get snapshot "id" && get pin "contractGeneration"==get snapshot "contractGeneration" && get version "contractGeneration"==get snapshot "contractGeneration") 409 "Candidate does not belong to this accepted consumer contract"
  original<-decodeValue 409 (get version "contract")
+ explanation<-either (failure 409 . T.pack) pure (parseEither candidateExplanation version)
+ forM_ explanation $ \_->do
+  void (candidateRubric original (get version "rubric"))
+  require (any (\check->get check "rubricAccepted"==Bool True && has check "explanationOperation") (items prepared "checks")) 409 "Hybrid candidate has no actual successful explanation"
+  require (all (\check->at (get check "actual") "status"/="ok" || get check "rubricAccepted"==Bool True) (items prepared "checks")) 409 "Hybrid candidate lacks independent semantic checks"
  require (sameSemanticContract original accepted) 409 "Candidate cannot replace accepted task criteria"
  require (at version "interface"=="json-stdin-result-v1" && at version "language"=="python" && get version "dependencies"==arr [] && get version "capabilities"==arr []) 409 "Candidate execution interface is unsupported"
  require (at prepared "status"=="awaiting_occurrence" && get (get prepared "review") "accepted"==Bool True && not (null (items prepared "checks"))
    && all (\check->get check "matched"==Bool True && get check "version"==toJSON reference && get check "sourceHash"==get version "sourceHash") (items prepared "checks")) 409 "Candidate lacks completed checks for this exact version"
  pure version
+
+criterionRows :: TaskSpec -> [(Text,Text)]
+criterionRows spec=zip ["criterion-"<>T.pack (show n) | n<-[1::Int ..]] (NE.toList (specCriteria spec))
+
+criterionContext :: TaskSpec -> Value
+criterionContext spec=arr [obj [("id",str identity),("criterion",str criterion)] | (identity,criterion)<-criterionRows spec]
+
+candidateRubric :: TaskSpec -> Value -> IO [RubricCriterion]
+candidateRubric spec value = do
+ rubric<-decodeValue 422 value
+ let identities=[identity | RubricCriterion identity _<-rubric]
+ require (length identities==length (criterionRows spec) && sort identities==sort (map fst (criterionRows spec))) 422 "Hybrid rubric must classify each original criterion exactly once"
+ require (NumericCriterion `elem` [kind | RubricCriterion _ kind<-rubric] && SemanticCriterion `elem` [kind | RubricCriterion _ kind<-rubric]) 422 "Hybrid requires numerical and semantic criteria"
+ pure rubric
+
+criterionAssessments :: TaskSpec -> Value -> IO [CriterionAssessment]
+criterionAssessments spec value = do
+ verdicts<-decodeValue 422 value
+ let identities=[identity | CriterionAssessment identity _ _<-verdicts]
+ require (length identities==length (criterionRows spec) && sort identities==sort (map fst (criterionRows spec))) 422 "Assessment must cover each original criterion exactly once"
+ pure verdicts
+
+criteriaOutcome :: TaskSpec -> [CriterionAssessment] -> Value
+criteriaOutcome spec verdicts = obj [("status",str (if all accepted verdicts then "Completed" else "Unresolved")),("satisfiedCriteria",arr [str criterion | (identity,criterion)<-criterionRows spec,CriterionAssessment key CriterionPass _<-verdicts,key==identity]),("notApplicableCriteria",obj [(criterion,str evidence) | (identity,criterion)<-criterionRows spec,CriterionAssessment key CriterionNotApplicable evidence<-verdicts,key==identity]),("artifacts",arr [])]
+ where accepted (CriterionAssessment _ verdict _)=verdict `elem` [CriterionPass,CriterionNotApplicable]
 
 sameSemanticContract :: TaskSpec -> TaskSpec -> Bool
 sameSemanticContract left right = specObjective left==specObjective right && specOutputs left==specOutputs right && specCriteria left==specCriteria right
@@ -170,6 +201,7 @@ resolveCandidate s work call = do
    accepted<-executionContract work call >>= maybe (failure 409 "Code execution requires a pinned task contract") pure
    works<-readWorks s
    version<-resolveCandidateFrom works owner (workField work "routineSnapshot") accepted reference
+   require (get (workField work "codeExecution") "structureHash"==get version "structureHash") 409 "Code occurrence structure pin changed"
    require (get (workField work "codeExecution") "reference"==toJSON reference && get (workField work "codeExecution") "role"==toJSON role) 409 "Code occurrence metadata differs from its immutable binding"
    case role of
     CandidateTrial->do
@@ -184,7 +216,16 @@ resolveCandidate s work call = do
 
 codeProjection :: Value -> Value
 codeProjection Null = Null
-codeProjection code = mergeFields [("runtimeResult",maybe Null (`get` "result") (listToMaybe (reverse [op | op<-items code "operations",at op "purpose"=="code_execution"]))),("verification",codeVerification code)] code
+codeProjection code = mergeFields ([("runtimeResult",runtime),("verification",codeVerification code)]++[("hybridResult",obj [("facts",get (get runtime "actual") "value"),("explanation",get (get operation "response") "text")]) | operation<-maybeToList explanation]) code
+ where
+ runtime=maybe Null (`get` "result") (listToMaybe (reverse [op | op<-items code "operations",at op "purpose"=="code_execution"]))
+ explanation=find ((=="hybrid_explanation") . (`at` "purpose")) (items code "operations")
+
+executionStages :: Value -> Value
+executionStages code
+ | not (has code "structureHash") = arr []
+ | otherwise = arr [obj [("id",str identity),("status",maybe (str "not_started") (\op->if at op "status"=="validating" then str "running" else get op "status") (find ((==identity) . (`at` "stage")) (items code "operations")))] | identity<-["calculate","explain"]]
+
 codeVerification :: Value -> Value
 codeVerification code=fromMaybe Null (find (\op->get op "id"==get (get code "verification") "id") (items code "operations"))
 

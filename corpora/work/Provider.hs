@@ -146,9 +146,11 @@ data InvocationPolicy = OrdinaryInvocation | EvidenceAnalysisResponseOnly derivi
 -- This narrow policy is verified against the pinned CLI's public process and
 -- transport interfaces. Unsupported versions/models never fall back to tools.
 analysisCatalog :: IO Value
-analysisCatalog = analysisCatalogFor Nothing
-analysisCatalogFor :: Maybe Run -> IO Value
-analysisCatalogFor activeRun = do
+analysisCatalog = do
+ (model,effort)<-modelDefaults
+ analysisCatalogFor Nothing (ModelSettings model effort)
+analysisCatalogFor :: Maybe Run -> ModelSettings -> IO Value
+analysisCatalogFor activeRun selectedSettings = do
  binary <- codexBinary >>= maybe (failure 503 "Codex CLI is unavailable for analysis") pure
  started <- getMonotonicTimeNSec
  let configurationDeadline=started+10000000000
@@ -170,23 +172,44 @@ analysisCatalogFor activeRun = do
  version <- T.strip <$> probe ["--version"]
  require (version=="codex-cli 0.162.1") 503 "Automation analysis requires verified Codex CLI 0.162.1"
  catalog <- probe ["debug","models","--bundled"]
- (model,_) <- modelDefaults
+ let model=modelSlug selectedSettings
  selected <- maybe (failure 503 "Configured model has no verified response-only catalog entry") pure
   (listToMaybe [entry | entry<-items (parseJSONText catalog) "models",at entry "slug"==model])
  pure (mergeFields [("shell_type",str "disabled"),("apply_patch_tool_type",Null),("experimental_supported_tools",arr []),("tool_mode",str "direct"),("supports_search_tool",Bool False),("include_skills_usage_instructions",Bool False),("include_plugin_usage_instructions",Bool False),("include_apps_usage_instructions",Bool False)] selected)
 
-withInvocationPolicy :: Service -> Run -> InvocationPolicy -> (FilePath -> [String] -> IO Text) -> IO Text
-withInvocationPolicy s run policy action = do
- (model,defaultEffort) <- modelDefaults
- settings <- executionSettings s (agentIdText (runOwner run))
- let effort=if executionMode settings==Deep then "xhigh" else defaultEffort
-     settingsArgs=["-c","model_reasoning_effort="++T.unpack (jsonText (str effort)),"-c","model="++T.unpack (jsonText (str model))]
+explanationTemplates :: Service -> Explanation -> IO (Text,Text)
+explanationTemplates s selected = do
+ template<-prompt s "hybrid-explanation"
+ envelope<-prompt s "preparation-envelope"
+ require (sourceHash template==explanationTemplateHash selected && sourceHash envelope==explanationEnvelopeHash selected) 409 "Pinned explanation prompt templates changed; prepare a new candidate"
+ pure (template,envelope)
+
+resolveModelSettings :: Service -> Run -> IO ModelSettings
+resolveModelSettings s running = do
+ (model,defaultEffort)<-modelDefaults
+ settings<-executionSettings s (agentIdText (runOwner running))
+ pure (ModelSettings model (if executionMode settings==Deep then "xhigh" else defaultEffort))
+
+verifiedResponseSettings :: Service -> Run -> IO ModelSettings
+verifiedResponseSettings s running = do
+ settings<-resolveModelSettings s running
+ catalog<-analysisCatalogFor (Just running) settings
+ verifyReasoning settings catalog
+ pure settings
+
+verifyReasoning :: ModelSettings -> Value -> IO ()
+verifyReasoning settings catalog = require (modelReasoning settings `elem` map (`at` "effort") (items catalog "supported_reasoning_levels")) 503 "Pinned reasoning effort is unavailable in the verified model catalog"
+
+withInvocationPolicy :: Service -> Run -> InvocationPolicy -> ModelSettings -> Bool -> (FilePath -> [String] -> IO Text) -> IO Text
+withInvocationPolicy s run policy settings pinned action = do
+ let settingsArgs=["-c","model_reasoning_effort="++T.unpack (jsonText (str (modelReasoning settings))),"-c","model="++T.unpack (jsonText (str (modelSlug settings)))]
  case policy of
   OrdinaryInvocation -> do
    let directory=workspaceRoot s (agentIdText (runOwner run))
    action directory (["exec"]++settingsArgs++["--skip-git-repo-check","--json","--dangerously-bypass-approvals-and-sandbox","--cd",directory,"--color","never","-"])
   EvidenceAnalysisResponseOnly -> do
-   catalog <- analysisCatalogFor (Just run)
+   catalog <- analysisCatalogFor (Just run) settings
+   when pinned (verifyReasoning settings catalog)
    temporary <- getTemporaryDirectory
    identity <- newId
    let directory=temporary </> ("sapiens-analysis-"++T.unpack identity)
@@ -207,13 +230,21 @@ invokeModelObserved :: Service -> Run -> Text -> (EvidenceSnapshot -> IO ()) -> 
 invokeModelObserved s run input observe = invokeModelWithPolicy s run OrdinaryInvocation input observe
 
 invokeModelWithPolicy :: Service -> Run -> InvocationPolicy -> Text -> (EvidenceSnapshot -> IO ()) -> IO Text
-invokeModelWithPolicy s run policy input observe = withInvocationPolicy s run policy $ \workdir args -> do
+invokeModelWithPolicy s run policy input observe = do
+ settings<-resolveModelSettings s run
+ invokeWithSettings s run policy settings False input observe
+
+invokeResponseOnlyObservedWith :: Service -> Run -> ModelSettings -> Text -> (EvidenceSnapshot -> IO ()) -> IO Text
+invokeResponseOnlyObservedWith s run settings = invokeWithSettings s run EvidenceAnalysisResponseOnly settings True
+
+invokeWithSettings :: Service -> Run -> InvocationPolicy -> ModelSettings -> Bool -> Text -> (EvidenceSnapshot -> IO ()) -> IO Text
+invokeWithSettings s run policy settings pinned input observe = withInvocationPolicy s run policy settings pinned $ \workdir args -> do
  cancelled <- readIORef (runCancel run)
  require (not cancelled) 409 "Stopped by Admin"
  before <- getMonotonicTimeNSec
  require (before < runDeadline run) 504 "Call time limit exhausted between decision nodes"
  binary <- codexBinary >>= maybe (failure 503 "Codex CLI was not found. Install Codex and run codex login.") pure
- (model,_) <- modelDefaults
+ let model=modelSlug settings
  environment <- getEnvironment
  started <- realToFrac . (*1000) <$> getPOSIXTime :: IO Double
  writeIORef (runActivity run) (obj [("started",toJSON started),("updated",toJSON started),("phase",str "Waiting for model"),("last_action",str "")])

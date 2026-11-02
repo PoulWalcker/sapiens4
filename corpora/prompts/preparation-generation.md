@@ -6,3 +6,10 @@ The program reads one JSON value from stdin and prints exactly one JSON envelope
 Only the profile's standard library is available. No network, host files, model calls,
 external effects or package installation. Preserve all original task criteria.
 Hidden independent examples will be used; implement the general transformation.
+
+For a hybrid task requiring meaningful prose, the code may return numerical facts
+and the response may additionally include "explanation":{"instruction":"..."}.
+This selects exactly calculation followed by a response-only owner explanation.
+The instruction consumes actual facts and original inputs; it cannot call tools,
+change criteria or invent data. The host pins its model policy and checks the
+independent original-criteria rubric. Omit explanation for fully scripted work.

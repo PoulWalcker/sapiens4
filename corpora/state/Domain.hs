@@ -26,6 +26,57 @@ import qualified Data.Vector as V
 newtype AgentId = AgentId { agentIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
 newtype RunId = RunId { runIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
 
+-- Requested configuration is pinned; remote model weights are not versioned here.
+data ModelSettings = ModelSettings { modelSlug :: Text, modelReasoning :: Text } deriving (Eq,Show)
+instance FromJSON ModelSettings where
+ parseJSON value = do
+  onlyFields ["slug","reasoning"] value
+  ModelSettings <$> textFieldP "slug" 200 value <*> textFieldP "reasoning" 40 value
+instance ToJSON ModelSettings where
+ toJSON settings=obj [("slug",str (modelSlug settings)),("reasoning",str (modelReasoning settings))]
+
+data CriterionKind = NumericCriterion | SemanticCriterion deriving (Eq,Show)
+instance FromJSON CriterionKind where
+ parseJSON value=case text value of "numeric"->pure NumericCriterion; "semantic"->pure SemanticCriterion; _->fail "Unknown criterion kind"
+instance ToJSON CriterionKind where
+ toJSON kind=str (case kind of NumericCriterion->"numeric"; SemanticCriterion->"semantic")
+data RubricCriterion = RubricCriterion Text CriterionKind deriving (Eq,Show)
+instance FromJSON RubricCriterion where
+ parseJSON value=do
+  onlyFields ["id","kind"] value
+  RubricCriterion <$> textFieldP "id" 80 value <*> parseJSON (get value "kind")
+instance ToJSON RubricCriterion where
+ toJSON (RubricCriterion identity kind)=obj [("id",str identity),("kind",toJSON kind)]
+data CriterionVerdict = CriterionPass | CriterionFail | CriterionUnknown | CriterionNotApplicable deriving (Eq,Show)
+instance FromJSON CriterionVerdict where
+ parseJSON value=case text value of "pass"->pure CriterionPass; "fail"->pure CriterionFail; "unknown"->pure CriterionUnknown; "not_applicable"->pure CriterionNotApplicable; _->fail "Unknown criterion verdict"
+data CriterionAssessment = CriterionAssessment Text CriterionVerdict Text deriving (Eq,Show)
+instance FromJSON CriterionAssessment where
+ parseJSON value=do
+  onlyFields ["id","status","evidence"] value
+  CriterionAssessment <$> textFieldP "id" 80 value <*> parseJSON (get value "status") <*> textFieldP "evidence" 16000 value
+
+data Explanation = Explanation { explanationInstruction :: Text, explanationModel :: ModelSettings, explanationTemplateHash :: Text, explanationEnvelopeHash :: Text } deriving (Eq,Show)
+instance FromJSON Explanation where
+ parseJSON value=do
+  onlyFields ["instruction","model","policy","implementationHash","templateHash","envelopeHash"] value
+  unless (get value "policy"==str "response_only" && get value "implementationHash"==str (canonicalHash (remove ["implementationHash"] value))) (fail "Explanation policy or immutable hash changed")
+  Explanation <$> textFieldP "instruction" 16000 value <*> parseJSON (get value "model") <*> textFieldP "templateHash" 64 value <*> textFieldP "envelopeHash" 64 value
+
+narrativeText :: Value -> Parser Text
+narrativeText value=onlyFields ["text"] value >> textFieldP "text" 16000 value
+
+hybridComposition :: Value
+hybridComposition=obj [("schema",num 1),("steps",arr [
+ obj [("id",str "calculate"),("kind",str "code"),("input",str "accepted-input-v1"),("output",str "json-result-facts-v1")],
+ obj [("id",str "explain"),("kind",str "agent"),("input",str "accepted-input-and-facts-v1"),("output",str "narrative-text-v1")]])]
+
+candidateExplanation :: Value -> Parser (Maybe Explanation)
+candidateExplanation version
+ | not (any (has version) ["explanation","composition","structureHash","rubric"]) = pure Nothing
+ | not (has version "rubric") || get version "composition"/=hybridComposition || get version "structureHash"/=str (canonicalHash hybridComposition) = fail "Unsupported or changed hybrid composition"
+ | otherwise = Just <$> parseJSON (get version "explanation")
+
 data OrdinarySource = RoutineSnapshotSource | TaskDecisionSource Text deriving (Eq, Show)
 data CandidateReference = CandidateReference AgentId RunId Text deriving (Eq,Show)
 instance FromJSON CandidateReference where

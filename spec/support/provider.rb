@@ -29,10 +29,19 @@ node = text[/decision at node (\w+)/, 1] || (text.start_with?('You are acting as
 owner = context['selfId'] || File.basename(Dir.pwd)
 key = "#{owner}:#{node}"
 rule = config.fetch('rules', {}).fetch(key, config.fetch('rules', {}).fetch(node, {}))
+variants = rule.fetch('variants', []).select { |variant| text.include?(variant.fetch('contains')) }
+raise 'Ambiguous controlled provider variants' if variants.length > 1
+rule = rule.merge(variants.first.reject { |name, _| name == 'contains' }) unless variants.empty?
 matching = config.fetch('messages', []).find { |item| context.fetch('originalIntent', text).include?(item.fetch('contains')) }
 rule = rule.merge(matching.fetch('rule')) if matching
 record = {owner: owner, node: node, prompt: text, args: ARGV, cwd: Dir.pwd,
           pid: Process.pid, started: Time.now.to_f, agency_run: ENV['SAPIENS_AGENCY_RUN']}
+if (catalog_argument = ARGV.find { |argument| argument.start_with?('model_catalog_json=') })
+  catalog_path = JSON.parse(catalog_argument.split('=', 2).last)
+  record[:invocation_catalog] = JSON.parse(File.read(catalog_path)).fetch('models').map do |model|
+    model.slice('slug', 'shell_type', 'apply_patch_tool_type', 'experimental_supported_tools', 'tool_mode', 'supports_search_tool')
+  end
+end
 path = File.join(root, 'calls', SecureRandom.hex(12) + '.json')
 if rule['child']
   record[:heartbeat] = path + '.heartbeat'

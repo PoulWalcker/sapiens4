@@ -8,6 +8,7 @@ import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
 import Data.Aeson hiding (pairs)
+import Data.Aeson.Types (parseEither)
 import qualified Data.Text.Encoding as TE
 import qualified Database.SQLite.Simple as SQL
 import qualified Data.ByteString.Lazy as BL
@@ -246,7 +247,7 @@ runCode s running turn = do
    let interrupted code =
         let container=get code "container"
             pending=has container "name" && at container "status"/="removed"
-            operations=[if at op "status"=="running" then mergeFields [("status",str terminal),("error",str (D.exceptionText exception))] op else op | op<-items code "operations"]
+            operations=[if at op "status" `elem` ["running","validating"] then mergeFields [("status",str terminal),("error",str (D.exceptionText exception))] op else op | op<-items code "operations"]
         in mergeFields [("status",str (if pending then "cleanup_pending" else terminal)),("operations",arr operations),("error",str (D.exceptionText exception))] code
    codeUpdate s running interrupted
    case fromException exception of
@@ -280,7 +281,7 @@ executeCode s running = do
  nonce<-newId
  started<-now
  let reserved=Code.businessReservation profile (agentIdText (runOwner running)) (runIdText (runId running)) nonce
-     operation=obj [("id",str nonce),("purpose",str "code_execution"),("status",str "running"),("started",str started),("durationMs",Null),("reference",reference),("inputHash",str (canonicalHash input))]
+     operation=obj [("id",str nonce),("purpose",str "code_execution"),("stage",str "calculate"),("status",str "running"),("started",str started),("durationMs",Null),("reference",reference),("inputHash",str (canonicalHash input))]
  codeUpdate s running (mergeFields [("input",input),("status",str "running"),("container",reserved)] . appendItems "operations" [operation])
  result<-Code.runFixture profile running reserved (at version "source") input (\receipt->do
   when (at receipt "status"/="removed") (codeGuard s running)
@@ -294,21 +295,27 @@ executeCode s running = do
  require (at result "status"=="exited" && not (boolean (get result "wasRunning"))) 503 "Runtime attachment ended without an established process result"
  when (get result "exitCode"/=num 0) (throwIO (ProvenCodeFault "Candidate body exited unsuccessfully"))
  unless ((at actual "status"=="ok" && has actual "value") || (at actual "status"=="rejected" && not (T.null (at actual "error")))) (throwIO (ProvenCodeFault "Candidate returned an invalid result envelope"))
- invocation<-newId
+ explanation<-either (failure 409 . T.pack) pure (parseEither candidateExplanation version)
+ when (isJust explanation && at actual "status"=="rejected") $ failure 422 ("Hybrid input rejected: "<>at actual "error")
+ narrative<-forM explanation $ \selected->do
+  let explainContext=obj [("instruction",str (explanationInstruction selected)),("acceptedInput",input),("facts",get actual "value"),("result",actual),("criteria",D.criterionContext spec),("reference",reference),("structureHash",get version "structureHash"),("implementationHash",get (get version "explanation") "implementationHash")]
+  (explanationId,produced)<-invokeCodeModel s running "HybridExplanation" "hybrid_explanation" "hybrid-explanation" explainContext (Just selected)
+  text_<-either (failure 422 . T.pack) pure (parseEither narrativeText produced)
+  codeUpdate s running (\code->put "operations" (arr [if at op "id"==explanationId then put "status" (str "completed") op else op | op<-items code "operations"]) code)
+  codeGuard s running
+  pure text_
  let purpose=if role==CandidateTrial then "code_acceptance_and_activation_audit" else "code_acceptance"
-     context=obj [("selfId",toJSON (runOwner running)),("contract",toJSON spec),("input",input),("result",actual),("runtime",runtime),("version",version),("initialTrial",Bool (role==CandidateTrial))]
- instruction<-prompt s "code-assessment"
- envelope<-prompt s "preparation-envelope"
- let rendered=render envelope [("node","CodeAssessment"),("instruction",instruction),("context",jsonText context)]
- let verification=obj [("id",str invocation),("purpose",str purpose),("status",str "running"),("promptHash",str (sourceHash rendered))]
-     saveVerification fields=codeUpdate s running (\code->put "operations" (arr [if at op "id"==invocation then merge op fields else op | op<-items code "operations"]) code)
- codeUpdate s running (mergeFields [("status",str "assessment"),("verification",obj [("id",str invocation)])] . appendItems "operations" [verification])
- raw<-invokeAnalysisObserved s running rendered (\evidence->saveVerification (obj [("evidence",toJSON evidence)]))
- let response=parseJSONText raw
- saveVerification (obj [("status",str "completed"),("response",response)])
+     context=obj ([("contract",toJSON spec),("input",input),("result",actual),("runtime",runtime),("version",version),("initialTrial",Bool (role==CandidateTrial))]++concat [[("criteria",D.criterionContext spec),("rubric",get version "rubric"),("hybridResult",obj [("facts",get actual "value"),("explanation",str text_)])] | text_<-maybeToList narrative])
+ (invocation,response)<-invokeCodeModel s running (if isJust explanation then "HybridAssessment" else "CodeAssessment") purpose (if isJust explanation then "hybrid-assessment" else "code-assessment") context Nothing
  parsed<-try $ do
   verdict<-field 422 response "verdict"
-  decision<-parseValue 422 (D.parseDecision D.Execution) (mergeFields [("event",str "Outcome"),("outcome",get response "acceptance")] (select ["reply","reason","evidence"] response))
+  body<-case narrative of
+   Nothing->pure (mergeFields [("event",str "Outcome"),("outcome",get response "acceptance")] (select ["reply","reason","evidence"] response))
+   Just text_->do
+    judgments<-D.criterionAssessments spec (get response "criteria")
+    require (verdict/=SemanticallyRejected || any (\(CriterionAssessment _ result_ _)->result_==CriterionFail) judgments) 422 "Rejected hybrid assessment has no failed original criterion"
+    pure (mergeFields [("event",str "Outcome"),("reply",str text_),("outcome",D.criteriaOutcome spec judgments)] (select ["reason","evidence"] response))
+  decision<-parseValue 422 (D.parseDecision D.Execution) body
   case D.decisionBody decision of
    D.ReportOutcome _ outcome->do
     D.validateOutcome decision outcome (NE.toList (D.specCriteria spec))
@@ -326,6 +333,25 @@ executeCode s running = do
    commitCodeOutcome s running version role invocation verdict decision outcome auditFact
    when (verdict==SemanticallyRejected) (markCodeFault s running (D.decisionReason decision))
    case D.decisionBody decision of D.ReportOutcome reply _->pure reply; _->failure 500 "Invalid code assessment transition"
+
+-- Both useful explanation and final assessment retain one canonical invocation.
+invokeCodeModel :: Service -> Run -> Text -> Text -> Text -> Value -> Maybe Explanation -> IO (Text,Value)
+invokeCodeModel s running node purpose templateName context explanation = do
+ codeGuard s running
+ (instruction,envelope)<-case explanation of
+  Just selected->explanationTemplates s selected
+  Nothing->(,) <$> prompt s templateName <*> prompt s "preparation-envelope"
+ let rendered=render envelope [("node",node),("instruction",instruction),("context",jsonText (put "selfId" (toJSON (runOwner running)) context))]
+ invocation<-newId
+ started<-now
+ let operation=obj ([("id",str invocation),("purpose",str purpose),("status",str "running"),("started",str started),("promptHash",str (sourceHash rendered))]++concat [[("stage",str "explain"),("modelSettings",toJSON (explanationModel selected)),("input",context),("inputHash",str (canonicalHash context)),("reference",get context "reference"),("structureHash",get context "structureHash"),("implementationHash",get context "implementationHash")] | selected<-maybeToList explanation])
+     save fields=codeUpdate s running (\code->put "operations" (arr [if at op "id"==invocation then merge op fields else op | op<-items code "operations"]) code)
+     phaseFields=if isJust explanation then [("status",str "explanation")] else [("status",str "assessment"),("verification",obj [("id",str invocation)])]
+ codeUpdate s running (mergeFields phaseFields . appendItems "operations" [operation])
+ raw<-(maybe (invokeAnalysisObserved s running) (invokeResponseOnlyObservedWith s running . explanationModel) explanation) rendered (\evidence->save (obj [("evidence",toJSON evidence)]))
+ let response=parseJSONText raw
+ save (obj [("status",str (if isJust explanation then "validating" else "completed")),("response",response)])
+ pure (invocation,response)
 
 commitCodeOutcome :: Service -> Run -> Value -> CodeRole -> Text -> SemanticVerdict -> D.DecisionResponse -> D.Outcome -> Value -> IO ()
 commitCodeOutcome s running version role invocation verdict response outcome audit = locked s $ do
@@ -355,7 +381,7 @@ commitCodeOutcome s running version role invocation verdict response outcome aud
       activation=obj [("status",str (if role==ActiveCode then "not_required" else if activating then "activated" else "not_activated")),("reference",reference),("run",toJSON (runId running)),("invocation",str invocation),("decidedAt",str decidedAt),("reason",str activationReason)]
       saved=mergeFields [("reply",get (D.decisionRaw response) "reply"),("evidence",toJSON (D.decisionEvidence response)),("author",toJSON (runOwner running))] (get (D.decisionRaw response) "outcome")
       assessment=put "decisionId" (str invocation) (assessmentValue (if accepted then AssessmentAccepted else if verdict==SemanticallyRejected then AssessmentRejected else AssessmentUnresolved) "model_contract_assessment" (D.decisionReason response))
-      record=obj [("decisionId",str invocation),("callId",toJSON (runId running)),("node",str "CodeAssessment"),("accepted",Bool True),("response",D.decisionRaw response),("assessment",assessment),("evidenceOperation",str invocation)]
+      record=obj [("decisionId",str invocation),("callId",toJSON (runId running)),("node",str (if has version "explanation" then "HybridAssessment" else "CodeAssessment")),("accepted",Bool True),("response",D.decisionRaw response),("assessment",assessment),("evidenceOperation",str invocation)]
       finished=D.withDecisionRecord record (D.setWorkField "outcome" saved (D.setWorkField "codeExecution" (mergeFields [("status",str "completed"),("activation",activation)] (D.workField current "codeExecution")) current))
       complete=finished {D.workCalls=fmap (\c->c {D.callState=if accepted then D.CallCompleted else D.CallUnresolved,D.callOutput=Just (at saved "reply")}) (D.workCalls finished)}
   when activating $ forM_ definition $ \d->void (DB.saveRoutineOn db (put "activeCode" (mergeFields [("status",str "active"),("contractGeneration",get snapshot "contractGeneration")] activation) d))
@@ -386,9 +412,9 @@ recoverCode s = do
   recovered<-if has container "name" && at container "status"/="removed" then do
    result<-try (Code.reconcile container) :: IO (Either APIError ())
    pure (case result of Right ()->mergeFields [("status",str "interrupted"),("container",put "status" (str "removed") container)] code; Left (APIError _ reason)->mergeFields [("status",str "cleanup_pending"),("error",str reason)] code)
-   else pure (if at code "status" `elem` ["running","assessment"] then put "status" (str "interrupted") code else code)
+   else pure (if at code "status" `elem` ["running","explanation","assessment"] then put "status" (str "interrupted") code else code)
   let terminal=if at recovered "status"=="cleanup_pending" then "uncertain" else "interrupted"
-      finalized=put "operations" (arr [if at op "status"=="running" then put "status" (str terminal) op else op | op<-items recovered "operations"]) recovered
+      finalized=put "operations" (arr [if at op "status" `elem` ["running","validating"] then put "status" (str terminal) op else op | op<-items recovered "operations"]) recovered
   when (finalized/=code) (D.saveWork s (D.setWorkField "codeExecution" finalized work))
 
 publish :: Service -> Text -> Pulse -> IO ()

@@ -209,6 +209,30 @@ start a new authorized occurrence instead. Ordinary Retry is unchanged.
 Owned-container uncertainty blocks further generated-code starts until runtime
 restoration and app restart reconcile ownership; ordinary work remains available.
 
+### Hybrid calculation and explanation
+
+Preparation may produce a two-step candidate: pure code calculates structured
+facts, then a response-only owner invocation produces the useful explanation.
+Its original numerical and semantic criteria remain unchanged. Independent
+preparation examples compare numerical results before explanation and rubric
+review; final business acceptance separately checks the already-produced result.
+Retaining numerical fields does not make contradictory prose acceptable, and
+these checks are not a general mathematical oracle for every unseen input.
+
+The explanation pins its requested model, reasoning effort, instruction and host
+prompt-template hashes. Admission retains the exact implementation reference and
+structure identity. Changed defaults cannot repin an accepted run; a changed host
+prompt template fails visibly and requires new preparation. Remote model weights
+are not claimed immutable. Both stages share the existing execution deadline,
+Stop and recovery; no tools, external effects or automatic stage replay are enabled.
+
+ Explanation usage
+is recorded separately from final acceptance and the initial activation audit.
+Final assessment cannot replace the business explanation. A rejected calculation
+input retains its reason and stops before explanation or activation, without
+quarantining a valid active version. Existing single-script candidates keep their
+prior behavior; fallback and effect reconciliation are separate capabilities.
+
 ### Opt-in managed calls
 
 Ordinary chat submissions can explicitly send `"managed": true`. This mode is
