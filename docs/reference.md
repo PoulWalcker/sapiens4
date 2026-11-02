@@ -226,7 +226,7 @@ prompt template fails visibly and requires new preparation. Remote model weights
 are not claimed immutable. Both stages share the existing execution deadline,
 Stop and recovery; no tools, external effects or automatic stage replay are enabled.
 
- Explanation usage
+The routine result shows Calculation and Explanation progress. Explanation usage
 is recorded separately from final acceptance and the initial activation audit.
 Final assessment cannot replace the business explanation. A rejected calculation
 input retains its reason and stops before explanation or activation, without

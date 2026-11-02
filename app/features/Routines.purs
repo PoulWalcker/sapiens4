@@ -168,9 +168,20 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     ,V.when (D.s "error" run /= "") $ V.p "routine-problem" $ D.s "error" run
     ,V.when (active run && D.s "message" run == "") $ V.p "routine-muted" $ if D.s "status" run == "queued" then "Waiting to start." else "Work is in progress."
     ,V.when (managed routine) $ V.div "routine-run-inputs" [V.p "routine-muted" $ if D.n "revision" (D.get "snapshot" run) > 0.0 then "Definition revision " <> show (D.int $ D.at ["snapshot","revision"] run) else "Definition revision not recorded",V.p "" $ D.str $ D.at ["snapshot","inputs"] run]
+    ,stagePanel run
     ,V.when (managed routine) $ evidencePanel routine run
     ,V.when (managed routine && not (active run)) $ V.button "routine-link" "Reject result…" $ OpenDialog M.RoutineReject $ D.put "revision" (D.at ["snapshot","revision"] run) $ D.put "run" (D.get "id" run) (record routine)
     ,V.div "routine-actions" $ reply run <> if managed routine && active run then [V.button "button" "Stop this run…" $ OpenDialog M.RoutineStop $ D.put "run" (D.get "id" run) (record routine)] else []]
+  stagePanel run = V.when (not (A.null stages)) $ V.div "routine-notice" $
+    [V.textNode "h3" [] "Execution steps"] <> map (\stage -> V.p "" $ (if D.s "id" stage == "calculate" then "Calculation" else "Explanation") <> " · " <> stageStatus (D.s "status" stage)) stages
+    where stages = D.rows "executionStages" run
+  stageStatus value = case value of
+    "completed" -> "Completed"
+    "running" -> "In progress"
+    "failed" -> "Failed"
+    "interrupted" -> "Interrupted"
+    "uncertain" -> "Outcome unknown"
+    _ -> "Not started"
   reply run = case A.find (\w -> D.s "id" w == D.s "id" run && D.s "state" w == "WaitingForAdmin") $ D.rows "workloads" m.snapshot of
     Just work -> [V.button "button" ("Reply to " <> D.s "name" (M.agent m $ D.s "owner" work)) $ Clarify work]
     Nothing -> []
