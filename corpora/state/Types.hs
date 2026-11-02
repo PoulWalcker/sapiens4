@@ -6,6 +6,7 @@
 module Types (module Types, module Domain) where
 
 import Domain
+import qualified ManagedState as Managed
 
 import Control.Concurrent
 import Control.Concurrent.Async
@@ -114,9 +115,32 @@ agentRoot s a = serviceRoot s </> "agentpy/agents" </> T.unpack a
 workspaceRoot :: Service -> Text -> FilePath
 workspaceRoot s a = serviceRoot s </> "workspaces" </> T.unpack a
 agentState :: Service -> Text -> IO AgentState
-agentState s a = readJSON (agentRoot s a </> "state.json") (AgentState [] KM.empty)
+agentState s a = do
+ raw <- rawAgentState s a
+ managedConnection s $ \db -> Managed.load db a raw
+rawAgentState :: Service -> Text -> IO AgentState
+rawAgentState s a = readJSON (agentRoot s a </> "state.json") (AgentState [] KM.empty)
+managedConnection :: Service -> (Connection -> IO a) -> IO a
+managedConnection s action = withMVar (serviceDatabase s) (maybe (failure 503 "Database is closed") action) `catch` \(Managed.Conflict message) -> failure 409 message
+enrollManaged :: Service -> Text -> Turn -> Value -> Text -> [Value] -> IO ()
+enrollManaged s a turn message input attachments = managedConnection s $ \db -> Managed.enroll db a turn message input attachments
+restoreManaged :: Service -> Text -> IO ()
+restoreManaged s a = do
+ raw <- rawAgentState s a
+ pending <- managedConnection s $ \db -> Managed.restore db a raw
+ forM_ pending $ \state -> do
+  writeJSON (agentRoot s a </> "state.json") state
+  managedConnection s $ \db -> Managed.acknowledge db a
 saveState :: Service -> Text -> AgentState -> IO ()
-saveState s a v = writeJSON (agentRoot s a </> "state.json") (put "revision" (num (int (get (stateJSON v) "revision") + 1)) (stateJSON v))
+saveState s a v = saveStateCommand s a v Nothing
+saveStateCommand :: Service -> Text -> AgentState -> Maybe (Text,Value) -> IO ()
+saveStateCommand s a v command = saveStateCommitted s a v command (pure ())
+saveStateCommitted :: Service -> Text -> AgentState -> Maybe (Text,Value) -> IO () -> IO ()
+saveStateCommitted s a v command committed = do
+ saved <- managedConnection s $ \db -> Managed.save db a v command
+ committed
+ writeJSON (agentRoot s a </> "state.json") (put "revision" (num (int (get (stateJSON saved) "revision") + 1)) (stateJSON saved))
+ managedConnection s $ \db -> Managed.acknowledge db a
 modifyState :: Service -> Text -> (Value -> Value) -> IO ()
 modifyState s a f = agentState s a >>= decodeValue 500 . f . stateJSON >>= saveState s a
 modifyTurns :: Service -> Text -> (Turn -> Turn) -> IO ()

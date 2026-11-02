@@ -80,7 +80,7 @@ initialize :: Service -> IO ()
 initialize s = connection s $ \db -> do
  execute_ db "PRAGMA journal_mode=WAL"
  [Only version] <- query_ db "PRAGMA user_version" :: IO [Only Int]
- require (version `elem` [0..8]) 500 ("Unsupported CORPORA schema: " <> T.pack (show version))
+ require (version `elem` [0..9]) 500 ("Unsupported CORPORA schema: " <> T.pack (show version))
  mapM_ (execute_ db) [
   "CREATE TABLE IF NOT EXISTS scheduled_routines (sequence INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS system_pulse (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)",
@@ -92,13 +92,14 @@ initialize s = connection s $ \db -> do
   "CREATE TABLE IF NOT EXISTS preferences (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, agent TEXT NOT NULL REFERENCES agents(id), value TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS message_inputs (job TEXT PRIMARY KEY, text TEXT NOT NULL, attachments TEXT NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS managed_turns (id TEXT PRIMARY KEY, agent TEXT NOT NULL REFERENCES agents(id), value TEXT NOT NULL, projection TEXT, pending INTEGER NOT NULL)",
   "CREATE TABLE IF NOT EXISTS workloads (id TEXT PRIMARY KEY, value TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS groups (id TEXT PRIMARY KEY, value TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS group_attachments (id TEXT PRIMARY KEY, agent TEXT NOT NULL REFERENCES groups(id), value TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS activity_events (id INTEGER PRIMARY KEY, owner TEXT NOT NULL, timestamp TEXT NOT NULL, actor TEXT NOT NULL, entity TEXT NOT NULL, event TEXT NOT NULL, agency TEXT, details TEXT NOT NULL)",
   "CREATE INDEX IF NOT EXISTS activity_events_owner ON activity_events(owner,id)"]
  when (version `elem` [1,2]) $ execute_ db "INSERT OR IGNORE INTO turns SELECT * FROM jobs WHERE flow IN ('chat','computer')"
- execute_ db "PRAGMA user_version=8"
+ execute_ db "PRAGMA user_version=9"
 agents :: Service -> IO [Value]
 agents s = queryRows s "SELECT * FROM agents ORDER BY created,id" ["id","name","role","color","face","created"] []
 agent :: Service -> Text -> IO Value
@@ -142,7 +143,7 @@ project s a = do
       old = maybe Null (get `flip` "status") (listToMaybe previous)
       actor = if status == "queued" then if has origin "routine" then "system" else at (put "author" (get origin "author" `fallback` str "admin") origin) "author" else a
   when (old /= str status) $ recordOn s db owners (at turn "id") ("call." <> status) (obj [("previous",old),("origin",origin),("error",get turn "error"),("warning",get turn "warning")]) actor (Just (if has turn "output_order" then "chatOutput" else at turn "agency_kind"))
-  let details = selectPresent ["origin","batch_id","batch_members","agency_kind","slot","pulseId","output_at","output_order"] turn
+  let details = selectPresent ["origin","batch_id","batch_members","agency_kind","slot","pulseId","output_at","output_order","managed"] turn
   putValueOn db TurnDetails (at turn "id") details
   let output = listToMaybe [get m "content" | m <- items (stateJSON state) "chat",get m "turn" == get turn "id",at m "role" == "agent"]
   archived <- if isNothing output && status `elem` ["done","warning"] && batchLeader typed == turnId typed then readJSON (archivePath s a ("runs/" <> at turn "id")) empty else pure empty
