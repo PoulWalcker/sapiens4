@@ -89,10 +89,11 @@ admitRoutineOn db owner turn snapshot accepted = do
 routineWorkload :: AgentId -> Turn -> Value -> Maybe TaskSpec -> Workload
 routineWorkload owner turn snapshot accepted =
  let identity=runIdText (turnId turn)
-     first=newCall (turnId turn) owner Nothing (if isJust accepted then Execution else ReadyToWork) CallQueued (turnInput turn)
+     first=maybe base (const (setCallFields [("executionBinding",toJSON (OrdinaryBinding owner RoutineSnapshotSource))] base)) accepted
+     base=newCall (turnId turn) owner Nothing (if isJust accepted then Execution else ReadyToWork) CallQueued (turnInput turn)
  in Workload identity True (first :| []) (KM.fromList
-  [("originalIntent",str (turnInput turn)),("task",obj [("taskId",str ("task_"<>identity)),("taskType",str "automated"),("specification",maybe Null toJSON accepted)])
-  ,("origin",turnField turn "origin"),("routineSnapshot",snapshot),("executionGate",toJSON ExecutionOpen)
+  [("bindingSchema",num 1),("originalIntent",str (turnInput turn)),("task",obj [("taskId",str ("task_"<>identity)),("taskType",str "automated"),("specification",maybe Null toJSON accepted)])
+  ,("origin",turnField turn "origin"),("routineSnapshot",maybe snapshot (\spec -> put "acceptedTask" (toJSON spec) snapshot) accepted),("executionGate",toJSON ExecutionOpen)
   ,("created",turnField turn "created"),("decisions",arr []),("outcome",Null)])
 routineSpecPinned :: Workload -> Bool
 routineSpecPinned work = has (workField work "routineSnapshot") "criteria"
@@ -106,6 +107,40 @@ instance FromJSON TaskSpec where
   TaskSpec <$> parseJSON (get value "objective") <*> stringsP "inputs" False (get value "inputs") <*> nonempty "expectedOutputs" <*> nonempty "completionCriteria"
 instance ToJSON TaskSpec where
  toJSON spec = obj [("objective",str (specObjective spec)),("inputs",toJSON (specInputs spec)),("expectedOutputs",toJSON (NE.toList (specOutputs spec))),("completionCriteria",toJSON (NE.toList (specCriteria spec)))]
+-- Resolve only local durable sources. Mutable future Routine definitions are not
+-- execution contracts, and old installations are not assigned invented versions.
+executionContract :: Workload -> WorkCall -> IO (Maybe TaskSpec)
+executionContract work call = do
+ let marker=workField work "bindingSchema"
+     acceptedDecisionForCall entry = get entry "callId"==toJSON (callIdentity call) && boolean (get entry "accepted") && at (get entry "response") "event"=="TaskPrepared"
+     expected = callNode call==Execution || any acceptedDecisionForCall (workItems work "decisions")
+       || (callIdentity call==callIdentity (NE.head (workCalls work)) && has (workField work "routineSnapshot") "acceptedTask")
+ require (marker==Null || marker==num 1) 409 "Unsupported execution binding schema"
+ if callField call "executionBinding"==Null then do
+  require (marker==Null || not expected) 409 "Accepted execution binding is missing"
+  pure Nothing
+ else do
+  OrdinaryBinding owner source <- decodeValue 409 (callField call "executionBinding")
+  require (owner==callOwner call) 409 "Execution binding belongs to another owner"
+  case source of
+   RoutineSnapshotSource -> do
+    let snapshot=workField work "routineSnapshot"
+    require (callIdentity call==callIdentity (NE.head (workCalls work)) && get snapshot "owner"==toJSON owner && has snapshot "criteria") 409 "Routine contract source does not belong to this call"
+    Just <$> decodeValue 409 (get snapshot "acceptedTask")
+   TaskDecisionSource identity -> do
+    record <- maybe (failure 409 "Accepted task decision is missing") pure (find ((==identity) . (`at` "decisionId")) (workItems work "decisions"))
+    require (get record "callId"==toJSON (callIdentity call) && get record "agent"==toJSON owner && boolean (get record "accepted") && at record "node"=="ReadyToWork" && at (get record "response") "event"=="TaskPrepared") 409 "Execution contract is not this call's accepted task decision"
+    Just <$> decodeValue 409 (get (get record "response") "specification")
+
+bindingDetail :: Workload -> WorkCall -> IO Value
+bindingDetail work call = renderBinding `catch` (\(APIError _ reason) -> pure (obj [("status",str "invalid"),("reason",str reason)]))
+ where
+ renderBinding = do
+  contract <- executionContract work call
+  pure $ case contract of
+   Nothing -> obj [("status",str (if workField work "bindingSchema"==Null then "legacy_unknown" else "not_selected"))]
+   Just spec -> obj [("status",str "pinned"),("binding",callField call "executionBinding"),("contract",toJSON spec),("inputs",toJSON (specInputs spec)),("request",str (callRequest call))]
+
 data OutcomeStatus = Completed | Unresolved deriving (Eq, Ord, Show, Enum, Bounded)
 instance Wire OutcomeStatus where wireName status = case status of Completed -> "Completed"; Unresolved -> "Unresolved"
 instance FromJSON OutcomeStatus where parseJSON = parseWire
@@ -223,7 +258,7 @@ begin s a turn = do
  found <- findWork s (turnId turn)
  let routine=has (turnField turn "origin") "routine"
      first=newCall (turnId turn) a Nothing (if routine then ReadyToWork else Assessing) CallRunning (turnInput turn)
-     initial=Workload (runIdText (turnId turn)) routine (first :| []) (KM.fromList [("originalIntent",str (turnInput turn)),("task",obj [("taskId",str ("task_"<>runIdText (turnId turn))),("taskType",str (if routine then "automated" else "work")),("specification",Null)]),("origin",merge (obj [("agent",toJSON a),("call",toJSON (turnId turn))]) (turnField turn "origin")),("decisions",arr []),("outcome",Null)])
+     initial=Workload (runIdText (turnId turn)) routine (first :| []) (KM.fromList [("bindingSchema",num 1),("originalIntent",str (turnInput turn)),("task",obj [("taskId",str ("task_"<>runIdText (turnId turn))),("taskType",str (if routine then "automated" else "work")),("specification",Null)]),("origin",merge (obj [("agent",toJSON a),("call",toJSON (turnId turn))]) (turnField turn "origin")),("decisions",arr []),("outcome",Null)])
      (w,c)=fromMaybe (initial,first) found
      running=if isNothing (callOutput c) then c { callState=CallRunning, callFields=KM.delete "error" (callFields c) } else c
      updated=setCallFields [("attempt",num (fromMaybe 1 (turnAttempt turn)))] running
@@ -243,10 +278,14 @@ recordDecision :: Service -> Text -> Value -> IO ()
 recordDecision s a record = do
  writeJSON (archivePath s a ("decisions/"<>at record "decisionId")) record
  (w,_) <- field 500 record "callId" >>= getWork s
- let update d = if get d "decisionId" == get record "decisionId" then merge d (selectPresent ["accepted","response","error","transition"] record) else d
- saveWork s (setWorkField "decisions" (arr (map update (workItems w "decisions"))) w)
+ saveWork s (withDecisionRecord record w)
+withDecisionRecord :: Value -> Workload -> Workload
+withDecisionRecord record work = setWorkField "decisions" (arr (map update (workItems work "decisions"))) work
+ where update entry = if get entry "decisionId"==get record "decisionId" then merge entry (selectPresent ["accepted","response","error","transition"] record) else entry
 accept :: Service -> Text -> Value -> Text -> Text -> IO ()
-accept s a record before after = recordDecision s a (merge record (obj [("accepted",Bool True),("transition",obj [("before",str before),("event",get record "hostEvent" `fallback` get (get record "response") "event"),("after",str (transition before (at (get record "response") "event") after)),("nextNode",str after)])]))
+accept s a record before after = recordDecision s a (acceptedDecision record before after)
+acceptedDecision :: Value -> Text -> Text -> Value
+acceptedDecision record before after = merge record (obj [("accepted",Bool True),("transition",obj [("before",str before),("event",get record "hostEvent" `fallback` get (get record "response") "event"),("after",str (transition before (at (get record "response") "event") after)),("nextNode",str after)])])
  where transition b e def = fromMaybe def $ lookup (b,e) [(("Assessing","FitsSpecialization"),"ReadyToWork"),(("Assessing","OutsideSpecialization"),"ChiefTriage"),(("ChiefTriage","SpecialistSelected"),"Assessing"),(("ChiefTriage","NewSpecialistNeeded"),"CreatingSapi"),(("ChiefTriage","RequestUnclear"),"WaitingForAdmin"),(("ChiefTriage","FitsSpecialization"),"ReadyToWork")]
 decide :: Service -> Run -> Turn -> AgentState -> Node -> IORef [Value] -> IO (DecisionResponse,Value)
 decide s run turn state node logs = do
@@ -254,6 +293,8 @@ decide s run turn state node logs = do
   source <- templates s >>= maybe (failure 400 "Unknown decision node") pure . find ((==toJSON node) . (`get` "node"))
   (w,c) <- getWork s (turnId turn)
   DB.requireOccurrence s (workField w "origin")
+  contract <- if node==Execution then executionContract w c else pure Nothing
+  let taskContext=maybe (workField w "task") (\spec -> put "specification" (toJSON spec) (workField w "task")) contract
   conv <- if node==AutomationAnalysis then pure Null else conversation s (runOwner run) turn state
   chief <- DB.mainAgent s
   members <- team s
@@ -267,7 +308,7 @@ decide s run turn state node logs = do
   wiki <- prompt s "notes-wiki"
   envelope <- prompt s "decision-envelope"
   let instruction = at source "content" <> extra <> scheduled <> pinned
-      context = if node==AutomationAnalysis then obj [("selfId",toJSON (runOwner run)),("analysisEvidence",workField w "analysisEvidence")] else obj [("originalIntent",workField w "originalIntent"),("task",workField w "task"),("routine",routine),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
+      context = if node==AutomationAnalysis then obj [("selfId",toJSON (runOwner run)),("analysisEvidence",workField w "analysisEvidence")] else obj [("originalIntent",workField w "originalIntent"),("task",taskContext),("routine",routine),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
       rendered = render envelope [("node",wireName node),("instruction",instruction),("notes_wiki",if node==AutomationAnalysis then "" else render wiki [("notes_example",T.pack (repositoryRoot s </> "corpora/prompts/examples/jarvis-notes.html"))]),("context",jsonText context),("events",T.intercalate ", " (sort (eventsFor node)))]
   (model,effort) <- modelDefaults
   policy <- executionSettings s (agentIdText (runOwner run))
@@ -412,10 +453,18 @@ runDecision s run turn state = do
            when (routineSpecPinned current) $ require (toJSON spec==previous) 409 "Routine goal, inputs and criteria are pinned for this run"
            require (all (`elem` map str (NE.toList (specCriteria spec))) (items previous "completionCriteria")) 400 "A handoff cannot remove accepted completion criteria"
            let task=mergeFields [("taskType",str (if has (workField current "origin") "routine" then "automated" else taskType)),("specification",toJSON spec)] (workField current "task")
-           finish (setWorkField "task" task current) call Execution
+           require (callField call "executionBinding"==Null) 409 "Execution binding cannot be replaced"
+           let binding=OrdinaryBinding (callOwner call) (TaskDecisionSource (at record "decisionId"))
+               following=(setCallFields [("executionBinding",toJSON binding),("observation",decisionRaw response)] call) {callNode=Execution}
+               acceptedRecord=acceptedDecision record "ReadyToWork" "Execution"
+               committed=withDecisionRecord acceptedRecord (setWorkField "task" task current)
+           saveWork s (withCall committed following)
+           writeJSON (archivePath s owner ("decisions/"<>at record "decisionId")) acceptedRecord
+           pure Nothing
           Handoff request -> Just <$> transfer s run request (decisionReason response) record
           ReportOutcome reply outcome -> do
-           criteria <- decodeValue 500 (get (get (workField current "task") "specification") "completionCriteria")
+           pinnedContract <- executionContract current call
+           criteria <- maybe (decodeValue 500 (get (get (workField current "task") "specification") "completionCriteria")) (pure . NE.toList . specCriteria) pinnedContract
            validation <- try (validateOutcome response outcome criteria)
            case validation of
             Left (APIError code _) -> do
@@ -493,8 +542,9 @@ workTasks s a full = do
  works <- readWorks s
  rows <- forM [w | w <- works,workTracked w,any ((==AgentId a) . callOwner) (workCalls w)] $ \w -> do
   let lastCall=NE.last (workCalls w)
+  binding <- bindingDetail w lastCall
   decisions <- forM (workItems w "decisions") $ \d -> if full then merge d <$> readJSON (archivePath s (at d "agent") ("decisions/"<>at d "decisionId")) empty else pure d
-  pure $ mergeFields [("execution",obj [("state",toJSON (callState lastCall)),("owner",toJSON (callOwner lastCall)),("currentCall",toJSON (callIdentity lastCall)),("attempt",callField lastCall "attempt")]),("decisions",arr decisions)] (select ["task","workloadId","originalIntent","calls","outcome"] (toJSON w))
+  pure $ mergeFields [("executionBinding",binding),("execution",obj [("state",toJSON (callState lastCall)),("owner",toJSON (callOwner lastCall)),("currentCall",toJSON (callIdentity lastCall)),("attempt",callField lastCall "attempt")]),("decisions",arr decisions)] (select ["task","workloadId","originalIntent","calls","outcome"] (toJSON w))
  pure (obj [("tasks",arr rows)])
 taskList :: Service -> Text -> IO Value
 taskList s a = do

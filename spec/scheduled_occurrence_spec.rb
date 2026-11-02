@@ -277,6 +277,8 @@ RSpec.describe 'Durable interval occurrences', :host do
         expect(wait_for_run(id, 'unresolved')['error']).not_to be_empty
         expect(host.calls).to be_empty
         if shape == 'terminal_turn'
+          detail = host.api('GET', "/api/agents/#{owner}/routines/#{id}/runs/#{identity}")
+          expect(detail.fetch('executionBinding')).to include('status' => 'legacy_unknown')
           expect(host.state['turns'].find { |entry| entry['id'] == identity }['output']).to eq('Unvalidated old reply')
         end
       end

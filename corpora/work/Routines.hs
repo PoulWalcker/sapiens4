@@ -317,7 +317,7 @@ admitPersonalOn db owner turn snapshot_ accepted runtime = do
     D.admitRoutineOn db owner turn snapshot_ accepted
    Just old -> do
     require (not (has (toJSON old) "managed")) 500 "Managed occurrence is missing its Workload"
-    let restored=D.routineWorkload owner old snapshot_ Nothing
+    let restored=D.setWorkField "bindingSchema" Null (D.routineWorkload owner old snapshot_ Nothing)
         state=case turnStatus old of
          Queued -> D.CallQueued
          Running -> D.CallInterrupted

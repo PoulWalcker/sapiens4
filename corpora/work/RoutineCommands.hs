@@ -249,10 +249,11 @@ renderRun projection operations revision work = do
      reported=get (maybe Null (`get` "response") (listToMaybe (reverse (D.workItems work "decisions")))) "outcome"
      criteriaAssessment=[obj [("criterion",criterion),("status",str (if criterion `elem` items reported "satisfiedCriteria" then "Model reports satisfied" else if has (get reported "notApplicableCriteria") (text criterion) then "Model reports not applicable" else "Unresolved")),("reason",get (get reported "notApplicableCriteria") (text criterion)),("source",str "model_statement")] | criterion<-items (D.workField work "routineSnapshot") "criteria"]
      observations=obj [("source",str "model_statement"),("statements",get (D.workField work "outcome") "evidence" `fallback` arr []),("independent",Bool False)]
+ binding <- D.bindingDetail work call
  let lastDecision=maybe Null (`get` "decisionId") (listToMaybe (reverse (D.workItems work "decisions")))
      lastFeedback=maybe Null (`get` "operation") (listToMaybe (reverse feedback))
      version=jsonText (arr [str status,lastDecision,lastFeedback,toJSON revision])
      details=case projection of
       RunSummary -> []
-      RunDetail -> [("criteriaAssessment",arr criteriaAssessment),("invocations",arr invocations),("observations",observations),("feedback",arr feedback),("rejection",fromMaybe Null (listToMaybe feedback)),("outcome",D.workField work "outcome")]
+      RunDetail -> [("executionBinding",binding),("criteriaAssessment",arr criteriaAssessment),("invocations",arr invocations),("observations",observations),("feedback",arr feedback),("rejection",fromMaybe Null (listToMaybe feedback)),("outcome",D.workField work "outcome")]
  pure (obj (details++[("assessment",assessment),("originalAssessment",original),("detailVersion",str version),("invocationCount",num (length invocations)),("currentRevision",toJSON revision),("historical",Bool (get (D.workField work "routineSnapshot") "revision"/=toJSON revision)),("id",str (D.workloadId work)),("created",D.workField work "created"),("trigger",get (D.workField work "origin") "trigger"),("snapshot",D.workField work "routineSnapshot"),("status",str status),("result",if gate==ExecutionStopped then Null else get (D.workField work "outcome") "reply"),("message",if gate==ExecutionOpen && D.callState call==D.CallWaiting then toJSON (D.callOutput call) else Null),("error",D.callField call "error"),("currentOwner",toJSON (D.callOwner call))]))

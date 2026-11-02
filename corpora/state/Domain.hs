@@ -23,6 +23,24 @@ import qualified Data.Vector as V
 newtype AgentId = AgentId { agentIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
 newtype RunId = RunId { runIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
 
+data OrdinarySource = RoutineSnapshotSource | TaskDecisionSource Text deriving (Eq, Show)
+data OrdinaryBinding = OrdinaryBinding AgentId OrdinarySource deriving (Eq, Show)
+instance FromJSON OrdinaryBinding where
+ parseJSON value = do
+  onlyFields ["schema","mode","owner","source"] value
+  unless (get value "schema"==num 1 && at value "mode"=="ordinary") (fail "Unsupported ordinary binding format")
+  owner <- parseJSON (get value "owner")
+  let source=get value "source"
+  kind <- case at source "kind" of
+   "routine_snapshot" -> onlyFields ["kind"] source >> pure RoutineSnapshotSource
+   "task_decision" -> onlyFields ["kind","decisionId"] source >> TaskDecisionSource <$> textFieldP "decisionId" 128 source
+   _ -> fail "Unknown ordinary contract source"
+  pure (OrdinaryBinding owner kind)
+instance ToJSON OrdinaryBinding where
+ toJSON (OrdinaryBinding owner source) = obj [("schema",num 1),("mode",str "ordinary"),("owner",toJSON owner),("source",case source of
+  RoutineSnapshotSource -> obj [("kind",str "routine_snapshot")]
+  TaskDecisionSource identity -> obj [("kind",str "task_decision"),("decisionId",str identity)])]
+
 newtype ContractGeneration = ContractGeneration Int deriving (Eq, Show, ToJSON)
 instance FromJSON ContractGeneration where
  parseJSON value = do
