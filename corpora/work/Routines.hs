@@ -4,6 +4,7 @@ module Routines
  , IntervalSchedule(..), Definition(..), readDefinitions, readRoutines
  , definitionTitle, definitionGoal, definitionCriteria, intervalView, bumpRevision
  , setInterval, setSchedulePaused, storeRoutine, initializeRoutines
+ , contractGeneration, changeContract
  , save, setPaused, command, receipt, acknowledge, dispatch
  ) where
 
@@ -83,6 +84,7 @@ instance FromJSON Definition where
    Nothing -> case contract of
     LegacyPrompt _ -> pure (Revision 1)
     AcceptedContract _ -> fail "Routine revision is required"
+  forM_ (KM.lookup "contractGeneration" o) (\generation -> void (parseJSON generation :: Parser ContractGeneration))
   trigger <- routineTrigger value
   schedule <- case trigger of
    ManualTrigger -> pure Nothing
@@ -124,6 +126,16 @@ intervalView definition = put "prompt" (str (definitionGoal definition)) (toJSON
 bumpRevision :: Definition -> Definition
 bumpRevision d = let Revision previous=definitionRevision d; next=Revision (previous+1)
  in d {definitionRevision=next,definitionFields=KM.insert "revision" (toJSON next) (definitionFields d)}
+contractGeneration :: Definition -> ContractGeneration
+contractGeneration d = ContractGeneration (max 1 (int (get (Object (definitionFields d)) "contractGeneration")))
+changeContract :: RoutineContract -> Definition -> Definition
+changeContract contract d = d {definitionContract=contract,definitionFields=KM.insert "contractGeneration" (toJSON next) (definitionFields d)}
+ where
+ current=contractGeneration d
+ semantic value = case value of
+  LegacyPrompt goal -> (goal,Nothing)
+  AcceptedContract fields -> (fieldGoal fields,Just (fieldCriteria fields))
+ next=if semantic contract==semantic (definitionContract d) then current else let ContractGeneration n=current in ContractGeneration (n+1)
 setInterval :: UTCTime -> Minutes -> Definition -> Definition
 setInterval time minutes d = d {definitionSchedule=Just (IntervalSchedule minutes (addUTCTime (intervalSeconds minutes) time) count paused)}
  where count=maybe 0 intervalCount (definitionSchedule d); paused=maybe False intervalPaused (definitionSchedule d)
@@ -152,6 +164,9 @@ initializeRoutines s = do
    let group=findId (at r "owner") groups
        count=case group of Just g->length [t | t<-items g "tasks",get t "routine"==get r "id"]; Nothing->length [w | w<-works,get (get w "origin") "routine"==get r "id"]
    void (DB.saveRoutine s (merge r (obj [("runCount",num count),("paused",Bool (count>=1000))])))
+ enrolled <- DB.values s DB.ScheduledRoutines
+ forM_ enrolled $ \r -> unless (has r "contractGeneration") $
+  void (DB.saveRoutine s (put "contractGeneration" (num 1) r))
 save :: Service -> Text -> Value -> Value -> Maybe Text -> Maybe Int -> Maybe Text -> IO Value
 save s owner minutes execution identity previous source = do
  body <- textField (obj [("prompt",execution)]) "prompt" 16000
@@ -180,10 +195,10 @@ save s owner minutes execution identity previous source = do
        contract=case definitionContract initial of
         LegacyPrompt _ -> LegacyPrompt body
         AcceptedContract fields -> AcceptedContract fields {fieldGoal=body}
-       updated=(setInterval t interval initial) {definitionContract=contract
-        ,definitionFields=KM.insert "updated" (str (timestamp t)) (case contract of
-          LegacyPrompt _ -> KM.insert "title" (str (T.unwords (take 7 (T.words body)))) (definitionFields initial)
-          AcceptedContract _ -> definitionFields initial)}
+       changed=changeContract contract (setInterval t interval initial)
+       updated=changed {definitionFields=KM.insert "updated" (str (timestamp t)) (case contract of
+          LegacyPrompt _ -> KM.insert "title" (str (T.unwords (take 7 (T.words body)))) (definitionFields changed)
+          AcceptedContract _ -> definitionFields changed)}
        value=toJSON (if isJust existing then bumpRevision updated else updated)
    r <- DB.saveRoutine s (if isJust existing then value else remove ["id"] value)
    DB.record s [owner] (at r "id") (if isJust identity then "routine.updated" else "routine.created") r "admin" Nothing

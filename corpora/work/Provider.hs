@@ -140,25 +140,85 @@ invokeObserved s run input observe = do
    locked s $ do
     current <- readIORef (serviceLease s)
     when (current==lease) $ writeIORef (serviceLease s) Nothing
+
+data InvocationPolicy = OrdinaryInvocation | EvidenceAnalysisResponseOnly deriving (Eq, Show)
+
+-- This narrow policy is verified against the pinned CLI's public process and
+-- transport interfaces. Unsupported versions/models never fall back to tools.
+analysisCatalog :: IO Value
+analysisCatalog = analysisCatalogFor Nothing
+analysisCatalogFor :: Maybe Run -> IO Value
+analysisCatalogFor activeRun = do
+ binary <- codexBinary >>= maybe (failure 503 "Codex CLI is unavailable for analysis") pure
+ started <- getMonotonicTimeNSec
+ let configurationDeadline=started+10000000000
+     guardRun = do
+      clock <- getMonotonicTimeNSec
+      require (clock < configurationDeadline) 503 "Response-only provider configuration exceeded its deadline"
+      forM_ activeRun $ \running -> do
+       cancelled <- readIORef (runCancel running)
+       require (not cancelled) 409 "Analysis stopped before provider admission"
+       require (clock < runDeadline running) 504 "Call time limit exhausted during provider configuration"
+     monitor = guardRun >> threadDelay 50000 >> monitor
+     probe arguments = do
+      guardRun
+      clock <- getMonotonicTimeNSec
+      result <- timeout (fromIntegral ((configurationDeadline-clock) `div` 1000)) (race (readProcessWithExitCode binary arguments "") monitor)
+      case result of
+       Just (Left (ExitSuccess,output,_)) -> pure (T.pack output)
+       _ -> failure 503 "Response-only provider configuration could not be verified"
+ version <- T.strip <$> probe ["--version"]
+ require (version=="codex-cli 0.162.1") 503 "Automation analysis requires verified Codex CLI 0.162.1"
+ catalog <- probe ["debug","models","--bundled"]
+ (model,_) <- modelDefaults
+ selected <- maybe (failure 503 "Configured model has no verified response-only catalog entry") pure
+  (listToMaybe [entry | entry<-items (parseJSONText catalog) "models",at entry "slug"==model])
+ pure (mergeFields [("shell_type",str "disabled"),("apply_patch_tool_type",Null),("experimental_supported_tools",arr []),("tool_mode",str "direct"),("supports_search_tool",Bool False),("include_skills_usage_instructions",Bool False),("include_plugin_usage_instructions",Bool False),("include_apps_usage_instructions",Bool False)] selected)
+
+withInvocationPolicy :: Service -> Run -> InvocationPolicy -> (FilePath -> [String] -> IO Text) -> IO Text
+withInvocationPolicy s run policy action = do
+ (model,defaultEffort) <- modelDefaults
+ settings <- executionSettings s (agentIdText (runOwner run))
+ let effort=if executionMode settings==Deep then "xhigh" else defaultEffort
+     settingsArgs=["-c","model_reasoning_effort="++T.unpack (jsonText (str effort)),"-c","model="++T.unpack (jsonText (str model))]
+ case policy of
+  OrdinaryInvocation -> do
+   let directory=workspaceRoot s (agentIdText (runOwner run))
+   action directory (["exec"]++settingsArgs++["--skip-git-repo-check","--json","--dangerously-bypass-approvals-and-sandbox","--cd",directory,"--color","never","-"])
+  EvidenceAnalysisResponseOnly -> do
+   catalog <- analysisCatalogFor (Just run)
+   temporary <- getTemporaryDirectory
+   identity <- newId
+   let directory=temporary </> ("sapiens-analysis-"++T.unpack identity)
+   bracket (createDirectory directory >> pure directory) removePathForcibly $ \folder -> do
+    let catalogPath=folder </> "models.json"
+    writeJSON catalogPath (obj [("models",arr [catalog])])
+    let disabled=["shell_tool","shell_snapshot","apps","plugins","multi_agent","computer_use","browser_use","browser_use_external","view_image","image_generation","code_mode_host","hooks","memories","goals","sleep_tool","skill_mcp_dependency_install","tool_suggest","enable_request_compression"]
+        config=[("model_catalog_json",str (T.pack catalogPath)),("approval_policy",str "never"),("web_search",str "disabled"),("project_doc_max_bytes",num 0),("mcp_servers",empty)]++[("features."<>feature,Bool False) | feature<-disabled]
+        options=concat [["-c",T.unpack key++"="++T.unpack (jsonText value)] | (key,value)<-config]
+    action folder (["exec","--ignore-user-config","--ignore-rules","--strict-config","--ephemeral","--skip-git-repo-check","--json","--sandbox","read-only","--cd",folder,"--color","never"]++settingsArgs++options++["-"])
+
+invokeAnalysisObserved :: Service -> Run -> Text -> (EvidenceSnapshot -> IO ()) -> IO Text
+invokeAnalysisObserved s run input observe = invokeModelWithPolicy s run EvidenceAnalysisResponseOnly input observe
 invokeModel :: Service -> Run -> Text -> IO Text
 invokeModel s run input = invokeModelObserved s run input (const (pure ()))
 
 invokeModelObserved :: Service -> Run -> Text -> (EvidenceSnapshot -> IO ()) -> IO Text
-invokeModelObserved s run input observe = do
+invokeModelObserved s run input observe = invokeModelWithPolicy s run OrdinaryInvocation input observe
+
+invokeModelWithPolicy :: Service -> Run -> InvocationPolicy -> Text -> (EvidenceSnapshot -> IO ()) -> IO Text
+invokeModelWithPolicy s run policy input observe = withInvocationPolicy s run policy $ \workdir args -> do
  cancelled <- readIORef (runCancel run)
  require (not cancelled) 409 "Stopped by Admin"
  before <- getMonotonicTimeNSec
  require (before < runDeadline run) 504 "Call time limit exhausted between decision nodes"
  binary <- codexBinary >>= maybe (failure 503 "Codex CLI was not found. Install Codex and run codex login.") pure
- (model,defaultEffort) <- modelDefaults
- settings <- executionSettings s (agentIdText (runOwner run))
- let effort = if executionMode settings == Deep then "xhigh" else defaultEffort
-     workdir = workspaceRoot s (agentIdText (runOwner run))
-     args = ["exec","-c","model_reasoning_effort=" ++ T.unpack (jsonText (str effort)),"-c","model=" ++ T.unpack (jsonText (str model)),"--skip-git-repo-check","--json","--dangerously-bypass-approvals-and-sandbox","--cd",workdir,"--color","never","-"]
+ (model,_) <- modelDefaults
  environment <- getEnvironment
  started <- realToFrac . (*1000) <$> getPOSIXTime :: IO Double
  writeIORef (runActivity run) (obj [("started",toJSON started),("updated",toJSON started),("phase",str "Waiting for model"),("last_action",str "")])
- initial <- initialEvidence model <$> now
+ startedAt <- now
+ let initial=(initialEvidence model startedAt) {evidencePolicy=case policy of OrdinaryInvocation -> OrdinaryEvidence; EvidenceAnalysisResponseOnly -> ResponseOnlyEvidence "codex-cli 0.162.1"}
  capture <- newIORef (Capture initial M.empty M.empty 0 2 False)
  checkpoint <- newIORef before
  let persist = readIORef capture >>= observe . captureSnapshot
@@ -168,7 +228,10 @@ invokeModelObserved s run input observe = do
       previous <- readIORef checkpoint
       when (clock-previous>=250000000) (persist >> writeIORef checkpoint clock)
  persist
- result <- try $ bracket (createProcess (proc binary args) { cwd=Just workdir,env=Just (("SAPIENS_AGENCY_RUN",T.unpack (runIdText (runId run))):filter ((/="SAPIENS_AGENCY_RUN") . fst) environment),std_in=CreatePipe,std_out=CreatePipe,std_err=CreatePipe,create_group=True,use_process_jobs=True,detach_console=os=="mingw32" }) cleanup $ \handles -> do
+ let invocationEnvironment=case policy of
+      OrdinaryInvocation -> ("SAPIENS_AGENCY_RUN",T.unpack (runIdText (runId run))):filter ((/="SAPIENS_AGENCY_RUN") . fst) environment
+      EvidenceAnalysisResponseOnly -> filter (\(key,_) -> key `notElem` ["SAPIENS_AGENCY_RUN","SAPIENS_CALL_TOKEN"]) environment
+ result <- try $ bracket (createProcess (proc binary args) { cwd=Just workdir,env=Just invocationEnvironment,std_in=CreatePipe,std_out=CreatePipe,std_err=CreatePipe,create_group=True,use_process_jobs=True,detach_console=os=="mingw32" }) cleanup $ \handles -> do
   (hin,hout,herr,ph) <- case handles of
    (Just inputHandle,Just outputHandle,Just errorHandle,process) -> pure (inputHandle,outputHandle,errorHandle,process)
    _ -> failure 500 "Provider process did not expose its configured pipes"
@@ -257,7 +320,7 @@ data Capture = Capture
  , capturePending :: M.Map Int Bool, captureSequence :: Int, captureBytes :: Int, captureOversized :: Bool
  }
 initialEvidence :: Text -> Text -> EvidenceSnapshot
-initialEvidence model started = EvidenceSnapshot model started Nothing Nothing False []
+initialEvidence model started = EvidenceSnapshot OrdinaryEvidence model started Nothing Nothing False []
  (EvidenceUsage Nothing Nothing Nothing 0 False 0) False False False (Just 0) 0 0 0 0 0 0 0 0
 mapSnapshot :: (EvidenceSnapshot -> EvidenceSnapshot) -> Capture -> Capture
 mapSnapshot f capture = capture {captureSnapshot=f (captureSnapshot capture)}

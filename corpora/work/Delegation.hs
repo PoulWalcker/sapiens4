@@ -32,9 +32,9 @@ import Population
 import Memo
 import Provider
 
-data Node = Assessing | ChiefTriage | CreatingSapi | ReadyToWork | Delegation | Execution | OutcomeNode | WaitingForAdmin deriving (Eq, Ord, Show, Enum, Bounded)
+data Node = Assessing | ChiefTriage | CreatingSapi | ReadyToWork | Delegation | Execution | AutomationAnalysis | OutcomeNode | WaitingForAdmin deriving (Eq, Ord, Show, Enum, Bounded)
 instance Wire Node where
- wireName node = case node of Assessing -> "Assessing"; ChiefTriage -> "ChiefTriage"; CreatingSapi -> "CreatingSapi"; ReadyToWork -> "ReadyToWork"; Delegation -> "Delegation"; Execution -> "Execution"; OutcomeNode -> "Outcome"; WaitingForAdmin -> "WaitingForAdmin"
+ wireName node = case node of Assessing -> "Assessing"; ChiefTriage -> "ChiefTriage"; CreatingSapi -> "CreatingSapi"; ReadyToWork -> "ReadyToWork"; Delegation -> "Delegation"; Execution -> "Execution"; AutomationAnalysis -> "AutomationAnalysis"; OutcomeNode -> "Outcome"; WaitingForAdmin -> "WaitingForAdmin"
 instance FromJSON Node where parseJSON = parseWire
 instance ToJSON Node where toJSON = str . wireName
 
@@ -121,7 +121,7 @@ instance FromJSON Outcome where
 data Decision
  = ReplyNow Text | ExecuteTask | OutsideSpecialization | SelectSpecialist Text
  | NeedSpecialist | AskAdmin Text | SpecifySapi Text Text | PrepareTask Text TaskSpec
- | Handoff Text | ReportOutcome Text Outcome
+ | Handoff Text | ReportOutcome Text Outcome | ReportAnalysis AnalysisDecision
  deriving (Eq, Show)
 data DecisionResponse = DecisionResponse { decisionBody :: Decision, decisionReason :: Text, decisionEvidence :: [Text], decisionRaw :: Value } deriving (Eq, Show)
 parseDecision :: Node -> Value -> Parser DecisionResponse
@@ -145,11 +145,12 @@ parseDecision node value = do
   "TaskPrepared" -> variant ["taskType","specification"] (PrepareTask <$> textAt "taskType" 60 <*> parseJSON (get value "specification"))
   "HandoffPrepared" -> variant ["request"] (Handoff <$> textAt "request" 16000)
   "Outcome" -> variant ["reply","outcome"] (ReportOutcome <$> textAt "reply" 64000 <*> parseJSON (get value "outcome"))
+  "AutomationAnalyzed" -> variant ["decision"] (ReportAnalysis <$> parseJSON (get value "decision"))
   _ -> fail "Unknown decision event"
  pure (DecisionResponse body reason evidence value)
 
 promptNames :: [(Node,Text)]
-promptNames = [(Assessing,"decision-triage"),(ChiefTriage,"decision-chief-triage"),(CreatingSapi,"decision-create-sapi"),(ReadyToWork,"decision-prepare-task"),(Delegation,"decision-delegation"),(Execution,"decision-execution")]
+promptNames = [(Assessing,"decision-triage"),(ChiefTriage,"decision-chief-triage"),(CreatingSapi,"decision-create-sapi"),(ReadyToWork,"decision-prepare-task"),(Delegation,"decision-delegation"),(Execution,"decision-execution"),(AutomationAnalysis,"decision-automation-analysis")]
 eventsFor :: Node -> [Text]
 eventsFor node = case node of
  Assessing -> ["FitsSpecialization","OutsideSpecialization"]
@@ -158,6 +159,7 @@ eventsFor node = case node of
  ReadyToWork -> ["TaskPrepared"]
  Delegation -> ["HandoffPrepared"]
  Execution -> ["Outcome","OutsideSpecialization"]
+ AutomationAnalysis -> ["AutomationAnalyzed"]
  OutcomeNode -> []
  WaitingForAdmin -> []
 templates :: Service -> IO [Value]
@@ -252,7 +254,7 @@ decide s run turn state node logs = do
   source <- templates s >>= maybe (failure 400 "Unknown decision node") pure . find ((==toJSON node) . (`get` "node"))
   (w,c) <- getWork s (turnId turn)
   DB.requireOccurrence s (workField w "origin")
-  conv <- conversation s (runOwner run) turn state
+  conv <- if node==AutomationAnalysis then pure Null else conversation s (runOwner run) turn state
   chief <- DB.mainAgent s
   members <- team s
   extra <- if KM.member "agency_batch" (agentFields state) then ("\n\n" <>) <$> prompt s "agency-chat" else pure ""
@@ -265,15 +267,15 @@ decide s run turn state node logs = do
   wiki <- prompt s "notes-wiki"
   envelope <- prompt s "decision-envelope"
   let instruction = at source "content" <> extra <> scheduled <> pinned
-      context = obj [("originalIntent",workField w "originalIntent"),("task",workField w "task"),("routine",routine),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
-      rendered = render envelope [("node",wireName node),("instruction",instruction),("notes_wiki",render wiki [("notes_example",T.pack (repositoryRoot s </> "corpora/prompts/examples/jarvis-notes.html"))]),("context",jsonText context),("events",T.intercalate ", " (sort (eventsFor node)))]
+      context = if node==AutomationAnalysis then obj [("selfId",toJSON (runOwner run)),("analysisEvidence",workField w "analysisEvidence")] else obj [("originalIntent",workField w "originalIntent"),("task",workField w "task"),("routine",routine),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
+      rendered = render envelope [("node",wireName node),("instruction",instruction),("notes_wiki",if node==AutomationAnalysis then "" else render wiki [("notes_example",T.pack (repositoryRoot s </> "corpora/prompts/examples/jarvis-notes.html"))]),("context",jsonText context),("events",T.intercalate ", " (sort (eventsFor node)))]
   (model,effort) <- modelDefaults
   policy <- executionSettings s (agentIdText (runOwner run))
   i <- newId
   t <- now
   let digest = T.pack (concatMap (\b -> let v=showHex b "" in if length v==1 then '0':v else v) (BS.unpack (hash (TE.encodeUtf8 instruction))))
       record = obj [("decisionId",str i),("callId",toJSON (turnId turn)),("node",toJSON node),("template",get source "template"),("promptHash",str digest),("templatePath",get source "path"),("renderedPrompt",str rendered),("model",str model),("effort",str (if executionMode policy == Deep then "xhigh" else effort)),("created",str t),("accepted",Bool False)]
-      summary = merge (select ["decisionId","callId","node","promptHash","accepted"] record) (obj [("agent",str (agentIdText (runOwner run))),("promptTemplate",get record "template")])
+      summary = merge (select ["decisionId","callId","node","promptHash","accepted"] record) (obj [("purpose",str (if node==AutomationAnalysis then "automation_analysis" else "ordinary_execution")),("agent",str (agentIdText (runOwner run))),("promptTemplate",get record "template")])
   saveWork s (setWorkField "decisions" (arr (workItems w "decisions"++[summary])) w)
   writeJSON (archivePath s (agentIdText (runOwner run)) ("decisions/"<>i)) record
   pure (rendered,record)
@@ -284,9 +286,9 @@ decide s run turn state node logs = do
  result <- try $ do
   let observe snapshot = locked s $ do
        (current,_) <- getWork s (turnId turn)
-       let update entry = if get entry "decisionId"==get record "decisionId" then put "evidence" (toJSON snapshot) entry else entry
+       let update entry = if get entry "decisionId"==get record "decisionId" then put "evidence" (put "purpose" (str (if node==AutomationAnalysis then "automation_analysis" else "ordinary_execution")) (toJSON snapshot)) entry else entry
        DB.putValue s DB.Workloads (workloadId current) (toJSON (setWorkField "decisions" (arr (map update (workItems current "decisions"))) current))
-  raw <- invokeObserved s run rendered observe
+  raw <- (if node==AutomationAnalysis then invokeAnalysisObserved else invokeObserved) s run rendered observe
   writeIORef rawResponse (Just raw)
   activity <- readIORef (runActivity run)
   updateLog (obj ([("session",get activity "session"),("answer",str raw)]++[("warning",get activity "warning") | has activity "warning"]))
@@ -383,6 +385,10 @@ runDecision s run turn state = do
               accept s owner record (wireName node) (wireName next)
               pure (callOutput following)
          case decisionBody response of
+          ReportAnalysis analysis -> do
+           requireActive s owner
+           let saved=mergeFields [("reason",str (decisionReason response)),("evidence",toJSON (decisionEvidence response))] (toJSON analysis)
+           finish (setWorkField "analysisDecision" saved current) (call {callState=CallCompleted,callOutput=Just (decisionReason response)}) OutcomeNode
           ReplyNow reply -> do
            require (not (workTracked current)) 409 "An accepted Task must execute and report its completion criteria"
            finish current (call { callState=CallCompleted, callOutput=Just reply }) OutcomeNode
@@ -437,7 +443,9 @@ reconcileWorks s = do
  works <- readWorks s
  forM_ works $ \w -> do
   permitted <- DB.occurrenceAllowed s (workField w "origin")
-  updated <- forM (workCalls w) $ \c -> if not permitted && callState c `elem` [CallQueued,CallRunning,CallWaiting] then pure (c {callState=CallCancelled,callOutput=Nothing}) else case findId (runIdText (callIdentity c)) turns of
+  -- Canonical cancellation is terminal. A later process-interrupted projection
+  -- must not replace its known cause with an uncertain execution failure.
+  updated <- forM (workCalls w) $ \c -> if callState c==CallCancelled then pure c else if not permitted && callState c `elem` [CallQueued,CallRunning,CallWaiting] then pure (c {callState=CallCancelled,callOutput=Nothing}) else case findId (runIdText (callIdentity c)) turns of
    Just t | isNothing (callOutput c) -> do
     status <- field 500 t "status"
     pure $ case status of

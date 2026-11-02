@@ -19,16 +19,17 @@ import Data.Time (UTCTime, getCurrentTime)
 import Routines (Revision(..), Minutes, RoutineFields(..), RoutineContract(..), Definition(..))
 import qualified Routines as R
 import qualified Delegation as D
+import qualified Automation
 
 newtype OperationId = OperationId Text deriving (Eq, Show)
 
-data RoutineCommand = Create RoutineFields | Edit Revision RoutineFields | RunNow Revision Text | StopRun Revision RunId | Delete Revision | Schedule Revision Minutes | Pause Revision Bool | RejectRun Revision RunId Text deriving (Eq, Show)
+data RoutineCommand = Create RoutineFields | Edit Revision RoutineFields | RunNow Revision Text | StopRun Revision RunId | Delete Revision | Schedule Revision Minutes | Pause Revision Bool | RejectRun Revision RunId Text | Analyze Revision | StopAnalysis Revision RunId deriving (Eq, Show)
 data CommandError = CommandError Int Text deriving (Eq, Show)
-data CommandPlan = CreateDefinition RoutineFields | UpdateDefinition Definition | Admit Definition Text | StopOccurrences [D.Workload] | DeleteDefinition Definition [D.Workload] | RecordFeedback Text RunId
+data CommandPlan = CreateDefinition RoutineFields | UpdateDefinition Definition | Admit Definition Text | StopOccurrences [D.Workload] | DeleteDefinition Definition [D.Workload] | RecordFeedback Text RunId | AnalyzeDefinition Definition | StopAnalysisCall Definition RunId
 
 parseCommand :: Text -> Value -> Parser RoutineCommand
 parseCommand action value = withObject "Routine command" (\o -> do
- unless (all (`elem` ["operation","revision","title","goal","criteria","inputs","run","minutes","reason"]) (keys value)) (fail "Unknown Routine command field")
+ unless (all (`elem` ["operation","revision","title","goal","criteria","inputs","run","minutes","reason","analysis"]) (keys value)) (fail "Unknown Routine command field")
  case action of
   "create" -> Create <$> parseJSON value
   "edit" -> Edit <$> o .: "revision" <*> parseJSON value
@@ -48,6 +49,8 @@ parseCommand action value = withObject "Routine command" (\o -> do
   "schedule" -> Schedule <$> o .: "revision" <*> o .: "minutes"
   "pause" -> Pause <$> o .: "revision" <*> pure True
   "resume" -> Pause <$> o .: "revision" <*> pure False
+  "analyze" -> Analyze <$> o .: "revision"
+  "stop-analysis" -> StopAnalysis <$> o .: "revision" <*> o .: "analysis"
   _ -> fail "Unknown Routine command") value
 
 -- Pure policy; all persistence and clocks stay in the IO interpreter below.
@@ -56,7 +59,10 @@ decide time current occurrences request = case request of
  Create fields -> Right (CreateDefinition fields)
  Edit revision fields -> do
   d <- existing revision
-  pure (UpdateDefinition (R.bumpRevision d {definitionContract=AcceptedContract fields,definitionFields=KM.delete "prompt" (definitionFields d)}))
+  let changed=R.changeContract (AcceptedContract fields) d
+  pure (UpdateDefinition (R.bumpRevision changed {definitionFields=KM.delete "prompt" (definitionFields changed)}))
+ Analyze revision -> AnalyzeDefinition <$> existing revision
+ StopAnalysis revision identity -> StopAnalysisCall <$> existing revision <*> pure identity
  RunNow revision inputs -> Admit <$> existing revision <*> pure inputs
  StopRun revision identity -> do
   _ <- existing revision
@@ -113,6 +119,12 @@ command s owner action identity payload = do
       cfg <- corporaSettings s
       require (corporaStatus cfg==Active) 409 "Activate this corpora before starting work"
      _ -> pure ()
+    case request_ of
+     Analyze _ -> do
+      cfg <- corporaSettings s
+      require (corporaStatus cfg==Active) 409 "Activate this corpora before starting analysis"
+      Automation.preflight
+     _ -> pure ()
     DB.connection s $ \db -> SQL.withTransaction db $ do
      -- Revision, stop targets and admission are decided from the same transaction.
      stored <- DB.queryRowsOn db "SELECT value FROM scheduled_routines ORDER BY sequence" ["value"] [] >>= traverse (DB.decodeStored . (`at` "value"))
@@ -142,9 +154,15 @@ command s owner action identity payload = do
 
 applyPlan :: SQL.Connection -> AgentId -> RunId -> Text -> CommandPlan -> IO (Text,Value)
 applyPlan db owner runIdentity time plan = case plan of
+ AnalyzeDefinition definition -> do
+  response <- Automation.requestOn db definition runIdentity time True
+  pure (definitionId definition,response)
+ StopAnalysisCall definition identity -> do
+  response <- Automation.stopOn db definition identity
+  pure (definitionId definition,response)
  RecordFeedback identity run -> pure (identity,obj [("routine",str identity),("run",toJSON run)])
  CreateDefinition fields -> do
-  let initial=Definition "" (agentIdText owner) (Revision 1) (AcceptedContract fields) Nothing False (KM.singleton "created" (str time))
+  let initial=Definition "" (agentIdText owner) (Revision 1) (AcceptedContract fields) Nothing False (KM.fromList [("created",str time),("contractGeneration",num 1)])
   saved <- DB.saveRoutineOn db (remove ["id"] (toJSON initial))
   pure (at saved "id",obj [("routine",get saved "id")])
  UpdateDefinition definition -> saveDefinition definition
@@ -188,12 +206,7 @@ saveReceipt db owner (OperationId identity) target request code response time =
 data RunProjection = RunSummary | RunDetail
 
 readOperations :: Service -> IO [Value]
-readOperations s = do
- operations <- DB.queryRows s "SELECT id,owner,target,code,response,created,request FROM command_receipts WHERE scope='routine' ORDER BY rowid" ["id","owner","target","code","response","created","request"] []
- forM operations $ \op -> do
-  response <- DB.decodeStored (at op "response")
-  request <- DB.decodeStored (at op "request")
-  pure (mergeFields [("response",response),("request",request)] op)
+readOperations = DB.routineOperations
 
 snapshot :: Service -> IO Value
 snapshot s = do
@@ -202,7 +215,8 @@ snapshot s = do
  operations <- readOperations s
  rendered <- forM ds $ \d -> do
   history <- traverse (renderRun RunSummary operations (definitionRevision d)) [w|w<-works,at (D.workField w "origin") "routine"==definitionId d]
-  pure (merge (toJSON d) (obj [("trigger",str (maybe "manual" (const "interval") (definitionSchedule d))),("title",str (R.definitionTitle d)),("goal",str (R.definitionGoal d)),("criteria",maybe Null toJSON (R.definitionCriteria d)),("revision",toJSON (definitionRevision d)),("deleted",Bool (definitionDeleted d)),("runs",arr history)]))
+  analysis <- Automation.projection s d works
+  pure (merge (toJSON d) (obj [("analysis",analysis),("trigger",str (maybe "manual" (const "interval") (definitionSchedule d))),("title",str (R.definitionTitle d)),("goal",str (R.definitionGoal d)),("criteria",maybe Null toJSON (R.definitionCriteria d)),("revision",toJSON (definitionRevision d)),("deleted",Bool (definitionDeleted d)),("runs",arr history)]))
  pure (obj [("definitions",arr rendered),("errors",arr [remove ["request"] op|op<-reverse operations,int (get op "code")>=400])])
 
 detail :: Service -> Text -> Text -> Text -> IO Value
@@ -229,9 +243,8 @@ renderRun projection operations revision work = do
       D.CallInterrupted -> "interrupted"
       D.CallCancelled -> "cancelled"
  let original=maybe Null (`get` "assessment") (listToMaybe (reverse (D.workItems work "decisions"))) `fallback` assessmentValue AssessmentUnresolved "application_observation" "No recorded contract assessment"
-     feedback=[obj [("operation",get op "id"),("run",get payload "run"),("revision",get payload "revision"),("reason",get payload "reason"),("author",str "admin"),("created",get op "created")]
-      | op<-operations,int (get op "code")<300,at (get op "request") "action"=="reject",let payload=get (get op "request") "payload",get payload "run"==str (D.workloadId work)]
-     assessment=if not (null feedback) then assessmentValue AssessmentRejected "user_feedback" (maybe "" (`at` "reason") (listToMaybe feedback)) else if gate==ExecutionStopped then assessmentValue AssessmentUnresolved "application_observation" "Run was stopped; external effects require review" else original
+     feedback=DB.workFeedback operations (toJSON work)
+     assessment=DB.workAssessment operations (toJSON work)
      invocations=[select ["decisionId","callId","node","evidence","assessment"] entry | entry<-D.workItems work "decisions",has entry "evidence"]
      reported=get (maybe Null (`get` "response") (listToMaybe (reverse (D.workItems work "decisions")))) "outcome"
      criteriaAssessment=[obj [("criterion",criterion),("status",str (if criterion `elem` items reported "satisfiedCriteria" then "Model reports satisfied" else if has (get reported "notApplicableCriteria") (text criterion) then "Model reports not applicable" else "Unresolved")),("reason",get (get reported "notApplicableCriteria") (text criterion)),("source",str "model_statement")] | criterion<-items (D.workField work "routineSnapshot") "criteria"]

@@ -28,6 +28,7 @@ import System.Posix.Files (setFileMode)
 import Types
 import qualified Store as DB
 import qualified RoutineCommands as RC
+import qualified Automation
 import Population
 import Workspace
 import Memo
@@ -202,6 +203,7 @@ dispatch s method target body = locked s $ do
   ("POST",["api","agents"]) -> json 201 $ do row<-createAgent s d; Mgt.prepare s (at row "id"); pure row
   ("PUT",["api","agents",a]) -> json 200 (updateAgent s a d)
   ("GET",["api","agents",a,"routines",rid,"runs",run]) -> json 200 (RC.detail s a rid run)
+  ("GET",["api","agents",a,"routines",rid,"analysis",analysis]) -> json 200 (Automation.detail s a rid analysis)
   ("POST",["api","agents",a,"routines"]) -> do
    (code,value)<-RC.command s a "create" "" d
    pure (code,encode value,"application/json; charset=utf-8")

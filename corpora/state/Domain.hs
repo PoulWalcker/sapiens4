@@ -23,6 +23,58 @@ import qualified Data.Vector as V
 newtype AgentId = AgentId { agentIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
 newtype RunId = RunId { runIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
 
+newtype ContractGeneration = ContractGeneration Int deriving (Eq, Show, ToJSON)
+instance FromJSON ContractGeneration where
+ parseJSON value = do
+  generation <- parseJSON value
+  if generation > 0 then pure (ContractGeneration generation) else fail "Contract generation must be positive"
+
+data AnalysisPin = AnalysisPin
+ { analysisOwner :: AgentId, analysisRoutine :: Text, analysisGeneration :: ContractGeneration
+ , analysisFeedback :: [Text], analysisSources :: [RunId]
+ } deriving (Eq, Show)
+instance FromJSON AnalysisPin where
+ parseJSON = withObject "Analysis identity" $ \o -> do
+  owner <- o .: "owner"
+  routine <- o .: "routine"
+  unless (not (T.null routine) && T.length routine <= 128) (fail "Invalid analysis consumer")
+  AnalysisPin owner routine <$> o .: "contractGeneration" <*> o .: "feedback" <*> o .: "sources"
+instance ToJSON AnalysisPin where
+ toJSON pin = obj [("owner",toJSON (analysisOwner pin)),("routine",str (analysisRoutine pin)),("contractGeneration",toJSON (analysisGeneration pin)),("feedback",toJSON (analysisFeedback pin)),("sources",toJSON (analysisSources pin))]
+
+data AnalysisParameter = AnalysisParameter Text Text deriving (Eq, Show)
+instance FromJSON AnalysisParameter where
+ parseJSON value = do
+  onlyFields ["name","description"] value
+  AnalysisParameter <$> textFieldP "name" 128 value <*> textFieldP "description" 2000 value
+instance ToJSON AnalysisParameter where
+ toJSON (AnalysisParameter name description) = obj [("name",str name),("description",str description)]
+data AnalysisDecision
+ = AnalysisReady Text [AnalysisParameter]
+ | AnalysisNeedsEvidence [Text]
+ | AnalysisDeclined Text
+ deriving (Eq, Show)
+instance FromJSON AnalysisDecision where
+ parseJSON value = case at value "status" of
+  "Ready" -> do
+   onlyFields ["status","automatablePart","parameters"] value
+   parameters <- fieldP "parameters" value
+   unless (length parameters<=30) (fail "Too many analysis parameters")
+   AnalysisReady <$> textFieldP "automatablePart" 8000 value <*> pure parameters
+  "NeedMoreEvidence" -> do
+   onlyFields ["status","missingObservations"] value
+   missing <- fieldP "missingObservations" value
+   unless (not (null missing) && length missing<=30 && all (\t -> not (T.null (T.strip t)) && T.length t<=2000) missing) (fail "Provide concrete missing observations")
+   pure (AnalysisNeedsEvidence missing)
+  "Decline" -> onlyFields ["status","reconsiderCondition"] value >> AnalysisDeclined <$> textFieldP "reconsiderCondition" 4000 value
+  _ -> fail "Unknown automation analysis decision"
+  where fieldP key = parseJSON . (`get` key)
+instance ToJSON AnalysisDecision where
+ toJSON decision = case decision of
+  AnalysisReady part parameters -> obj [("status",str "Ready"),("automatablePart",str part),("parameters",toJSON parameters)]
+  AnalysisNeedsEvidence missing -> obj [("status",str "NeedMoreEvidence"),("missingObservations",toJSON missing)]
+  AnalysisDeclined condition -> obj [("status",str "Decline"),("reconsiderCondition",str condition)]
+
 -- Wire spellings live at the codec boundary; domain code matches constructors.
 class (Eq a, Enum a, Bounded a) => Wire a where
  wireName :: a -> Text
@@ -247,8 +299,9 @@ data EvidenceReceipt = EvidenceReceipt
 instance ToJSON EvidenceReceipt where
  toJSON r = obj [("sequence",toJSON (receiptSequence r)),("receivedAt",str (receiptTime r)),("kind",str (receiptKind r)),("item",toJSON (receiptItem r)),("status",toJSON (receiptStatus r)),("exitCode",toJSON (receiptExit r)),("source",str "provider_receipt"),("summary",toJSON (receiptSummary r))]
 
+data EvidencePolicy = OrdinaryEvidence | ResponseOnlyEvidence Text deriving (Eq, Show)
 data EvidenceSnapshot = EvidenceSnapshot
- { evidenceModel :: Text, evidenceStarted :: Text, evidenceDuration :: Maybe Double
+ { evidencePolicy :: EvidencePolicy, evidenceModel :: Text, evidenceStarted :: Text, evidenceDuration :: Maybe Double
  , evidenceExit :: Maybe Int, evidenceFinished :: Bool, evidenceReceipts :: [EvidenceReceipt]
  , evidenceUsage :: EvidenceUsage, evidenceFinal :: Bool, evidenceTurnEnd :: Bool, evidenceStreamEnd :: Bool
  , evidencePending :: Maybe Int, evidenceMalformed :: Int, evidenceUnknown :: Int
@@ -257,7 +310,7 @@ data EvidenceSnapshot = EvidenceSnapshot
  } deriving (Eq, Show)
 instance ToJSON EvidenceSnapshot where
  toJSON e = obj
-  [("schemaVersion",num 1),("provider",str "codex"),("model",str (evidenceModel e)),("policy",str "unsafe_bypass"),("providerVersion",Null),("configuredExecutable",Bool True)
+  [("schemaVersion",num 1),("provider",str "codex"),("model",str (evidenceModel e)),("policy",str (case evidencePolicy e of OrdinaryEvidence -> "unsafe_bypass"; ResponseOnlyEvidence _ -> "response_only")),("providerVersion",case evidencePolicy e of OrdinaryEvidence -> Null; ResponseOnlyEvidence version -> str version),("configuredExecutable",Bool True)
   ,("startedAt",str (evidenceStarted e)),("durationMs",toJSON (evidenceDuration e)),("processExit",toJSON (evidenceExit e)),("finished",Bool (evidenceFinished e))
   ,("events",toJSON (evidenceReceipts e)),("usage",toJSON (evidenceUsage e))
   ,("completeness",obj [("finalSeen",Bool (evidenceFinal e)),("turnEndSeen",Bool (evidenceTurnEnd e)),("streamEndSeen",Bool (evidenceStreamEnd e)),("pendingTools",toJSON (evidencePending e)),("malformedEvents",num (evidenceMalformed e)),("unknownEvents",num (evidenceUnknown e)),("droppedEvents",num (evidenceDropped e)),("droppedBytes",toJSON (evidenceDroppedBytes e)),("outOfOrderEvents",num (evidenceOutOfOrder e)),("contentOmitted",Bool True),("externalEffectsVerified",Bool False),("tailUnknown",Bool (not (evidenceFinished e) || not (evidenceStreamEnd e))),("observedEvents",num (length (evidenceReceipts e)+evidenceDropped e+evidenceMalformed e)),("omittedFields",num (evidenceOmittedFields e)),("redactedFields",num (evidenceRedactedFields e)),("truncatedFields",num (evidenceTruncatedFields e))])]

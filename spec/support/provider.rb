@@ -10,6 +10,18 @@ if ARGV.include?('--version')
   exit
 end
 
+if ARGV.take(3) == %w[debug models --bundled]
+  if (gate = config['model_catalog_gate'])
+    File.write(File.join(root, gate + '-started'), '')
+    sleep 0.02 until File.exist?(File.join(root, gate))
+  end
+  models = config.fetch('model_catalog', [{slug: ENV.fetch('SAPIENS_CODEX_MODEL', 'gpt-6-sol'),
+    shell_type: 'unified_exec', apply_patch_tool_type: 'freeform',
+    experimental_supported_tools: [], tool_mode: 'direct', supports_search_tool: false}])
+  puts JSON.generate(models: models)
+  exit
+end
+
 text = STDIN.read
 context = text.include?("\nContext:\n") ? JSON.parse(text.split("\nContext:\n", 2).last) : {}
 node = text[/decision at node (\w+)/, 1] || (text.start_with?('You are acting as yourself inside') ? 'group' :
@@ -55,6 +67,8 @@ defaults = {
   'ReadyToWork' => {event: 'TaskPrepared', taskType: 'research', specification: {
     objective: 'Compare the products.', inputs: [], expectedOutputs: ['A comparison'], completionCriteria: ['Return a sourced comparison.']}},
   'Execution' => {event: 'Outcome', reply: 'Verified comparison', outcome: {status: 'Completed', satisfiedCriteria: ['Return a sourced comparison.'], artifacts: []}},
+  'AutomationAnalysis' => {event: 'AutomationAnalyzed', decision: {status: 'Ready',
+    automatablePart: 'Compare the supplied product records.', parameters: [{name: 'products', description: 'Current records'}]}},
   'Delegation' => {event: 'HandoffPrepared', request: 'Compare the products.'},
   'CreatingSapi' => {event: 'SapiSpecified', name: 'NewResearcher', role: 'Research'}
 }
@@ -67,4 +81,7 @@ reply = rule.fetch('response') do
 end
 reply = JSON.generate(reply) unless reply.is_a?(String)
 puts JSON.generate(type: 'thread.started', thread_id: 'fixture-session')
+Array(rule['events']).each { |event| puts JSON.generate(event) }
 puts JSON.generate(type: 'item.completed', item: {type: 'agent_message', text: reply})
+
+puts JSON.generate(type: 'turn.completed', usage: rule['usage']) if rule['usage']

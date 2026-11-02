@@ -177,6 +177,7 @@ pulseCall s tick a kind slot groups = do
 -- Legacy calls without an occurrence retain their original behavior.
 occurrenceAllowed :: Service -> Value -> IO Bool
 occurrenceAllowed s origin
+ | has origin "analysis" = analysisAllowed s (get origin "analysis")
  | not (has origin "occurrence") = pure True
  | otherwise = do
     identity <- textField origin "occurrence" 128
@@ -189,3 +190,59 @@ occurrenceAllowed s origin
       pure (gate==ExecutionOpen)
 requireOccurrence :: Service -> Value -> IO ()
 requireOccurrence s origin = occurrenceAllowed s origin >>= \ok -> require ok 409 "Routine run was stopped or deleted; start a new run explicitly"
+
+-- Feedback receipts remain the sole authority for effective result rejection.
+routineOperations :: Service -> IO [Value]
+routineOperations s = connection s routineOperationsOn
+routineOperationsOn :: Connection -> IO [Value]
+routineOperationsOn db = do
+ rows <- queryRowsOn db "SELECT id,owner,target,code,response,created,request FROM command_receipts WHERE scope='routine' ORDER BY rowid" ["id","owner","target","code","response","created","request"] []
+ forM rows $ \row -> do
+  response <- decodeStored (at row "response")
+  request <- decodeStored (at row "request")
+  pure (mergeFields [("response",response),("request",request)] row)
+workFeedback :: [Value] -> Value -> [Value]
+workFeedback operations work =
+ [obj [("operation",get op "id"),("run",get payload "run"),("revision",get payload "revision"),("reason",get payload "reason"),("author",str "admin"),("created",get op "created")]
+ | op<-operations,int (get op "code")<300,at (get op "request") "action"=="reject"
+ ,get op "owner"==get owner "addressedTo",get op "target"==get (get work "origin") "routine"
+ ,let payload=get (get op "request") "payload",get payload "run"==get work "workloadId"]
+ where owner=fromMaybe Null (listToMaybe (items work "calls"))
+workAssessment :: [Value] -> Value -> Value
+workAssessment operations work = case workFeedback operations work of
+ first:_ -> assessmentValue AssessmentRejected "user_feedback" (at first "reason")
+ [] | at work "executionGate"=="stopped" -> assessmentValue AssessmentUnresolved "application_observation" "Run was stopped; external effects require review"
+    | otherwise -> maybe Null (`get` "assessment") (listToMaybe (reverse (items work "decisions"))) `fallback` assessmentValue AssessmentUnresolved "application_observation" "No recorded contract assessment"
+sameRoutineContract :: Value -> Value -> Bool
+sameRoutineContract definition work =
+ get (get work "origin") "routine"==get definition "id" &&
+ get source "addressedTo"==get definition "owner" &&
+ has snapshot "contractGeneration" && get snapshot "contractGeneration"==get definition "contractGeneration"
+ where
+ snapshot=get work "routineSnapshot"
+ source=fromMaybe Null (listToMaybe (items work "calls"))
+effectiveFeedbackIds :: [Value] -> Value -> [Value] -> [Text]
+effectiveFeedbackIds operations definition works =
+ [at feedback "operation" | work<-works,sameRoutineContract definition work,feedback<-take 1 (workFeedback operations work)]
+analysisFeedbackIds :: [Value] -> Value -> [Value] -> [RunId] -> [Text]
+analysisFeedbackIds operations definition works sources =
+ [at feedback "operation" | work<-works,sameRoutineContract definition work || get work "workloadId" `elem` map toJSON sources,feedback<-take 1 (workFeedback operations work)]
+analysisAllowed :: Service -> Value -> IO Bool
+analysisAllowed s identityValue = do
+ identity <- decodeValue 500 identityValue :: IO RunId
+ rows <- queryRows s "SELECT value FROM workloads WHERE id=?" ["value"] [SQLText (runIdText identity)]
+ case rows of
+  [] -> pure False
+  row:_ -> do
+   work <- decodeStored (at row "value")
+   pin <- field 500 work "analysisPin" :: IO AnalysisPin
+   gate <- field 500 work "executionGate" :: IO ExecutionGate
+   definitions <- values s ScheduledRoutines
+   case find (\d -> at d "id"==analysisRoutine pin && get d "owner"==toJSON (analysisOwner pin)) definitions of
+    Nothing -> pure False
+    Just definition -> do
+     generation <- field 500 definition "contractGeneration"
+     operations <- routineOperations s
+     works <- values s Workloads
+     pure (gate==ExecutionOpen && not (boolean (get definition "deleted")) && generation==analysisGeneration pin
+       && analysisFeedbackIds operations definition works (analysisSources pin)==analysisFeedback pin)

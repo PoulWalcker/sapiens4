@@ -27,6 +27,7 @@ import Population
 import Workspace
 import qualified Delegation as D
 import qualified Routines as R
+import qualified Automation
 import Provider
 import qualified GroupChat as G
 
@@ -93,7 +94,9 @@ turnCommand s a identity rawAction external = do
  action <- decodeValue 404 (str rawAction)
  state <- agentState s a
  turn <- maybe (failure 404 "Unknown active turn") pure (find ((==RunId identity) . turnId) (agentTurns state))
- when (rawAction=="retry") $ D.requireCallAllowed s turn
+ when (rawAction=="retry") $ do
+  require (not (has (turnField turn "origin") "analysis")) 409 "Use explicit Routine reconsideration for a new analysis"
+  D.requireCallAllowed s turn
  work <- D.findWork s (RunId identity)
  require (not (maybe False (any ((==Just (RunId identity)) . D.callParent) . D.workCalls . fst) work)) 409 "This request was delegated; use the recipient call controls"
  command <- if has (toJSON turn) "managed" then do
@@ -156,7 +159,7 @@ finish s run turn outcome = do
      updated=mapTurns update state
      result | isJust failureText = updated
             | buffered = mapStateFields (appendItems "output_buffer" [obj [("turn",str i),("members",toJSON ids),("content",str output),("origin",origin)]]) updated
-            | has origin "group" = updated
+            | has origin "group" || has origin "analysis" = updated
             | otherwise = mapStateFields (put "last_output" (str output) . appendItems "chat" [obj [("role",str "agent"),("content",str output),("turn",str i),("time",str time),("origin",origin)]]) updated
  let receipt=obj [("status",str (if isJust failureText then if stop then "interrupted" else "failed" else "done")),("output",str output),("error",maybe Null str failureText),("recorded_at",str time)]
      recorded=mapTurns (\t -> if turnId t `elem` ids && has (toJSON t) "managed" then withTurnFields (put "managed_result" receipt) t else t) result
@@ -233,6 +236,7 @@ onPulse s tick = do
  R.dispatch s tick
  when (pulseFrequency tick==Bph60 || (pulseFrequency tick==Bpm60 && even (pulseNumber tick))) $ do
   D.pendingWorks s
+  Automation.dispatch s
   G.reconcileGroups s
   G.dispatchGroups s
   rows <- DB.agents s
