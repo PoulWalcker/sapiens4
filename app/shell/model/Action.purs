@@ -1,7 +1,7 @@
 module Sapiens.Action where
 
 import Data.Argonaut.Core (Json)
-import Sapiens.Model (DialogKind, RoutinePage)
+import Sapiens.Model (DialogKind, RoutinePage, ScheduleAction)
 import Sapiens.Navigation (Activity, Scope, Pane, Period)
 import Web.Event.Event (Event)
 
@@ -26,6 +26,10 @@ data Action
   | RoutineNavigate RoutinePage
   | RoutineField String String
   | RoutineSave
+  | RoutineReloadEditor
+  | RoutineScheduleAction ScheduleAction Json
+  | RoutineRetrySchedule
+  | RoutineRefreshSchedule
   | RoutineDiscardChanges
   | ToggleExpanded String
   | Clarify Json

@@ -21,11 +21,13 @@ import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import qualified Database.SQLite.Simple as SQL
 import Numeric (showHex)
 import System.Directory
 import System.FilePath
 import Types
 import qualified Store as DB
+import qualified ManagedState as Managed
 import Population
 import Memo
 import Provider
@@ -70,6 +72,30 @@ setWorkField :: Text -> Value -> Workload -> Workload
 setWorkField key value work = work { workFields = KM.insert (Data.Aeson.Key.fromText key) value (workFields work) }
 readWorks :: Service -> IO [Workload]
 readWorks s = DB.values s DB.Workloads >>= traverse (decodeValue 500)
+-- A call with a successor has handed off responsibility, including legacy
+-- answered questions whose saved ancestor still says WaitingForAdmin.
+frontierCalls :: Workload -> [WorkCall]
+frontierCalls work = filter (\call -> not (any ((==Just (callIdentity call)) . callParent) calls)) calls
+ where calls=NE.toList (workCalls work)
+
+-- The caller owns the transaction that also saves its command or next deadline.
+-- No files, model calls or nested transactions cross this admission interface.
+admitRoutineOn :: SQL.Connection -> AgentId -> Turn -> Value -> Maybe TaskSpec -> IO ()
+admitRoutineOn db owner turn snapshot accepted = do
+ let work=routineWorkload owner turn snapshot accepted
+     message=obj [("role",str "user"),("content",str (turnInput turn)),("turn",toJSON (turnId turn)),("time",turnField turn "created"),("origin",turnField turn "origin")]
+ SQL.execute db "INSERT INTO workloads(id,value) VALUES (?,?)" (workloadId work,jsonText (toJSON work))
+ Managed.enrollOn db (agentIdText owner) turn message (turnInput turn) []
+routineWorkload :: AgentId -> Turn -> Value -> Maybe TaskSpec -> Workload
+routineWorkload owner turn snapshot accepted =
+ let identity=runIdText (turnId turn)
+     first=newCall (turnId turn) owner Nothing (if isJust accepted then Execution else ReadyToWork) CallQueued (turnInput turn)
+ in Workload identity True (first :| []) (KM.fromList
+  [("originalIntent",str (turnInput turn)),("task",obj [("taskId",str ("task_"<>identity)),("taskType",str "automated"),("specification",maybe Null toJSON accepted)])
+  ,("origin",turnField turn "origin"),("routineSnapshot",snapshot),("executionGate",toJSON ExecutionOpen)
+  ,("created",turnField turn "created"),("decisions",arr []),("outcome",Null)])
+routineSpecPinned :: Workload -> Bool
+routineSpecPinned work = has (workField work "routineSnapshot") "criteria"
 
 data TaskSpec = TaskSpec { specObjective :: Text, specInputs :: [Text], specOutputs :: NonEmpty Text, specCriteria :: NonEmpty Text } deriving (Eq, Show)
 instance FromJSON TaskSpec where
@@ -227,11 +253,15 @@ decide s run turn state node logs = do
   members <- team s
   extra <- if KM.member "agency_batch" (agentFields state) then ("\n\n" <>) <$> prompt s "agency-chat" else pure ""
   scheduled <- if has (workField w "origin") "routine" && at (workField w "origin") "trigger"/="manual" then ("\n\n" <>) <$> prompt s "scheduled-execution" else pure ""
-  pinned <- if node==ReadyToWork && has (workField w "origin") "occurrence" then ("\n\n" <>) <$> prompt s "decision-routine-specification" else pure ""
+  pinned <- if node==ReadyToWork && routineSpecPinned w then ("\n\n" <>) <$> prompt s "decision-routine-specification" else pure ""
+  routine <- if has (workField w "origin") "routine" then do
+   definitions <- DB.values s DB.ScheduledRoutines
+   pure (obj [("definition",fromMaybe Null (findId (at (workField w "origin") "routine") definitions)),("snapshot",workField w "routineSnapshot")])
+   else pure Null
   wiki <- prompt s "notes-wiki"
   envelope <- prompt s "decision-envelope"
   let instruction = at source "content" <> extra <> scheduled <> pinned
-      context = obj [("originalIntent",workField w "originalIntent"),("task",workField w "task"),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
+      context = obj [("originalIntent",workField w "originalIntent"),("task",workField w "task"),("routine",routine),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
       rendered = render envelope [("node",wireName node),("instruction",instruction),("notes_wiki",render wiki [("notes_example",T.pack (repositoryRoot s </> "corpora/prompts/examples/jarvis-notes.html"))]),("context",jsonText context),("events",T.intercalate ", " (sort (eventsFor node)))]
   (model,effort) <- modelDefaults
   policy <- executionSettings s (agentIdText (runOwner run))
@@ -358,7 +388,7 @@ runDecision s run turn state = do
            finish current (setCallFields [("target",get created "id"),("creation",obj [("name",str name),("role",str role)]),("creationReceipt",obj [("agent",created),("created",Bool True)])] call) Delegation
           PrepareTask taskType spec -> do
            let previous=get (workField current "task") "specification"
-           when (has (workField current "origin") "occurrence") $ require (toJSON spec==previous) 409 "Routine goal, inputs and criteria are pinned for this run"
+           when (routineSpecPinned current) $ require (toJSON spec==previous) 409 "Routine goal, inputs and criteria are pinned for this run"
            require (all (`elem` map str (NE.toList (specCriteria spec))) (items previous "completionCriteria")) 400 "A handoff cannot remove accepted completion criteria"
            let task=mergeFields [("taskType",str (if has (workField current "origin") "routine" then "automated" else taskType)),("specification",toJSON spec)] (workField current "task")
            finish (setWorkField "task" task current) call Execution

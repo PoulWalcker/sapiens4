@@ -1,9 +1,14 @@
 require_relative 'support/desktop'
 require_relative 'support/proxy'
+require 'sqlite3'
+require 'time'
 
 RSpec.describe 'Routine list, results and settings in the native app', :desktop do
   def click_button(label)
-    desktop.click_node(desktop.find(label, role: %w[AXButton AXCheckBox AXRadioButton AXLink AXDisclosureTriangle AXPopUpButton]))
+    roles = %w[AXButton AXCheckBox AXRadioButton AXLink AXDisclosureTriangle AXPopUpButton]
+    node = desktop.find(label, role: roles)
+    desktop.control('scroll-to', '--path', node.fetch('path'))
+    desktop.click_node(desktop.find(label, role: roles))
   end
 
   def open_routines
@@ -31,11 +36,18 @@ RSpec.describe 'Routine list, results and settings in the native app', :desktop 
     desktop.fill('Name (up to 60 characters)', 'Weekly comparison')
     click_button('Save changes')
     desktop.see('Weekly comparison')
+    click_button('Manage Weekly comparison')
+    click_button('Settings')
+    click_button('Schedule settings')
+    desktop.fill('Interval, minutes', '60')
+    click_button('Enable interval')
+    desktop.see('Every 60 minutes')
+    expect(host.state['personal_routines'].length).to eq(1)
     click_button('Run now')
     desktop.fill('Inputs for this run', 'Today’s products')
     click_button('Run now')
     desktop.see('Verified comparison')
-    desktop.see('Definition revision 2')
+    desktop.see('Definition revision 3')
     click_button('History')
     click_button(/Run 1 ·/)
     desktop.see('Today’s products')
@@ -93,10 +105,15 @@ RSpec.describe 'Routine list, results and settings in the native app', :desktop 
     desktop.see('Every 60 minutes')
     buttons = desktop.tree.select { |node| node['role'] == 'AXButton' && desktop.label(node) == 'Same title' }
     expect(buttons.length).to eq(2)
-    desktop.click_node(buttons.last)
+    schedule = desktop.find(/Every 60 minutes/)
+    target = buttons.select { |node| node['position']['y'] < schedule['position']['y'] }.max_by { |node| node['position']['y'] }
+    expect(target).not_to be_nil
+    desktop.click_node(target)
     click_button('Manage Same title')
-    click_button('Pause schedule through chat')
-    desktop.value('Message ChiefSapi', "Pause Scheduled Routine\n@#{interval['id']}")
+    click_button('Settings')
+    desktop.see('prepares its completion criteria when it runs')
+    click_button('Edit instructions through chat')
+    expect(desktop.find('Message ChiefSapi')['value']).to include("Edit @#{interval['id']} (", 'Edit Frequency')
   end
   it 'recovers the same accepted save after switching corpora while its response is delayed', unless: Gem.win_platform? do
     @host = desktop_host
@@ -158,6 +175,203 @@ RSpec.describe 'Routine list, results and settings in the native app', :desktop 
     click_button('Reply to ChiefSapi')
     desktop.fill('Message ChiefSapi', 'Products A and B')
     desktop.value('Message ChiefSapi', 'Products A and B')
+  end
+
+  def scheduled_fixture(minutes = 30)
+    owner = host.state.fetch('main_agent_id')
+    id = host.api('POST', "/api/agents/#{owner}/routines", operation: 'create-fixture', title: 'Scheduled comparison', goal: 'Compare the products.', criteria: ['Return a sourced comparison.'])['routine']
+    host.api('POST', "/api/agents/#{owner}/routines/#{id}/schedule", operation: 'schedule-fixture', revision: 1, minutes: minutes)
+    [owner, id]
+  end
+
+  def routine_snapshot(id)
+    host.state.fetch('personal_routines').find { |row| row['id'] == id }
+  end
+
+  it 'conflicts on a stale interval edit and keeps the active run snapshot unchanged' do
+    @host = desktop_host
+    owner, id = scheduled_fixture
+    host.configure(block: true)
+    run = host.api('POST', "/api/agents/#{owner}/routines/#{id}/run", operation: 'active-fixture', revision: 2)['run']
+    host.turn(run, 'running')
+    start_desktop
+    open_routines
+    click_button('Scheduled comparison')
+    click_button('Manage Scheduled comparison')
+    click_button('Settings')
+    click_button('Schedule settings')
+    desktop.fill('Interval, minutes', '5')
+    host.control(owner, 'routine_update', id: id, minutes: 90, prompt: 'Compare the products.')
+    click_button('Save interval')
+    desktop.see('Routine changed')
+    click_button('Reload current schedule')
+    desktop.value('Interval, minutes', '90')
+    desktop.fill('Interval, minutes', '5')
+    click_button('Save interval')
+    desktop.see('Every 5 minutes')
+    desktop.see('Next:')
+    desktop.see('Definition revision 2')
+    value = routine_snapshot(id)
+    expect(value['minutes']).to eq(5)
+    expect(value['runs'].find { |row| row['id'] == run }['snapshot']).to include('revision' => 2, 'minutes' => 30)
+    click_button('Stop this run…')
+    click_button('Stop run')
+    desktop.see('Stopped')
+  end
+
+  it 'keeps pause, a manual run and stopping the current timer occurrence separate' do
+    @host = desktop_host
+    owner, id = scheduled_fixture(1)
+    host.configure(block: true)
+    SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+      sequence = id.split('_').last.to_i
+      saved = JSON.parse(db.get_first_value('SELECT value FROM scheduled_routines WHERE sequence=?', sequence))
+      saved['nextDue'] = (Time.now.utc - 60).strftime('%Y-%m-%dT%H:%M:%S.000000+00:00')
+      db.execute('UPDATE scheduled_routines SET value=? WHERE sequence=?', [JSON.generate(saved), sequence])
+    end
+    start_desktop
+    open_routines
+    click_button('Scheduled comparison')
+    timer = Contract.wait(timeout: 90, description: 'real minute pulse starts a scheduled occurrence') do
+      routine_snapshot(id)['runs'].find { |run| run['trigger'] == 'interval' && run['status'] == 'running' }
+    end
+    desktop.see('Scheduled run')
+    click_button('Pause schedule')
+    desktop.see('Schedule paused')
+    desktop.see('Work is in progress.')
+    click_button('Run now')
+    desktop.fill('Inputs for this run', 'A manual request while paused')
+    click_button('Run now')
+    desktop.see('Manual run')
+    click_button('History')
+    click_button(/Run 1 ·/)
+    desktop.see('Scheduled run')
+    click_button('Stop this run…')
+    click_button('Stop run')
+    desktop.see('Stopped')
+    host.release
+    manual = Contract.wait do
+      routine_snapshot(id)['runs'].find { |run| run['trigger'] == 'manual' && run['status'] == 'done' }
+    end
+    click_button('History')
+    click_button(/Run 2 ·/)
+    desktop.see('Verified comparison')
+    desktop.see('Schedule paused')
+    value = routine_snapshot(id)
+    expect(value['paused']).to eq(true)
+    expect(value['runs'].find { |run| run['id'] == timer['id'] }['status']).to eq('stopped')
+    expect(manual['snapshot']['inputs']).to eq('A manual request while paused')
+    expect(value['runs'].length).to eq(2)
+    click_button('Resume schedule')
+    desktop.see('Next:')
+    expect(routine_snapshot(id)['paused']).to eq(false)
+  end
+
+  it 'retries an unconfirmed pause unchanged and refreshes a stale resume deliberately', unless: Gem.win_platform? do
+    @host = desktop_host
+    owner, id = scheduled_fixture
+    requests = []
+    frozen = nil
+    proxy = HostProxy.new(host) do |request, response|
+      if request.request_method == 'GET' && request.path.end_with?('/api/state') && frozen
+        [200, frozen, {'Content-Type' => 'application/json'}]
+      elsif request.request_method == 'POST' && request.path.match?(%r{/routines/[^/]+/(pause|resume)$})
+        requests << {path: request.path, body: JSON.parse(request.body)}
+        if requests.length == 1
+          [503, {error: 'Fixture response lost after acceptance'}, {'Content-Type' => 'application/json'}]
+        else
+          response
+        end
+      end
+    end
+    start_desktop(proxy.url)
+    open_routines
+    click_button('Scheduled comparison')
+    click_button('Pause schedule')
+    desktop.see('Fixture response lost after acceptance')
+    click_button('Retry unchanged')
+    desktop.see('Schedule paused')
+    expect(requests[0]).to eq(requests[1])
+    frozen = host.state
+    host.control(owner, 'routine_update', id: id, minutes: 45, prompt: 'Compare the products.')
+    click_button('Resume schedule')
+    desktop.see('Routine changed')
+    frozen = nil
+    click_button('Refresh current schedule')
+    click_button('Resume schedule')
+    desktop.see('Next:')
+    expect(requests[2][:body]['operation']).not_to eq(requests[3][:body]['operation'])
+    expect(requests[3][:body]['revision']).to be > requests[2][:body]['revision']
+    expect(routine_snapshot(id)).to include('paused' => false, 'minutes' => 45)
+  ensure
+    proxy&.close
+  end
+
+  it 'does not apply a delayed settings reload to another Sapi or replace newer draft input', unless: Gem.win_platform? do
+    @host = desktop_host
+    owner, id = scheduled_fixture
+    other = host.agent('OtherSapi')
+    host.api('POST', "/api/agents/#{other}/routines", operation: 'other-fixture', title: 'Other routine', goal: 'Another request', criteria: ['Provide a result.'])
+    held, returned = Queue.new, Queue.new
+    blocking = false
+    released = false
+    proxy = HostProxy.new(host) do |request, response|
+      if blocking && request.request_method == 'GET' && request.path.end_with?('/api/state')
+        held << true
+        Timeout.timeout(30) { sleep 0.02 until released }
+        returned << true
+      end
+      response
+    end
+    start_desktop(proxy.url)
+    open_routines
+    click_button('Scheduled comparison')
+    click_button('Manage Scheduled comparison')
+    click_button('Settings')
+    click_button('Schedule settings')
+    desktop.fill('Interval, minutes', '5')
+    host.control(owner, 'routine_update', id: id, minutes: 90, prompt: 'Compare the products.')
+    click_button('Save interval')
+    desktop.see('Routine changed')
+    blocking = true
+    click_button('Reload current schedule')
+    Timeout.timeout(10) { held.pop }
+    desktop.fill('Interval, minutes', '7')
+    click_button('Open OtherSapi')
+    open_routines
+    click_button('Other routine')
+    blocking = false
+    released = true
+    Timeout.timeout(10) { returned.pop }
+    click_button('Manage Other routine')
+    click_button('Settings')
+    desktop.value('What to do', 'Another request')
+    click_button('Open ChiefSapi')
+    open_routines
+    desktop.value('Interval, minutes', '7')
+    expect(host.state['personal_routines'].length).to eq(2)
+    expect(routine_snapshot(id)['minutes']).to eq(90)
+  ensure
+    released = true
+    proxy&.close
+  end
+
+  it 'does not invent a definition revision for saved history without a snapshot' do
+    @host = desktop_host
+    owner, id = scheduled_fixture
+    run = host.api('POST', "/api/agents/#{owner}/routines/#{id}/run", operation: 'history-fixture', revision: 2)['run']
+    host.turn(run)
+    SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+      work = JSON.parse(db.get_first_value('SELECT value FROM workloads WHERE id=?', run))
+      work.delete('routineSnapshot')
+      db.execute('UPDATE workloads SET value=? WHERE id=?', [JSON.generate(work), run])
+    end
+    start_desktop
+    open_routines
+    click_button('Scheduled comparison')
+    desktop.see('Verified comparison')
+    desktop.see('Definition revision not recorded')
+    expect(desktop.text).not_to include('Definition revision 0')
   end
 
 end

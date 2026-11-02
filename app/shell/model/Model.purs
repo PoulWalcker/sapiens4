@@ -27,24 +27,30 @@ corporaDialog kind = A.elem kind [CreateCorpora,EditCorpora,ConnectRemote,HostPa
 
 type Dialog = { kind :: DialogKind, title :: String, record :: Json, fields :: Json, content :: Json, error :: String, busy :: Boolean, identity :: Int }
 
-data RoutinePage = RoutineList Boolean | RoutineLatest String | RoutineHistory String | RoutineOccurrence String String | RoutineSettings String
+data RoutinePage = RoutineList Boolean | RoutineLatest String | RoutineHistory String | RoutineOccurrence String String | RoutineSettings String | RoutineSchedule String
 
 derive instance eqRoutinePage :: Eq RoutinePage
 
 type RoutineEditor = { record :: Json, fields :: Json, operation :: String, error :: String, busy :: Boolean, dirty :: Boolean, identity :: Int }
-type RoutineView = { page :: RoutinePage, editor :: Maybe RoutineEditor, pending :: Maybe RoutinePage }
+data ScheduleAction = PauseSchedule | ResumeSchedule
+
+derive instance eqScheduleAction :: Eq ScheduleAction
+
+type ScheduleRequest = { action :: ScheduleAction, record :: Json, operation :: String, busy :: Boolean, error :: String }
+
+type RoutineView = { page :: RoutinePage, editor :: Maybe RoutineEditor, pending :: Maybe RoutinePage, scheduleRequest :: Maybe ScheduleRequest }
 
 routineKey :: Model -> String
 routineKey m = m.active <> ":" <> m.selected
 
 routineView :: Model -> RoutineView
-routineView m = fromMaybe {page:RoutineList false,editor:Nothing,pending:Nothing} $ O.lookup (routineKey m) m.routineViews
+routineView m = fromMaybe {page:RoutineList false,editor:Nothing,pending:Nothing,scheduleRequest:Nothing} $ O.lookup (routineKey m) m.routineViews
 
 modifyRoutineView :: String -> (RoutineView -> RoutineView) -> Model -> Model
-modifyRoutineView key f m = m {routineViews=O.alter (Just <<< f <<< fromMaybe {page:RoutineList false,editor:Nothing,pending:Nothing}) key m.routineViews}
+modifyRoutineView key f m = m {routineViews=O.alter (Just <<< f <<< fromMaybe {page:RoutineList false,editor:Nothing,pending:Nothing,scheduleRequest:Nothing}) key m.routineViews}
 
 resetRoutineRequests :: O.Object RoutineView -> O.Object RoutineView
-resetRoutineRequests = map \view -> view {editor=map (\editor -> if editor.busy then editor {busy=false,error="The connection changed while saving. Retry unchanged to recover the saved response."} else editor) view.editor}
+resetRoutineRequests = map \view -> view {editor=map (\editor -> if editor.busy then editor {busy=false,error="The connection changed while saving. Retry unchanged to recover the saved response."} else editor) view.editor,scheduleRequest=map (\request -> if request.busy then request {busy=false,error="The connection changed before the schedule response arrived. Retry unchanged or refresh the current schedule."} else request) view.scheduleRequest}
 
 type Model =
   { snapshot :: Json, agents :: Array Json, messages :: O.Object (Array Json)

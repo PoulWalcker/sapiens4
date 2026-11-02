@@ -7,7 +7,6 @@ import Data.Aeson
 import Data.Aeson.Types (Parser)
 import qualified Data.Aeson.KeyMap as KM
 import Data.List (find)
-import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.List.NonEmpty as NE
 import Data.Maybe
 import Data.Text (Text)
@@ -16,54 +15,20 @@ import qualified Database.SQLite.Simple as SQL
 import Types
 import Population
 import qualified Store as DB
-import qualified ManagedState as Managed
+import Data.Time (UTCTime, getCurrentTime)
+import Routines (Revision(..), Minutes, RoutineFields(..), RoutineContract(..), Definition(..))
+import qualified Routines as R
 import qualified Delegation as D
 
 newtype OperationId = OperationId Text deriving (Eq, Show)
-newtype Revision = Revision Int deriving (Eq, Show)
-instance FromJSON Revision where
- parseJSON value = do
-  n <- parseJSON value
-  if n>0 then pure (Revision n) else fail "Revision must be a positive integer"
-instance ToJSON Revision where toJSON (Revision n)=toJSON n
 
-data RoutineFields = RoutineFields
- { fieldTitle :: Text, fieldGoal :: Text, fieldCriteria :: NonEmpty Text
- } deriving (Eq, Show)
-instance FromJSON RoutineFields where
- parseJSON = withObject "Routine fields" $ \o -> do
-  title <- o .: "title" >>= boundedText "Routine title" 60
-  goal <- o .: "goal" >>= boundedText "Goal" 16000
-  criteria <- o .: "criteria" >>= traverse (boundedText "Criterion" 2000)
-  unless (length criteria<=30) (fail "Provide at most 30 completion criteria")
-  nonempty <- maybe (fail "Provide at least one completion criterion") pure (NE.nonEmpty criteria)
-  pure (RoutineFields title goal nonempty)
-boundedText :: String -> Int -> Text -> Parser Text
-boundedText label limit raw = do
- let value=T.strip raw
- unless (not (T.null value) && T.length value<=limit) (fail (label<>" is empty or too long"))
- pure value
-
-data Definition = Definition
- { definitionId :: Text, definitionOwner :: AgentId, definitionRevision :: Revision
- , definitionFields :: RoutineFields, definitionDeleted :: Bool, definitionCreated :: Text
- } deriving (Eq, Show)
-instance FromJSON Definition where
- parseJSON value = withObject "Routine definition" (\o -> do
-  trigger <- routineTrigger value
-  unless (trigger==ManualTrigger) (fail "This command requires a manual trigger")
-  Definition <$> o .: "id" <*> o .: "owner" <*> o .: "revision" <*> parseJSON value <*> o .:? "deleted" .!= False <*> o .: "created") value
-instance ToJSON Definition where
- toJSON d = obj [("id",str (definitionId d)),("owner",toJSON (definitionOwner d)),("revision",toJSON (definitionRevision d)),("title",str (fieldTitle f)),("goal",str (fieldGoal f)),("criteria",toJSON (NE.toList (fieldCriteria f))),("trigger",toJSON ManualTrigger),("deleted",Bool (definitionDeleted d)),("created",str (definitionCreated d))]
-  where f=definitionFields d
-
-data RoutineCommand = Create RoutineFields | Edit Revision RoutineFields | RunNow Revision Text | StopRun Revision RunId | Delete Revision deriving (Eq, Show)
+data RoutineCommand = Create RoutineFields | Edit Revision RoutineFields | RunNow Revision Text | StopRun Revision RunId | Delete Revision | Schedule Revision Minutes | Pause Revision Bool deriving (Eq, Show)
 data CommandError = CommandError Int Text deriving (Eq, Show)
 data CommandPlan = CreateDefinition RoutineFields | UpdateDefinition Definition | Admit Definition Text | StopOccurrences [D.Workload] | DeleteDefinition Definition [D.Workload]
 
 parseCommand :: Text -> Value -> Parser RoutineCommand
 parseCommand action value = withObject "Routine command" (\o -> do
- unless (all (`elem` ["operation","revision","title","goal","criteria","inputs","run"]) (keys value)) (fail "Unknown Routine command field")
+ unless (all (`elem` ["operation","revision","title","goal","criteria","inputs","run","minutes"]) (keys value)) (fail "Unknown Routine command field")
  case action of
   "create" -> Create <$> parseJSON value
   "edit" -> Edit <$> o .: "revision" <*> parseJSON value
@@ -72,18 +37,22 @@ parseCommand action value = withObject "Routine command" (\o -> do
    unless (T.length inputs<=16000) (fail "Run inputs are too long")
    RunNow <$> o .: "revision" <*> pure inputs
   "stop" -> do
-   identity <- o .: "run" >>= boundedText "Run identity" 128
+   identity <- o .: "run"
+   unless (not (T.null identity) && T.length identity<=128) (fail "Run identity is empty or too long")
    StopRun <$> o .: "revision" <*> pure (RunId identity)
   "delete" -> Delete <$> o .: "revision"
+  "schedule" -> Schedule <$> o .: "revision" <*> o .: "minutes"
+  "pause" -> Pause <$> o .: "revision" <*> pure True
+  "resume" -> Pause <$> o .: "revision" <*> pure False
   _ -> fail "Unknown Routine command") value
 
 -- Pure policy; all persistence and clocks stay in the IO interpreter below.
-decide :: Maybe Definition -> [D.Workload] -> RoutineCommand -> Either CommandError CommandPlan
-decide current occurrences request = case request of
+decide :: UTCTime -> Maybe Definition -> [D.Workload] -> RoutineCommand -> Either CommandError CommandPlan
+decide time current occurrences request = case request of
  Create fields -> Right (CreateDefinition fields)
  Edit revision fields -> do
   d <- existing revision
-  pure (UpdateDefinition d {definitionFields=fields,definitionRevision=next revision})
+  pure (UpdateDefinition (R.bumpRevision d {definitionContract=AcceptedContract fields,definitionFields=KM.delete "prompt" (definitionFields d)}))
  RunNow revision inputs -> Admit <$> existing revision <*> pure inputs
  StopRun revision identity -> do
   _ <- existing revision
@@ -91,20 +60,24 @@ decide current occurrences request = case request of
   if finished w then Left (CommandError 409 "Routine run is already finished") else Right (StopOccurrences [w])
  Delete revision -> do
   d <- existing revision
-  pure (DeleteDefinition d {definitionDeleted=True,definitionRevision=next revision} (filter (not . finished) occurrences))
+  pure (DeleteDefinition (R.bumpRevision d {definitionDeleted=True}) (filter (not . finished) occurrences))
+ Schedule revision minutes -> do
+  d <- existing revision
+  pure (UpdateDefinition (R.bumpRevision (R.setInterval time minutes d)))
+ Pause revision paused -> do
+  d <- existing revision
+  changed <- either (Left . CommandError 409) Right (R.setSchedulePaused time paused d)
+  pure (UpdateDefinition (if changed==d then d else R.bumpRevision changed))
  where
  existing revision = do
   d <- maybe (Left (CommandError 404 "Unknown personal Routine")) Right current
   if definitionRevision d/=revision then Left (CommandError 409 "Routine changed; reload before trying again")
    else if definitionDeleted d then Left (CommandError 409 "Routine is deleted") else Right d
- next (Revision n)=Revision (n+1)
- finished w = not (any ((`elem` [D.CallQueued,D.CallRunning,D.CallWaiting]) . D.callState) (D.workCalls w)) && D.callState (NE.last (D.workCalls w)) `elem` [D.CallCompleted,D.CallUnresolved,D.CallFailed,D.CallInterrupted,D.CallCancelled]
+ finished w = let frontier=D.frontierCalls w
+  in not (null frontier) && all ((`elem` [D.CallCompleted,D.CallUnresolved,D.CallFailed,D.CallInterrupted,D.CallCancelled]) . D.callState) frontier
 
 definitions :: Service -> IO [Definition]
-definitions s = do
- rows <- DB.values s DB.ScheduledRoutines
- manual <- filterM (fmap (==ManualTrigger) . parseValue 500 routineTrigger) rows
- traverse (decodeValue 500) manual
+definitions s = filter (not . T.isPrefixOf "group_" . definitionOwner) <$> R.readDefinitions s
 
 command :: Service -> Text -> Text -> Text -> Value -> IO (Int,Value)
 command s owner action identity payload = do
@@ -119,7 +92,8 @@ command s owner action identity payload = do
    DB.record s [owner] identity "routine.command_refused" (obj [("error",str message),("operation",get payload "operation")]) "admin" Nothing
    pure (409,obj [("error",str message)])
   Nothing -> do
-   time <- now
+   clock <- getCurrentTime
+   let time=timestamp clock
    runIdentity <- RunId <$> newId
    result <- try $ do
     requireActive s owner
@@ -132,12 +106,12 @@ command s owner action identity payload = do
     DB.connection s $ \db -> SQL.withTransaction db $ do
      -- Revision, stop targets and admission are decided from the same transaction.
      stored <- DB.queryRowsOn db "SELECT value FROM scheduled_routines ORDER BY sequence" ["value"] [] >>= traverse (DB.decodeStored . (`at` "value"))
-     manual <- filterM (fmap (==ManualTrigger) . parseValue 500 routineTrigger) stored >>= traverse (decodeValue 500)
+     allDefinitions <- traverse (decodeValue 500) stored
      workValues <- DB.queryRowsOn db "SELECT value FROM workloads ORDER BY rowid" ["value"] [] >>= traverse (DB.decodeStored . (`at` "value"))
      works <- traverse (decodeValue 500) workValues
-     let current=find (\d->definitionId d==identity && definitionOwner d==AgentId owner) manual
-         occurrences=filter (\w->at (D.workField w "origin") "routine"==identity && at (D.workField w "routineSnapshot") "owner"==owner) works
-     plan <- either (\(CommandError code message)->failure code message) pure (decide current occurrences request_)
+     let current=find (\d->definitionId d==identity && definitionOwner d==owner) allDefinitions
+         occurrences=filter (\w->at (D.workField w "origin") "routine"==identity) works
+     plan <- either (\(CommandError code message)->failure code message) pure (decide clock current occurrences request_)
      (target,response) <- applyPlan db (AgentId owner) runIdentity time plan
      saveReceipt db owner operation target request 200 response time
      pure (200,response)
@@ -151,7 +125,7 @@ command s owner action identity payload = do
 applyPlan :: SQL.Connection -> AgentId -> RunId -> Text -> CommandPlan -> IO (Text,Value)
 applyPlan db owner runIdentity time plan = case plan of
  CreateDefinition fields -> do
-  let initial=Definition "" owner (Revision 1) fields False time
+  let initial=Definition "" (agentIdText owner) (Revision 1) (AcceptedContract fields) Nothing False (KM.singleton "created" (str time))
   saved <- DB.saveRoutineOn db (remove ["id"] (toJSON initial))
   pure (at saved "id",obj [("routine",get saved "id")])
  UpdateDefinition definition -> saveDefinition definition
@@ -163,16 +137,13 @@ applyPlan db owner runIdentity time plan = case plan of
    _ -> failure 500 "Invalid stop plan"
  Admit definition inputs -> do
   let identity=runIdText runIdentity
-      fields=definitionFields definition
       snapshot_=merge (toJSON definition) (obj [("inputs",str inputs)])
       origin=obj [("routine",str (definitionId definition)),("occurrence",str identity),("trigger",toJSON ManualTrigger)]
-      spec=D.TaskSpec (fieldGoal fields) [inputs | not (T.null inputs)] (fieldCriteria fields) (fieldCriteria fields)
-      first=D.newCall runIdentity owner Nothing D.Execution D.CallQueued (fieldGoal fields)
-      work=D.Workload identity True (first :| []) (KM.fromList [("originalIntent",str (fieldGoal fields)),("task",obj [("taskId",str ("task_"<>identity)),("taskType",str "automated"),("specification",toJSON spec)]),("origin",origin),("routineSnapshot",snapshot_),("executionGate",toJSON ExecutionOpen),("decisions",arr []),("outcome",Null)])
-      turn=newTurn runIdentity Chat (fieldGoal fields) time origin False
-      message=obj [("role",str "user"),("content",str (fieldGoal fields)),("turn",str identity),("time",str time),("origin",origin)]
-  DB.putValueOn db DB.Workloads identity (toJSON work)
-  Managed.enrollOn db (agentIdText owner) turn message (fieldGoal fields) []
+      spec=case definitionContract definition of
+       LegacyPrompt _ -> Nothing
+       AcceptedContract fields -> Just (D.TaskSpec (fieldGoal fields) [inputs | not (T.null inputs)] (fieldCriteria fields) (fieldCriteria fields))
+      turn=newTurn runIdentity Chat (R.definitionGoal definition) time origin False
+  D.admitRoutineOn db owner turn snapshot_ spec
   pure (definitionId definition,obj [("routine",str (definitionId definition)),("run",str identity)])
  where
  saveDefinition definition = do
@@ -180,7 +151,8 @@ applyPlan db owner runIdentity time plan = case plan of
   pure (definitionId definition,obj [("routine",str (definitionId definition))])
  stop work = do
   let cancel call = if D.callState call `elem` [D.CallQueued,D.CallRunning,D.CallWaiting] then call {D.callState=D.CallCancelled,D.callOutput=Nothing} else call
-      stopped=(D.setWorkField "executionGate" (toJSON ExecutionStopped) work) {D.workCalls=fmap cancel (D.workCalls work)}
+      fenced=D.setWorkField "origin" (put "occurrence" (str (D.workloadId work)) (D.workField work "origin")) work
+      stopped=(D.setWorkField "executionGate" (toJSON ExecutionStopped) fenced) {D.workCalls=fmap cancel (D.workCalls work)}
   DB.putValueOn db DB.Workloads (D.workloadId work) (toJSON stopped)
 
 receipt :: Service -> Text -> OperationId -> IO (Maybe Value)
@@ -201,12 +173,12 @@ snapshot s = do
  operations <- DB.queryRows s "SELECT id,owner,target,code,response,created FROM command_receipts WHERE scope='routine' ORDER BY rowid DESC" ["id","owner","target","code","response","created"] []
  decoded <- forM operations $ \op -> do response<-DB.decodeStored (at op "response"); pure (put "response" response op)
  rendered <- forM ds $ \d -> do
-  history <- traverse renderRun [w|w<-works,at (D.workField w "origin") "routine"==definitionId d,has (D.workField w "origin") "occurrence"]
-  pure (put "runs" (arr history) (toJSON d))
+  history <- traverse renderRun [w|w<-works,at (D.workField w "origin") "routine"==definitionId d]
+  pure (merge (toJSON d) (obj [("trigger",str (maybe "manual" (const "interval") (definitionSchedule d))),("title",str (R.definitionTitle d)),("goal",str (R.definitionGoal d)),("criteria",maybe Null toJSON (R.definitionCriteria d)),("revision",toJSON (definitionRevision d)),("deleted",Bool (definitionDeleted d)),("runs",arr history)]))
  pure (obj [("definitions",arr rendered),("errors",arr [op|op<-decoded,int (get op "code")>=400])])
  where
  renderRun work = do
-  gate <- field 500 (toJSON work) "executionGate"
+  gate <- if has (D.workField work "origin") "occurrence" then field 500 (toJSON work) "executionGate" else pure ExecutionOpen
   let call=NE.last (D.workCalls work)
       status=if gate==ExecutionStopped then "stopped" else case D.callState call of
        D.CallQueued -> "queued"
@@ -218,4 +190,4 @@ snapshot s = do
        D.CallFailed -> "failed"
        D.CallInterrupted -> "interrupted"
        D.CallCancelled -> "cancelled"
-  pure (obj [("id",str (D.workloadId work)),("snapshot",D.workField work "routineSnapshot"),("status",str status),("result",if gate==ExecutionStopped then Null else get (D.workField work "outcome") "reply"),("message",if gate==ExecutionOpen && D.callState call==D.CallWaiting then toJSON (D.callOutput call) else Null),("error",D.callField call "error"),("currentOwner",toJSON (D.callOwner call))])
+  pure (obj [("id",str (D.workloadId work)),("created",D.workField work "created"),("trigger",get (D.workField work "origin") "trigger"),("snapshot",D.workField work "routineSnapshot"),("status",str status),("result",if gate==ExecutionStopped then Null else get (D.workField work "outcome") "reply"),("message",if gate==ExecutionOpen && D.callState call==D.CallWaiting then toJSON (D.callOutput call) else Null),("error",D.callField call "error"),("currentOwner",toJSON (D.callOwner call))])

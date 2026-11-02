@@ -24,6 +24,30 @@ actions. Never-started queued work resumes after restart; previously running wor
 becomes interrupted and requires explicit retry. Inspect uncertain external
 outcomes before retrying. The shared computer allows one owner at a time.
 
+### Routines
+
+Under a Sapi's **Work → Automation → Routines**, save a title, goal and
+completion criteria, then use **Run now** with optional inputs. Saving does not
+start work. Each run keeps its original owner, definition revision, goal, criteria
+and inputs even when the routine is edited. Work can delegate through the existing
+team; its history identifies the current responsible Sapi. Open a routine to view
+its latest result or history, then open an individual run for its details.
+Settings edits the definition; its Schedule page saves the interval separately.
+
+**Stop run** stops that occurrence, including delegated calls, and prevents later
+results from being published. It does not stop other runs or undo completed
+external actions. **Delete routine** prevents new runs and stops active occurrences;
+completed history remains visible. A routine without a schedule runs on request.
+Setting an interval preserves its identity and history. **Pause** stops future
+timer admissions, while current work continues and **Run now** remains available.
+**Resume** schedules the next interval from the time of resumption. The schedule
+and the current run have separate statuses.
+
+Minute pulses admit due work. One routine and due time identify one scheduled
+occurrence; its admission and the next deadline are saved together. Downtime does
+not replay every missed interval. Previously started work is not automatically
+repeated merely because its result is unknown after restart.
+
 ## Notes and files
 
 Memo reads `workspaces/<id>/Notes.html`. Its wiki has `about`, `map` and `content`
@@ -89,7 +113,7 @@ a supplied Origin must match the loopback Host. Common entrypoints:
 | POST | `/api/agents/<id>/messages`, `/api/agents/<id>/attachments` | Submit chat or attachments |
 | GET | `/api/agents/<id>/notes` | Memo and file metadata |
 | GET | `/api/agents/<id>/tasks` | YAML export; `?format=json` returns task metadata |
-| POST | `/api/agents/<id>/routines`, `/api/agents/<id>/routines/<routine>/<action>` | Save a manual routine; edit, run, stop or delete |
+| POST | `/api/agents/<id>/routines`, `/api/agents/<id>/routines/<routine>/<action>` | Save a routine; edit, run, stop, delete, schedule, pause or resume |
 | GET | `/api/agents/<id>/decisions` | Decision records |
 | POST | `/api/agents/<id>/control` | Authorized team/workspace operations |
 | POST | `/api/agents/<id>/turns/<id>/retry`, `/api/agents/<id>/turns/<id>/cancel` | Explicit recovery |
@@ -102,11 +126,17 @@ public contracts; see [Testing](testing.md) to run them.
 ### Routine commands
 
 Create accepts `operation`, `title`, `goal`, and a nonempty `criteria` array.
-Actions are `edit`, `run`, `stop`, and `delete`; each also requires the current
+Actions are `edit`, `run`, `stop`, `delete`, `schedule`, `pause`, and `resume`; each also requires the current
 `revision`. Edit supplies the same definition fields; run accepts optional text
-`inputs`; stop requires the occurrence's `run` ID. Ownership comes from the route,
+`inputs`; stop requires the occurrence's `run` ID. Schedule accepts an integer
+`minutes` from 1 to 525600 and preserves the routine ID. Definition and schedule
+edits are separate commands, each checked against the current revision.
+Ownership comes from the route,
 not the body. `/api/state` exposes definitions and occurrence history in
-`personal_routines`, and saved command refusals in `routine_errors`.
+`personal_routines`, and saved command refusals in `routine_errors`. This list
+includes legacy personal interval routines, whose unspecified completion criteria
+remain `null`. Its explicit `trigger` is `manual` or `interval`; legacy storage is
+not rewritten merely to render this normalized view.
 
 Reuse the same operation ID and unchanged request to recover its original response
 without duplicating work, including after restart or while the corpora is paused.

@@ -33,6 +33,18 @@ handle runtime dispatch = case _ of
     m <- H.get
     operation <- liftEffect B.uuid
     H.modify_ $ M.modifyRoutineView (M.routineKey m) \view -> view {editor=map (\e -> e {fields=D.put key (D.text value) e.fields,operation=operation,dirty=true,error=""}) view.editor}
+  RoutineReloadEditor -> do
+    m <- H.get
+    let page = (M.routineView m).page
+        key = M.routineKey m
+        identity = _.identity <$> (M.routineView m).editor
+        operation = _.operation <$> (M.routineView m).editor
+    E.attempt (E.api runtime m "/api/state" "GET" D.null) \result -> E.inEpoch m.epoch \_ -> case result of
+      Left failure -> E.notify $ message failure
+      Right snapshot -> do
+        H.modify_ $ M.project snapshot
+        current <- H.get
+        when (M.routineKey current == key && (_.identity <$> (M.routineView current).editor) == identity && (_.operation <$> (M.routineView current).editor) == operation) $ navigate page
   RoutineSave -> do
     m <- H.get
     case (M.routineView m).editor of
@@ -41,8 +53,11 @@ handle runtime dispatch = case _ of
       Just editor -> do
         let key = M.routineKey m
             id = D.s "id" editor.record
-            path = "/api/agents/" <> B.encodeURI (D.s "owner" editor.record) <> "/routines" <> if id == "" then "" else "/" <> B.encodeURI id <> "/edit"
-            body = D.json {operation:editor.operation,revision:D.get "revision" editor.record,title:D.s "title" editor.fields,goal:D.s "goal" editor.fields,criteria:A.filter (_ /= "") $ map S.trim $ S.split (S.Pattern "\n") $ D.s "criteria" editor.fields}
+            scheduling = case (M.routineView m).page of
+              M.RoutineSchedule _ -> true
+              _ -> false
+            path = "/api/agents/" <> B.encodeURI (D.s "owner" editor.record) <> "/routines" <> if id == "" then "" else "/" <> B.encodeURI id <> if scheduling then "/schedule" else "/edit"
+            body = if scheduling then D.json {operation:editor.operation,revision:D.get "revision" editor.record,minutes:D.parse $ D.s "minutes" editor.fields} else D.json {operation:editor.operation,revision:D.get "revision" editor.record,title:D.s "title" editor.fields,goal:D.s "goal" editor.fields,criteria:A.filter (_ /= "") $ map S.trim $ S.split (S.Pattern "\n") $ D.s "criteria" editor.fields}
             update f = H.modify_ $ M.modifyRoutineView key \view -> view {editor=map (\current -> if current.identity == editor.identity then f current else current) view.editor}
         update _ {busy=true,error=""}
         E.attempt (E.api runtime m path "POST" body) \result -> E.inEpoch m.epoch \_ -> case result of
@@ -50,17 +65,54 @@ handle runtime dispatch = case _ of
           Right response -> do
             H.modify_ $ M.modifyRoutineView key \view -> if (_.identity <$> view.editor) == Just editor.identity then view {page=M.RoutineLatest (D.s "routine" response),editor=Nothing,pending=Nothing} else view
             dispatch Poll
+  RoutineScheduleAction action record -> do
+    m <- H.get
+    case (M.routineView m).scheduleRequest of
+      Just request | request.action == action && D.s "id" request.record == D.s "id" record -> sendSchedule m request
+      Just _ -> E.notify "Resolve the previous schedule request before starting another."
+      Nothing -> do
+        operation <- liftEffect B.uuid
+        sendSchedule m {action,record,operation,busy:false,error:""}
+  RoutineRetrySchedule -> do
+    m <- H.get
+    case (M.routineView m).scheduleRequest of
+      Just request -> sendSchedule m request
+      Nothing -> pure unit
+  RoutineRefreshSchedule -> do
+    m <- H.get
+    let key = M.routineKey m
+        operation = _.operation <$> (M.routineView m).scheduleRequest
+    E.attempt (E.api runtime m "/api/state" "GET" D.null) \result -> E.inEpoch m.epoch \_ -> case result of
+      Left failure -> E.notify $ message failure
+      Right snapshot -> H.modify_ \current -> M.modifyRoutineView key (\view -> if (_.operation <$> view.scheduleRequest) == operation then view {scheduleRequest=Nothing} else view) $ M.project snapshot current
   _ -> pure unit
   where
+  sendSchedule m request = unless request.busy do
+    let key = M.routineKey m
+        action = case request.action of
+          M.PauseSchedule -> "pause"
+          M.ResumeSchedule -> "resume"
+        path = "/api/agents/" <> B.encodeURI (D.s "owner" request.record) <> "/routines/" <> B.encodeURI (D.s "id" request.record) <> "/" <> action
+        body = D.json {operation:request.operation,revision:D.get "revision" request.record}
+    H.modify_ $ M.modifyRoutineView key _ {scheduleRequest=Just request {busy=true,error=""}}
+    E.attempt (E.api runtime m path "POST" body) \result -> E.inEpoch m.epoch \_ -> do
+      H.modify_ $ M.modifyRoutineView key \view -> if (_.operation <$> view.scheduleRequest) /= Just request.operation then view else view {scheduleRequest=case result of
+        Left failure -> Just request {busy=false,error=message failure}
+        Right _ -> Nothing}
+      dispatch Poll
+
   maybeDirty editor = fromMaybe false $ (\e -> e.dirty) <$> editor
   navigate page = do
     m <- H.get
     case page of
-      M.RoutineSettings id -> do
-        operation <- liftEffect B.uuid
-        let record = D.put "owner" (D.text m.selected) $ fromMaybe D.empty $ A.find (\r -> D.s "id" r == id && D.s "owner" r == m.selected) $ D.rows "personal_routines" m.snapshot
-            fields = D.json {title:D.s "title" record,goal:D.s "goal" record,criteria:S.joinWith "\n" $ D.strings $ D.get "criteria" record}
-            editor = {record,fields,operation,error:"",busy:false,dirty:false,identity:m.sequence+1}
-        H.modify_ \current -> M.modifyRoutineView (M.routineKey m) (_ {page=page,editor=Just editor,pending=Nothing}) current {sequence=m.sequence+1,menu=Nothing}
+      M.RoutineSettings id -> prepareEditor m page id false
+      M.RoutineSchedule id -> prepareEditor m page id true
       _ -> H.modify_ $ M.modifyRoutineView (M.routineKey m) _ {page=page,editor=Nothing,pending=Nothing}
     liftEffect $ B.scroll "#conversation-body" 0.0
+
+  prepareEditor m page id scheduling = do
+    operation <- liftEffect B.uuid
+    let record = D.put "owner" (D.text m.selected) $ fromMaybe D.empty $ A.find (\r -> D.s "id" r == id && D.s "owner" r == m.selected) $ D.rows "personal_routines" m.snapshot
+        fields = if scheduling then D.json {minutes:show $ if D.n "minutes" record > 0.0 then D.int $ D.get "minutes" record else 60} else D.json {title:D.s "title" record,goal:D.s "goal" record,criteria:S.joinWith "\n" $ D.strings $ D.get "criteria" record}
+        editor = {record,fields,operation,error:"",busy:false,dirty:false,identity:m.sequence+1}
+    H.modify_ \current -> M.modifyRoutineView (M.routineKey m) (_ {page=page,editor=Just editor,pending=Nothing}) current {sequence=m.sequence+1,menu=Nothing}

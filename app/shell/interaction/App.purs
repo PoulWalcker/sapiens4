@@ -206,6 +206,10 @@ handle runtime input = session input
     RoutineNavigate _ -> Routine.handle runtime dispatch action
     RoutineField _ _ -> Routine.handle runtime dispatch action
     RoutineSave -> Routine.handle runtime dispatch action
+    RoutineReloadEditor -> Routine.handle runtime dispatch action
+    RoutineScheduleAction _ _ -> Routine.handle runtime dispatch action
+    RoutineRetrySchedule -> Routine.handle runtime dispatch action
+    RoutineRefreshSchedule -> Routine.handle runtime dispatch action
     RoutineDiscardChanges -> Routine.handle runtime dispatch action
     ToggleExpanded key -> H.modify_ \m -> m {expanded=(if Set.member key m.expanded then Set.delete else Set.insert) key m.expanded}
     Clarify work -> do

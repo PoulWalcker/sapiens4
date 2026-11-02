@@ -42,7 +42,7 @@ status = case _ of
 
 view :: M.Model -> V.Html
 view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
-  if M.isGroup (M.selected m) then [V.textNode "h1" [] "Routines",V.p "routine-muted" "Personal routines belong to an individual Sapi."] else content
+  if M.isGroup (M.selected m) then [V.textNode "h1" [] "Routines",V.p "routine-muted" "Personal routines belong to an individual Sapi."] else content <> scheduleFeedback
   where
   state = M.routineView m
   saved = A.filter (\r -> D.s "owner" r == m.selected) $ D.rows "personal_routines" m.snapshot
@@ -52,9 +52,19 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
   link caption page = V.button "routine-link" caption $ RoutineNavigate page
   errors = map (\op -> V.p "routine-problem" $ D.s "error" $ D.get "response" op) $ A.filter (\op -> D.s "owner" op == m.selected) $ D.rows "routine_errors" m.snapshot
   badge value = V.span [V.cls "routine-status"] value
-  whenText routine = if managed routine then "On request" else "Every " <> show (D.int $ D.get "minutes" $ record routine) <> " minutes" <> if D.b "paused" (record routine) then " · Schedule paused" else " · Next: " <> formatDate (D.s "nextDue" $ record routine)
+  interval routine = D.s "trigger" (record routine) == "interval" || not (managed routine)
+  whenText routine = frequency <> next
+    where
+    r = record routine
+    minutes = D.int $ D.get "minutes" r
+    frequency = if interval routine then "Every " <> show minutes <> (if minutes == 1 then " minute" else " minutes") else "On request"
+    next = if D.b "deleted" r then " · No future runs" else if not (interval routine) then "" else if D.b "paused" r then " · Schedule paused" else " · Next: " <> formatDate (D.s "nextDue" r)
   formatDate value = if value == "" then "Time unavailable" else B.formatDate "en-GB" (D.json {day:"numeric",month:"short",hour:"2-digit",minute:"2-digit",second:"2-digit"}) value
-  timestamp run = D.s "created" $ fromMaybe D.empty $ A.find (\t -> D.s "id" t == D.s "id" run) $ D.rows "turns" m.snapshot
+  timestamp run = D.fallback (D.s "created" $ fromMaybe D.empty $ A.find (\t -> D.s "id" t == D.s "id" run) $ D.rows "turns" m.snapshot) $ D.s "created" run
+  triggerLabel run = case D.s "trigger" run of
+    "manual" -> "Manual run"
+    "interval" -> "Scheduled run"
+    _ -> "Trigger not recorded"
   runs routine = case routine of
     Managed r -> D.rows "runs" r
     Legacy r -> map legacyRun $ A.filter (\w -> D.str (D.at ["origin","routine"] w) == D.s "id" r) $ D.rows "workloads" m.snapshot
@@ -72,30 +82,43 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     Nothing -> A.last $ runs routine
   routineStatus routine = if D.b "deleted" $ record routine then "Deleted" else case latest routine of
     Just run | active run || A.elem (D.s "status" run) ["failed","unresolved","interrupted"] -> status $ D.s "status" run
-    _ -> if managed routine then "Ready" else if D.b "paused" $ record routine then "Paused" else "Enabled"
+    _ -> if not (interval routine) then "Ready" else if D.b "paused" $ record routine then "Paused" else "Enabled"
   menu routine = V.node "details" [V.cls "routine-menu"]
     [V.node "summary" [V.label $ "Manage " <> title routine] [V.text "⋯"]
     ,V.div "" $ if D.b "deleted" $ record routine then [] else case routine of
-      Managed r -> [link "Settings" $ M.RoutineSettings (D.s "id" r),V.button "routine-link" "Delete…" $ OpenDialog M.RoutineDelete r]
+      Managed r -> [link "Settings" $ M.RoutineSettings (D.s "id" r)] <> scheduleControl routine <> [V.button "routine-link" "Delete…" $ OpenDialog M.RoutineDelete r]
       Legacy r -> [V.button "routine-link" "Edit through chat" $ PrepareDraft ("Edit @" <> D.s "id" r <> " ( " <> D.s "title" r <> " )\nEdit Frequency (prev every " <> show (D.int $ D.get "minutes" r) <> " minutes): new every XXX minutes\nEdit Execution Prompt as: " <> D.s "prompt" r) "XXX",V.button "routine-link" (if D.b "paused" r then "Resume schedule through chat" else "Pause schedule through chat") $ PrepareDraft ((if D.b "paused" r then "Resume Scheduled Routine" else "Pause Scheduled Routine") <> "\n@" <> D.s "id" r) ""]]
+  scheduleControl routine = if not (managed routine && interval routine) then [] else
+    [V.control [V.cls "routine-link",V.disabled $ case state.scheduleRequest of
+      Nothing -> false
+      Just request -> request.busy || request.action /= action || D.s "id" request.record /= D.s "id" r]
+      (if D.b "paused" r then "Resume schedule" else "Pause schedule") (RoutineScheduleAction action r)]
+    where
+    r = record routine
+    action = if D.b "paused" r then M.ResumeSchedule else M.PauseSchedule
+  scheduleFeedback = case state.scheduleRequest of
+    Nothing -> []
+    Just request -> [V.div "routine-notice" $
+      [V.p "" $ "Schedule request: " <> D.s "title" request.record,V.p "" $ if request.busy then "Waiting for confirmation…" else request.error] <>
+      if request.busy then [] else [V.button "button" "Retry unchanged" RoutineRetrySchedule,V.button "routine-link" "Refresh current schedule" RoutineRefreshSchedule]]
   runButton routine = case routine of
     Managed r -> V.button "button" "Run now" $ OpenDialog M.RoutineRun r
     Legacy r -> V.button "button" "Run through chat" $ PrepareDraft ("@" <> D.s "id" r <> "\nRun it now.") ""
   heading routine history single =
     [link (if single then "← History" else "← All routines") (if single then M.RoutineHistory id else M.RoutineList false)
-    ,V.div "routine-heading routine-page-heading" [V.textNode "h1" [] $ title routine,V.div "routine-actions" $ if D.b "deleted" r then [badge "Deleted"] else [runButton routine,menu routine]]
+    ,V.div "routine-heading routine-page-heading" [V.textNode "h1" [] $ title routine,V.div "routine-actions" $ if D.b "deleted" r then [badge "Deleted"] else [runButton routine] <> scheduleControl routine <> [menu routine]]
     ,V.p "routine-muted" $ whenText routine
     ,V.node "nav" [V.cls "routine-tabs",V.label "Routine views"] [V.control [V.cls $ "routine-link" <> if not history then " selected" else "",V.attr "aria-current" $ if not history then "page" else "false"] "Latest result" (RoutineNavigate $ M.RoutineLatest id),V.control [V.cls $ "routine-link" <> if history then " selected" else "",V.attr "aria-current" $ if history then "page" else "false"] "History" (RoutineNavigate $ M.RoutineHistory id)]]
     where r = record routine
           id = D.s "id" r
   result routine run =
-    [V.p "routine-muted" $ status (D.s "status" run) <> " · " <> formatDate (timestamp run)
+    [V.p "routine-muted" $ status (D.s "status" run) <> " · " <> formatDate (timestamp run) <> " · " <> triggerLabel run
     ,V.p "routine-muted" $ "Responsible Sapi: " <> D.s "name" (M.agent m $ D.s "currentOwner" run)
     ,V.when (D.s "message" run /= "") $ V.p "routine-notice" $ D.s "message" run
     ,V.when (D.s "result" run /= "") $ V.div "routine-result" $ T.paragraphs m $ D.s "result" run
     ,V.when (D.s "error" run /= "") $ V.p "routine-problem" $ D.s "error" run
     ,V.when (active run && D.s "message" run == "") $ V.p "routine-muted" $ if D.s "status" run == "queued" then "Waiting to start." else "Work is in progress."
-    ,V.when (managed routine) $ V.div "routine-run-inputs" [V.p "routine-muted" $ "Definition revision " <> show (D.int $ D.at ["snapshot","revision"] run),V.p "" $ D.str $ D.at ["snapshot","inputs"] run]
+    ,V.when (managed routine) $ V.div "routine-run-inputs" [V.p "routine-muted" $ if D.n "revision" (D.get "snapshot" run) > 0.0 then "Definition revision " <> show (D.int $ D.at ["snapshot","revision"] run) else "Definition revision not recorded",V.p "" $ D.str $ D.at ["snapshot","inputs"] run]
     ,V.div "routine-actions" $ reply run <> if managed routine && active run then [V.button "button" "Stop this run…" $ OpenDialog M.RoutineStop $ D.put "run" (D.get "id" run) (record routine)] else []]
   reply run = case A.find (\w -> D.s "id" w == D.s "id" run && D.s "state" w == "WaitingForAdmin") $ D.rows "workloads" m.snapshot of
     Just work -> [V.button "button" ("Reply to " <> D.s "name" (M.agent m $ D.s "owner" work)) $ Clarify work]
@@ -109,8 +132,11 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
       [V.div "routine-heading" [V.textNode "h1" [] "Routines",V.button "button" "+ New routine" $ RoutineNavigate $ M.RoutineSettings ""]
       ,V.node "nav" [V.cls "routine-tabs",V.label "Routine filter"] [link "Active" $ M.RoutineList false,link "Deleted" $ M.RoutineList true]] <>
       (let rows = A.filter (\r -> D.b "deleted" (record r) == deleted) routines in if A.null rows then [V.div "routine-empty" [V.textNode "h2" [] $ if deleted then "No deleted routines" else "No routines yet",V.p "routine-muted" $ if deleted then "Deleted routines keep their run history." else "Save work you want to repeat."]] else map row rows) <> errors
+    M.RoutineSchedule _ -> case state.editor of
+      Just editor -> scheduleEditor editor
+      Nothing -> [link "← All routines" $ M.RoutineList false]
     M.RoutineSettings _ -> case state.editor of
-      Just editor -> editorView editor
+      Just editor -> if D.s "id" editor.record /= "" && not (D.valid $ D.get "criteria" editor.record) then legacySettings editor.record else editorView editor
       Nothing -> [link "← All routines" $ M.RoutineList false]
     M.RoutineLatest id -> case find id of
       Nothing -> [link "← All routines" $ M.RoutineList false]
@@ -129,10 +155,27 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     [V.textNode "h1" [] $ if id == "" then "New routine" else "Routine settings"
     ,V.node "form" [V.cls "routine-editor",V.submit RoutineSave]
       [field "input" "Name (up to 60 characters)" "title",field "textarea" "What to do" "goal",field "textarea" "Completion criteria (one per line)" "criteria"
-      ,V.p "routine-muted" "When: On request"
+      ,V.p "routine-muted" $ "When: " <> whenText (Managed editor.record)
+      ,V.when (id /= "") $ link "Schedule settings" $ M.RoutineSchedule id
       ,V.p "routine-muted" "Saving does not start work. Changes apply to future runs; accepted runs keep their original instructions."
-      ,V.when (editor.error /= "") $ V.textNode "p" [V.cls "routine-problem",V.attr "role" "alert"] editor.error
+      ,V.when (editor.error /= "") $ V.div "" [V.textNode "p" [V.cls "routine-problem",V.attr "role" "alert"] editor.error,V.button "routine-link" "Reload current settings" RoutineReloadEditor]
       ,V.div "routine-actions" [V.textNode "button" [V.attr "type" "submit",V.cls "button primary",V.disabled editor.busy] (if id == "" then "Create routine" else "Save changes"),link "Cancel" $ if id == "" then M.RoutineList false else M.RoutineLatest id]]]
     where
     id = D.s "id" editor.record
     field tag label key = V.node "label" [] [V.text label,V.node tag [V.label label,V.value $ D.s key editor.fields,V.input $ RoutineField key,V.bool "required" true,V.disabled editor.busy] []]
+
+  legacySettings r =
+    [V.textNode "h1" [] "Routine settings",V.p "" $ D.s "goal" r
+    ,V.p "routine-muted" "This existing routine prepares its completion criteria when it runs. Edit its instructions through chat."
+    ,V.button "button" "Edit instructions through chat" $ PrepareDraft ("Edit @" <> D.s "id" r <> " ( " <> D.s "title" r <> " )\nEdit Frequency (prev every " <> show (D.int $ D.get "minutes" r) <> " minutes): new every XXX minutes\nEdit Execution Prompt as: " <> D.s "goal" r) "XXX"
+    ,link "Schedule settings" $ M.RoutineSchedule $ D.s "id" r
+    ,link "← Latest result" $ M.RoutineLatest $ D.s "id" r]
+  scheduleEditor editor =
+    [link "← Settings" $ M.RoutineSettings id,V.textNode "h1" [] "Routine schedule"
+    ,V.p "routine-muted" $ whenText (Managed editor.record)
+    ,V.node "form" [V.cls "routine-editor",V.submit RoutineSave]
+      [V.node "label" [] [V.text "Interval, minutes",V.node "input" [V.label "Interval, minutes",V.attr "type" "number",V.attr "min" "1",V.attr "max" "525600",V.attr "step" "1",V.bool "required" true,V.value $ D.s "minutes" editor.fields,V.input $ RoutineField "minutes",V.disabled editor.busy] []]
+      ,V.p "routine-muted" "This changes future scheduled runs. Current runs keep their accepted instructions."
+      ,V.when (editor.error /= "") $ V.div "" [V.textNode "p" [V.cls "routine-problem",V.attr "role" "alert"] editor.error,V.button "routine-link" "Reload current schedule" RoutineReloadEditor]
+      ,V.div "routine-actions" [V.textNode "button" [V.attr "type" "submit",V.cls "button primary",V.disabled editor.busy] (if D.s "trigger" editor.record == "interval" then "Save interval" else "Enable interval"),link "Cancel" $ M.RoutineSettings id]]]
+    where id = D.s "id" editor.record
