@@ -116,7 +116,7 @@ RSpec.describe 'Local service contracts' do
     agent = chief
     host.configure(fail: true)
     failed = host.submit(agent, 'First')
-    expect(host.turn(failed, 'failed')).to include('output' => nil, 'error' => a_string_including('Scripted provider failure'))
+    expect(host.turn(failed, 'failed')).to include('output' => nil, 'error' => a_string_including('provider stdout and stderr omitted'))
     host.configure(fail: false)
     host.turn(host.submit(agent, 'New independent work'))
     expect(host.turn(failed, 'failed')['input']).to eq('First')
@@ -319,7 +319,7 @@ RSpec.describe 'Local service contracts' do
     host.turn(failed, 'failed')
     rejected = read_run.call(failed)
     expect(rejected['logs'].first).to include('role' => 'Assessing', 'prompt' => a_string_including('Keep the unsuccessful call reviewable'))
-    expect(rejected['error']).to include('Scripted provider failure')
+    expect(rejected['error']).to include('provider stdout and stderr omitted')
     host.restart
     expect(read_run.call(completed)).to eq(saved)
     expect(read_run.call(failed)).to eq(rejected)

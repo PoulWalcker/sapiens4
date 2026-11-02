@@ -206,6 +206,10 @@ saveWork s w = do
  DB.putValue s DB.Workloads (workloadId w) (toJSON w)
 withCall :: Workload -> WorkCall -> Workload
 withCall w c = w { workCalls = fmap (\x -> if callIdentity x == callIdentity c then c else x) (workCalls w) }
+setAssessment :: Workload -> Value -> Value -> Workload
+setAssessment work record assessment = setWorkField "decisions" (arr (map update (workItems work "decisions"))) work
+ where update entry = if get entry "decisionId"==get record "decisionId" then put "assessment" assessment entry else entry
+
 validateOutcome :: DecisionResponse -> Outcome -> [Text] -> IO ()
 validateOutcome response outcome criteria = do
  forM_ (M.keys (notApplicable outcome)) $ \criterion ->
@@ -278,12 +282,23 @@ decide s run turn state node logs = do
  let updateLog extra = modifyIORef' logs (\entries -> [if index==logIndex then merge entry extra else entry | (index,entry)<-zip [0::Int ..] entries])
  rawResponse <- newIORef Nothing
  result <- try $ do
-  raw <- invoke s run rendered
+  let observe snapshot = locked s $ do
+       (current,_) <- getWork s (turnId turn)
+       let update entry = if get entry "decisionId"==get record "decisionId" then put "evidence" (toJSON snapshot) entry else entry
+       DB.putValue s DB.Workloads (workloadId current) (toJSON (setWorkField "decisions" (arr (map update (workItems current "decisions"))) current))
+  raw <- invokeObserved s run rendered observe
   writeIORef rawResponse (Just raw)
   activity <- readIORef (runActivity run)
   updateLog (obj ([("session",get activity "session"),("answer",str raw)]++[("warning",get activity "warning") | has activity "warning"]))
   require (T.length raw <= 100000) 400 "Decision response exceeds 100000 characters"
-  response <- parseValue 400 (parseDecision node) (parseJSONText raw)
+  parsed <- try (parseValue 400 (parseDecision node) (parseJSONText raw))
+  response <- case parsed of
+   Right value -> pure value
+   Left (_::APIError) -> do
+    when (at (get (parseJSONText raw) "outcome") "status"=="Completed") $ locked s $ do
+     (current,_) <- getWork s (turnId turn)
+     saveWork s (setAssessment current record (put "decisionId" (get record "decisionId") (assessmentValue AssessmentRejected "application_validation" "Claimed completion did not satisfy the response contract")))
+    failure 400 (if at (parseJSONText raw) "event" `notElem` eventsFor node then "Unknown decision event; diagnostic payload omitted" else "Decision response did not satisfy its schema; diagnostic payload omitted")
   pure (response,merge record (obj [("rawResponse",str raw),("response",decisionRaw response)]))
  case result of
   Left (e::SomeException) -> do
@@ -395,9 +410,16 @@ runDecision s run turn state = do
           Handoff request -> Just <$> transfer s run request (decisionReason response) record
           ReportOutcome reply outcome -> do
            criteria <- decodeValue 500 (get (get (workField current "task") "specification") "completionCriteria")
-           validateOutcome response outcome criteria
+           validation <- try (validateOutcome response outcome criteria)
+           case validation of
+            Left (APIError code _) -> do
+             let assessment=put "decisionId" (get record "decisionId") (assessmentValue AssessmentRejected "application_validation" "Outcome did not satisfy the pinned criteria")
+             saveWork s (setAssessment current record assessment)
+             failure code "Outcome did not satisfy the pinned completion criteria"
+            Right () -> pure ()
            let saved=mergeFields [("reply",str reply),("evidence",toJSON (decisionEvidence response)),("author",str owner)] (get (decisionRaw response) "outcome")
-           finish (setWorkField "outcome" saved current) (call { callState=case outcomeStatus outcome of Completed -> CallCompleted; Unresolved -> CallUnresolved, callOutput=Just reply }) OutcomeNode
+           let assessment=put "decisionId" (get record "decisionId") (assessmentValue (if outcomeStatus outcome==Completed then AssessmentAccepted else AssessmentUnresolved) "model_contract_assessment" "Model assessment against the pinned criteria; external effects are not independently verified")
+           finish (setAssessment (setWorkField "outcome" saved current) record assessment) (call { callState=case outcomeStatus outcome of Completed -> CallCompleted; Unresolved -> CallUnresolved, callOutput=Just reply }) OutcomeNode
         maybe (loop (n+1)) pure result
  output <- loop (0::Int) `catch` (\(e::SomeException) -> do
   locked s $ do

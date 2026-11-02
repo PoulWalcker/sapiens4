@@ -231,3 +231,53 @@ nameP value = do
  pure name
 onlyFields :: [Text] -> Value -> Parser ()
 onlyFields allowed = withObject "record" $ \fields -> unless (all ((`elem` allowed) . K.toText) (KM.keys fields)) (fail "Unknown field in response")
+
+-- Provider receipts describe delivery, not independently verified external effects.
+data EvidenceUsage = EvidenceUsage
+ { usageInput :: Maybe Integer, usageCached :: Maybe Integer, usageOutput :: Maybe Integer
+ , usageDuplicates :: Int, usageConflict :: Bool, usageInvalid :: Int
+ } deriving (Eq, Show)
+instance ToJSON EvidenceUsage where
+ toJSON u = obj [("inputTokens",toJSON (usageInput u)),("cachedInputTokens",toJSON (usageCached u)),("outputTokens",toJSON (usageOutput u)),("duplicates",toJSON (usageDuplicates u)),("conflict",Bool (usageConflict u)),("invalidReports",num (usageInvalid u)),("source",str "provider_report"),("price",Null)]
+
+data EvidenceReceipt = EvidenceReceipt
+ { receiptSequence :: Int, receiptTime :: Text, receiptKind :: Text
+ , receiptItem :: Maybe Int, receiptStatus :: Maybe Text, receiptExit :: Maybe Int, receiptSummary :: Maybe ToolSummary
+ } deriving (Eq, Show)
+instance ToJSON EvidenceReceipt where
+ toJSON r = obj [("sequence",toJSON (receiptSequence r)),("receivedAt",str (receiptTime r)),("kind",str (receiptKind r)),("item",toJSON (receiptItem r)),("status",toJSON (receiptStatus r)),("exitCode",toJSON (receiptExit r)),("source",str "provider_receipt"),("summary",toJSON (receiptSummary r))]
+
+data EvidenceSnapshot = EvidenceSnapshot
+ { evidenceModel :: Text, evidenceStarted :: Text, evidenceDuration :: Maybe Double
+ , evidenceExit :: Maybe Int, evidenceFinished :: Bool, evidenceReceipts :: [EvidenceReceipt]
+ , evidenceUsage :: EvidenceUsage, evidenceFinal :: Bool, evidenceTurnEnd :: Bool, evidenceStreamEnd :: Bool
+ , evidencePending :: Maybe Int, evidenceMalformed :: Int, evidenceUnknown :: Int
+ , evidenceDropped :: Int, evidenceDroppedBytes :: Integer, evidenceOutOfOrder :: Int
+ , evidenceOmittedFields :: Int, evidenceRedactedFields :: Int, evidenceTruncatedFields :: Int
+ } deriving (Eq, Show)
+instance ToJSON EvidenceSnapshot where
+ toJSON e = obj
+  [("schemaVersion",num 1),("provider",str "codex"),("model",str (evidenceModel e)),("policy",str "unsafe_bypass"),("providerVersion",Null),("configuredExecutable",Bool True)
+  ,("startedAt",str (evidenceStarted e)),("durationMs",toJSON (evidenceDuration e)),("processExit",toJSON (evidenceExit e)),("finished",Bool (evidenceFinished e))
+  ,("events",toJSON (evidenceReceipts e)),("usage",toJSON (evidenceUsage e))
+  ,("completeness",obj [("finalSeen",Bool (evidenceFinal e)),("turnEndSeen",Bool (evidenceTurnEnd e)),("streamEndSeen",Bool (evidenceStreamEnd e)),("pendingTools",toJSON (evidencePending e)),("malformedEvents",num (evidenceMalformed e)),("unknownEvents",num (evidenceUnknown e)),("droppedEvents",num (evidenceDropped e)),("droppedBytes",toJSON (evidenceDroppedBytes e)),("outOfOrderEvents",num (evidenceOutOfOrder e)),("contentOmitted",Bool True),("externalEffectsVerified",Bool False),("tailUnknown",Bool (not (evidenceFinished e) || not (evidenceStreamEnd e))),("observedEvents",num (length (evidenceReceipts e)+evidenceDropped e+evidenceMalformed e)),("omittedFields",num (evidenceOmittedFields e)),("redactedFields",num (evidenceRedactedFields e)),("truncatedFields",num (evidenceTruncatedFields e))])]
+
+data AssessmentStatus = AssessmentAccepted | AssessmentRejected | AssessmentUnresolved deriving (Eq, Show)
+instance ToJSON AssessmentStatus where
+ toJSON status = str $ case status of AssessmentAccepted -> "Accepted"; AssessmentRejected -> "Rejected"; AssessmentUnresolved -> "Unresolved"
+assessmentValue :: AssessmentStatus -> Text -> Text -> Value
+assessmentValue status source reason = obj [("status",toJSON status),("source",str source),("reason",str reason),("independent",Bool False)]
+
+-- Only the provider adapter constructs these allowlisted field names and values.
+data SummaryField = SummaryField
+ { summaryName :: Text, summaryValue :: Value, summaryRedacted :: Bool
+ , summaryTruncated :: Bool, summaryOmitted :: Bool
+ } deriving (Eq, Show)
+instance ToJSON SummaryField where
+ toJSON f = obj [("name",str (summaryName f)),("value",summaryValue f),("redacted",Bool (summaryRedacted f)),("truncated",Bool (summaryTruncated f)),("omitted",Bool (summaryOmitted f))]
+data ToolSummary = ToolSummary
+ { summaryFields :: [SummaryField], summaryOmittedFields :: Int
+ , summaryRedactedFields :: Int, summaryTruncatedFields :: Int
+ } deriving (Eq, Show)
+instance ToJSON ToolSummary where
+ toJSON s = obj [("fields",toJSON (summaryFields s)),("omittedFields",num (summaryOmittedFields s)),("redactedFields",num (summaryRedactedFields s)),("truncatedFields",num (summaryTruncatedFields s))]
