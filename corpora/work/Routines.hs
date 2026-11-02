@@ -47,7 +47,7 @@ instance FromJSON Routine where
 instance ToJSON Routine where
  toJSON r = mergeFields [("id",str (routineId r)),("owner",str (routineOwner r)),("prompt",str (routinePrompt r)),("minutes",toJSON (routineMinutes r)),("nextDue",if parseTime (at (Object (routineFields r)) "nextDue") == Just (routineDue r) then get (Object (routineFields r)) "nextDue" else str (timestamp (routineDue r))),("runCount",num (routineCount r)),("paused",Bool (routinePaused r))] (Object (routineFields r))
 readRoutines :: Service -> IO [Routine]
-readRoutines s = DB.values s DB.ScheduledRoutines >>= traverse (decodeValue 500)
+readRoutines s = DB.values s DB.ScheduledRoutines >>= filterM (fmap (==IntervalTrigger) . parseValue 500 routineTrigger) >>= traverse (decodeValue 500)
 storeRoutine :: Service -> Routine -> IO Value
 storeRoutine s = DB.saveRoutine s . toJSON
 
@@ -56,10 +56,12 @@ initializeRoutines s = do
  routines <- DB.values s DB.ScheduledRoutines
  works <- DB.values s DB.Workloads
  groups <- DB.values s DB.Groups
- forM_ routines $ \r -> unless (has r "runCount") $ do
-  let group=findId (at r "owner") groups
-      count=case group of Just g->length [t | t<-items g "tasks",get t "routine"==get r "id"]; Nothing->length [w | w<-works,get (get w "origin") "routine"==get r "id"]
-  void (DB.saveRoutine s (merge r (obj [("runCount",num count),("paused",Bool (count>=1000))])))
+ forM_ routines $ \r -> do
+  trigger <- parseValue 500 routineTrigger r
+  when (trigger==IntervalTrigger && not (has r "runCount")) $ do
+   let group=findId (at r "owner") groups
+       count=case group of Just g->length [t | t<-items g "tasks",get t "routine"==get r "id"]; Nothing->length [w | w<-works,get (get w "origin") "routine"==get r "id"]
+   void (DB.saveRoutine s (merge r (obj [("runCount",num count),("paused",Bool (count>=1000))])))
 save :: Service -> Text -> Value -> Value -> Maybe Text -> Maybe Int -> Maybe Text -> IO Value
 save s owner minutes execution identity previous source = do
  body <- textField (obj [("prompt",execution)]) "prompt" 16000
@@ -70,7 +72,7 @@ save s owner minutes execution identity previous source = do
   g <- maybe (failure 404 "Unknown Group") pure (findId owner groups)
   require (not (boolean (get g "archived"))) 409 "Restore this Group before changing its work"
  else requireActive s owner
- routines <- filter ((==owner) . (`at` "owner")) <$> DB.values s DB.ScheduledRoutines
+ routines <- map toJSON . filter ((==owner) . routineOwner) <$> readRoutines s
  let existing = identity >>= (`findId` routines)
  when (isJust identity) $ require (isJust existing) 404 "Unknown Scheduled Routine in this conversation"
  case (existing,previous) of

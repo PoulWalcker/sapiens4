@@ -89,6 +89,7 @@ a supplied Origin must match the loopback Host. Common entrypoints:
 | POST | `/api/agents/<id>/messages`, `/api/agents/<id>/attachments` | Submit chat or attachments |
 | GET | `/api/agents/<id>/notes` | Memo and file metadata |
 | GET | `/api/agents/<id>/tasks` | YAML export; `?format=json` returns task metadata |
+| POST | `/api/agents/<id>/routines`, `/api/agents/<id>/routines/<routine>/<action>` | Save a manual routine; edit, run, stop or delete |
 | GET | `/api/agents/<id>/decisions` | Decision records |
 | POST | `/api/agents/<id>/control` | Authorized team/workspace operations |
 | POST | `/api/agents/<id>/turns/<id>/retry`, `/api/agents/<id>/turns/<id>/cancel` | Explicit recovery |
@@ -97,6 +98,22 @@ a supplied Origin must match the loopback Host. Common entrypoints:
 Group notes, messages, attachments, tasks and calls use `/api/groups/<id>`.
 Updates require the relevant revision. [RSpec scenarios](../spec) exercise the
 public contracts; see [Testing](testing.md) to run them.
+
+### Routine commands
+
+Create accepts `operation`, `title`, `goal`, and a nonempty `criteria` array.
+Actions are `edit`, `run`, `stop`, and `delete`; each also requires the current
+`revision`. Edit supplies the same definition fields; run accepts optional text
+`inputs`; stop requires the occurrence's `run` ID. Ownership comes from the route,
+not the body. `/api/state` exposes definitions and occurrence history in
+`personal_routines`, and saved command refusals in `routine_errors`.
+
+Reuse the same operation ID and unchanged request to recover its original response
+without duplicating work, including after restart or while the corpora is paused.
+Reusing an ID with changed contents returns 409; use a new operation for new inputs.
+For an existing owner and valid operation ID, first refusals are saved as command outcomes; operation-ID conflicts also appear
+in the existing bounded activity history. Stale definition revisions return 409.
+A stopped occurrence cannot be reopened through ordinary call retry.
 
 ### Opt-in managed calls
 

@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveDataTypeable #-}
-module ManagedState (Conflict(..), load, enroll, save, acknowledge, restore, commands) where
+module ManagedState (Conflict(..), load, enroll, enrollOn, save, acknowledge, restore, commands) where
 
 import Control.Exception
 import Control.Monad
@@ -69,7 +69,9 @@ decodeState = either (throwIO . userError) pure . fromResult . fromJSON
  where fromResult (Error e)=Left e; fromResult (Success x)=Right x
 
 enroll :: Connection -> Text -> Turn -> Value -> Text -> [Value] -> IO ()
-enroll db owner turn message input attachments = withTransaction db $ do
+enroll db owner turn message input attachments = withTransaction db (enrollOn db owner turn message input attachments)
+enrollOn :: Connection -> Text -> Turn -> Value -> Text -> [Value] -> IO ()
+enrollOn db owner turn message input attachments = do
  let value=toJSON turn
      metadata=obj [("version",num 1),("revision",num 1),("pin",selectPresent ["input","flow"] value),("attempts_started",num 0),("receipts",arr []),("commands",arr []),("messages",arr [message]) ]
  execute db "INSERT INTO message_inputs(job,text,attachments) VALUES (?,?,?)" (runIdText (turnId turn),input,encodeText (arr attachments))

@@ -93,6 +93,7 @@ turnCommand s a identity rawAction external = do
  action <- decodeValue 404 (str rawAction)
  state <- agentState s a
  turn <- maybe (failure 404 "Unknown active turn") pure (find ((==RunId identity) . turnId) (agentTurns state))
+ when (rawAction=="retry") $ D.requireCallAllowed s turn
  work <- D.findWork s (RunId identity)
  require (not (maybe False (any ((==Just (RunId identity)) . D.callParent) . D.workCalls . fst) work)) 409 "This request was delegated; use the recipient call controls"
  command <- if has (toJSON turn) "managed" then do
@@ -129,13 +130,15 @@ recover s a = do
  DB.project s a
 finish :: Service -> Run -> Turn -> Either SomeException (Text,[Value]) -> IO ()
 finish s run turn outcome = do
- stop <- readIORef (runCancel run)
+ fenced <- not <$> D.callAllowed s turn
+ stop <- (||fenced) <$> readIORef (runCancel run)
  let a=agentIdText (runOwner run); i=runIdText (runId run)
-     (output,logs,error)=case outcome of
+     (rawOutput,logs,error)=case outcome of
       Left e -> case fromException e of
        Just (RunFailure message entries)->("",entries,Just message)
        Nothing->("",[],Just (D.exceptionText e))
       Right (value,entries)->(value,entries,Nothing)
+     output=if fenced then "" else rawOutput
      failureText=if stop then Just "Stopped by Admin. Saved work is preserved; review external effects before retrying." else error
  writeJSON (archivePath s a ("runs/"<>i)) (obj [("output",str output),("logs",arr logs),("error",maybe Null str failureText)])
  state <- agentState s a
@@ -163,6 +166,7 @@ finish s run turn outcome = do
  D.reconcileWorks s
 launch :: Service -> Text -> NonEmpty Turn -> Pulse -> Int -> Bool -> IO ()
 launch s a batch tick slot batching = do
+ mapM_ (D.requireCallAllowed s) batch
  state <- agentState s a
  let first=NE.head batch; i=turnId first; ids=map turnId (NE.toList batch)
      reserve t
@@ -225,6 +229,7 @@ admit s a tick = do
   _ -> pure ()
 onPulse :: Service -> Pulse -> IO ()
 onPulse s tick = do
+ stopRoutineRuns s
  R.dispatch s tick
  when (pulseFrequency tick==Bph60 || (pulseFrequency tick==Bpm60 && even (pulseNumber tick))) $ do
   D.pendingWorks s
@@ -246,6 +251,27 @@ onPulse s tick = do
     admit s a tick
     when (pulseFrequency tick==Bph60) $ admit s a tick)
     `catches` [Handler (\e@(APIError code _) -> if code==409 then pure () else throwIO e),Handler (\(_::IOException) -> pure ())]
+-- Replay durable occurrence fences through the existing call/process runtime.
+stopRoutineRuns :: Service -> IO ()
+stopRoutineRuns s = do
+ works <- D.readWorks s
+ blockedWorks <- filterM (fmap not . DB.occurrenceAllowed s . (`D.workField` "origin")) works
+ let owners=nub [agentIdText (D.callOwner call) | work<-blockedWorks,call<-NE.toList (D.workCalls work)]
+ forM_ owners $ \owner -> do
+  state <- agentState s owner
+  blocked <- filterM (fmap not . D.callAllowed s) [t | t<-agentTurns state,turnStatus t `elem` [Queued,Running,OutputPending]]
+  unless (null blocked) $ do
+   live <- readMVar (serviceRuns s)
+   forM_ blocked $ \t -> forM_ (M.lookup (turnId t) live) $ \r -> writeIORef (runCancel r) True
+   let ids=map turnId blocked
+       update t | turnId t `elem` ids && turnStatus t/=Running = t {turnStatus=Cancelled}
+                | otherwise = t
+   let updated=mapStateFields (put "output_buffer" (arr [b | b<-items (stateJSON state) "output_buffer",get b "turn" `notElem` map toJSON ids])) (mapTurns update state)
+   when (stateJSON updated/=stateJSON state) $ do
+    saveState s owner updated
+    DB.project s owner
+ D.reconcileWorks s
+
 milliseconds :: IO Int
 milliseconds = fromIntegral . (`div` 1000000) <$> getMonotonicTimeNSec
 startExecution :: Service -> IO ()

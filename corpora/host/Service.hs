@@ -27,6 +27,7 @@ import System.Posix.Files (setFileMode)
 #endif
 import Types
 import qualified Store as DB
+import qualified RoutineCommands as RC
 import Population
 import Workspace
 import Memo
@@ -119,7 +120,8 @@ snapshotUnlocked s = do
  prefs <- DB.singleton s DB.Preferences
  corpora <- corporaIdentity s
  groups <- G.snapshotGroups s
- routines <- DB.values s DB.ScheduledRoutines
+ routines <- map toJSON <$> R.readRoutines s
+ personal <- RC.snapshot s
  creation <- prompt s "creation-request"
  agentRows <- forM rows $ \row -> put "retired" . Bool <$> retired s (at row "id") <*> pure row
  owner <- maybe Null (toJSON . fst) <$> readIORef (serviceLease s)
@@ -143,7 +145,7 @@ snapshotUnlocked s = do
   pure (run,merge value (obj [("turn",str (runIdText (runId run))),("stopping",Bool stopping),("agencyKind",str "chatInput"),("slot",num (runSlot run))]))
  let groupTurns=M.fromList [(at request "id",at g "id") | g<-groups,request<-items g "requests"]
      projected=[maybe t (\gid->put "group" (str gid) t) (M.lookup (at t "id") groupTurns) | t<-turns]
- pure $ obj [("agents",arr agentRows),("turns",arr projected),("preferences",prefs),("corpora",corpora),("groups",arr groups),("routines",arr routines),("creation_template",str (T.strip creation)),("computer",obj [("owner",owner),("built",Bool built),("platform",str (if os=="mingw32" then "win32" else T.pack os))]),("pulses",arr pulses),("events",events),("pulse",pulse),("provider",str "codex"),("activity",obj [(agentIdText (runOwner r),v) | (r,v)<-activity]),("run_activity",obj [(runIdText (runId r),v) | (r,v)<-activity]),("main_agent_id",str chief),("workloads",arr (D.workSummaries works)),("attachment_drafts",obj drafts),("orchestration",obj orchestration)]
+ pure $ obj [("agents",arr agentRows),("turns",arr projected),("preferences",prefs),("corpora",corpora),("groups",arr groups),("routines",arr routines),("personal_routines",get personal "definitions"),("routine_errors",get personal "errors"),("creation_template",str (T.strip creation)),("computer",obj [("owner",owner),("built",Bool built),("platform",str (if os=="mingw32" then "win32" else T.pack os))]),("pulses",arr pulses),("events",events),("pulse",pulse),("provider",str "codex"),("activity",obj [(agentIdText (runOwner r),v) | (r,v)<-activity]),("run_activity",obj [(runIdText (runId r),v) | (r,v)<-activity]),("main_agent_id",str chief),("workloads",arr (D.workSummaries works)),("attachment_drafts",obj drafts),("orchestration",obj orchestration)]
 savePreferences :: Service -> Value -> IO Value
 savePreferences s d = do
  require (all (`elem` ["selected","panel","scope","groupView","panes","drafts","attachment_drafts"]) (keys d)) 400 "Unknown preference field"
@@ -166,7 +168,8 @@ dispatch s method target body = locked s $ do
  let (path,query)=T.breakOn "?" target; parts=filter (not . T.null) (T.splitOn "/" path); write=method `elem` ["POST","PUT"]; d=fromMaybe Null body
  when write $ require (case d of Object _->True; _->False) 400 "Expected a JSON object"
  cfg <- corporaSettings s
- when (write && corporaStatus cfg/=Active && ("/messages" `T.isSuffixOf` path || "/run" `T.isSuffixOf` path || "/turns/" `T.isInfixOf` path)) $ failure 409 "Activate this corpora before starting work"
+ let personalRun=case parts of ["api","agents",_,"routines",_,"run"] -> True; _ -> False
+ when (write && not personalRun && corporaStatus cfg/=Active && ("/messages" `T.isSuffixOf` path || "/run" `T.isSuffixOf` path || "/turns/" `T.isInfixOf` path)) $ failure 409 "Activate this corpora before starting work"
  let json code action = do value<-action; pure (code,encode value,"application/json; charset=utf-8")
      owner kind a=if kind=="groups" then void (G.getGroup s a False) else void (DB.agent s a)
  case (method,parts) of
@@ -198,6 +201,13 @@ dispatch s method target body = locked s $ do
   ("POST",["api","groups",gid,"calls",rid,action]) -> json 200 (GC.actionGroup s gid rid action)
   ("POST",["api","agents"]) -> json 201 $ do row<-createAgent s d; Mgt.prepare s (at row "id"); pure row
   ("PUT",["api","agents",a]) -> json 200 (updateAgent s a d)
+  ("POST",["api","agents",a,"routines"]) -> do
+   (code,value)<-RC.command s a "create" "" d
+   pure (code,encode value,"application/json; charset=utf-8")
+  ("POST",["api","agents",a,"routines",rid,action]) -> do
+   (code,value)<-RC.command s a action rid d
+   when (code<300 && action `elem` ["stop","delete"]) (E.stopRoutineRuns s)
+   pure (code,encode value,"application/json; charset=utf-8")
   ("POST",["api","agents",a,"messages"]) -> json 202 (E.submitTurn s a d)
   ("POST",["api","agents",a,"control"]) -> json 200 (withActor s a Nothing (Mgt.control s a d))
   ("POST",["api","agents",a,"turns",tid,action]) -> json 200 (E.turnAction s a tid action)

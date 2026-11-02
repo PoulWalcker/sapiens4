@@ -242,6 +242,7 @@ RSpec.describe 'Opt-in managed execution and saved-file compatibility', :host do
     host.stop
     database do |db|
       db.execute('DROP TABLE managed_turns')
+      db.execute('DROP TABLE command_receipts')
       db.execute('PRAGMA user_version=8')
     end
     host.start

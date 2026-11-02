@@ -154,6 +154,15 @@ findWork :: Service -> RunId -> IO (Maybe (Workload,WorkCall))
 findWork s i = do
  works <- readWorks s
  pure $ listToMaybe [(w,c) | w <- works,c <- NE.toList (workCalls w),callIdentity c == i]
+-- Canonical membership prevents editable legacy child files from removing a stop fence.
+callAllowed :: Service -> Turn -> IO Bool
+callAllowed s turn = do
+ found <- findWork s (turnId turn)
+ DB.occurrenceAllowed s (maybe (turnField turn "origin") (\(work,_) -> workField work "origin") found)
+requireCallAllowed :: Service -> Turn -> IO ()
+requireCallAllowed s turn = do
+ allowed <- callAllowed s turn
+ unless allowed (failure 409 "Routine run is stopped")
 getWork :: Service -> RunId -> IO (Workload,WorkCall)
 getWork s i = findWork s i >>= maybe (failure 409 "Unknown workload call") pure
 saveWork :: Service -> Workload -> IO ()
@@ -212,14 +221,16 @@ decide s run turn state node logs = do
  (rendered,record) <- locked s $ do
   source <- templates s >>= maybe (failure 400 "Unknown decision node") pure . find ((==toJSON node) . (`get` "node"))
   (w,c) <- getWork s (turnId turn)
+  DB.requireOccurrence s (workField w "origin")
   conv <- conversation s (runOwner run) turn state
   chief <- DB.mainAgent s
   members <- team s
   extra <- if KM.member "agency_batch" (agentFields state) then ("\n\n" <>) <$> prompt s "agency-chat" else pure ""
-  scheduled <- if has (workField w "origin") "routine" then ("\n\n" <>) <$> prompt s "scheduled-execution" else pure ""
+  scheduled <- if has (workField w "origin") "routine" && at (workField w "origin") "trigger"/="manual" then ("\n\n" <>) <$> prompt s "scheduled-execution" else pure ""
+  pinned <- if node==ReadyToWork && has (workField w "origin") "occurrence" then ("\n\n" <>) <$> prompt s "decision-routine-specification" else pure ""
   wiki <- prompt s "notes-wiki"
   envelope <- prompt s "decision-envelope"
-  let instruction = at source "content" <> extra <> scheduled
+  let instruction = at source "content" <> extra <> scheduled <> pinned
       context = obj [("originalIntent",workField w "originalIntent"),("task",workField w "task"),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
       rendered = render envelope [("node",wireName node),("instruction",instruction),("notes_wiki",render wiki [("notes_example",T.pack (repositoryRoot s </> "corpora/prompts/examples/jarvis-notes.html"))]),("context",jsonText context),("events",T.intercalate ", " (sort (eventsFor node)))]
   (model,effort) <- modelDefaults
@@ -269,6 +280,7 @@ validateTarget s w source target = do
 transfer :: Service -> Run -> Text -> Text -> Value -> IO Text
 transfer s run request reason record = do
  (w,c) <- getWork s (runId run)
+ DB.requireOccurrence s (workField w "origin")
  stopped <- readIORef (runCancel run)
  require (not stopped) 409 "Stopped before handoff acceptance"
  let target=text (callField c "target")
@@ -315,6 +327,7 @@ runDecision s run turn state = do
         (response,record) <- decide s run turn state node logs
         result <- locked s $ do
          (current,call) <- getWork s (turnId turn)
+         DB.requireOccurrence s (workField current "origin")
          stopped <- readIORef (runCancel run)
          require (not stopped) 409 "Stopped by Admin"
          chief <- DB.mainAgent s
@@ -345,6 +358,7 @@ runDecision s run turn state = do
            finish current (setCallFields [("target",get created "id"),("creation",obj [("name",str name),("role",str role)]),("creationReceipt",obj [("agent",created),("created",Bool True)])] call) Delegation
           PrepareTask taskType spec -> do
            let previous=get (workField current "task") "specification"
+           when (has (workField current "origin") "occurrence") $ require (toJSON spec==previous) 409 "Routine goal, inputs and criteria are pinned for this run"
            require (all (`elem` map str (NE.toList (specCriteria spec))) (items previous "completionCriteria")) 400 "A handoff cannot remove accepted completion criteria"
            let task=mergeFields [("taskType",str (if has (workField current "origin") "routine" then "automated" else taskType)),("specification",toJSON spec)] (workField current "task")
            finish (setWorkField "task" task current) call Execution
@@ -370,7 +384,8 @@ reconcileWorks s = do
  turns <- DB.turns s
  works <- readWorks s
  forM_ works $ \w -> do
-  updated <- forM (workCalls w) $ \c -> case findId (runIdText (callIdentity c)) turns of
+  permitted <- DB.occurrenceAllowed s (workField w "origin")
+  updated <- forM (workCalls w) $ \c -> if not permitted && callState c `elem` [CallQueued,CallRunning,CallWaiting] then pure (c {callState=CallCancelled,callOutput=Nothing}) else case findId (runIdText (callIdentity c)) turns of
    Just t | isNothing (callOutput c) -> do
     status <- field 500 t "status"
     pure $ case status of
@@ -388,25 +403,29 @@ pendingWorks :: Service -> IO ()
 pendingWorks s = do
  works <- readWorks s
  existing <- DB.turns s
- forM_ works $ \w -> forM_ (workCalls w) $ \c -> when (callState c == CallQueued && isJust (callParent c) && isNothing (findId (runIdText (callIdentity c)) existing)) $ do
-  let a=agentIdText (callOwner c)
-      parent=find ((==callParent c) . Just . callIdentity) (workCalls w)
-      origin=mergeFields [("workloadId",str (workloadId w)),("taskId",get (workField w "task") "taskId"),("caller",maybe Null (toJSON . callOwner) parent),("parentCall",toJSON (callParent c))] (remove ["agent","call"] (workField w "origin"))
-  time <- now
-  let turn=toJSON (newTurn (callIdentity c) Chat (callRequest c) time origin (has origin "routine"))
-      message=obj [("role",str "user"),("content",str (callRequest c)),("turn",toJSON (callIdentity c)),("time",str time),("origin",origin)]
-  modifyState s a $ \state -> if isJust (findId (runIdText (callIdentity c)) (items state "turns")) then state else appendItems "chat" [message] (appendItems "turns" [turn] state)
-  DB.project s a
+ forM_ works $ \w -> do
+  permitted <- DB.occurrenceAllowed s (workField w "origin")
+  forM_ (workCalls w) $ \c -> when (permitted) $ when (callState c == CallQueued && isJust (callParent c) && isNothing (findId (runIdText (callIdentity c)) existing)) $ do
+   let a=agentIdText (callOwner c)
+       parent=find ((==callParent c) . Just . callIdentity) (workCalls w)
+       origin=mergeFields [("workloadId",str (workloadId w)),("taskId",get (workField w "task") "taskId"),("caller",maybe Null (toJSON . callOwner) parent),("parentCall",toJSON (callParent c))] (remove ["agent","call"] (workField w "origin"))
+   time <- now
+   let turn=toJSON (newTurn (callIdentity c) Chat (callRequest c) time origin (has origin "routine" && at origin "trigger"/="manual"))
+       message=obj [("role",str "user"),("content",str (callRequest c)),("turn",toJSON (callIdentity c)),("time",str time),("origin",origin)]
+   modifyState s a $ \state -> if isJust (findId (runIdText (callIdentity c)) (items state "turns")) then state else appendItems "chat" [message] (appendItems "turns" [turn] state)
+   DB.project s a
 clarify :: Service -> Text -> Text -> Text -> IO Text
 clarify s a wid message = do
  works <- readWorks s
  w <- maybe (failure 409 "Clarification requires the waiting Chief call") pure (find ((==wid) . workloadId) works)
+ DB.requireOccurrence s (workField w "origin")
  chief <- DB.mainAgent s
  let previous=NE.last (workCalls w)
  require (callState previous == CallWaiting && a==chief) 409 "Clarification requires the waiting Chief call"
  i <- newId
  let call=setCallFields [("activation",str "RequestClarified")] (newCall (RunId i) (AgentId a) (Just (callIdentity previous)) ChiefTriage CallQueued message)
- saveWork s w { workCalls=workCalls w <> (call :| []) }
+ let consumed c=if callIdentity c==callIdentity previous then c {callState=CallDelegated} else c
+ saveWork s w { workCalls=fmap consumed (workCalls w) <> (call :| []) }
  pendingWorks s
  pure i
 workTasks :: Service -> Text -> Bool -> IO Value

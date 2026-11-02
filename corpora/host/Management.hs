@@ -25,7 +25,8 @@ import qualified Groups as G
 activeTurn :: Service -> Text -> Maybe Text -> IO (Maybe Text)
 activeTurn s a specific = do
  state <- agentState s a
- pure $ listToMaybe [runIdText (turnId t) | t<-agentTurns state,turnStatus t==Running,maybe True ((==turnId t) . RunId) specific]
+ candidates <- filterM (D.callAllowed s) [t | t<-agentTurns state,turnStatus t==Running,maybe True ((==turnId t) . RunId) specific]
+ pure $ runIdText . turnId <$> listToMaybe candidates
 status :: Service -> Text -> IO Value
 status s a = do
  chief <- DB.mainAgent s

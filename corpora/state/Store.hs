@@ -13,7 +13,7 @@ import Data.String (fromString)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding
-import Database.SQLite.Simple hiding (withTransaction)
+import Database.SQLite.Simple hiding (withTransaction,field)
 import qualified Database.SQLite.Simple as SQLite
 import System.FilePath
 import Text.Read (readMaybe)
@@ -80,7 +80,7 @@ initialize :: Service -> IO ()
 initialize s = connection s $ \db -> do
  execute_ db "PRAGMA journal_mode=WAL"
  [Only version] <- query_ db "PRAGMA user_version" :: IO [Only Int]
- require (version `elem` [0..9]) 500 ("Unsupported CORPORA schema: " <> T.pack (show version))
+ require (version `elem` [0..10]) 500 ("Unsupported CORPORA schema: " <> T.pack (show version))
  mapM_ (execute_ db) [
   "CREATE TABLE IF NOT EXISTS scheduled_routines (sequence INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS system_pulse (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)",
@@ -92,6 +92,7 @@ initialize s = connection s $ \db -> do
   "CREATE TABLE IF NOT EXISTS preferences (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, agent TEXT NOT NULL REFERENCES agents(id), value TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS message_inputs (job TEXT PRIMARY KEY, text TEXT NOT NULL, attachments TEXT NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS command_receipts (scope TEXT NOT NULL, owner TEXT NOT NULL, id TEXT NOT NULL, target TEXT NOT NULL, request TEXT NOT NULL, code INTEGER NOT NULL, response TEXT NOT NULL, created TEXT NOT NULL, PRIMARY KEY(scope,owner,id))",
   "CREATE TABLE IF NOT EXISTS managed_turns (id TEXT PRIMARY KEY, agent TEXT NOT NULL REFERENCES agents(id), value TEXT NOT NULL, projection TEXT, pending INTEGER NOT NULL)",
   "CREATE TABLE IF NOT EXISTS workloads (id TEXT PRIMARY KEY, value TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS groups (id TEXT PRIMARY KEY, value TEXT NOT NULL)",
@@ -99,7 +100,7 @@ initialize s = connection s $ \db -> do
   "CREATE TABLE IF NOT EXISTS activity_events (id INTEGER PRIMARY KEY, owner TEXT NOT NULL, timestamp TEXT NOT NULL, actor TEXT NOT NULL, entity TEXT NOT NULL, event TEXT NOT NULL, agency TEXT, details TEXT NOT NULL)",
   "CREATE INDEX IF NOT EXISTS activity_events_owner ON activity_events(owner,id)"]
  when (version `elem` [1,2]) $ execute_ db "INSERT OR IGNORE INTO turns SELECT * FROM jobs WHERE flow IN ('chat','computer')"
- execute_ db "PRAGMA user_version=9"
+ execute_ db "PRAGMA user_version=10"
 agents :: Service -> IO [Value]
 agents s = queryRows s "SELECT * FROM agents ORDER BY created,id" ["id","name","role","color","face","created"] []
 agent :: Service -> Text -> IO Value
@@ -158,7 +159,9 @@ turns s = do
  pure [let msg=M.findWithDefault empty (at v "id") messagesById; d=M.findWithDefault empty (at v "id") detailsById in merge (merge v d) (obj [("attachments",get msg "attachments" `asJSON` arr []),("input",get msg "text" `fallback` get v "input")]) | v <- rows]
  where asJSON (String t) _ = parseJSONText t; asJSON _ def = def
 saveRoutine :: Service -> Value -> IO Value
-saveRoutine s v = connection s $ \db -> do
+saveRoutine s v = connection s $ \db -> saveRoutineOn db v
+saveRoutineOn :: Connection -> Value -> IO Value
+saveRoutineOn db v = do
  sequenceId <- if has v "id" then maybe (failure 500 "Invalid scheduled routine ID") pure (T.stripPrefix "routine_sch_" (at v "id") >>= readMaybe . T.unpack :: Maybe Int64) else execute_ db "INSERT INTO scheduled_routines(value) VALUES ('{}')" >> lastInsertRowId db
  let i = "routine_sch_" <> T.justifyRight 5 '0' (T.pack (show sequenceId)); value = put "id" (str i) v
  execute db "UPDATE scheduled_routines SET value=? WHERE sequence=?" (jsonText value,sequenceId)
@@ -169,3 +172,20 @@ pulseCall s tick a kind slot groups = do
  let v = merge (toJSON tick) (obj [("agent",str a),("agencyKind",str kind),("slot",num slot),("timestamp",str t)])
  executeSQL s "INSERT INTO pulse_calls(value) VALUES (?)" [SQLText (jsonText v)]
  record s (a:groups) a "pulse.dispatched" v "system" (Just kind)
+
+-- A managed occurrence must have its authoritative Workload and a valid gate.
+-- Legacy calls without an occurrence retain their original behavior.
+occurrenceAllowed :: Service -> Value -> IO Bool
+occurrenceAllowed s origin
+ | not (has origin "occurrence") = pure True
+ | otherwise = do
+    identity <- textField origin "occurrence" 128
+    rows <- queryRows s "SELECT value FROM workloads WHERE id=?" ["value"] [SQLText identity]
+    case rows of
+     [] -> pure False
+     row:_ -> do
+      work <- decodeStored (at row "value")
+      gate <- field 500 work "executionGate"
+      pure (gate==ExecutionOpen)
+requireOccurrence :: Service -> Value -> IO ()
+requireOccurrence s origin = occurrenceAllowed s origin >>= \ok -> require ok 409 "Routine run was stopped or deleted; start a new run explicitly"

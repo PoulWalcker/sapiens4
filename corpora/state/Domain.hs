@@ -30,6 +30,25 @@ parseWire :: Wire a => Value -> Parser a
 parseWire = withText "domain value" $ \name ->
  maybe (fail ("Unknown value: " ++ T.unpack name)) pure (find ((==name) . wireName) [minBound..maxBound])
 
+-- Missing trigger is the explicitly supported pre-trigger interval format.
+data RoutineTrigger = ManualTrigger | IntervalTrigger deriving (Eq, Show, Enum, Bounded)
+instance Wire RoutineTrigger where
+ wireName ManualTrigger = "manual"
+ wireName IntervalTrigger = "interval"
+instance FromJSON RoutineTrigger where parseJSON = parseWire
+instance ToJSON RoutineTrigger where toJSON = str . wireName
+routineTrigger :: Value -> Parser RoutineTrigger
+routineTrigger = withObject "Routine" $ \o -> case KM.lookup "trigger" o of
+ Nothing -> pure IntervalTrigger
+ Just value -> parseJSON value
+
+data ExecutionGate = ExecutionOpen | ExecutionStopped deriving (Eq, Show, Enum, Bounded)
+instance Wire ExecutionGate where
+ wireName ExecutionOpen = "open"
+ wireName ExecutionStopped = "stopped"
+instance FromJSON ExecutionGate where parseJSON = parseWire
+instance ToJSON ExecutionGate where toJSON = str . wireName
+
 data TurnStatus = Queued | Running | OutputPending | Done | Failed | Interrupted | Cancelled | Warning deriving (Eq, Ord, Show, Enum, Bounded)
 instance Wire TurnStatus where
  wireName status = case status of Queued -> "queued"; Running -> "running"; OutputPending -> "output_pending"; Done -> "done"; Failed -> "failed"; Interrupted -> "interrupted"; Cancelled -> "cancelled"; Warning -> "warning"
