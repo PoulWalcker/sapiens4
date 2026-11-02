@@ -21,6 +21,8 @@ import GHC.Clock
 import System.Directory
 import Types
 import qualified Store as DB
+import qualified ManagedState as Managed
+import qualified Command as ScheduleCommand
 import Population
 import Workspace
 import qualified Delegation as D
@@ -33,7 +35,7 @@ trimConversation s a = do
  state <- stateJSON <$> agentState s a
  bounded <- foldM (\current field -> do
   let rows=items current field
-      settled=filter (\row -> at row "status" `notElem` ["queued","running","output_pending"]) rows
+      settled=filter (\row -> at row "status" `notElem` ["queued","running","output_pending"] && not (has row "managed")) rows
       removed=take (max 0 (length settled-100)) settled
   unless (null removed) $ newId >>= \i -> writeJSON (archivePath s a (field<>"/"<>i)) (arr removed)
   pure (put field (arr (filter (`notElem` removed) rows)) current)) state ["chat","events","turns"]
@@ -41,7 +43,7 @@ trimConversation s a = do
   let prune value removed [] = pure (value,removed)
       prune value removed (row:rest)
        | BL.length (encode value)<=800000 = pure (value,removed)
-       | at row "status" `elem` ["queued","running","output_pending"] || (field=="turns" && Just row==listToMaybe (reverse (items value field))) = prune value removed rest
+       | has row "managed" || at row "status" `elem` ["queued","running","output_pending"] || (field=="turns" && Just row==listToMaybe (reverse (items value field))) = prune value removed rest
        | otherwise = prune (put field (arr (filter (/=row) (items value field))) value) (removed++[row]) rest
   (result,removed) <- prune current [] (items current field)
   unless (null removed) $ newId >>= \i -> writeJSON (archivePath s a (field<>"/"<>i)) (arr removed)
@@ -54,6 +56,10 @@ submitTurn s a d = do
  attachments <- resolveAttachments s a (get d "attachments" `fallback` arr []) True
  require (not (T.null input) || not (null attachments)) 400 "Write a message or attach a file"
  flow <- decodeValue 400 flowValue
+ managed <- decodeValue 400 (get d "managed" `fallback` Bool False)
+ when managed $ do
+  require (flow==Chat && not (has d "workload")) 400 "Managed execution currently supports ordinary chat submissions only"
+  require (ScheduleCommand.interpret (not (null attachments)) (T.unpack input)==Right Nothing) 400 "Managed execution does not accept schedule commands"
  binary <- codexBinary
  require (isJust binary) 503 "Codex CLI is missing. Install it and run codex login."
  when (flow==Computer) $ blindly s >>= doesFileExist >>= \built -> require built 503 "Blindly4 is not built. Run ./build/start.sh to build it."
@@ -69,34 +75,47 @@ submitTurn s a d = do
    i <- if has d "workload" then D.clarify s a (at d "workload") message else do
     i <- newId
     time <- now
-    let turn=toJSON (newTurn (RunId i) flow message time Null True)
+    let typed=newTurn (RunId i) flow message time Null (not managed)
+        turn=toJSON typed
         msg=obj [("role",str "user"),("content",str message),("turn",str i),("time",str time),("origin",Null)]
-    modifyState s a $ \state -> merge state (obj [("turns",arr (items state "turns"++[turn])),("chat",arr (items state "chat"++[msg]))])
+    when managed (enrollManaged s a typed msg input attachments)
+    modifyState s a $ \state -> merge state (obj ([("turns",arr (items state "turns"++[turn])) | not managed]++[("chat",arr (items state "chat"++[msg])) | not managed]))
     pure i
    DB.message s i input attachments
    DB.project s a
    trimConversation s a
    pure (obj [("id",str i),("agent",str a),("status",str "queued"),("flow",toJSON flow)])
 turnAction :: Service -> Text -> Text -> Text -> IO Value
-turnAction s a identity rawAction = do
+turnAction s a identity rawAction = turnCommand s a identity rawAction Nothing
+turnCommand :: Service -> Text -> Text -> Text -> Maybe Value -> IO Value
+turnCommand s a identity rawAction external = do
  requireActive s a
  action <- decodeValue 404 (str rawAction)
  state <- agentState s a
  turn <- maybe (failure 404 "Unknown active turn") pure (find ((==RunId identity) . turnId) (agentTurns state))
  work <- D.findWork s (RunId identity)
  require (not (maybe False (any ((==Just (RunId identity)) . D.callParent) . D.workCalls . fst) work)) 409 "This request was delegated; use the recipient call controls"
- let leader=batchLeader turn
+ command <- if has (toJSON turn) "managed" then do
+  cmd <- case external of
+   Just value -> pure value
+   Nothing -> do i<-newId; pure (obj [("id",str i),("action",str rawAction),("revision",get (turnField turn "managed") "revision")])
+  pure (Just (identity,cmd))
+  else pure Nothing
+ let duplicate=maybe False ((`elem` items (turnField turn "managed") "commands") . snd) command
+     leader=batchLeader turn
      update f = mapTurns (\t -> if batchLeader t == leader then f t else t)
- case action of
+ if duplicate then saveStateCommand s a state command else case action of
   Retry -> do
    require (retryableStatus (turnStatus turn)) 409 "Only failed or interrupted batches can be retried"
-   saveState s a (update retryTurn state)
+   saveStateCommand s a (update (withTurnFields (remove ["cancel_requested"]) . retryTurn) state) command
   Cancel -> do
    require (turnStatus turn `notElem` [Done,OutputPending]) 409 "Completed input cannot be cancelled"
    runs <- readMVar (serviceRuns s)
    case M.lookup leader runs of
-    Just run -> writeIORef (runCancel run) True
-    Nothing -> saveState s a (update (\t -> t { turnStatus = Cancelled }) state)
+    Just run -> do
+     if isJust command then saveStateCommitted s a (update (withTurnFields (put "cancel_requested" (Bool True))) state) command (writeIORef (runCancel run) True)
+      else writeIORef (runCancel run) True
+    Nothing -> saveStateCommand s a (update (\t -> t { turnStatus = Cancelled }) state) command
  DB.project s a
  trimConversation s a
  D.reconcileWorks s
@@ -104,6 +123,7 @@ turnAction s a identity rawAction = do
  pure (obj [("id",str identity),("status",maybe Null (toJSON . turnStatus) (find ((==RunId identity) . turnId) (agentTurns updated)))])
 recover :: Service -> Text -> IO ()
 recover s a = do
+ restoreManaged s a
  modifyTurns s a $ \t -> if turnStatus t == Running then
   (withTurnFields (put "error" (str "Runner stopped before saving a reply; inspect effects before retrying")) t) { turnStatus = Interrupted } else t
  DB.project s a
@@ -135,7 +155,9 @@ finish s run turn outcome = do
             | buffered = mapStateFields (appendItems "output_buffer" [obj [("turn",str i),("members",toJSON ids),("content",str output),("origin",origin)]]) updated
             | has origin "group" = updated
             | otherwise = mapStateFields (put "last_output" (str output) . appendItems "chat" [obj [("role",str "agent"),("content",str output),("turn",str i),("time",str time),("origin",origin)]]) updated
- saveState s a result
+ let receipt=obj [("status",str (if isJust failureText then if stop then "interrupted" else "failed" else "done")),("output",str output),("error",maybe Null str failureText),("recorded_at",str time)]
+     recorded=mapTurns (\t -> if turnId t `elem` ids && has (toJSON t) "managed" then withTurnFields (put "managed_result" receipt) t else t) result
+ saveState s a recorded
  DB.project s a
  trimConversation s a
  D.reconcileWorks s
@@ -212,10 +234,18 @@ onPulse s tick = do
   forM_ rows $ \row -> do
    let a=at row "id"
    inactive <- retired s a
-   unless inactive $ do
+   unless inactive $ (do
+    restoreManaged s a
+    current <- agentState s a
+    activeRuns <- readMVar (serviceRuns s)
+    forM_ (agentTurns current) $ \t -> when (has (toJSON t) "managed" && boolean (turnField t "cancel_requested")) $
+     forM_ (M.lookup (turnId t) activeRuns) $ \run -> writeIORef (runCancel run) True
+    let pending=Managed.commands current
+    forM_ pending $ \(identity,command) -> void (turnCommand s a identity (at command "action") (Just command))
     publish s a tick
     admit s a tick
-    when (pulseFrequency tick==Bph60) $ admit s a tick
+    when (pulseFrequency tick==Bph60) $ admit s a tick)
+    `catches` [Handler (\e@(APIError code _) -> if code==409 then pure () else throwIO e),Handler (\(_::IOException) -> pure ())]
 milliseconds :: IO Int
 milliseconds = fromIntegral . (`div` 1000000) <$> getMonotonicTimeNSec
 startExecution :: Service -> IO ()

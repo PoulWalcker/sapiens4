@@ -97,3 +97,36 @@ a supplied Origin must match the loopback Host. Common entrypoints:
 Group notes, messages, attachments, tasks and calls use `/api/groups/<id>`.
 Updates require the relevant revision. [RSpec scenarios](../spec) exercise the
 public contracts; see [Testing](testing.md) to run them.
+
+### Opt-in managed calls
+
+Ordinary chat submissions can explicitly send `"managed": true`. This mode is
+currently available through HTTP; ordinary UI submissions retain their existing
+behavior. Computer submissions, workload clarification and schedule commands do
+not accept this option. Managed calls run individually in the existing scheduler.
+
+SQLite owns a managed call's pinned input/flow, lifecycle, number of admitted
+attempts (`attempts_started`, advanced before launching the provider), outcome receipts and accepted command identities. Its `state.json` turn
+is a protected projection; other turns and unrelated saved fields retain their
+existing file authority, including same-revision external edits. A receipt records
+the call's outcome, not independent proof of an external action or task acceptance.
+The attempt counter is not a token or spending budget. Delegated recipient calls
+continue through the existing delegation path; they are not implicitly managed.
+
+Use the usual HTTP cancel/retry endpoints. A file-based client may instead add
+`"managed_command": {"id": "unique-operation", "action": "retry", "revision": N}`
+to the managed turn, using its current `managed.revision`. `cancel` is also
+supported. The worker consumes the command; reading state does not execute it.
+An exact accepted command replay is harmless. Reusing its id with different
+contents, stale new commands, deleting a managed turn, or changing protected
+fields returns a visible conflict. Preserve the rest of the projection when
+submitting a command. Repair a conflicting file from its known valid contents;
+do not rewrite protected facts to reset an attempt.
+
+Canonical transitions and their file-projection intents commit together.
+Interrupted projection writes are recovered on startup or worker pulses without
+starting a fresh attempt. Calls that were running at shutdown become interrupted;
+retry remains explicit, and prior receipts are retained. Back up SQLite and
+`agentpy/` together. Managed turns and their command/receipt history currently stay
+in the active projection; archival and large-history scaling are not implemented
+for this opt-in mode yet.
