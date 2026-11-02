@@ -28,6 +28,7 @@ import System.Posix.Files (setFileMode)
 import Types
 import qualified Store as DB
 import qualified RoutineCommands as RC
+import qualified Composer
 import qualified Automation
 import Population
 import Workspace
@@ -76,6 +77,7 @@ openService path = do
       d <- directory s
       saveDirectory s $ foldl (\dir row -> let a=at row "id"; entry=get dir a in put a (put "parent" (if a==chief then Null else get entry "parent" `fallback` str chief) entry) dir) d agents
       mapM_ (E.recover s . (`at` "id")) agents
+      Composer.recover s
       prefs <- DB.singleton s DB.Preferences
       let panel=at prefs "panel"; updated=if panel=="mindmap" then put "panel" (str "notes") prefs else if panel `elem` ["cron","log"] then put "panel" (str "chat") prefs else prefs
       DB.saveSingleton s DB.Preferences (remove ["work_views"] updated)
@@ -203,6 +205,7 @@ dispatch s method target body = locked s $ do
   ("POST",["api","agents"]) -> json 201 $ do row<-createAgent s d; Mgt.prepare s (at row "id"); pure row
   ("PUT",["api","agents",a]) -> json 200 (updateAgent s a d)
   ("GET",["api","agents",a,"routines",rid,"runs",run]) -> json 200 (RC.detail s a rid run)
+  ("GET",["api","agents",a,"routines",rid,"preparations",preparation]) -> json 200 (Composer.detail s a rid preparation)
   ("GET",["api","agents",a,"routines",rid,"analysis",analysis]) -> json 200 (Automation.detail s a rid analysis)
   ("POST",["api","agents",a,"routines"]) -> do
    (code,value)<-RC.command s a "create" "" d

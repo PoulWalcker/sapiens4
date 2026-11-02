@@ -145,6 +145,44 @@ For an existing owner and valid operation ID, first refusals are saved as comman
 in the existing bounded activity history. Stale definition revisions return 409.
 A stopped occurrence cannot be reopened through ordinary call retry.
 
+### Preparing a routine candidate
+
+A current `Ready` analysis can be used by
+`POST /api/agents/<owner>/routines/<routine>/prepare`, with `operation`, current
+`revision`, and `analysis` ID. The source run must have an accepted task contract
+for the current instructions. The response contains a `preparation` ID.
+`GET /api/agents/<owner>/routines/<routine>/preparations/<preparation>` exposes
+its immutable candidate version, independent fixtures, actual checks, review,
+and operation evidence. `stop-preparation` accepts `operation`, `revision`, and
+`preparation`. Replaying an unchanged operation returns its original response;
+a failed or interrupted attempt needs a new explicit operation.
+
+Preparation designs hidden expected results before generating code, executes the
+actual code against those inputs, then requests separate review. Success is
+`awaiting_occurrence`: it does not activate code, publish a Kit entry, or perform
+another business occurrence. Ordinary routine execution remains unchanged.
+Editing the goal or criteria, deleting the routine, or stopping preparation
+prevents further promotion. Historical evidence remains inspectable.
+
+The first verified external runtime profile requires macOS ARM64 with a running
+local OrbStack/Docker 29.4.0 daemon and the already-cached official
+`python@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a`
+Linux ARM64 image (Python 3.13.15). The app does not install or pull a runtime.
+`SAPIENS_GENERATED_DOCKER` may specify an absolute Docker CLI path, and
+`SAPIENS_GENERATED_SOCKET` a local `unix:///...` endpoint; defaults use
+`~/.orbstack/bin/docker` and `~/.orbstack/run/docker.sock`.
+Unavailable profiles, non-standard dependencies, or effect capabilities fail
+explicitly. Other languages need their own verified profiles.
+
+Each fixture runs without networking or host mounts, with a read-only root,
+unprivileged user, dropped capabilities, and bounded memory, process count,
+CPU, time, and streamed output. These are per-workload limits; they do not bound
+the whole Docker VM's host memory. Durable container ownership is recorded before
+start. After a host crash, restart reconciles only the matching owned containers
+without replaying the attempt. If cleanup is uncertain, preparation remains
+`cleanup_pending`; restore the runtime and restart the app before another
+preparation. Ordinary work remains available.
+
 ### Opt-in managed calls
 
 Ordinary chat submissions can explicitly send `"managed": true`. This mode is

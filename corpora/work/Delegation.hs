@@ -32,9 +32,9 @@ import Population
 import Memo
 import Provider
 
-data Node = Assessing | ChiefTriage | CreatingSapi | ReadyToWork | Delegation | Execution | AutomationAnalysis | OutcomeNode | WaitingForAdmin deriving (Eq, Ord, Show, Enum, Bounded)
+data Node = Assessing | ChiefTriage | CreatingSapi | ReadyToWork | Delegation | Execution | AutomationAnalysis | Preparation | OutcomeNode | WaitingForAdmin deriving (Eq, Ord, Show, Enum, Bounded)
 instance Wire Node where
- wireName node = case node of Assessing -> "Assessing"; ChiefTriage -> "ChiefTriage"; CreatingSapi -> "CreatingSapi"; ReadyToWork -> "ReadyToWork"; Delegation -> "Delegation"; Execution -> "Execution"; AutomationAnalysis -> "AutomationAnalysis"; OutcomeNode -> "Outcome"; WaitingForAdmin -> "WaitingForAdmin"
+ wireName node = case node of Assessing -> "Assessing"; ChiefTriage -> "ChiefTriage"; CreatingSapi -> "CreatingSapi"; ReadyToWork -> "ReadyToWork"; Delegation -> "Delegation"; Execution -> "Execution"; AutomationAnalysis -> "AutomationAnalysis"; Preparation -> "Preparation"; OutcomeNode -> "Outcome"; WaitingForAdmin -> "WaitingForAdmin"
 instance FromJSON Node where parseJSON = parseWire
 instance ToJSON Node where toJSON = str . wireName
 
@@ -195,6 +195,7 @@ eventsFor node = case node of
  Delegation -> ["HandoffPrepared"]
  Execution -> ["Outcome","OutsideSpecialization"]
  AutomationAnalysis -> ["AutomationAnalyzed"]
+ Preparation -> []
  OutcomeNode -> []
  WaitingForAdmin -> []
 templates :: Service -> IO [Value]

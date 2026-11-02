@@ -177,6 +177,7 @@ pulseCall s tick a kind slot groups = do
 -- Legacy calls without an occurrence retain their original behavior.
 occurrenceAllowed :: Service -> Value -> IO Bool
 occurrenceAllowed s origin
+ | has origin "preparation" = preparationAllowed s (get origin "preparation")
  | has origin "analysis" = analysisAllowed s (get origin "analysis")
  | not (has origin "occurrence") = pure True
  | otherwise = do
@@ -227,15 +228,22 @@ effectiveFeedbackIds operations definition works =
 analysisFeedbackIds :: [Value] -> Value -> [Value] -> [RunId] -> [Text]
 analysisFeedbackIds operations definition works sources =
  [at feedback "operation" | work<-works,sameRoutineContract definition work || get work "workloadId" `elem` map toJSON sources,feedback<-take 1 (workFeedback operations work)]
+preparationAllowed :: Service -> Value -> IO Bool
+preparationAllowed s = pinnedMaintenanceAllowed s "preparationPin"
+
 analysisAllowed :: Service -> Value -> IO Bool
-analysisAllowed s identityValue = do
+analysisAllowed s = pinnedMaintenanceAllowed s "analysisPin"
+
+-- Analysis and preparation use the same consumer generation/feedback fence.
+pinnedMaintenanceAllowed :: Service -> Text -> Value -> IO Bool
+pinnedMaintenanceAllowed s pinField identityValue = do
  identity <- decodeValue 500 identityValue :: IO RunId
  rows <- queryRows s "SELECT value FROM workloads WHERE id=?" ["value"] [SQLText (runIdText identity)]
  case rows of
   [] -> pure False
   row:_ -> do
    work <- decodeStored (at row "value")
-   pin <- field 500 work "analysisPin" :: IO AnalysisPin
+   pin <- field 500 work pinField :: IO AnalysisPin
    gate <- field 500 work "executionGate" :: IO ExecutionGate
    definitions <- values s ScheduledRoutines
    case find (\d -> at d "id"==analysisRoutine pin && get d "owner"==toJSON (analysisOwner pin)) definitions of

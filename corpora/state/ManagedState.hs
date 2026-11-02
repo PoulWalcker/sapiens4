@@ -36,8 +36,8 @@ revision :: Value -> Value
 revision v = get (get v "managed") "revision"
 validateCommand :: Value -> Value -> IO ()
 validateCommand turn command = do
- when (at command "action"=="retry" && has (get turn "origin") "analysis") $
-  check False "Use explicit Routine reconsideration for a new analysis; an interrupted analysis cannot be replayed"
+ when (at command "action"=="retry" && (has (get turn "origin") "analysis" || has (get turn "origin") "preparation")) $
+  check False "Use a new explicit Routine analysis or preparation; interrupted maintenance cannot be replayed"
  check (keys command `allIn` ["id","action","revision"] && length (keys command)==3 && not (T.null (at command "id")) && T.length (at command "id")<=128 && get command "action" `elem` map str ["cancel","retry"]) "Invalid managed command; expected id, action and revision"
  let history=items (get turn "managed") "commands"
  check (all (\old -> at old "id"/=at command "id" || old==command) history) "Managed command id was already used with different contents"
@@ -100,14 +100,16 @@ save db owner state command = withTransaction db $ do
       candidate=put "managed" nextMetadata (remove ["managed_command","managed_result"] next)
       changed=candidate/=old
       value=if changed then put "managed" (put "revision" (num (int (get metadata "revision")+1)) nextMetadata) candidate else old
-  -- All user cancel interfaces revoke the same analysis gate atomically with
+  -- All user cancel interfaces revoke the same maintenance gate atomically with
   -- the managed command. Feedback invalidation does not write this stop gate.
-  when (has (get old "origin") "analysis" && any ((=="cancel") . (`at` "action")) applied) $ do
-   rows_ <- query db "SELECT value FROM workloads WHERE id=?" (Only (at (get old "origin") "analysis")) :: IO [Only Text]
+  let preparationOrigin=get old "origin"
+      maintenance=if has preparationOrigin "preparation" then "preparation" else "analysis"
+  when (has preparationOrigin maintenance && any ((=="cancel") . (`at` "action")) applied) $ do
+   rows_ <- query db "SELECT value FROM workloads WHERE id=?" (Only (at preparationOrigin maintenance)) :: IO [Only Text]
    work <- case rows_ of
     [Only stored] -> either (throwIO . userError) pure (eitherDecodeStrict (TE.encodeUtf8 stored))
-    _ -> throwIO (Conflict "Analysis is missing its canonical Workload")
-   execute db "UPDATE workloads SET value=? WHERE id=?" (encodeText (put "executionGate" (toJSON ExecutionStopped) work),at (get old "origin") "analysis")
+    _ -> throwIO (Conflict "Maintenance is missing its canonical Workload")
+   execute db "UPDATE workloads SET value=? WHERE id=?" (encodeText (put "executionGate" (toJSON ExecutionStopped) work),at preparationOrigin maintenance)
   when changed $ execute db "UPDATE managed_turns SET value=?,projection=?,pending=1 WHERE id=?" (encodeText value,if projected==Null then Nothing else Just (encodeText projected),i)
   pure (i,if has next "managed_command" && maybe True ((/=i) . fst) command then put "managed_command" (get next "managed_command") value else value,pending||changed)
  decodeState $ put "turns" (arr [fromMaybe (toJSON t) (lookup (runIdText (turnId t)) [(i,v) | (i,v,_)<-updates]) | t<-agentTurns state]) (stateJSON state)
