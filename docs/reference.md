@@ -197,6 +197,7 @@ completion criteria. The first trial also returns distinct activation-audit fact
 from that same invocation; this is shared evidence, not a second independent call.
 Only an accepted result and affirmative audit, with the current contract and source
 feedback still applicable, activate the exact version for future admissions.
+The routine screen shows the version and the run, time and reason for activation.
 
 A failed or unknown trial retains its actual output and does not immediately launch
 an ordinary replacement. A later occurrence uses a still-valid prior active version
