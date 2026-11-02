@@ -14,7 +14,7 @@ data ChatView = Conversation | Pins | Threads | Comments
 
 derive instance eqChatView :: Eq ChatView
 
-data WorkView = Memo | Tasks | TaskCall | Backlog | Automated | Automation | Scheduled | Callbacks | Jobs | Agentic | Pipelines | Composers | ComposeWorkflow | ComposeRoutine | ComposeCall
+data WorkView = Memo | Tasks | TaskCall | Backlog | Automated | Automation | Routines | Scheduled | Callbacks | Jobs | Agentic | Pipelines | Composers | ComposeWorkflow | ComposeRoutine | ComposeCall
 
 derive instance eqWorkView :: Eq WorkView
 
@@ -33,7 +33,7 @@ derive instance eqScope :: Eq Scope
 data NavTree = Branch String String WorkView (Array NavTree) | Leaf WorkView
 
 workTree :: Array NavTree
-workTree = [Leaf Memo, Branch "tasks" "Tasks" Tasks [Leaf TaskCall, Leaf Backlog, Leaf Automated], Branch "automation" "Automation" Automation [Branch "routine" "Routines" Scheduled [Leaf Scheduled, Leaf Callbacks, Leaf Jobs], Branch "workflows" "Workflows" Agentic [Leaf Agentic, Leaf Pipelines, Leaf Composers], Branch "composer" "Composers" ComposeWorkflow [Leaf ComposeWorkflow, Leaf ComposeRoutine, Leaf ComposeCall]]]
+workTree = [Leaf Memo, Branch "tasks" "Tasks" Tasks [Leaf TaskCall, Leaf Backlog, Leaf Automated], Branch "automation" "Automation" Automation [Branch "routine" "Routines" Routines [Leaf Scheduled, Leaf Callbacks, Leaf Jobs], Branch "workflows" "Workflows" Agentic [Leaf Agentic, Leaf Pipelines, Leaf Composers], Branch "composer" "Composers" ComposeWorkflow [Leaf ComposeWorkflow, Leaf ComposeRoutine, Leaf ComposeCall]]]
 
 workId :: WorkView -> String
 workId = case _ of
@@ -43,6 +43,7 @@ workId = case _ of
   Backlog -> "tasks-backlog"
   Automated -> "tasks-automated"
   Automation -> "automation"
+  Routines -> "routines"
   Scheduled -> "routine-scheduled"
   Callbacks -> "routine-callback"
   Jobs -> "routine-job"
@@ -61,6 +62,7 @@ workLabel = case _ of
   Backlog -> "Backlog"
   Automated -> "Automated"
   Automation -> "Automation"
+  Routines -> "Routines"
   Scheduled -> "Scheduled"
   Callbacks -> "Callbacks"
   Jobs -> "Jobs"
@@ -135,7 +137,7 @@ readActivity group prefs =
         "paused" -> Paused
         "deleted" | group -> Deleted
         _ -> Planned
-      w = fromMaybe Memo $ A.find ((_ == D.s "view" prefs) <<< workId) [Memo,Tasks,TaskCall,Backlog,Automated,Automation,Scheduled,Callbacks,Jobs,Agentic,Pipelines,Composers,ComposeWorkflow,ComposeRoutine,ComposeCall]
+      w = fromMaybe Memo $ A.find ((_ == D.s "view" prefs) <<< workId) [Memo,Tasks,TaskCall,Backlog,Automated,Automation,Routines,Scheduled,Callbacks,Jobs,Agentic,Pipelines,Composers,ComposeWorkflow,ComposeRoutine,ComposeCall]
       work v = Work v (if v == Scheduled && p == Paused || A.elem v [Tasks,Automated] && A.elem p [Executed,Deleted] then p else Planned)
   in case D.s "panel" prefs of
     "notes" -> work Memo

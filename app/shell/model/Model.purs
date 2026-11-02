@@ -18,7 +18,7 @@ data RemoteData a = NotAsked | Loading Request (Maybe a) | Ready Request a | Fai
 
 type Request = { epoch :: Int, sequence :: Int, key :: String, revision :: String, path :: String }
 
-data DialogKind = AppMenu | WorkspaceSettings | Computer | AgentSettings | GroupSettings | Attach | Reference String | DecisionPrompts | GroupTask | CreateCorpora | EditCorpora | ConnectRemote | HostPairing | RelayList | RelayAdd | RelaySwitch | RelayTerms | Installation | Notice
+data DialogKind = AppMenu | WorkspaceSettings | Computer | AgentSettings | GroupSettings | Attach | Reference String | DecisionPrompts | GroupTask | RoutineRun | RoutineDelete | RoutineStop | RoutineDiscard | CreateCorpora | EditCorpora | ConnectRemote | HostPairing | RelayList | RelayAdd | RelaySwitch | RelayTerms | Installation | Notice
 
 derive instance eqDialogKind :: Eq DialogKind
 
@@ -27,11 +27,31 @@ corporaDialog kind = A.elem kind [CreateCorpora,EditCorpora,ConnectRemote,HostPa
 
 type Dialog = { kind :: DialogKind, title :: String, record :: Json, fields :: Json, content :: Json, error :: String, busy :: Boolean, identity :: Int }
 
+data RoutinePage = RoutineList Boolean | RoutineLatest String | RoutineHistory String | RoutineOccurrence String String | RoutineSettings String
+
+derive instance eqRoutinePage :: Eq RoutinePage
+
+type RoutineEditor = { record :: Json, fields :: Json, operation :: String, error :: String, busy :: Boolean, dirty :: Boolean, identity :: Int }
+type RoutineView = { page :: RoutinePage, editor :: Maybe RoutineEditor, pending :: Maybe RoutinePage }
+
+routineKey :: Model -> String
+routineKey m = m.active <> ":" <> m.selected
+
+routineView :: Model -> RoutineView
+routineView m = fromMaybe {page:RoutineList false,editor:Nothing,pending:Nothing} $ O.lookup (routineKey m) m.routineViews
+
+modifyRoutineView :: String -> (RoutineView -> RoutineView) -> Model -> Model
+modifyRoutineView key f m = m {routineViews=O.alter (Just <<< f <<< fromMaybe {page:RoutineList false,editor:Nothing,pending:Nothing}) key m.routineViews}
+
+resetRoutineRequests :: O.Object RoutineView -> O.Object RoutineView
+resetRoutineRequests = map \view -> view {editor=map (\editor -> if editor.busy then editor {busy=false,error="The connection changed while saving. Retry unchanged to recover the saved response."} else editor) view.editor}
+
 type Model =
   { snapshot :: Json, agents :: Array Json, messages :: O.Object (Array Json)
   , selected :: String, activity :: N.Activity, scope :: N.Scope, groupView :: Maybe String
   , mention :: Maybe { start :: Int, end :: Int, choices :: Array Json, index :: Int }
   , drafts :: O.Object String, attachments :: O.Object (Array Json), sending :: Set.Set String, uploading :: Int, clarification :: Maybe Json
+  , routineViews :: O.Object RoutineView
   , workspaces :: Json, workspaceRevision :: Number, documents :: O.Object (RemoteData Json), expanded :: Set.Set String
   , polling :: Boolean, pollGeneration :: Int, saving :: Boolean, lastPreview :: Number, nativeReporting :: Boolean, nativeReports :: Array Json
   , epoch :: Int, sequence :: Int, now :: Number, env :: Json
@@ -48,6 +68,7 @@ initial :: Json -> Model
 initial env =
   { snapshot:D.empty, agents:[], messages:O.empty, selected:"", activity:N.Chat N.Conversation, scope:N.All, groupView:Nothing
   , mention:Nothing, drafts:O.empty, attachments:O.empty, sending:Set.empty, uploading:0, clarification:Nothing
+  , routineViews:O.empty
   , workspaces:D.empty, workspaceRevision:0.0, documents:O.empty, expanded:Set.empty
   , polling:false,pollGeneration:0,saving:false,lastPreview:0.0,nativeReporting:false,nativeReports:[]
   , epoch:0, sequence:0, now:0.0, env, panes:[N.ChatPane,N.Sidebar,N.Workspace], search:"", searchOpen:false, menu:Nothing, dialog:Nothing
@@ -138,6 +159,7 @@ reset snapshot old = project snapshot old
   , groupView=if group then Just (D.s "selected" p) else if D.s "groupView" p == "" then Nothing else Just (D.s "groupView" p)
   , drafts=map D.str $ fromMaybe O.empty $ toObject $ D.get "drafts" p
   , attachments=map D.arr $ fromMaybe O.empty $ toObject $ D.get "attachment_drafts" snapshot
+  , routineViews=resetRoutineRequests old.routineViews
   , sending=Set.empty, uploading=0, clarification=Nothing, documents=O.empty, expanded=Set.empty, epoch=old.epoch+1
   , panes=if not (D.valid $ D.get "panes" p) then [N.ChatPane,N.Sidebar,N.Workspace] else A.filter (\pane -> D.b (N.paneId pane) $ D.get "panes" p) [N.ChatPane,N.Sidebar,N.Workspace]
   , workspaces=D.get "workspaces" p, workspaceRevision=D.n "workspace_revision" p, search="", searchOpen=false

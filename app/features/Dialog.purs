@@ -34,6 +34,10 @@ make kind record m = {kind,title,record,fields,content:D.null,error:"",busy:fals
     M.Reference _ -> "Add filepath"
     M.DecisionPrompts -> "Decision prompts"
     M.GroupTask -> if D.s "id" record == "" then "Create Group task" else "Edit Group task"
+    M.RoutineStop -> "Stop this run?"
+    M.RoutineDiscard -> "Discard changes?"
+    M.RoutineRun -> "Run " <> D.s "title" record
+    M.RoutineDelete -> "Delete " <> D.s "title" record
     M.CreateCorpora -> "Create local corpora"
     M.EditCorpora -> "Message to ChiefSapi"
     M.ConnectRemote -> "Connect remote corpora"
@@ -48,6 +52,7 @@ make kind record m = {kind,title,record,fields,content:D.null,error:"",busy:fals
     M.AgentSettings -> D.merge record $ D.json {mode: D.at ["orchestration",D.s "id" record,"execution","mode"] m.snapshot, manager: D.at ["orchestration",D.s "id" record,"manager"] m.snapshot}
     M.GroupSettings -> record
     M.GroupTask -> D.merge (D.json {assignee: D.get "lead" $ M.selected m, state: "backlog"}) record
+    M.RoutineRun -> D.json {inputs: ""}
     M.EditCorpora -> D.json {message: replaceFields (D.fallback (D.str $ D.at ["corpora","settings_template"] m.snapshot) $ D.s "settings_template" record) ["name","device","scope"]}
     M.RelayAdd -> D.json {name: D.get "name" record, connection: if D.valid $ D.get "connection" record then D.encode $ D.get "connection" record else ""}
     M.Notice -> D.json {message: record}
@@ -91,6 +96,15 @@ body m d = case d.kind of
     ,V.when (D.s "id" d.record /= "") $ select "Status" "state" $ map (\state -> Tuple state $ W.taskState state) ["backlog","in_progress","done"]
     ,V.when (D.s "id" d.record /= "" && not (D.b "deleted" d.record)) $ V.button "button" "Delete task" $ DialogCommand "delete-task" D.empty
     ,V.p "form-hint" "Saving keeps this as shared work. Use Run task to call the assignee. Deletions can be restored."]
+  M.RoutineStop -> form "Stop run"
+    [V.p "" "This stops this run and its delegated work. Completed external actions cannot be undone. Other runs are unchanged."]
+  M.RoutineDiscard -> form "Discard changes"
+    [V.p "" "Your changes have not been saved."]
+  M.RoutineRun -> form "Run now"
+    [V.p "" $ D.s "goal" d.record,textarea "Inputs for this run" "inputs" 4 [V.attr "maxlength" "16000"]
+    ,V.p "form-hint" "This starts a new run. Changes to the routine later will not change this run."]
+  M.RoutineDelete -> form "Delete routine and stop runs"
+    [V.p "" "This stops this routine’s active runs and prevents new runs. Saved history remains available."]
   M.CreateCorpora -> form "Create" [input "Corpora name" "name" [V.bool "required" true,V.attr "maxlength" "200"],textarea "Scope of work" "scope" 4 [V.attr "maxlength" "16000"]]
   M.EditCorpora -> form "Send to ChiefSapi ↑" [textarea "Message to ChiefSapi" "message" 8 [V.bool "required" true]]
   M.ConnectRemote -> V.div ""

@@ -107,6 +107,7 @@ conversation m = V.node "section" [V.cls "conversation",V.id "chat-panel",V.labe
     N.Chat N.Conversation -> Chat.rows m
     N.Chat view -> [Tuple "unavailable" $ V.p "empty" $ N.chatLabel view <> " are not available yet."]
     N.Work N.Memo _ -> [Tuple ("memo:" <> m.selected) $ Memo.view m]
+    N.Work N.Routines _ -> [Tuple "personal-routines" $ Work.personalRoutines m]
     N.Work N.Scheduled period -> [Tuple "routines" $ Work.routines m period]
     N.Work view period | A.elem view [N.Tasks,N.Automated] -> [Tuple "tasks" $ Work.tasks m view period]
     N.Work view _ -> [Tuple "unavailable" $ V.p "empty" $ N.workLabel view <> " is not available yet."]
@@ -120,9 +121,12 @@ activityNav :: M.Model -> V.Html
 activityNav m = V.node "nav" [V.cls "conversation-tabs",V.label "Agent activity"] $ map tab [Tuple "chat" "Chat",Tuple "work" "Work",Tuple "updates" "Updates"]
   where
   item activity label = V.choice (m.activity == activity) label (Navigate activity)
+  branchOpen = case _ of
+    N.Leaf _ -> false
+    N.Branch id _ _ children -> m.menu == Just ("activity-" <> id) || A.any branchOpen children
   tree = case _ of
     N.Leaf view -> item (N.Work view N.Planned) (N.workLabel view)
-    N.Branch id label view children -> V.div "activity-submenu-row" [item (N.Work view N.Planned) label,V.controlWith [V.attr "data-activity-menu" $ "activity-" <> id,V.label $ label <> " menu",V.attr "aria-expanded" $ show $ m.menu == Just ("activity-" <> id)] [V.chevron true] (Menu $ "activity-" <> id),V.node "div" [V.cls "activity-menu activity-submenu",V.hidden $ m.menu /= Just ("activity-" <> id)] $ map tree children]
+    branch@(N.Branch id label view children) -> V.div "activity-submenu-row" [item (N.Work view N.Planned) label,V.controlWith [V.attr "data-activity-menu" $ "activity-" <> id,V.label $ label <> " menu",V.attr "aria-expanded" $ show $ branchOpen branch] [V.chevron true] (Menu $ "activity-" <> id),V.node "div" [V.cls "activity-menu activity-submenu",V.hidden $ not $ branchOpen branch] $ map tree children]
   tab (Tuple id label) = V.div ("activity-tab " <> if N.panel m.activity == id then "active" else "")
     [V.control [V.attr "data-panel" id,V.attr "aria-pressed" $ show $ N.panel m.activity == id] (label) (if id == "work" then DefaultWork else Navigate $ if id == "chat" then N.Chat N.Conversation else N.Updates)
     ,V.node "button" [V.cls "activity-toggle",V.label $ label <> " menu",V.attr "aria-expanded" $ show $ m.menu == Just ("activity-" <> id),V.click $ Menu $ "activity-" <> id] [V.chevron false]

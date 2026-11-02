@@ -15,6 +15,7 @@ import Sapiens.Html as V
 import Sapiens.Model as M
 import Sapiens.Navigation as N
 import Sapiens.Text as T
+import Sapiens.Routines as Routines
 
 emptyTasks :: String -> String -> V.Html
 emptyTasks title detail = V.div "task-empty" [V.p "" title,V.textNode "small" [] (detail)]
@@ -95,6 +96,9 @@ routines :: M.Model -> N.Period -> V.Html
 routines m period = V.node "section" [V.cls "task-browser"] [V.node "div" [V.cls "task-list",V.label $ N.periodLabel period <> " scheduled routines"] $ if A.null rows then [emptyTasks (if period == N.Paused then "No paused routines" else "No planned routines") (if period == N.Paused then "Paused routines will appear here." else "Create a scheduled routine through chat.")] else map (taskRow m) rows]
   where
   rows = map (\r -> D.merge r $ D.json {routine: true, sender: D.get "owner" r, state: if D.b "paused" r then "Paused" else "Planned", minutes: show $ D.int $ D.get "minutes" r, meta: "Every " <> show (D.int $ D.get "minutes" r) <> " minutes" <> if D.b "paused" r then "" else " · " <> B.formatDate "" D.empty (D.s "nextDue" r), body: "Frequency: every " <> show (D.int $ D.get "minutes" r) <> " minutes\nExecute: " <> D.s "prompt" r}) $ A.filter (\r -> D.s "owner" r == m.selected && D.b "paused" r == (period == N.Paused)) $ D.rows "routines" m.snapshot
+
+personalRoutines :: M.Model -> V.Html
+personalRoutines = Routines.view
 
 events :: M.Model -> V.Html
 events m = V.node "section" [V.cls "event-log"] [V.div "event-columns event-head" $ map (\s -> V.span [] (s)) ["Timestamp","Actor","Entity","Event","Agency",""],V.div "event-rows" $ if A.null rows then [V.p "empty" "No events yet."] else map event rows]

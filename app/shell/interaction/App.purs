@@ -25,6 +25,7 @@ import Sapiens.Connections as C
 import Sapiens.CorporaEffects as Corpora
 import Sapiens.Data as D
 import Sapiens.DialogEffects as Dialog
+import Sapiens.RoutineEffects as Routine
 import Sapiens.Effects as E
 import Sapiens.Model as M
 import Sapiens.Navigation as N
@@ -202,6 +203,10 @@ handle runtime input = session input
               E.save dispatch
               E.scrollBottom
               dispatch Poll
+    RoutineNavigate _ -> Routine.handle runtime dispatch action
+    RoutineField _ _ -> Routine.handle runtime dispatch action
+    RoutineSave -> Routine.handle runtime dispatch action
+    RoutineDiscardChanges -> Routine.handle runtime dispatch action
     ToggleExpanded key -> H.modify_ \m -> m {expanded=(if Set.member key m.expanded then Set.delete else Set.insert) key m.expanded}
     Clarify work -> do
       dispatch $ Select $ D.s "owner" work

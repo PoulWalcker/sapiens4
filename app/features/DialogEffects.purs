@@ -32,7 +32,10 @@ handle runtime dispatch action = case action of
     m <- H.get
     if kind == M.ConnectRemote && m.installRequired then dispatch Install else do
       when (m.dialog /= Nothing) $ void $ H.fork $ H.liftAff $ C.cancelPairing runtime
-      let d = Dialog.make kind record m
+      operation <- liftEffect B.uuid
+      let routine = A.elem kind [M.RoutineRun,M.RoutineDelete,M.RoutineStop]
+          prepared = if routine then D.merge record $ D.json {operation, owner: if D.s "owner" record == "" then m.selected else D.s "owner" record} else record
+          d = Dialog.make kind prepared m
       H.modify_ _ {dialog=Just d,dialogStack=[],menu=Nothing,sequence=d.identity,mention=Nothing}
       when (kind == M.ConnectRemote && M.remote m) $ liftEffect $ B.historyPush $ D.json {dialog: true}
       E.sync
@@ -48,7 +51,8 @@ handle runtime dispatch action = case action of
     H.modify_ _ {dialog=Nothing,dialogStack=[]}
     E.sync
   Field key value -> do
-    H.modify_ \m -> m {dialog=map (updateField key value) m.dialog}
+    operation <- liftEffect B.uuid
+    H.modify_ \m -> m {dialog=map (\d -> let updated = updateField key value d in if A.elem d.kind [M.RoutineRun] then updated {record=D.put "operation" (D.text operation) updated.record} else updated) m.dialog}
     when (key == "showLink") do
       liftEffect $ B.focus "#host-pair-link"
       m <- H.get
@@ -95,6 +99,10 @@ handle runtime dispatch action = case action of
       runDialog d (saved "Sapi saved.") $ E.api runtime m ("/api/agents/" <> B.encodeURI (D.s "id" d.record)) "PUT" $ D.json {name: D.get "name" d.fields, role: D.get "role" d.fields, manager: if D.s "manager" d.fields == "" then D.null else D.get "manager" d.fields, execution: D.json {mode: D.get "mode" d.fields}}
     M.GroupSettings -> runDialog d (saved "Group saved.") $ E.api runtime m ("/api/groups/" <> B.encodeURI (D.s "id" d.record)) "PUT" $ D.obj $ map (\key -> Tuple key $ D.get key d.fields) ["name","description","lead","members","revision"]
     M.GroupTask -> saveTask m d false
+    M.RoutineStop -> routineCommand m d "stop"
+    M.RoutineDiscard -> dispatch CloseDialog *> dispatch RoutineDiscardChanges
+    M.RoutineRun -> routineCommand m d "run"
+    M.RoutineDelete -> routineCommand m d "delete"
     M.Reference kind -> if A.length (M.attachments m) >= 8 then E.modifyDialog d.identity _ {error="Attach up to 8 items per message."} else do
       H.modify_ _ {uploading=m.uploading+1}
       E.modifyDialog d.identity _ {busy=true}
@@ -163,6 +171,14 @@ handle runtime dispatch action = case action of
       uuid <- liftEffect B.uuid
       void $ liftEffect $ C.write "s4.relay-reset" $ D.text uuid
     dispatch LoadRegistry
+  routineCommand m d action =
+    let path = "/api/agents/" <> B.encodeURI (D.s "owner" d.record) <> "/routines" <> if action == "create" then "" else "/" <> B.encodeURI (D.s "id" d.record) <> "/" <> action
+        body = D.json {operation: D.get "operation" d.record, revision: D.get "revision" d.record, title: D.get "title" d.fields, goal: D.get "goal" d.fields, criteria: A.filter (_ /= "") $ map S.trim $ S.split (S.Pattern "\n") $ D.s "criteria" d.fields, inputs: D.s "inputs" d.fields, run: D.get "run" d.record}
+        done response = do
+          dispatch CloseDialog
+          when (m.selected == D.s "owner" d.record) $ dispatch $ RoutineNavigate $ if action == "run" then M.RoutineOccurrence (D.s "id" d.record) (D.s "run" response) else if action == "delete" then M.RoutineList true else M.RoutineOccurrence (D.s "id" d.record) (D.s "run" d.record)
+          dispatch Poll
+    in runDialog d done $ E.api runtime m path "POST" body
   commandAction command value = do
     m <- H.get
     case command of
