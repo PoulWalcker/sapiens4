@@ -113,18 +113,63 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
           id = D.s "id" r
   result routine run =
     [V.p "routine-muted" $ status (D.s "status" run) <> " · " <> formatDate (timestamp run) <> " · " <> triggerLabel run
+    ,V.when (managed routine) $ V.p "routine-muted" $ "Assessment: " <> D.s "status" (D.get "assessment" run) <> if D.b "historical" run then " · Historical revision" else ""
     ,V.p "routine-muted" $ "Responsible Sapi: " <> D.s "name" (M.agent m $ D.s "currentOwner" run)
     ,V.when (D.s "message" run /= "") $ V.p "routine-notice" $ D.s "message" run
     ,V.when (D.s "result" run /= "") $ V.div "routine-result" $ T.paragraphs m $ D.s "result" run
     ,V.when (D.s "error" run /= "") $ V.p "routine-problem" $ D.s "error" run
     ,V.when (active run && D.s "message" run == "") $ V.p "routine-muted" $ if D.s "status" run == "queued" then "Waiting to start." else "Work is in progress."
     ,V.when (managed routine) $ V.div "routine-run-inputs" [V.p "routine-muted" $ if D.n "revision" (D.get "snapshot" run) > 0.0 then "Definition revision " <> show (D.int $ D.at ["snapshot","revision"] run) else "Definition revision not recorded",V.p "" $ D.str $ D.at ["snapshot","inputs"] run]
+    ,V.when (managed routine) $ evidencePanel routine run
+    ,V.when (managed routine && not (active run)) $ V.button "routine-link" "Reject result…" $ OpenDialog M.RoutineReject $ D.put "revision" (D.at ["snapshot","revision"] run) $ D.put "run" (D.get "id" run) (record routine)
     ,V.div "routine-actions" $ reply run <> if managed routine && active run then [V.button "button" "Stop this run…" $ OpenDialog M.RoutineStop $ D.put "run" (D.get "id" run) (record routine)] else []]
   reply run = case A.find (\w -> D.s "id" w == D.s "id" run && D.s "state" w == "WaitingForAdmin") $ D.rows "workloads" m.snapshot of
     Just work -> [V.button "button" ("Reply to " <> D.s "name" (M.agent m $ D.s "owner" work)) $ Clarify work]
     Nothing -> []
+  evidencePanel routine run = V.div "routine-evidence" $
+    [V.button "routine-link" "Evidence and usage" $ RoutineEvidence (D.s "id" $ record routine) (D.s "id" run)] <>
+    case state.evidence of
+      Just evidence | evidence.run == D.s "id" run && evidence.routine == D.s "id" (record routine) ->
+        if evidence.busy then [V.p "routine-muted" "Loading evidence…"]
+        else if evidence.error /= "" then [V.p "routine-problem" evidence.error,V.button "routine-link" "Retry evidence" $ RoutineEvidence evidence.routine evidence.run]
+        else [evidenceDetail evidence.record,V.button "routine-link" "Refresh evidence" $ RoutineEvidence evidence.routine evidence.run]
+      _ -> []
+  evidenceDetail run = V.div "routine-evidence-detail" $
+    [V.textNode "h3" [] "Evidence and usage"
+    ,V.p "routine-muted" $ D.s "reason" $ D.get "assessment" run
+    ,V.p "routine-muted" $ "Original assessment: " <> D.s "status" (D.get "originalAssessment" run)
+    ,V.p "routine-muted" "Model statements and provider receipts do not independently verify external effects. Summaries may omit or shorten content; recognized credentials are removed."
+    ,V.textNode "h3" [] "Pinned completion criteria"] <>
+    map (\criterion -> V.p "" $ D.s "criterion" criterion <> " · " <> D.s "status" criterion <> if D.s "reason" criterion == "" then "" else " · " <> D.s "reason" criterion) (D.rows "criteriaAssessment" run) <>
+    [V.textNode "h3" [] "Model statements"] <>
+    map (V.p "" <<< D.str) (D.arr $ D.at ["observations","statements"] run) <>
+    [V.textNode "h3" [] "Artifacts reported by the model"] <>
+    map (V.p "" <<< D.str) (D.arr $ D.at ["outcome","artifacts"] run) <>
+    map (\f -> V.p "routine-notice" $ "Admin feedback: " <> D.s "reason" f) (D.rows "feedback" run) <>
+    (if A.null (D.rows "invocations" run) then [V.p "routine-muted" "Provider evidence and usage were not recorded."] else map invocation $ D.rows "invocations" run)
+  invocation call = V.div "routine-run-inputs"
+    [V.textNode "h3" [] $ D.s "node" call <> " · " <> D.s "provider" evidence <> " · " <> D.s "model" evidence
+    ,V.when (D.valid $ D.get "assessment" call) $ V.p "routine-muted" $ "Invocation assessment: " <> D.s "status" (D.get "assessment" call)
+    ,V.p "routine-muted" $ "Duration (ms): " <> known "durationMs" evidence <> " · Process exit: " <> known "processExit" evidence
+    ,V.p "routine-muted" $ if D.b "conflict" usage then "Usage is unknown: provider reports conflict." else "Input tokens: " <> known "inputTokens" usage <> " · Cached: " <> known "cachedInputTokens" usage <> " · Output: " <> known "outputTokens" usage
+    ,V.p "routine-muted" $ "First reported tokens: " <> known "inputTokens" usage <> " / " <> known "outputTokens" usage <> " · Repeated reports: " <> known "duplicates" usage <> " · Price: Unknown"
+    ,V.p "routine-muted" $ "Capture: " <> (if D.b "tailUnknown" coverage then "unfinished; unrecorded tail unknown" else "finalized") <> " · Final message: " <> show (D.b "finalSeen" coverage) <> " · Stream end: " <> show (D.b "streamEndSeen" coverage) <> " · Turn end: " <> show (D.b "turnEndSeen" coverage)
+    ,V.p "routine-muted" $ "Pending tools: " <> known "pendingTools" coverage <> " · Dropped events: " <> known "droppedEvents" coverage <> " · Dropped bytes: " <> known "droppedBytes" coverage <> " · Unknown events: " <> known "unknownEvents" coverage <> " · Malformed events: " <> known "malformedEvents" coverage
+    ,V.p "routine-muted" "Process exit and elapsed time are application observations. Provider version and omitted event content are unknown."
+    ,V.p "routine-muted" $ "Omitted fields: " <> known "omittedFields" coverage <> " · Redacted fields: " <> known "redactedFields" coverage <> " · Shortened fields: " <> known "truncatedFields" coverage
+    ,V.node "details" [] [V.node "summary" [] [V.text "Provider receipts"],V.node "ul" [] $ map receipt $ D.rows "events" evidence]]
+    where
+    evidence = D.get "evidence" call
+    usage = D.get "usage" evidence
+    coverage = D.get "completeness" evidence
+  receipt event = V.node "li" [] $
+    [V.p "routine-muted" $ "Provider receipt " <> known "sequence" event <> ": " <> D.s "kind" event <> " · item " <> known "item" event <> " · status " <> (if D.s "status" event == "" then "Unknown" else D.s "status" event) <> " · exit " <> known "exitCode" event <> " · received " <> D.s "receivedAt" event] <>
+    map (\field -> V.div "" [V.p "routine-muted" $ D.s "name" field <> (if D.b "redacted" field then " · credential content removed" else "") <> (if D.b "truncated" field then " · shortened" else "") <> (if D.b "omitted" field then " · some content omitted" else ""),V.textNode "pre" [] $ if D.valid $ D.get "value" field then D.encode $ D.get "value" field else "Not retained"]) (D.rows "fields" $ D.get "summary" event)
+  known key value = if D.valid $ D.get key value then D.encode $ D.get key value else "Unknown"
   row routine = V.node "article" [V.cls "routine-row routine-list-row"]
-    [V.div "routine-heading" [link (title routine) $ M.RoutineLatest $ D.s "id" $ record routine,badge $ routineStatus routine]
+    [V.div "routine-heading" [link (title routine) $ M.RoutineLatest $ D.s "id" $ record routine,badge $ routineStatus routine <> case latest routine of
+      Just run | managed routine && not (active run) -> " · " <> D.s "status" (D.get "assessment" run)
+      _ -> ""]
     ,V.p "routine-muted routine-schedule" $ whenText routine
     ,V.div "routine-actions" $ if D.b "deleted" $ record routine then [] else [menu routine]]
   content = case state.page of
@@ -145,7 +190,7 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
         Just run -> result routine run
     M.RoutineHistory id -> case find id of
       Nothing -> [link "← All routines" $ M.RoutineList false]
-      Just routine -> heading routine true false <> (if A.null (runs routine) then [V.p "routine-muted" "No runs yet."] else A.mapWithIndex (\index run -> V.div "routine-history-row" [link ("Run " <> show (A.length (runs routine) - index) <> " · " <> formatDate (timestamp run)) $ M.RoutineOccurrence id (D.s "id" run),badge $ status $ D.s "status" run]) $ A.reverse $ runs routine)
+      Just routine -> heading routine true false <> (if A.null (runs routine) then [V.p "routine-muted" "No runs yet."] else A.mapWithIndex (\index run -> V.div "routine-history-row" [link ("Run " <> show (A.length (runs routine) - index) <> " · " <> formatDate (timestamp run)) $ M.RoutineOccurrence id (D.s "id" run),badge $ status (D.s "status" run) <> if managed routine then " · " <> D.s "status" (D.get "assessment" run) else ""]) $ A.reverse $ runs routine)
     M.RoutineOccurrence id runId -> case find id of
       Nothing -> [link "← All routines" $ M.RoutineList false]
       Just routine -> heading routine true true <> case A.find ((runId == _) <<< D.s "id") $ runs routine of

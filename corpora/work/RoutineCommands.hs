@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module RoutineCommands (command, snapshot) where
+module RoutineCommands (command, snapshot, detail) where
 
 import Control.Exception
 import Control.Monad
@@ -22,13 +22,13 @@ import qualified Delegation as D
 
 newtype OperationId = OperationId Text deriving (Eq, Show)
 
-data RoutineCommand = Create RoutineFields | Edit Revision RoutineFields | RunNow Revision Text | StopRun Revision RunId | Delete Revision | Schedule Revision Minutes | Pause Revision Bool deriving (Eq, Show)
+data RoutineCommand = Create RoutineFields | Edit Revision RoutineFields | RunNow Revision Text | StopRun Revision RunId | Delete Revision | Schedule Revision Minutes | Pause Revision Bool | RejectRun Revision RunId Text deriving (Eq, Show)
 data CommandError = CommandError Int Text deriving (Eq, Show)
-data CommandPlan = CreateDefinition RoutineFields | UpdateDefinition Definition | Admit Definition Text | StopOccurrences [D.Workload] | DeleteDefinition Definition [D.Workload]
+data CommandPlan = CreateDefinition RoutineFields | UpdateDefinition Definition | Admit Definition Text | StopOccurrences [D.Workload] | DeleteDefinition Definition [D.Workload] | RecordFeedback Text RunId
 
 parseCommand :: Text -> Value -> Parser RoutineCommand
 parseCommand action value = withObject "Routine command" (\o -> do
- unless (all (`elem` ["operation","revision","title","goal","criteria","inputs","run","minutes"]) (keys value)) (fail "Unknown Routine command field")
+ unless (all (`elem` ["operation","revision","title","goal","criteria","inputs","run","minutes","reason"]) (keys value)) (fail "Unknown Routine command field")
  case action of
   "create" -> Create <$> parseJSON value
   "edit" -> Edit <$> o .: "revision" <*> parseJSON value
@@ -40,6 +40,10 @@ parseCommand action value = withObject "Routine command" (\o -> do
    identity <- o .: "run"
    unless (not (T.null identity) && T.length identity<=128) (fail "Run identity is empty or too long")
    StopRun <$> o .: "revision" <*> pure (RunId identity)
+  "reject" -> do
+   reason <- o .: "reason"
+   unless (not (T.null (T.strip reason)) && T.length reason<=4000) (fail "Feedback reason must contain 1–4000 characters")
+   RejectRun <$> o .: "revision" <*> (RunId <$> o .: "run") <*> pure reason
   "delete" -> Delete <$> o .: "revision"
   "schedule" -> Schedule <$> o .: "revision" <*> o .: "minutes"
   "pause" -> Pause <$> o .: "revision" <*> pure True
@@ -58,6 +62,12 @@ decide time current occurrences request = case request of
   _ <- existing revision
   w <- maybe (Left (CommandError 404 "Unknown Routine run")) Right (find ((==runIdText identity) . D.workloadId) occurrences)
   if finished w then Left (CommandError 409 "Routine run is already finished") else Right (StopOccurrences [w])
+ RejectRun revision identity _ -> do
+  definition <- maybe (Left (CommandError 404 "Unknown personal Routine")) Right current
+  work <- maybe (Left (CommandError 404 "Unknown Routine run")) Right (find ((==runIdText identity) . D.workloadId) occurrences)
+  if get (D.workField work "routineSnapshot") "revision"/=toJSON revision then Left (CommandError 409 "Feedback must reference the saved run revision")
+   else if not (finished work) then Left (CommandError 409 "Wait until the run is finished before rejecting its result")
+   else Right (RecordFeedback (definitionId definition) identity)
  Delete revision -> do
   d <- existing revision
   pure (DeleteDefinition (R.bumpRevision d {definitionDeleted=True}) (filter (not . finished) occurrences))
@@ -113,6 +123,14 @@ command s owner action identity payload = do
          occurrences=filter (\w->at (D.workField w "origin") "routine"==identity) works
      plan <- either (\(CommandError code message)->failure code message) pure (decide clock current occurrences request_)
      (target,response) <- applyPlan db (AgentId owner) runIdentity time plan
+     case plan of
+      RecordFeedback _ run -> do
+       rows <- DB.queryRowsOn db "SELECT request FROM command_receipts WHERE scope='routine' AND owner=? AND target=? AND code<300 ORDER BY rowid" ["request"] [SQL.SQLText owner,SQL.SQLText identity]
+       requests <- traverse (DB.decodeStored . (`at` "request")) rows
+       let rejected=any (\old -> at old "action"=="reject" && get (get old "payload") "run"==toJSON run) requests
+           entity=maybe (runIdText run) (\work -> at (D.workField work "task") "taskId") (find ((==runIdText run) . D.workloadId) occurrences)
+       unless rejected $ DB.recordOn s db [owner] entity "task.result.rejected" (mergeFields [("run",toJSON run)] (select ["reason","revision"] payload)) "admin" Nothing
+      _ -> pure ()
      saveReceipt db owner operation target request 200 response time
      pure (200,response)
    case result of
@@ -124,6 +142,7 @@ command s owner action identity payload = do
 
 applyPlan :: SQL.Connection -> AgentId -> RunId -> Text -> CommandPlan -> IO (Text,Value)
 applyPlan db owner runIdentity time plan = case plan of
+ RecordFeedback identity run -> pure (identity,obj [("routine",str identity),("run",toJSON run)])
  CreateDefinition fields -> do
   let initial=Definition "" (agentIdText owner) (Revision 1) (AcceptedContract fields) Nothing False (KM.singleton "created" (str time))
   saved <- DB.saveRoutineOn db (remove ["id"] (toJSON initial))
@@ -166,28 +185,61 @@ saveReceipt :: SQL.Connection -> Text -> OperationId -> Text -> Value -> Int -> 
 saveReceipt db owner (OperationId identity) target request code response time =
  SQL.execute db "INSERT INTO command_receipts(scope,owner,id,target,request,code,response,created) VALUES ('routine',?,?,?,?,?,?,?)" (owner,identity,target,jsonText request,code,jsonText response,time)
 
+data RunProjection = RunSummary | RunDetail
+
+readOperations :: Service -> IO [Value]
+readOperations s = do
+ operations <- DB.queryRows s "SELECT id,owner,target,code,response,created,request FROM command_receipts WHERE scope='routine' ORDER BY rowid" ["id","owner","target","code","response","created","request"] []
+ forM operations $ \op -> do
+  response <- DB.decodeStored (at op "response")
+  request <- DB.decodeStored (at op "request")
+  pure (mergeFields [("response",response),("request",request)] op)
+
 snapshot :: Service -> IO Value
 snapshot s = do
  ds <- definitions s
  works <- D.readWorks s
- operations <- DB.queryRows s "SELECT id,owner,target,code,response,created FROM command_receipts WHERE scope='routine' ORDER BY rowid DESC" ["id","owner","target","code","response","created"] []
- decoded <- forM operations $ \op -> do response<-DB.decodeStored (at op "response"); pure (put "response" response op)
+ operations <- readOperations s
  rendered <- forM ds $ \d -> do
-  history <- traverse renderRun [w|w<-works,at (D.workField w "origin") "routine"==definitionId d]
+  history <- traverse (renderRun RunSummary operations (definitionRevision d)) [w|w<-works,at (D.workField w "origin") "routine"==definitionId d]
   pure (merge (toJSON d) (obj [("trigger",str (maybe "manual" (const "interval") (definitionSchedule d))),("title",str (R.definitionTitle d)),("goal",str (R.definitionGoal d)),("criteria",maybe Null toJSON (R.definitionCriteria d)),("revision",toJSON (definitionRevision d)),("deleted",Bool (definitionDeleted d)),("runs",arr history)]))
- pure (obj [("definitions",arr rendered),("errors",arr [op|op<-decoded,int (get op "code")>=400])])
- where
- renderRun work = do
-  gate <- if has (D.workField work "origin") "occurrence" then field 500 (toJSON work) "executionGate" else pure ExecutionOpen
-  let call=NE.last (D.workCalls work)
-      status=if gate==ExecutionStopped then "stopped" else case D.callState call of
-       D.CallQueued -> "queued"
-       D.CallRunning -> "running"
-       D.CallCompleted -> "done"
-       D.CallUnresolved -> "unresolved"
-       D.CallWaiting -> "waiting"
-       D.CallDelegated -> "queued"
-       D.CallFailed -> "failed"
-       D.CallInterrupted -> "interrupted"
-       D.CallCancelled -> "cancelled"
-  pure (obj [("id",str (D.workloadId work)),("created",D.workField work "created"),("trigger",get (D.workField work "origin") "trigger"),("snapshot",D.workField work "routineSnapshot"),("status",str status),("result",if gate==ExecutionStopped then Null else get (D.workField work "outcome") "reply"),("message",if gate==ExecutionOpen && D.callState call==D.CallWaiting then toJSON (D.callOutput call) else Null),("error",D.callField call "error"),("currentOwner",toJSON (D.callOwner call))])
+ pure (obj [("definitions",arr rendered),("errors",arr [remove ["request"] op|op<-reverse operations,int (get op "code")>=400])])
+
+detail :: Service -> Text -> Text -> Text -> IO Value
+detail s owner identity run = do
+ ds <- definitions s
+ definition <- maybe (failure 404 "Unknown personal Routine") pure (find (\d -> definitionId d==identity && definitionOwner d==owner) ds)
+ works <- D.readWorks s
+ work <- maybe (failure 404 "Unknown Routine run") pure (find (\w -> D.workloadId w==run && at (D.workField w "origin") "routine"==identity) works)
+ operations <- readOperations s
+ renderRun RunDetail operations (definitionRevision definition) work
+
+renderRun :: RunProjection -> [Value] -> Revision -> D.Workload -> IO Value
+renderRun projection operations revision work = do
+ gate <- if has (D.workField work "origin") "occurrence" then field 500 (toJSON work) "executionGate" else pure ExecutionOpen
+ let call=NE.last (D.workCalls work)
+     status=if gate==ExecutionStopped then "stopped" else case D.callState call of
+      D.CallQueued -> "queued"
+      D.CallRunning -> "running"
+      D.CallCompleted -> "done"
+      D.CallUnresolved -> "unresolved"
+      D.CallWaiting -> "waiting"
+      D.CallDelegated -> "queued"
+      D.CallFailed -> "failed"
+      D.CallInterrupted -> "interrupted"
+      D.CallCancelled -> "cancelled"
+ let original=maybe Null (`get` "assessment") (listToMaybe (reverse (D.workItems work "decisions"))) `fallback` assessmentValue AssessmentUnresolved "application_observation" "No recorded contract assessment"
+     feedback=[obj [("operation",get op "id"),("run",get payload "run"),("revision",get payload "revision"),("reason",get payload "reason"),("author",str "admin"),("created",get op "created")]
+      | op<-operations,int (get op "code")<300,at (get op "request") "action"=="reject",let payload=get (get op "request") "payload",get payload "run"==str (D.workloadId work)]
+     assessment=if not (null feedback) then assessmentValue AssessmentRejected "user_feedback" (maybe "" (`at` "reason") (listToMaybe feedback)) else if gate==ExecutionStopped then assessmentValue AssessmentUnresolved "application_observation" "Run was stopped; external effects require review" else original
+     invocations=[select ["decisionId","callId","node","evidence","assessment"] entry | entry<-D.workItems work "decisions",has entry "evidence"]
+     reported=get (maybe Null (`get` "response") (listToMaybe (reverse (D.workItems work "decisions")))) "outcome"
+     criteriaAssessment=[obj [("criterion",criterion),("status",str (if criterion `elem` items reported "satisfiedCriteria" then "Model reports satisfied" else if has (get reported "notApplicableCriteria") (text criterion) then "Model reports not applicable" else "Unresolved")),("reason",get (get reported "notApplicableCriteria") (text criterion)),("source",str "model_statement")] | criterion<-items (D.workField work "routineSnapshot") "criteria"]
+     observations=obj [("source",str "model_statement"),("statements",get (D.workField work "outcome") "evidence" `fallback` arr []),("independent",Bool False)]
+ let lastDecision=maybe Null (`get` "decisionId") (listToMaybe (reverse (D.workItems work "decisions")))
+     lastFeedback=maybe Null (`get` "operation") (listToMaybe (reverse feedback))
+     version=jsonText (arr [str status,lastDecision,lastFeedback,toJSON revision])
+     details=case projection of
+      RunSummary -> []
+      RunDetail -> [("criteriaAssessment",arr criteriaAssessment),("invocations",arr invocations),("observations",observations),("feedback",arr feedback),("rejection",fromMaybe Null (listToMaybe feedback)),("outcome",D.workField work "outcome")]
+ pure (obj (details++[("assessment",assessment),("originalAssessment",original),("detailVersion",str version),("invocationCount",num (length invocations)),("currentRevision",toJSON revision),("historical",Bool (get (D.workField work "routineSnapshot") "revision"/=toJSON revision)),("id",str (D.workloadId work)),("created",D.workField work "created"),("trigger",get (D.workField work "origin") "trigger"),("snapshot",D.workField work "routineSnapshot"),("status",str status),("result",if gate==ExecutionStopped then Null else get (D.workField work "outcome") "reply"),("message",if gate==ExecutionOpen && D.callState call==D.CallWaiting then toJSON (D.callOutput call) else Null),("error",D.callField call "error"),("currentOwner",toJSON (D.callOwner call))]))

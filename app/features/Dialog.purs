@@ -35,6 +35,7 @@ make kind record m = {kind,title,record,fields,content:D.null,error:"",busy:fals
     M.DecisionPrompts -> "Decision prompts"
     M.GroupTask -> if D.s "id" record == "" then "Create Group task" else "Edit Group task"
     M.RoutineStop -> "Stop this run?"
+    M.RoutineReject -> "Reject this result?"
     M.RoutineDiscard -> "Discard changes?"
     M.RoutineRun -> "Run " <> D.s "title" record
     M.RoutineDelete -> "Delete " <> D.s "title" record
@@ -96,6 +97,9 @@ body m d = case d.kind of
     ,V.when (D.s "id" d.record /= "") $ select "Status" "state" $ map (\state -> Tuple state $ W.taskState state) ["backlog","in_progress","done"]
     ,V.when (D.s "id" d.record /= "" && not (D.b "deleted" d.record)) $ V.button "button" "Delete task" $ DialogCommand "delete-task" D.empty
     ,V.p "form-hint" "Saving keeps this as shared work. Use Run task to call the assignee. Deletions can be restored."]
+  M.RoutineReject -> form "Reject result"
+    [textarea "Reason for rejecting (up to 4000 characters)" "reason" 4 [V.bool "required" true,V.attr "maxlength" "4000"]
+    ,V.p "form-hint" "Your feedback stays with this run and its original instructions. The original assessment is preserved. This does not start another run."]
   M.RoutineStop -> form "Stop run"
     [V.p "" "This stops this run and its delegated work. Completed external actions cannot be undone. Other runs are unchanged."]
   M.RoutineDiscard -> form "Discard changes"

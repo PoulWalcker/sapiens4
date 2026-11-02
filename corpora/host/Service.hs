@@ -201,6 +201,7 @@ dispatch s method target body = locked s $ do
   ("POST",["api","groups",gid,"calls",rid,action]) -> json 200 (GC.actionGroup s gid rid action)
   ("POST",["api","agents"]) -> json 201 $ do row<-createAgent s d; Mgt.prepare s (at row "id"); pure row
   ("PUT",["api","agents",a]) -> json 200 (updateAgent s a d)
+  ("GET",["api","agents",a,"routines",rid,"runs",run]) -> json 200 (RC.detail s a rid run)
   ("POST",["api","agents",a,"routines"]) -> do
    (code,value)<-RC.command s a "create" "" d
    pure (code,encode value,"application/json; charset=utf-8")

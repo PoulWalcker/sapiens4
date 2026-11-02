@@ -26,6 +26,38 @@ RSpec.describe 'Routine list, results and settings in the native app', :desktop 
     desktop.see('No results yet')
   end
 
+  it 'shows sourced evidence and unknown usage without starting work, and saves run feedback' do
+    @host = desktop_host
+    owner = host.state.fetch('main_agent_id')
+    routine = host.api('POST', "/api/agents/#{owner}/routines", operation: 'evidence-create', title: 'Evidence example', goal: 'Compare the products.', criteria: ['Return a sourced comparison.']).fetch('routine')
+    run = host.api('POST', "/api/agents/#{owner}/routines/#{routine}/run", operation: 'evidence-run', revision: 1).fetch('run')
+    host.turn(run)
+    before = host.state.fetch('personal_routines').find { |row| row['id'] == routine }
+    calls = host.calls.length
+    start_desktop
+    open_routines
+    click_button('Evidence example')
+    desktop.see('Assessment: Accepted')
+    click_button('Evidence and usage')
+    desktop.see('Model reports satisfied')
+    desktop.see('Input tokens: Unknown')
+    desktop.see('Price: Unknown')
+    desktop.see('external effects')
+    click_button('History')
+    click_button(/Run 1 ·/)
+    click_button('Evidence and usage')
+    expect(host.calls.length).to eq(calls)
+    expect(host.state.fetch('personal_routines').find { |row| row['id'] == routine }).to eq(before)
+    click_button('Reject result…')
+    desktop.fill('Reason for rejecting (up to 4000 characters)', 'The comparison missed my requested context.')
+    click_button('Reject result')
+    desktop.see('Assessment: Rejected')
+    click_button('Evidence and usage')
+    desktop.see('Original assessment: Accepted')
+    desktop.see('Admin feedback: The comparison missed my requested context.')
+    expect(host.calls.length).to eq(calls)
+  end
+
   it 'uses separate list, latest result, history, run and inline settings screens' do
     @host = desktop_host
     start_desktop

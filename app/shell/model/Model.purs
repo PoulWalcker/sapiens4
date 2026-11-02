@@ -18,7 +18,7 @@ data RemoteData a = NotAsked | Loading Request (Maybe a) | Ready Request a | Fai
 
 type Request = { epoch :: Int, sequence :: Int, key :: String, revision :: String, path :: String }
 
-data DialogKind = AppMenu | WorkspaceSettings | Computer | AgentSettings | GroupSettings | Attach | Reference String | DecisionPrompts | GroupTask | RoutineRun | RoutineDelete | RoutineStop | RoutineDiscard | CreateCorpora | EditCorpora | ConnectRemote | HostPairing | RelayList | RelayAdd | RelaySwitch | RelayTerms | Installation | Notice
+data DialogKind = AppMenu | WorkspaceSettings | Computer | AgentSettings | GroupSettings | Attach | Reference String | DecisionPrompts | GroupTask | RoutineRun | RoutineDelete | RoutineStop | RoutineReject | RoutineDiscard | CreateCorpora | EditCorpora | ConnectRemote | HostPairing | RelayList | RelayAdd | RelaySwitch | RelayTerms | Installation | Notice
 
 derive instance eqDialogKind :: Eq DialogKind
 
@@ -38,19 +38,21 @@ derive instance eqScheduleAction :: Eq ScheduleAction
 
 type ScheduleRequest = { action :: ScheduleAction, record :: Json, operation :: String, busy :: Boolean, error :: String }
 
-type RoutineView = { page :: RoutinePage, editor :: Maybe RoutineEditor, pending :: Maybe RoutinePage, scheduleRequest :: Maybe ScheduleRequest }
+type RoutineEvidence = { routine :: String, run :: String, version :: String, record :: Json, busy :: Boolean, error :: String, request :: Int }
+
+type RoutineView = { evidence :: Maybe RoutineEvidence, page :: RoutinePage, editor :: Maybe RoutineEditor, pending :: Maybe RoutinePage, scheduleRequest :: Maybe ScheduleRequest }
 
 routineKey :: Model -> String
 routineKey m = m.active <> ":" <> m.selected
 
 routineView :: Model -> RoutineView
-routineView m = fromMaybe {page:RoutineList false,editor:Nothing,pending:Nothing,scheduleRequest:Nothing} $ O.lookup (routineKey m) m.routineViews
+routineView m = fromMaybe {page:RoutineList false,editor:Nothing,pending:Nothing,scheduleRequest:Nothing,evidence:Nothing} $ O.lookup (routineKey m) m.routineViews
 
 modifyRoutineView :: String -> (RoutineView -> RoutineView) -> Model -> Model
-modifyRoutineView key f m = m {routineViews=O.alter (Just <<< f <<< fromMaybe {page:RoutineList false,editor:Nothing,pending:Nothing,scheduleRequest:Nothing}) key m.routineViews}
+modifyRoutineView key f m = m {routineViews=O.alter (Just <<< f <<< fromMaybe {page:RoutineList false,editor:Nothing,pending:Nothing,scheduleRequest:Nothing,evidence:Nothing}) key m.routineViews}
 
 resetRoutineRequests :: O.Object RoutineView -> O.Object RoutineView
-resetRoutineRequests = map \view -> view {editor=map (\editor -> if editor.busy then editor {busy=false,error="The connection changed while saving. Retry unchanged to recover the saved response."} else editor) view.editor,scheduleRequest=map (\request -> if request.busy then request {busy=false,error="The connection changed before the schedule response arrived. Retry unchanged or refresh the current schedule."} else request) view.scheduleRequest}
+resetRoutineRequests = map \view -> view {evidence=Nothing,editor=map (\editor -> if editor.busy then editor {busy=false,error="The connection changed while saving. Retry unchanged to recover the saved response."} else editor) view.editor,scheduleRequest=map (\request -> if request.busy then request {busy=false,error="The connection changed before the schedule response arrived. Retry unchanged or refresh the current schedule."} else request) view.scheduleRequest}
 
 type Model =
   { snapshot :: Json, agents :: Array Json, messages :: O.Object (Array Json)

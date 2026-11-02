@@ -63,6 +63,7 @@ refresh runtime dispatch requested operation = attempt operation \result -> do
         liftEffect $ C.cache key raw
         restoreScroll
         requestDocument runtime
+        dispatch RoutineRefreshEvidence
         when (now - m.lastPreview >= 2000.0) do
           H.modify_ _ {lastPreview=now}
           preview runtime

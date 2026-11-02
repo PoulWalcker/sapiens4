@@ -17,6 +17,22 @@ import Sapiens.Model as M
 
 handle :: C.Runtime -> E.Dispatch -> Action -> E.UI Unit
 handle runtime dispatch = case _ of
+  RoutineEvidence routine run -> do
+    m <- H.get
+    fetchEvidence m routine run
+  RoutineRefreshEvidence -> do
+    m <- H.get
+    let view = M.routineView m
+    case view.evidence of
+      Just evidence | not evidence.busy && evidence.error == "" -> do
+        let routine = A.find ((evidence.routine == _) <<< D.s "id") $ D.rows "personal_routines" m.snapshot
+            run = routine >>= A.find ((evidence.run == _) <<< D.s "id") <<< D.rows "runs"
+            showing = case view.page of
+              M.RoutineOccurrence rid runId -> rid == evidence.routine && runId == evidence.run
+              M.RoutineLatest rid -> rid == evidence.routine && (D.s "id" <$> (routine >>= A.last <<< D.rows "runs")) == Just evidence.run
+              _ -> false
+        when (showing && (D.s "detailVersion" <$> run) /= Just evidence.version) $ fetchEvidence m evidence.routine evidence.run
+      _ -> pure unit
   RoutineNavigate page -> do
     m <- H.get
     let view = M.routineView m
@@ -87,6 +103,20 @@ handle runtime dispatch = case _ of
       Right snapshot -> H.modify_ \current -> M.modifyRoutineView key (\view -> if (_.operation <$> view.scheduleRequest) == operation then view {scheduleRequest=Nothing} else view) $ M.project snapshot current
   _ -> pure unit
   where
+  fetchEvidence m routine run = do
+    let key = M.routineKey m
+        request = m.sequence + 1
+        selected = A.find ((routine == _) <<< D.s "id") $ D.rows "personal_routines" m.snapshot
+        summary = selected >>= A.find ((run == _) <<< D.s "id") <<< D.rows "runs"
+        version = fromMaybe "" $ D.s "detailVersion" <$> summary
+        path = "/api/agents/" <> B.encodeURI m.selected <> "/routines/" <> B.encodeURI routine <> "/runs/" <> B.encodeURI run
+    H.modify_ \current -> M.modifyRoutineView key (_ {evidence=Just {routine,run,version,record:D.null,busy:true,error:"",request}}) current {sequence=request}
+    E.attempt (E.api runtime m path "GET" D.null) \result -> E.inEpoch m.epoch \current ->
+      when (M.routineKey current == key && (_.request <$> (M.routineView current).evidence) == Just request) $
+        H.modify_ $ M.modifyRoutineView key \view -> view {evidence=map (\evidence -> case result of
+          Left failure -> evidence {busy=false,error=message failure}
+          Right record -> evidence {busy=false,record=record,version=D.s "detailVersion" record}) view.evidence}
+
   sendSchedule m request = unless request.busy do
     let key = M.routineKey m
         action = case request.action of
@@ -107,7 +137,7 @@ handle runtime dispatch = case _ of
     case page of
       M.RoutineSettings id -> prepareEditor m page id false
       M.RoutineSchedule id -> prepareEditor m page id true
-      _ -> H.modify_ $ M.modifyRoutineView (M.routineKey m) _ {page=page,editor=Nothing,pending=Nothing}
+      _ -> H.modify_ $ M.modifyRoutineView (M.routineKey m) _ {page=page,editor=Nothing,pending=Nothing,evidence=Nothing}
     liftEffect $ B.scroll "#conversation-body" 0.0
 
   prepareEditor m page id scheduling = do
@@ -115,4 +145,4 @@ handle runtime dispatch = case _ of
     let record = D.put "owner" (D.text m.selected) $ fromMaybe D.empty $ A.find (\r -> D.s "id" r == id && D.s "owner" r == m.selected) $ D.rows "personal_routines" m.snapshot
         fields = if scheduling then D.json {minutes:show $ if D.n "minutes" record > 0.0 then D.int $ D.get "minutes" record else 60} else D.json {title:D.s "title" record,goal:D.s "goal" record,criteria:S.joinWith "\n" $ D.strings $ D.get "criteria" record}
         editor = {record,fields,operation,error:"",busy:false,dirty:false,identity:m.sequence+1}
-    H.modify_ \current -> M.modifyRoutineView (M.routineKey m) (_ {page=page,editor=Just editor,pending=Nothing}) current {sequence=m.sequence+1,menu=Nothing}
+    H.modify_ \current -> M.modifyRoutineView (M.routineKey m) (_ {page=page,editor=Just editor,pending=Nothing,evidence=Nothing}) current {sequence=m.sequence+1,menu=Nothing}

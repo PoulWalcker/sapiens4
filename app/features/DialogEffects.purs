@@ -33,7 +33,7 @@ handle runtime dispatch action = case action of
     if kind == M.ConnectRemote && m.installRequired then dispatch Install else do
       when (m.dialog /= Nothing) $ void $ H.fork $ H.liftAff $ C.cancelPairing runtime
       operation <- liftEffect B.uuid
-      let routine = A.elem kind [M.RoutineRun,M.RoutineDelete,M.RoutineStop]
+      let routine = A.elem kind [M.RoutineRun,M.RoutineDelete,M.RoutineStop,M.RoutineReject]
           prepared = if routine then D.merge record $ D.json {operation, owner: if D.s "owner" record == "" then m.selected else D.s "owner" record} else record
           d = Dialog.make kind prepared m
       H.modify_ _ {dialog=Just d,dialogStack=[],menu=Nothing,sequence=d.identity,mention=Nothing}
@@ -52,7 +52,7 @@ handle runtime dispatch action = case action of
     E.sync
   Field key value -> do
     operation <- liftEffect B.uuid
-    H.modify_ \m -> m {dialog=map (\d -> let updated = updateField key value d in if A.elem d.kind [M.RoutineRun] then updated {record=D.put "operation" (D.text operation) updated.record} else updated) m.dialog}
+    H.modify_ \m -> m {dialog=map (\d -> let updated = updateField key value d in if A.elem d.kind [M.RoutineRun,M.RoutineReject] then updated {record=D.put "operation" (D.text operation) updated.record} else updated) m.dialog}
     when (key == "showLink") do
       liftEffect $ B.focus "#host-pair-link"
       m <- H.get
@@ -100,6 +100,7 @@ handle runtime dispatch action = case action of
     M.GroupSettings -> runDialog d (saved "Group saved.") $ E.api runtime m ("/api/groups/" <> B.encodeURI (D.s "id" d.record)) "PUT" $ D.obj $ map (\key -> Tuple key $ D.get key d.fields) ["name","description","lead","members","revision"]
     M.GroupTask -> saveTask m d false
     M.RoutineStop -> routineCommand m d "stop"
+    M.RoutineReject -> routineCommand m d "reject"
     M.RoutineDiscard -> dispatch CloseDialog *> dispatch RoutineDiscardChanges
     M.RoutineRun -> routineCommand m d "run"
     M.RoutineDelete -> routineCommand m d "delete"
@@ -173,7 +174,7 @@ handle runtime dispatch action = case action of
     dispatch LoadRegistry
   routineCommand m d action =
     let path = "/api/agents/" <> B.encodeURI (D.s "owner" d.record) <> "/routines" <> if action == "create" then "" else "/" <> B.encodeURI (D.s "id" d.record) <> "/" <> action
-        body = D.json {operation: D.get "operation" d.record, revision: D.get "revision" d.record, title: D.get "title" d.fields, goal: D.get "goal" d.fields, criteria: A.filter (_ /= "") $ map S.trim $ S.split (S.Pattern "\n") $ D.s "criteria" d.fields, inputs: D.s "inputs" d.fields, run: D.get "run" d.record}
+        body = D.json {operation: D.get "operation" d.record, revision: D.get "revision" d.record, title: D.get "title" d.fields, goal: D.get "goal" d.fields, criteria: A.filter (_ /= "") $ map S.trim $ S.split (S.Pattern "\n") $ D.s "criteria" d.fields, inputs: D.s "inputs" d.fields, run: D.get "run" d.record, reason: D.s "reason" d.fields}
         done response = do
           dispatch CloseDialog
           when (m.selected == D.s "owner" d.record) $ dispatch $ RoutineNavigate $ if action == "run" then M.RoutineOccurrence (D.s "id" d.record) (D.s "run" response) else if action == "delete" then M.RoutineList true else M.RoutineOccurrence (D.s "id" d.record) (D.s "run" d.record)
