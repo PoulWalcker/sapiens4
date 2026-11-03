@@ -38,6 +38,8 @@ make kind record m = {kind,title,record,fields,content:D.null,error:"",busy:fals
     M.RoutineAnalyze -> "Analyze saved evidence"
     M.RoutineStopAnalysis -> "Stop analysis?"
     M.DoctorAccess -> "Doctor file access"
+    M.RepairGrant -> "Continue this repair"
+    M.RepairStop -> "Stop this repair?"
     M.RoutineReject -> "Reject this result?"
     M.RoutineDiscard -> "Discard changes?"
     M.RoutineRun -> "Run " <> D.s "title" record
@@ -57,6 +59,8 @@ make kind record m = {kind,title,record,fields,content:D.null,error:"",busy:fals
     M.GroupSettings -> record
     M.GroupTask -> D.merge (D.json {assignee: D.get "lead" $ M.selected m, state: "backlog"}) record
     M.RoutineRun -> D.json {inputs: ""}
+    M.RepairGrant -> D.json {minutes:"5",reason:""}
+    M.RepairStop -> D.json {reason:"Stopped by Admin"}
     M.DoctorAccess -> D.json {readFiles:S.joinWith "\n" $ map (D.s "path") $ A.filter (\resource -> D.s "access" resource == "read") $ D.rows "resources" $ D.at ["repair","access"] record,writeFiles:S.joinWith "\n" $ map (D.s "path") $ A.filter (\resource -> D.s "access" resource == "write") $ D.rows "resources" $ D.at ["repair","access"] record}
     M.EditCorpora -> D.json {message: replaceFields (D.fallback (D.str $ D.at ["corpora","settings_template"] m.snapshot) $ D.s "settings_template" record) ["name","device","scope","doctor_id"]}
     M.RelayAdd -> D.json {name: D.get "name" record, connection: if D.valid $ D.get "connection" record then D.encode $ D.get "connection" record else ""}
@@ -108,6 +112,14 @@ body m d = case d.kind of
     [V.p "" "This stops this run and its delegated work. Completed external actions cannot be undone. Other runs are unchanged."]
   M.RoutineAnalyze -> form "Analyze evidence"
     [V.p "" "The owner will make a new analysis of saved results and feedback. This uses a model call and does not start a routine run."]
+  M.RepairGrant -> form ("Add " <> field "minutes" <> " minutes and continue")
+    [V.p "" $ "This case used " <> show (D.n "spentMilliseconds" (D.get "repair" d.record) / 60000.0) <> " active minutes; remaining: " <> show (D.n "remainingMilliseconds" (D.get "repair" d.record) / 60000.0) <> " active minutes."
+    ,input "Additional active minutes" "minutes" [V.attr "type" "number",V.attr "min" "1",V.attr "step" "1",V.bool "required" true]
+    ,textarea "Reason for continuing repair" "reason" 3 [V.bool "required" true,V.attr "maxlength" "4000"]
+    ,V.p "form-hint" "This immediately queues a fresh diagnosis for the same case. Existing history, spending, pins and unknown outcomes remain. It does not repeat an old operation, clear uncertain effects or authorize a business run. There is no automatic refill."]
+  M.RepairStop -> form "Stop repair"
+    [textarea "Reason for stopping repair" "reason" 3 [V.bool "required" true,V.attr "maxlength" "4000"]
+    ,V.p "form-hint" "Stop this case's queued and active repair work. Unused grants and past spending remain in history; other cases and safe ordinary runs are unchanged. A grant cannot override this Stop."]
   M.DoctorAccess -> form "Save Doctor access"
     [textarea "Read-only files (absolute paths, one per line)" "readFiles" 4 [V.attr "maxlength" "16000"]
     ,textarea "Writable files (absolute paths, one per line)" "writeFiles" 4 [V.attr "maxlength" "16000"]

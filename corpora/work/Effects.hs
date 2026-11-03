@@ -5,7 +5,7 @@ module Effects
  ( configureOn, definitionOn, pinOn, profileBound, external
  , beforeContent, ContentCommit(..), acceptContentOn, deliver, finishOccurrence
  , completeActionFree, positiveAnomaly, observedInput, preparationInput, fixtureInput, requireCandidateInput, requireCurrentInput
- , auditPublication, requireRunClear, prepareRoutineAttempt, admitRoutineAttempt, sealRoutineAttempt, requireContentTrace, observeEvidence, recover, reconcile, summary, pendingTransport
+ , auditPublication, requireDefinitionClearOn, requireRunClear, prepareRoutineAttempt, admitRoutineAttempt, sealRoutineAttempt, requireContentTrace, observeEvidence, recover, reconcile, summary, pendingTransport
  ) where
 
 import Control.Concurrent (threadDelay)
@@ -258,6 +258,9 @@ configureOn db old current change=case change of
    _->pure 0
   let versioned=if changed || (get next "externalProfile"/=Null && previousRevision==0) then put "externalProfileRevision" (num (previousRevision+1)) next else next
   DB.saveRoutineOn db versioned
+
+requireDefinitionClearOn :: SQL.Connection -> Value -> IO ()
+requireDefinitionClearOn db definition=requireClearOn db (RoutineConsumer (at definition "owner") (at definition "id")) Nothing
 
 pinOn :: SQL.Connection -> Value -> Value -> IO Value
 pinOn db definition work=do

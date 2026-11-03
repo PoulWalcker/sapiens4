@@ -18,7 +18,7 @@ data RemoteData a = NotAsked | Loading Request (Maybe a) | Ready Request a | Fai
 
 type Request = { epoch :: Int, sequence :: Int, key :: String, revision :: String, path :: String }
 
-data DialogKind = AppMenu | WorkspaceSettings | Computer | AgentSettings | GroupSettings | Attach | Reference String | DecisionPrompts | GroupTask | RoutineRun | RoutineDelete | RoutineStop | RoutineReject | RoutineAnalyze | RoutineStopAnalysis | DoctorAccess | RoutineDiscard | CreateCorpora | EditCorpora | ConnectRemote | HostPairing | RelayList | RelayAdd | RelaySwitch | RelayTerms | Installation | Notice
+data DialogKind = AppMenu | WorkspaceSettings | Computer | AgentSettings | GroupSettings | Attach | Reference String | DecisionPrompts | GroupTask | RoutineRun | RoutineDelete | RoutineStop | RoutineReject | RoutineAnalyze | RoutineStopAnalysis | DoctorAccess | RepairGrant | RepairStop | RoutineDiscard | CreateCorpora | EditCorpora | ConnectRemote | HostPairing | RelayList | RelayAdd | RelaySwitch | RelayTerms | Installation | Notice
 
 derive instance eqDialogKind :: Eq DialogKind
 

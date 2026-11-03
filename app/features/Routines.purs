@@ -182,7 +182,13 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     ,V.p "" $ D.s "waitingReason" repair
     ,V.p "" $ D.s "diagnosis" (D.get "diagnosis" repair)
     ,V.p "routine-muted" $ D.s "recommendation" (D.get "diagnosis" repair)
-    ,V.p "routine-muted" $ "Attempts: " <> show (A.length $ D.rows "attempts" repair) <> " · Measured active time (ms): " <> show (D.int $ D.get "measuredMilliseconds" repair) <> " · Reserved (ms): " <> show (D.int $ D.get "reservedMilliseconds" repair) <> " / " <> show (D.int $ D.get "limitMilliseconds" repair)
+    ,V.p "routine-muted" $ "Attempts: " <> show (A.length $ D.rows "attempts" repair) <> " · Measured active time (ms): " <> show (D.int $ D.get "measuredMilliseconds" repair) <> " · Reserved (ms): " <> show (D.int $ D.get "reservedMilliseconds" repair) <> " / " <> show (D.n "limitMilliseconds" repair)
+    ,V.p "routine-muted" $ "Remaining active repair time (ms): " <> show (D.n "remainingMilliseconds" repair)
+    ,V.when (D.s "status" repair == "exhausted") $ V.div "routine-actions"
+      [V.control [V.cls "routine-link",V.disabled $ not $ D.b "canGrant" repair] "Continue repair…" $ OpenDialog M.RepairGrant $ record routine
+      ,V.p "routine-muted" $ D.s "grantBlocker" repair]
+    ,V.when (not $ A.elem (D.s "status" repair) ["recovered","stale","stopped"]) $ V.button "routine-link" "Stop repair…" $ OpenDialog M.RepairStop $ record routine
+    ,V.node "details" [] ([V.node "summary" [] [V.text "Repair continuation grants"]] <> map (\grant -> V.p "routine-muted" $ "Added " <> show (D.n "additionalMilliseconds" grant / 60000.0) <> " active minutes · " <> D.s "reason" grant <> " · " <> formatDate (D.s "created" grant)) (D.rows "grants" repair))
     ,V.p "routine-muted" $ "Current candidate: " <> D.fallback "None" (D.s "candidate" repair)
     ,V.p "" $ D.s "terminalReason" repair
     ,V.when (D.b "usageUnknown" repair) $ V.p "routine-problem" "Repair spend is unknown for interrupted activity. Its reserved resource remains consumed."

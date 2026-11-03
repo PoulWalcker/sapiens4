@@ -25,9 +25,9 @@ import qualified Automation
 
 newtype OperationId = OperationId Text deriving (Eq, Show)
 
-data RoutineCommand = Create RoutineFields | Edit Revision RoutineFields | RunNow Revision Text | StopRun Revision RunId | Delete Revision | Schedule Revision Minutes | Pause Revision Bool | RejectRun Revision RunId Text | Analyze Revision | StopAnalysis Revision RunId | Prepare Revision RunId | StopPreparation Revision RunId | DoctorAccess Revision Text Value deriving (Eq, Show)
+data RoutineCommand = Create RoutineFields | Edit Revision RoutineFields | RunNow Revision Text | StopRun Revision RunId | Delete Revision | Schedule Revision Minutes | Pause Revision Bool | RejectRun Revision RunId Text | Analyze Revision | StopAnalysis Revision RunId | Prepare Revision RunId | StopPreparation Revision RunId | DoctorAccess Revision Text Value | GrantRepair Revision Text Int Text | StopRepair Revision Text Text deriving (Eq, Show)
 data CommandError = CommandError Int Text deriving (Eq, Show)
-data CommandPlan = CreateDefinition RoutineFields | UpdateDefinition Definition | Admit Definition Text | StopOccurrences [D.Workload] | DeleteDefinition Definition [D.Workload] | RecordFeedback Text RunId | AnalyzeDefinition Definition | StopAnalysisCall Definition RunId | PrepareDefinition Definition RunId | StopPreparationCall Definition RunId | ConfigureDoctorAccess Definition Text Value
+data CommandPlan = CreateDefinition RoutineFields | UpdateDefinition Definition | Admit Definition Text | StopOccurrences [D.Workload] | DeleteDefinition Definition [D.Workload] | RecordFeedback Text RunId | AnalyzeDefinition Definition | StopAnalysisCall Definition RunId | PrepareDefinition Definition RunId | StopPreparationCall Definition RunId | ConfigureDoctorAccess Definition Text Value | GrantRepairCase Definition Text Int Text | StopRepairCase Definition Text Text
 
 parseCommand :: Text -> Value -> Parser RoutineCommand
 parseCommand action value = withObject "Routine command" (\o -> do
@@ -52,6 +52,11 @@ parseCommand action value = withObject "Routine command" (\o -> do
   "pause" -> Pause <$> o .: "revision" <*> pure True
   "resume" -> Pause <$> o .: "revision" <*> pure False
   "analyze" -> Analyze <$> o .: "revision"
+  "repair-grant" -> do
+   minutes<-o .: "minutes"
+   reason<-textFieldP "reason" 4000 value
+   GrantRepair <$> o .: "revision" <*> o .: "case" <*> pure minutes <*> pure reason
+  "stop-repair" -> StopRepair <$> o .: "revision" <*> o .: "case" <*> textFieldP "reason" 4000 value
   "doctor-access" -> DoctorAccess <$> o .: "revision" <*> o .: "case" <*> o .: "resources"
   "prepare" -> Prepare <$> o .: "revision" <*> o .: "analysis"
   "stop-preparation" -> StopPreparation <$> o .: "revision" <*> o .: "preparation"
@@ -66,6 +71,8 @@ decide time current occurrences request = case request of
   d <- existing revision
   let changed=R.changeContract (AcceptedContract fields) d
   pure (UpdateDefinition (R.bumpRevision changed {definitionFields=KM.delete "prompt" (definitionFields changed)}))
+ GrantRepair revision identity minutes reason -> GrantRepairCase <$> existing revision <*> pure identity <*> pure minutes <*> pure reason
+ StopRepair revision identity reason -> StopRepairCase <$> existing revision <*> pure identity <*> pure reason
  DoctorAccess revision identity resources -> ConfigureDoctorAccess <$> existing revision <*> pure identity <*> pure resources
  Prepare revision analysis -> (`PrepareDefinition` analysis) <$> existing revision
  StopPreparation revision identity -> (`StopPreparationCall` identity) <$> existing revision
@@ -131,6 +138,14 @@ command s owner action identity payload = do
       require (corporaStatus cfg==Active) 409 "Activate this corpora before starting work"
      _ -> pure ()
     case request_ of
+     GrantRepair _ _ _ _ -> do
+      cfg<-corporaSettings s
+      require (corporaStatus cfg==Active) 409 "Activate this corpora before continuing repair"
+      doctor<-maybe (failure 409 "Assign an active Doctor before continuing repair") pure (corporaDoctor cfg)
+      chief<-DB.mainAgent s
+      require (agentIdText doctor/=chief && not ("group_" `T.isPrefixOf` agentIdText doctor)) 409 "Assign an active personal specialist as Doctor"
+      requireActive s (agentIdText doctor)
+      Automation.preflight
      Prepare _ _ -> do
       cfg <- corporaSettings s
       require (corporaStatus cfg==Active) 409 "Activate this corpora before preparing code"
@@ -149,7 +164,7 @@ command s owner action identity payload = do
      let current=find (\d->definitionId d==identity && definitionOwner d==owner) allDefinitions
          occurrences=filter (\w->at (D.workField w "origin") "routine"==identity) works
      plan <- either (\(CommandError code message)->failure code message) pure (decide clock current occurrences request_)
-     (target,response) <- applyPlan db (AgentId owner) runIdentity time plan
+     (target,response) <- applyPlan db (AgentId owner) runIdentity time operation plan
      when (action `elem` ["create","edit"]) $ do
       change<-parseValue 400 profileChange payload
       definition<-Effects.definitionOn db target
@@ -171,8 +186,14 @@ command s owner action identity payload = do
      DB.connection s $ \db -> saveReceipt db owner operation identity request code response time
      pure (code,response)
 
-applyPlan :: SQL.Connection -> AgentId -> RunId -> Text -> CommandPlan -> IO (Text,Value)
-applyPlan db owner runIdentity time plan = case plan of
+applyPlan :: SQL.Connection -> AgentId -> RunId -> Text -> OperationId -> CommandPlan -> IO (Text,Value)
+applyPlan db owner runIdentity time (OperationId operation) plan = case plan of
+ GrantRepairCase definition identity minutes reason -> do
+  response<-Automation.grantRepairOn db (toJSON definition) identity operation minutes reason time
+  pure (definitionId definition,response)
+ StopRepairCase definition identity reason -> do
+  response<-Automation.stopRepairOn db (toJSON definition) identity reason time
+  pure (definitionId definition,response)
  ConfigureDoctorAccess definition identity resources -> do
   response<-Automation.configureDoctorAccessOn db (toJSON definition) identity resources
   pure (definitionId definition,response)

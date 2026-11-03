@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE CPP #-}
-module Automation (dispatch, requestOn, stopOn, projection, detail, preflight, recordRepairFaultOn, withRepairBudget, runDiagnosis, dispatchRepairs, recoverRepairs, repairProjection, selectDoctorResources, configureDoctorAccessOn, recordAuditFailure, savedAuditSourceOn, providerDue, deferProvider, cancelProviderWait) where
+module Automation (dispatch, requestOn, stopOn, projection, detail, preflight, recordRepairFaultOn, withRepairBudget, runDiagnosis, dispatchRepairs, recoverRepairs, repairProjection, selectDoctorResources, configureDoctorAccessOn, recordAuditFailure, savedAuditSourceOn, providerDue, deferProvider, cancelProviderWait, grantRepairOn, stopRepairOn) where
 
 import Control.Exception hiding (handle)
 import Control.Monad
@@ -402,14 +402,15 @@ withRepairBudget s running action = do
     let reservation=obj [("operation",str token),("status",str "reserved"),("milliseconds",num remaining)]
     void (DB.saveRoutineOn db (putRepair definition (appendItems "reservations" [reservation] (put "spentMilliseconds" (get saved "limitMilliseconds") saved))))
     pure remaining
-   let capped=running {runDeadline=min (runDeadline running) (started+fromIntegral allowance*1000000)}
+   let available=if runDeadline running>started then runDeadline running-started else 0
+       capped=running {runDeadline=started+fromInteger (min (toInteger available) (toInteger allowance*1000000))}
        settle=do
         ended<-getMonotonicTimeNSec
         let used=min allowance (max 1 (fromIntegral ((ended-started+999999) `div` 1000000)))
         updateRepair s pin $ \saved->
          let reservations=[if at r "operation"==token && at r "status"=="reserved" then mergeFields [("status",str "settled"),("usedMilliseconds",num used)] r else r | r<-items saved "reservations"]
              measured=put "reservations" (arr reservations) (put "spentMilliseconds" (num (int (get saved "spentMilliseconds")-allowance+used)) saved)
-         in if used>=allowance && not (at saved "status"=="recovered") then stopRepair "exhausted" "The case's aggregate active repair allowance is exhausted" measured else measured
+         in if used>=allowance && at saved "status" `notElem` ["recovered","stopped"] && not (has saved "userStop") then stopRepair "exhausted" "The case's aggregate active repair allowance is exhausted" measured else measured
    restore (action capped) `finally` settle
 
 withPreparationBudget :: Service -> Run -> (Run -> IO a) -> IO a
@@ -476,14 +477,62 @@ deferProvider s running operation due=do
 cancelProviderWait :: Service -> RunId -> IO ()
 cancelProviderWait s identity=do
  found<-D.findWork s identity
- forM_ found $ \(work,_)->when (has (toJSON work) "providerWait") $ do
-  let operation=at (D.workField work "providerWait") "operation"
-      cancel=map cancelOne
-      cancelOne op=let nested=if get op "correction"/=Null then put "correction" (cancelOne (get op "correction")) op else op
-                   in if at op "id"==operation && at op "status"=="retry_wait" then mergeFields [("status",str "cancelled"),("reason",str "Stopped by Admin")] nested else nested
-  if has (toJSON work) "preparation" then D.saveWork s (D.setWorkField "preparation" (put "operations" (arr (cancel (items (D.workField work "preparation") "operations"))) (D.workField work "preparation")) work)
-  else if has (toJSON work) "savedAudit" then D.saveWork s (D.setWorkField "codeExecution" (put "operations" (arr (cancel (items (D.workField work "codeExecution") "operations"))) (D.workField work "codeExecution")) work)
-  else when (has (toJSON work) "repairPin") (updateRepairUnlocked s (D.workField work "repairPin") (\saved->put "operations" (arr (cancel (items saved "operations"))) saved))
+ forM_ found $ \(work,_)->do
+  when (has (toJSON work) "repairPin") $ do
+   time<-now
+   updateRepairUnlocked s (D.workField work "repairPin") (\saved->if at saved "status"=="recovered" then saved else put "userStop" (obj [("at",str time),("reason",str "Repair stage stopped by Admin"),("authority",str "admin")]) (stopRepair "stopped" "Repair stage stopped by Admin" saved))
+  when (has (toJSON work) "providerWait") $ do
+   let operation=at (D.workField work "providerWait") "operation"
+       cancel=map cancelOne
+       cancelOne op=let nested=if get op "correction"/=Null then put "correction" (cancelOne (get op "correction")) op else op
+                    in if at op "id"==operation && at op "status"=="retry_wait" then mergeFields [("status",str "cancelled"),("reason",str "Stopped by Admin")] nested else nested
+   if has (toJSON work) "preparation" then D.saveWork s (D.setWorkField "preparation" (put "operations" (arr (cancel (items (D.workField work "preparation") "operations"))) (D.workField work "preparation")) work)
+   else if has (toJSON work) "savedAudit" then D.saveWork s (D.setWorkField "codeExecution" (put "operations" (arr (cancel (items (D.workField work "codeExecution") "operations"))) (D.workField work "codeExecution")) work)
+   else when (has (toJSON work) "repairPin") (updateRepairUnlocked s (D.workField work "repairPin") (\saved->put "operations" (arr (cancel (items saved "operations"))) saved))
+
+-- Explicit Admin grants extend only this case's ceiling. They never reopen an
+-- old operation, reset its deadline/count, or clear an effect/usage receipt.
+grantRepairOn :: SQL.Connection -> Value -> Text -> Text -> Int -> Text -> Text -> IO Value
+grantRepairOn db definition identity operation minutes reason time=do
+ saved<-currentRepair definition identity
+ works<-readWorksOn db
+ let related=[work | work<-works,D.workField work "repairPin"==casePin definition saved]
+     remaining=int (get saved "limitMilliseconds")-int (get saved "spentMilliseconds")
+ require (int (get saved "limitMilliseconds")>0 && int (get saved "spentMilliseconds")>=0 && at saved "status"=="exhausted" && remaining<=0 && not (has saved "userStop")) 409 "Only this case's exhausted active resource can be continued; Stop and provider-attempt exhaustion are not grants"
+ require (not (any ((`elem` ["reserved","uncertain"]) . (`at` "status")) (items saved "reservations")) && not (any repairWorkActive related)) 409 "Repair work is active or its prior reservation is uncertain; wait for settlement before granting resource"
+ Effects.requireDefinitionClearOn db definition
+ let additions=toInteger minutes*60000
+     previous=toInteger (int (get saved "limitMilliseconds"))
+ require (minutes>0 && additions>0 && previous+additions<=9007199254740991 && previous+additions<=toInteger (maxBound::Int)) 400 "Additional repair minutes must be a positive whole number within the accounting range"
+ require (not (any ((==operation) . (`at` "id")) (items saved "grants"))) 409 "This grant operation already exists"
+ let grant=obj [("id",str operation),("case",str identity),("owner",get definition "owner"),("routine",get definition "id"),("contractGeneration",get saved "contractGeneration"),("authority",str "admin"),("reason",str reason),("created",str time),("additionalMilliseconds",toJSON additions),("previousLimitMilliseconds",get saved "limitMilliseconds"),("previousSpentMilliseconds",get saved "spentMilliseconds")]
+     updated=mergeFields [("baseLimitMilliseconds",get saved "baseLimitMilliseconds" `fallback` get saved "limitMilliseconds"),("limitMilliseconds",toJSON (previous+additions)),("status",str "waiting_doctor"),("terminalReason",Null),("waitingReason",str "Explicit finite continuation authorized; waiting for fresh diagnosis"),("continuation",obj [("grant",str operation),("authorized",str time),("kind",str "fresh_diagnosis")])]
+       (appendItems "grants" [grant] saved)
+ void (DB.saveRoutineOn db (put "revision" (num (int (get definition "revision")+1)) (putRepair definition updated)))
+ pure (obj [("routine",get definition "id"),("case",str identity),("grant",grant),("status",str "waiting_doctor"),("remainingMilliseconds",toJSON additions)])
+
+currentRepair :: Value -> Text -> IO Value
+currentRepair definition identity=do
+ require (get definition "repairCase"==str identity && not (boolean (get definition "deleted"))) 409 "The current repair case is required"
+ saved<-maybe (failure 409 "Unknown repair case") pure (find ((==identity) . (`at` "id")) (items definition "repairCases"))
+ require (get saved "contractGeneration"==get definition "contractGeneration") 409 "Repair contract changed; this grant cannot change its pins"
+ pure saved
+
+repairWorkActive :: D.Workload -> Bool
+repairWorkActive work=any ((`elem` [D.CallQueued,D.CallRunning,D.CallWaiting]) . D.callState) (D.workCalls work)
+
+-- A case-wide Stop revokes future admission; unspent grants and old receipts
+-- stay visible. Existing occurrence gates stop queued and active processes.
+stopRepairOn :: SQL.Connection -> Value -> Text -> Text -> Text -> IO Value
+stopRepairOn db definition identity reason time=do
+ saved<-currentRepair definition identity
+ require (at saved "status" `notElem` ["recovered","stale","stopped"]) 409 "Repair case is already closed or stopped"
+ works<-readWorksOn db
+ forM_ [work | work<-works,D.workField work "repairPin"==casePin definition saved,repairWorkActive work] $ \work->
+  DB.putValueOn db DB.Workloads (D.workloadId work) (toJSON (D.setWorkField "executionGate" (toJSON ExecutionStopped) work))
+ let stopped=put "userStop" (obj [("at",str time),("reason",str reason),("authority",str "admin")]) (stopRepair "stopped" reason saved)
+ void (DB.saveRoutineOn db (put "revision" (num (int (get definition "revision")+1)) (putRepair definition stopped)))
+ pure (obj [("routine",get definition "id"),("case",str identity),("status",str "stopped")])
 
 -- Resource authority comes only from the explicit Admin command, never model paths.
 selectDoctorResources :: Service -> Value -> IO Value
@@ -943,5 +992,7 @@ repairProjection definition works = case find ((==get raw "repairCase") . (`get`
        | work<-owned,op<-items (D.workField work "preparation") "operations"++items (D.workField work "codeExecution") "operations"]
       measured=sum [int (get reservation "usedMilliseconds") | reservation<-items saved "reservations",at reservation "status"=="settled"]
       reserved=sum [int (get reservation "milliseconds") | reservation<-items saved "reservations",at reservation "status" `elem` ["reserved","uncertain"]]
-  in mergeFields [("providerWait",providerWaitProjection entries),("usage",arr (concatMap Provider.operationUsage (nubBy (\left right->get left "id"==get right "id") entries))),("measuredMilliseconds",num measured),("reservedMilliseconds",num reserved)] saved
+      remaining=max 0 (int (get saved "limitMilliseconds")-int (get saved "spentMilliseconds"))
+      grantBlocker=if at saved "status"/="exhausted" || remaining>0 then "Only exhausted active repair resource is eligible" else if has saved "userStop" then "Repair was explicitly stopped" else if any ((`elem` ["reserved","uncertain"]) . (`at` "status")) (items saved "reservations") || any repairWorkActive owned then "Prior repair work is active or uncertain" else if get saved "contractGeneration"/=get raw "contractGeneration" then "Routine instructions changed" else if any (\work->D.workField work "routineEffectUnknown"/=Null) [work | work<-works,at (D.workField work "repairPin") "routine"==R.definitionId definition || at (D.workField work "origin") "routine"==R.definitionId definition] then "Unknown consumer effects require reconciliation" else ""
+  in mergeFields [("remainingMilliseconds",num remaining),("grantBlocker",str grantBlocker),("canGrant",Bool (T.null grantBlocker)),("providerWait",providerWaitProjection entries),("usage",arr (concatMap Provider.operationUsage (nubBy (\left right->get left "id"==get right "id") entries))),("measuredMilliseconds",num measured),("reservedMilliseconds",num reserved)] saved
  where raw=toJSON definition
