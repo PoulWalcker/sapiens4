@@ -1,7 +1,7 @@
 module Sapiens.Routines (view) where
 
 import Prelude
-import Data.Argonaut.Core (Json)
+import Data.Argonaut.Core (Json, stringify)
 import Data.Array as A
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.String.CodeUnits as CU
@@ -263,7 +263,13 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     delivery = D.get "delivery" external
     deliveryStatus = D.s "status" delivery
   stagePanel run = V.when (not (A.null stages)) $ V.div "routine-notice" $
-    [V.textNode "h3" [] "Execution steps"] <> map (\stage -> V.p "" $ (if D.s "id" stage == "calculate" then "Calculation" else "Explanation") <> " · " <> stageStatus (D.s "status" stage)) stages
+    [V.textNode "h3" [] "Execution steps"] <> map (\stage -> V.div "routine-stage"
+      [V.p "" $ (if D.s "kind" stage /= "" then D.s "id" stage else if D.s "id" stage == "calculate" then "Calculation" else "Explanation") <> " · " <> stageStatus (D.s "status" stage)
+      ,V.when (D.s "kind" stage == "branch") $ V.div "routine-muted"
+        [V.p "" $ "Predicate input: " <> stringify (D.get "input" stage)
+        ,V.p "" $ "Predicate result: " <> stringify (D.get "output" stage)
+        ,V.p "" $ "Selected branch: " <> D.s "selected" stage
+        ,V.p "" $ "Reason: " <> D.s "reason" stage]]) stages
     where stages = D.rows "executionStages" run
   stageStatus value = case value of
     "completed" -> "Completed"
@@ -271,6 +277,9 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     "failed" -> "Failed"
     "interrupted" -> "Interrupted"
     "uncertain" -> "Outcome unknown"
+    "unknown" -> "Outcome unknown"
+    "admitted" -> "In progress"
+    "skipped" -> "Skipped"
     _ -> "Not started"
   reply run = case A.find (\w -> D.s "id" w == D.s "id" run && D.s "state" w == "WaitingForAdmin") $ D.rows "workloads" m.snapshot of
     Just work -> [V.button "button" ("Reply to " <> D.s "name" (M.agent m $ D.s "owner" work)) $ Clarify work]

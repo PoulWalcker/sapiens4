@@ -14,6 +14,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Types
 import qualified GeneratedCode as Code
+import qualified Workflow
 
 family :: Value -> Value
 family version=obj [("input",str (if get version "inputBinding"==Null then "json" else "receipt-feed-input-v1")),("content",get (get version "inputBinding") "contentInterface"),("hybrid",Bool (has version "explanation"))]
@@ -33,7 +34,8 @@ resolvePreparation :: AgentId -> Value -> CandidateReference -> IO Value
 resolvePreparation owner source reference@(CandidateReference refOwner preparation digest)=do
  let version=get (get source "preparation") "version"
  require (refOwner==owner && at source "workloadId"==runIdText preparation && get (get source "preparationPin") "owner"==toJSON owner) 409 "Candidate reference belongs to another preparation or owner"
- require (get version "reference"==toJSON reference && canonicalHash (remove ["reference"] version)==digest && sourceHash (at version "source")==at version "sourceHash") 409 "Pinned candidate content or reference changed"
+ require (get version "reference"==toJSON reference && canonicalHash (remove ["reference"] version)==digest && (if has version "workflow" then Workflow.contentHash (get version "workflow") else sourceHash (at version "source"))==at version "sourceHash") 409 "Pinned candidate content or reference changed"
+ when (has version "workflow") (either (failure 409) pure (Workflow.validate (get version "workflow")))
  void (either (failure 409 . T.pack) pure (parseEither candidateExplanation version))
  validateLocal version
  pure version
@@ -44,7 +46,7 @@ personal owner work=at (get work "preparationPin") "owner"==owner && not ("group
 
 checked :: Value -> Value -> Bool
 checked work version=let prepared=get work "preparation"; checks=items prepared "checks" in
- at prepared "status"=="awaiting_occurrence" && get (get prepared "review") "accepted"==Bool True && not (null checks)
+ not (has version "workflow") && at prepared "status"=="awaiting_occurrence" && get (get prepared "review") "accepted"==Bool True && not (null checks)
  && all (\check->get check "matched"==Bool True && get check "version"==get version "reference" && get check "sourceHash"==get version "sourceHash" && has check "actual" && has check "expected" && get check "actual"==get check "expected" && at check "status"=="exited" && get check "exitCode"==num 0 && not (boolean (get check "wasRunning"))) checks
  && (not (has version "explanation") || all (\check->at (get check "actual") "status"/="ok" || get check "rubricAccepted"==Bool True && has check "explanationOperation") checks)
 

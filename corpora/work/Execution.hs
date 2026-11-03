@@ -20,6 +20,7 @@ import qualified Data.Map.Strict as M
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
+import Data.Time.Clock (getCurrentTime,addUTCTime,diffUTCTime)
 import GHC.Clock
 import System.Directory
 import Types
@@ -33,6 +34,7 @@ import qualified Routines as R
 import qualified GeneratedCode as Code
 import qualified Effects
 import qualified Kit
+import qualified Workflow
 import qualified Composer
 import qualified Automation
 import Provider
@@ -248,6 +250,9 @@ codeGuard s running = do
  cancelled<-readIORef (runCancel running)
  require (not cancelled) 409 "Code occurrence stopped"
  (work,call)<-D.getWork s (runId running)
+ forM_ (parseTime (at (D.workField work "codeExecution") "workflowDeadline")) $ \deadline->do
+  wall<-getCurrentTime
+  require (wall<deadline) 409 "Original workflow allowance expired"
  DB.requireOccurrence s (D.workField work "origin")
  when (has (toJSON work) "repairPin") $ DB.repairPinAllowed s (D.workField work "repairPin") >>= \clear->require clear 409 "Repair case is stopped or changed"
  Effects.requireCurrentInput s (toJSON work)
@@ -297,7 +302,15 @@ requireKitBody s running version=do
  works<-D.readWorks s
  unless (Kit.executionAllowed definition version (map toJSON works)) (throwIO (KitPending "Shared Kit bytes await this consumer's own applicability inspection"))
 
-executeCode s running = executeCodeBody s running `catch` (\(KitPending reason)->do
+executeCode s originalRun = do
+ codeGuard s originalRun
+ (work,call)<-D.getWork s (runId originalRun)
+ (version,_)<-D.resolveCandidate s work call
+ running<-if has version "workflow" then workflowBudget s originalRun else pure originalRun
+ executePreparedCode s running
+
+executePreparedCode :: Service -> Run -> IO Text
+executePreparedCode s running = executeCodeBody s running `catch` (\(KitPending reason)->do
  codeGuard s running
  (work,call)<-D.getWork s (runId running)
  (version,role)<-D.resolveCandidate s work call
@@ -404,6 +417,7 @@ recordImplementationFault s running scope reason = do
  markCodeFault s running reason
 
 executeCalculation :: Service -> Run -> Value -> Value -> IO (Value,Value)
+executeCalculation s running version input | has version "workflow" = executeWorkflowCalculation s running version input
 executeCalculation s running version input = do
  let reference=get version "reference"
  environmentId<-newId
@@ -438,6 +452,71 @@ executeCalculation s running version input = do
  require (at result "status"=="exited" && not (boolean (get result "wasRunning"))) 503 "Runtime attachment ended without an established process result"
  when (get result "exitCode"/=num 0) (throwIO (ProvenCodeFault "Candidate body exited unsuccessfully"))
  validateCodeResult version actual
+ pure (actual,runtime)
+
+workflowBudget :: Service -> Run -> IO Run
+workflowBudget s originalRun = do
+ wall<-getCurrentTime
+ clock<-getMonotonicTimeNSec
+ require (clock<runDeadline originalRun) 409 "Workflow allowance is exhausted"
+ (savedWork,_)<-D.getWork s (runId originalRun)
+ let savedDeadline=get (D.workField savedWork "codeExecution") "workflowDeadline"
+     initial=addUTCTime (fromIntegral (runDeadline originalRun-clock)/1000000000) wall
+ deadline<-if savedDeadline==Null then pure initial else maybe (failure 409 "Invalid retained workflow deadline") pure (parseTime (text savedDeadline))
+ require (deadline>wall) 409 "Original workflow allowance expired"
+ let remaining=floor (diffUTCTime deadline wall*1000000000)
+     running=originalRun {runDeadline=min (runDeadline originalRun) (clock+remaining)}
+ codeUpdate s running (put "workflowDeadline" (str (timestamp deadline)))
+ pure running
+
+executeWorkflowCalculation :: Service -> Run -> Value -> Value -> IO (Value,Value)
+executeWorkflowCalculation s running version input = do
+ profile<-Code.available
+ require (Code.profileJSON profile==get version "runtime") 409 "Pinned workflow runtime is unavailable"
+ settings<-decodeValue 409 (get version "workflowModel")
+ let loadTrace=do (work,_)<-D.getWork s (runId running); pure (get (D.workField work "codeExecution") "workflowRun" `fallback` obj [])
+     publish trace=locked s $ do
+      currentClock<-getMonotonicTimeNSec
+      require (currentClock<runDeadline running) 409 "Original workflow allowance expired"
+      codeGuard s running
+      (work,call)<-D.getWork s (runId running)
+      (current,_)<-D.resolveCandidate s work call
+      require (current==version) 409 "Workflow candidate changed"
+      D.saveWork s (D.setWorkField "codeExecution" (put "workflowRun" trace (D.workField work "codeExecution")) work)
+     invoke identity node selected=case at node "kind" of
+      "script"->do
+       codeGuard s running
+       nonce<-newId
+       let reserved=Code.businessReservation profile (agentIdText (runOwner running)) (runIdText (runId running)) nonce
+       codeUpdate s running (put "container" reserved)
+       receipt<-Code.runFixture profile running reserved (at node "source") selected (\value->do
+        when (at value "status"/="removed") (codeGuard s running)
+        codeUpdate s running (put "container" value))
+       require (at receipt "status"=="exited" && get receipt "exitCode"==num 0 && not (boolean (get receipt "wasRunning"))) 503 "Workflow script did not establish a successful result"
+       either (failure 422 . T.pack) pure (eitherDecodeStrict (TE.encodeUtf8 (at receipt "output")))
+      _->do
+       codeGuard s running
+       invocation<-newId
+       let rendered=render (at version "workflowPrompt") [("instruction",at node "instruction"),("context",jsonText (obj [("selfId",toJSON (runOwner running)),("step",str identity),("input",selected)]))]
+           operation=obj [("id",str invocation),("node",str "WorkflowStep"),("step",str identity),("purpose",str "workflow_response"),("policy",str "response_only"),("modelSettings",toJSON settings),("promptHash",str (sourceHash rendered)),("status",str "running")]
+       codeUpdate s running (appendItems "operations" [operation])
+       raw<-invokeResponseOnlyObservedWith s running settings rendered (\evidence->locked s $ do
+        (work,_)<-D.getWork s (runId running)
+        let code=D.workField work "codeExecution"
+            updated=D.setWorkField "codeExecution" (put "operations" (arr [if at op "id"==invocation then put "evidence" (toJSON evidence) op else op | op<-items code "operations"]) code) work
+        observed<-decodeValue 500 (Effects.observeEvidence invocation evidence (toJSON updated))
+        D.saveWork s observed)
+       codeGuard s running
+       (observed,_)<-D.getWork s (runId running)
+       let evidence=listToMaybe [get op "evidence" | op<-items (D.workField observed "codeExecution") "operations",at op "id"==invocation]
+       require (maybe False Effects.completeActionFree evidence) 409 "Workflow model response has incomplete or action-bearing evidence; no replay"
+       value<-either (failure 422 . T.pack) pure (eitherDecodeStrict (TE.encodeUtf8 raw))
+       codeUpdate s running (\code->put "operations" (arr [if at op "id"==invocation then mergeFields [("status",str "completed"),("response",value)] op else op | op<-items code "operations"]) code)
+       pure value
+ actual<-Workflow.run (get version "workflow") input (select ["reference","workflowModel","workflowPrompt","runtime"] version) loadTrace publish invoke
+ validateCodeResult version actual
+ let runtime=obj [("status",str "exited"),("exitCode",num 0),("wasRunning",Bool False),("actual",actual),("reference",get version "reference"),("sourceHash",get version "sourceHash"),("inputHash",str (canonicalHash input)),("workflow",Bool True)]
+ codeUpdate s running (appendItems "operations" [obj [("id",str (canonicalHash runtime)),("purpose",str "code_execution"),("stage",str "calculate"),("status",str "completed"),("result",runtime)]])
  pure (actual,runtime)
 
 validateCodeResult :: Value -> Value -> IO ()
@@ -697,6 +776,26 @@ recoverCode s = do
       fallbackState=if not (has recovered "fallbacks") then recovered else put "fallbacks" (obj [(key,if at attempt "status"=="reserved" then put "status" (str "interrupted") attempt else attempt) | (key,attempt)<-pairs (get recovered "fallbacks")]) recovered
       finalized=put "operations" (arr [if at op "status" `elem` ["running","validating"] then put "status" (str terminal) op else op | op<-items recovered "operations"]) fallbackState
   when (finalized/=code) (D.saveWork s (D.setWorkField "codeExecution" finalized work))
+  -- Resume only the gap between confirmed nodes. An admitted node without a
+  -- complete receipt, a started assessment or any Stop remains terminal.
+  let receipts=pairs (get (get finalized "workflowRun") "nodes")
+      safe=not (null receipts) && all ((=="completed") . (`at` "status") . snd) receipts
+        && all (\op->at op "purpose" `elem` ["workflow_response","code_execution"] && at op "status"=="completed") (items finalized "operations")
+        && not (has finalized "evaluatedResult") && at recovered "status"/="cleanup_pending"
+        && D.workField work "executionGate"==toJSON ExecutionOpen && not (has (toJSON work) "repairPin")
+  when safe $ do
+   allowed<-DB.occurrenceAllowed s (D.workField work "origin")
+   let owner=agentIdText (D.callOwner (NE.head (D.workCalls work)))
+       identity=RunId (D.workloadId work)
+   state<-agentState s owner
+   case find ((==identity) . turnId) (agentTurns state) of
+    Just turn | allowed && turnStatus turn==Interrupted && not (any ((=="cancel") . (`at` "action")) (items (turnField turn "managed") "commands"))->do
+     time<-getCurrentTime
+     when (maybe False (>time) (parseTime (at finalized "workflowDeadline"))) $ do
+      (current,_)<-D.getWork s identity
+      D.saveWork s ((D.setWorkField "codeExecution" (put "status" (str "queued") finalized) current) {D.workCalls=fmap (\call->call {D.callState=D.CallQueued}) (D.workCalls current)})
+      saveState s owner (mapTurns (\item->if turnId item==identity then item {turnStatus=Queued} else item) state)
+    _->pure ()
 
 publish :: Service -> Text -> Pulse -> IO ()
 publish s a tick = forM_ [1,2] $ \slot -> do

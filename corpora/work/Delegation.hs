@@ -135,7 +135,7 @@ selectRoutineCodeOn db owner work snapshot (Just accepted) = do
    version<-resolveCandidateFrom works owner snapshot accepted reference_
    let initial=NE.head (workCalls work)
        binding=ScriptBinding owner RoutineSnapshotSource reference_ role
-       code=obj ([("upgradePin",get version "expectedBinding") | role==CandidateTrial && has (get version "expectedBinding") "case"]++[("reference",toJSON reference_),("role",toJSON role),("status",str "queued"),("operations",arr [])]++[("structureHash",get version "structureHash") | has version "structureHash"])
+       code=obj ([("upgradePin",get version "expectedBinding") | role==CandidateTrial && has (get version "expectedBinding") "case"]++[("reference",toJSON reference_),("role",toJSON role),("status",str "queued"),("operations",arr [])]++[("structureHash",get version "structureHash") | has version "structureHash"]++[("workflowDefinition",get version "workflow") | has version "workflow"])
        changed=setWorkField "codeExecution" code work {workCalls=setCallFields [("executionBinding",toJSON binding)] initial :| NE.tail (workCalls work)}
    forM_ candidate $ \preparedWork->do
     let claim=obj [("run",str (workloadId work)),("reference",toJSON reference_),("status",str "claimed")]
@@ -161,7 +161,7 @@ resolveCandidateFrom works owner snapshot accepted reference@(CandidateReference
   require (any (\check->get check "rubricAccepted"==Bool True && has check "explanationOperation") (items prepared "checks")) 409 "Hybrid candidate has no actual successful explanation"
   require (all (\check->at (get check "actual") "status"/="ok" || get check "rubricAccepted"==Bool True) (items prepared "checks")) 409 "Hybrid candidate lacks independent semantic checks"
  require (sameSemanticContract original accepted) 409 "Candidate cannot replace accepted task criteria"
- require (at version "interface"=="json-stdin-result-v1" && at version "language"=="python" && get version "dependencies"==arr [] && get version "capabilities"==arr []) 409 "Candidate execution interface is unsupported"
+ require (at version "interface"=="json-stdin-result-v1" && (at version "language"=="python" || at version "language"=="workflow" && has version "workflow") && get version "dependencies"==arr [] && get version "capabilities"==arr []) 409 "Candidate execution interface is unsupported"
  require (at prepared "status"=="awaiting_occurrence" && get (get prepared "review") "accepted"==Bool True && not (null (items prepared "checks"))
    && all (\check->get check "matched"==Bool True && get check "version"==toJSON reference && get check "sourceHash"==get version "sourceHash") (items prepared "checks")) 409 "Candidate lacks completed checks for this exact version"
  pure version
@@ -226,8 +226,14 @@ codeProjection code = mergeFields ([("runtimeResult",runtime),("verification",co
 
 executionStages :: Value -> Value
 executionStages code
+ | has code "workflowDefinition" = arr [mergeFields [("id",str identity),("kind",get node "kind"),("input",get (get receipt "request") "input"),("status",if receipt/=Null then get receipt "status" else str (if finished then "skipped" else "not_started"))] (select ["output","selected","reason"] receipt) | (identity,node)<-pairs nodes,let receipt=get receipts identity]
  | not (has code "structureHash") = arr []
  | otherwise = arr [obj [("id",str identity),("status",maybe (str "not_started") (\op->if at op "status"=="validating" then str "running" else get op "status") (find ((==identity) . (`at` "stage")) (items code "operations")))] | identity<-["calculate","explain"]]
+
+ where
+ nodes=get (get code "workflowDefinition") "nodes"
+ receipts=get (get code "workflowRun") "nodes"
+ finished=any (\(identity,node)->at node "kind"=="finish" && at (get receipts identity) "status"=="completed") (pairs nodes)
 
 codeVerification :: Value -> Value
 codeVerification code=fromMaybe Null (find (\op->get op "id"==get (get code "verification") "id") (items code "operations"))

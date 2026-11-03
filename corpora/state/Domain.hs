@@ -206,6 +206,9 @@ hybridComposition=obj [("schema",num 1),("steps",arr [
 
 candidateExplanation :: Value -> Parser (Maybe Explanation)
 candidateExplanation version
+ | has version "workflow" = do
+   unless (not (any (has version) ["explanation","composition","rubric"]) && get version "structureHash"==str (canonicalHash (get version "workflow"))) (fail "Unsupported or changed workflow composition")
+   pure Nothing
  | not (any (has version) ["explanation","composition","structureHash","rubric"]) = pure Nothing
  | not (has version "rubric") || get version "composition"/=hybridComposition || get version "structureHash"/=str (canonicalHash hybridComposition) = fail "Unsupported or changed hybrid composition"
  | otherwise = Just <$> parseJSON (get version "explanation")
