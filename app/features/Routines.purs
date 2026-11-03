@@ -152,6 +152,7 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
       "stale" -> "Script needs reconsideration"
       _ -> if D.s "id" prepared /= "" && not (D.b "applicable" prepared) then "Prepared version needs reconsideration" else if D.s "run" trial /= "" then if A.elem (D.s "status" trialRun) ["queued", "running", "waiting", "blocked"] then "Trial claimed" else "Trial finished without activation" else if D.s "status" prepared == "awaiting_occurrence" then "Prepared · awaiting an authorized run" else "Preparation: " <> D.s "status" prepared
     ,kitSource $ D.get "kitArtifact" active
+    ,V.when (D.b "timerFixturesSimulated" prepared) $ V.p "routine-muted" "Fixture timing is simulated; authorized runs use real waits."
     ,kitSource $ D.get "kitArtifact" prepared
     ,V.when (D.s "digest" (D.at ["expectedBinding","reference"] prepared) /= "") $ V.p "routine-muted" $ "Upgrade basis · expected prior pin " <> CU.take 12 (D.s "digest" $ D.at ["expectedBinding","reference"] prepared)
     ,V.when (D.s "error" prepared /= "") $ V.p "routine-problem" $ D.s "error" prepared
@@ -234,6 +235,7 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
       [V.p "" $ if D.s "status" (D.get "fallbackSummary" run) == "completed" then "Completed through fallback" else "Fallback · " <> D.s "status" (D.get "fallbackSummary" run)
       ,V.when (D.b "faultyImplementation" $ D.get "fallbackSummary" run) $ V.p "routine-muted" "Automation needs repair; successful fallback does not repair its implementation."]
     ,externalPanel routine run
+    ,waitPanel run
     ,parallelPanel run
     ,stagePanel run
     ,V.when (managed routine) $ evidencePanel routine run
@@ -263,6 +265,14 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     external = D.get "externalSummary" run
     delivery = D.get "delivery" external
     deliveryStatus = D.s "status" delivery
+  waitPanel run = V.when (not $ A.null waits) $ V.div "routine-notice" $
+    [V.textNode "h3" [] "Waiting steps"] <> map (\wait -> V.div "routine-wait"
+      [V.p "" $ D.s "node" wait <> " · " <> D.s "status" wait
+      ,V.p "" $ "Due: " <> D.s "due" wait
+      ,V.p "" $ "Progress: " <> D.s "progress" wait
+      ,V.p "routine-muted" $ "Next step: " <> D.s "next" wait
+      ,V.when (D.s "reason" wait /= "") $ V.p "routine-problem" $ D.s "reason" wait]) waits
+    where waits = D.rows "workflowWaits" run
   parallelPanel run = V.when (D.valid parallel) $ V.div "routine-notice" $
     [V.textNode "h3" [] "Parallel steps"
     ,V.p "routine-muted" $ "Active time (union): " <> show (D.int $ D.get "activeMilliseconds" parallel) <> " ms · " <> D.s "resourceStatus" parallel
@@ -288,6 +298,7 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     "uncertain" -> "Outcome unknown"
     "unknown" -> "Outcome unknown"
     "admitted" -> "In progress"
+    "waiting" -> "Waiting"
     "skipped" -> "Skipped"
     _ -> "Not started"
   reply run = case A.find (\w -> D.s "id" w == D.s "id" run && D.s "state" w == "WaitingForAdmin") $ D.rows "workloads" m.snapshot of

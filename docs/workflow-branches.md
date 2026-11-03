@@ -3,7 +3,7 @@
 Ordinary agent work keeps its existing loop. When preparation chooses a workflow, it
 produces a finite immutable structure containing isolated Python calculations,
 response-only model steps, strict Boolean branches and result steps. Tool-capable
-model steps, external effects, deferred work and cycles are unavailable. Finite same-owner
+model steps, external effects and cycles are unavailable. Finite same-owner
 fork/join may run independent prepared regions in parallel.
 
 A condition is retained data, not a prose edge evaluated implicitly. A calculation or
@@ -53,3 +53,20 @@ Reservation settlement waits for confirmed live-process exit. Completed child re
 remain visible. Restart can preserve a proven idle cohort with complete/never-admitted
 children; an open or uncertain activity keeps its reservation consumed and blocks free
 replay. The Routine history shows child states, waiting/blocked joins and union accounting.
+
+A defer step selects one finite wait: a timezone-aware `at` timestamp or a nonnegative
+integer `afterMilliseconds`, together with nonempty `progress` and a JSON `value`.
+Its immutable `next` names an existing successor; only `value` becomes that step's
+output. Relative due time is resolved once and retained with the original input,
+structure and version pins. The existing Pulse wakes the same managed Call after its
+due time and normal capacity admission; waiting holds neither a slot nor a computer
+lease. Completed receipts are reused, and the original business wall deadline remains
+unchanged. Proven idle waiting does not consume active repair/preparation time.
+
+Before wake and successor admission, current authority, the root gate and original
+deadline are checked again. Stop, deletion or revoked permission prevents continuation;
+an expired or blocked wait retains a visible reason. History shows due time, saved
+progress, successor and wait status. Independent preparation fixtures validate wait
+inputs using explicitly simulated timing; authorized occurrences perform real waits
+before activation. Waiting for declared child results uses the fork/join contract above;
+external Task or Workflow result references are unavailable.

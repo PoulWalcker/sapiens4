@@ -202,6 +202,10 @@ launch s a batch tick slot batching = do
  activity <- newIORef empty
  deadline <- (+1800000000000) <$> getMonotonicTimeNSec
  let run=Run (AgentId a) i slot cancel process activity deadline
+ found<-D.findWork s i
+ forM_ found $ \(work,call)->when (not (WC.child call) && any ((=="defer") . (`at` "kind") . snd) (pairs (get (get (D.workField work "codeExecution") "workflowDefinition") "nodes")) && not (has (D.workField work "codeExecution") "workflowDeadline")) $ do
+  wall<-getCurrentTime
+  D.saveWork s (D.setWorkField "codeExecution" (put "workflowDeadline" (str (timestamp (addUTCTime 1800 wall))) (D.workField work "codeExecution")) work)
  modifyMVar_ (serviceRuns s) (pure . M.insert i run)
  DB.pulseCall s tick a "chatInput" slot (nub [at (turnField t "origin") "group" | t <- NE.toList batch,has (turnField t "origin") "group"])
  DB.project s a
@@ -489,6 +493,7 @@ executeWorkflowCalculation s running version input = do
       require (current==version) 409 "Workflow candidate changed"
       D.saveWork s (D.setWorkField "codeExecution" (let code=D.workField work "codeExecution"; trace=get code "workflowRun" `fallback` obj [] in put "workflowRun" (put "nodes" (put node receipt (get trace "nodes" `fallback` obj [])) trace) code) work)
      invoke identity node selected=case at node "kind" of
+      "defer"->WC.defer s running version (obj []) identity node selected
       "fork"->WC.fork s running version input (obj []) identity node
       "script"->do
        codeGuard s running
@@ -861,6 +866,7 @@ admit s a tick = do
   _ -> pure ()
 onPulse :: Service -> Pulse -> IO ()
 onPulse s tick = do
+ WC.dispatchWaits s
  stopRoutineRuns s
  R.dispatch s tick
  when (pulseFrequency tick==Bph60 || (pulseFrequency tick==Bpm60 && even (pulseNumber tick))) $ do
@@ -891,6 +897,7 @@ stopRoutineRuns :: Service -> IO ()
 stopRoutineRuns s = do
  works <- D.readWorks s
  blockedWorks <- filterM (fmap not . DB.occurrenceAllowed s . (`D.workField` "origin")) works
+ forM_ blockedWorks $ \work->WC.stop s (RunId (D.workloadId work))
  let owners=nub [agentIdText (D.callOwner call) | work<-blockedWorks,call<-NE.toList (D.workCalls work)]
  forM_ owners $ \owner -> do
   state <- agentState s owner

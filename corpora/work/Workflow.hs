@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module Workflow (Yield(..), validate, selectInput, run, runRegion, contentHash) where
+module Workflow (Yield(..), validate, selectInput, run, runRegion, contentHash, waitSpec) where
 
 import Control.Exception
 import Control.Monad
@@ -9,6 +9,7 @@ import Data.Aeson.Types (Parser,parseEither)
 import qualified Data.ByteString.Lazy as BL
 import Data.List (intersect)
 import Data.Maybe (fromMaybe)
+import Data.Time.Clock (UTCTime,addUTCTime,diffUTCTime)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Read (readMaybe)
@@ -16,6 +17,26 @@ import Types
 
 data Yield = Yield Text deriving (Show)
 instance Exception Yield
+
+waitSpec :: UTCTime -> UTCTime -> Value -> Either Text (UTCTime,Value)
+waitSpec clock deadline value=either (Left . T.pack) Right (parseEither checked value)
+ where
+ checked selected=do
+  onlyFields (["progress","value"]++if has selected "at" then ["at"] else ["afterMilliseconds"]) selected
+  void (textFieldP "progress" 8000 selected)
+  unless (has selected "value") (fail "Defer requires a retained value")
+  due<-if has selected "at" then do
+   raw<-textFieldP "at" 100 selected
+   let suffix=T.takeEnd 6 raw
+       zoned="Z" `T.isSuffixOf` raw || T.length suffix==6 && T.take 1 suffix `elem` ["+","-"] && T.take 1 (T.drop 3 suffix)==":"
+   unless zoned (fail "Defer time needs an explicit UTC/offset timezone")
+   maybe (fail "Invalid defer timestamp") pure (parseTime raw)
+   else do
+    milliseconds<-withObject "Defer" (.: "afterMilliseconds") selected :: Parser Integer
+    unless (milliseconds>=0 && milliseconds<=max 0 (floor (diffUTCTime deadline clock*1000))) (fail "Defer delay exceeds the original wall allowance")
+    pure (addUTCTime (fromInteger milliseconds/1000) clock)
+  unless (due<=deadline) (fail "Defer time exceeds the original wall deadline")
+  pure (due,get selected "value")
 
 contentHash :: Value -> Text
 contentHash=canonicalHash
@@ -34,8 +55,8 @@ validate graph=either (Left . T.pack) Right (parseEither definition graph)
   unless (entry `elem` ids && all (\i->not (T.null i) && T.length i<=100) ids) (fail "Invalid workflow entry or node identity")
   forM_ (pairs nodes) $ \(identity,node)->do
    let kind=at node "kind"
-   onlyFields (case kind of "script"->["kind","source","input","next"]; "model"->["kind","instruction","input","next"]; "branch"->["kind","input","true","false"]; "finish"->["kind","input"]; "fork"->["kind","children","join"]; "join"->["kind","fork","input","next"]; _->[]) node
-   unless (kind `elem` ["script","model","branch","finish","fork","join"]) (fail "Unsupported workflow node kind")
+   onlyFields (case kind of "script"->["kind","source","input","next"]; "model"->["kind","instruction","input","next"]; "branch"->["kind","input","true","false"]; "finish"->["kind","input"]; "fork"->["kind","children","join"]; "join"->["kind","fork","input","next"]; "defer"->["kind","input","next"]; _->[]) node
+   unless (kind `elem` ["script","model","branch","finish","fork","join","defer"]) (fail "Unsupported workflow node kind")
    when (kind=="script") (void (textFieldP "source" 65536 node))
    when (kind=="model") (void (textFieldP "instruction" 16000 node))
    unless (kind=="fork") (selector (get node "input"))
@@ -148,14 +169,16 @@ runRegion graph input authority entry stop load publish invoke=do
       hash_=canonicalHash request
       previous=get receipts identity
       store receipt=publish identity receipt
-  when (previous/=Null) (require (at previous "requestHash"==hash_) 409 "Retained workflow request authority changed")
-  output<-if previous/=Null && not (at node "kind"=="fork" && at previous "status"=="admitted") then do
+  when (previous/=Null) $ do
+   require (at previous "requestHash"==hash_) 409 "Retained workflow request authority changed"
+   require (not (boolean (get previous "fixtureSimulation")) || boolean (get authority "fixtureTimer")) 409 "Fixture timer evidence cannot authorize business execution"
+  output<-if previous/=Null && not (at node "kind"=="fork" && at previous "status"=="admitted" || at node "kind"=="defer" && at previous "status"=="waiting") then do
    require (at previous "requestHash"==hash_ && at previous "status"=="completed") 409 "Workflow admission is failed or uncertain; no automatic replay"
    require (at previous "outputHash"==canonicalHash (get previous "output")) 409 "Retained workflow output changed"
    pure (get previous "output")
    else do
     let admitted=obj [("requestHash",str hash_),("request",request),("status",str "admitted")]
-    store admitted
+    unless (at previous "status"=="waiting") (store admitted)
     result<-try (case at node "kind" of
      "branch"->do
       void (parseValue 422 (onlyFields ["value","reason"]) selected)
@@ -170,8 +193,9 @@ runRegion graph input authority entry stop load publish invoke=do
      Left exception->store (mergeFields [("status",str "unknown"),("reason",str (T.pack (displayException exception)))] admitted) >> throwIO exception
      Right value->do
       require (BL.length (encode value)<=65536) 422 "Workflow output exceeds 64 KiB"
-      let decisionFields=if at node "kind"=="branch" then [("selected",get node (if get value "value"==Bool True then "true" else "false")),("reason",get value "reason")] else []
-      store (mergeFields ([("status",str "completed"),("output",value),("outputHash",str (canonicalHash value))]++decisionFields) admitted)
+      let timerFields=[("fixtureSimulation",Bool True) | at node "kind"=="defer" && boolean (get authority "fixtureTimer")]
+          decisionFields=if at node "kind"=="branch" then [("selected",get node (if get value "value"==Bool True then "true" else "false")),("reason",get value "reason")] else []
+      store (mergeFields ([("status",str "completed"),("output",value),("outputHash",str (canonicalHash value))]++decisionFields++timerFields) admitted)
       pure value
   case at node "kind" of
    "finish"->pure output

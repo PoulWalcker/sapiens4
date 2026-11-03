@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module WorkflowCalls (fork, ready, child, childData, yielding, openBudget, activity, used, cap, finishBudget, quiesce, allowed, trace, publish, container, safeIdle, recover, stop) where
+module WorkflowCalls (fork, ready, child, childData, yielding, openBudget, activity, used, cap, finishBudget, quiesce, allowed, trace, publish, container, safeIdle, recover, stop, defer, dispatchWaits) where
 
 import Control.Concurrent
 import Control.Exception
@@ -8,7 +8,7 @@ import Control.Monad
 import Data.Aeson hiding (pairs)
 import qualified Database.SQLite.Simple as SQL
 import Data.IORef
-import Data.Time.Clock (getCurrentTime,diffUTCTime)
+import Data.Time.Clock (getCurrentTime,diffUTCTime,addUTCTime)
 import Data.List (find)
 import qualified Data.List.NonEmpty as NE
 import Data.Maybe
@@ -20,6 +20,7 @@ import qualified Delegation as D
 import qualified Store as DB
 import qualified ManagedState as Managed
 import qualified GeneratedCode as Code
+import qualified Population
 import qualified Effects
 import qualified Workflow
 
@@ -104,10 +105,85 @@ ready s turn=do
   Just (work,call)->
    if (child call || turnField turn "workflowWait"/=Null) && (at (D.workField work "workflowBudget") "status"/="reserved" || has (toJSON work) "workflowHalt") then pure False else case turnField turn "workflowWait" of
     Null->pure True
+    key | has (D.workField work "workflowWaits") (text key)->timeReady s work call (text key)
     key->do
      let required=items (get (D.workField work "workflowCohorts") (text key)) "children"
          calls=[candidate | candidate<-NE.toList (D.workCalls work),toJSON (D.callIdentity candidate) `elem` required]
      pure (not (null calls) && all ((`notElem` [D.CallQueued,D.CallRunning,D.CallDelegated]) . D.callState) calls)
+
+defer :: Service -> Run -> Value -> Value -> Text -> Value -> Value -> IO Value
+defer s running version context nodeId node selected=do
+ allowed s running
+ (original,_)<-D.getWork s (runId running)
+ result<-locked s $ DB.connection s $ \db->SQL.withTransaction db $ do
+  rows<-DB.queryRowsOn db "SELECT value FROM workloads WHERE id=?" ["value"] [SQL.SQLText (D.workloadId original)]
+  work<-case rows of [row]->DB.decodeStored (at row "value") >>= decodeValue 500; _->failure 409 "Deferred root disappeared"
+  validateOn db work version context
+  wall<-getCurrentTime
+  deadline<-maybe (failure 409 "Original business wall deadline is unavailable") pure (parseTime (at (D.workField work "codeExecution") "workflowDeadline"))
+  require (wall<deadline) 409 "Original business wall deadline expired"
+  let key=canonicalHash (obj [("call",toJSON (runId running)),("node",str nodeId),("structure",get version "structureHash")])
+      waits=D.workField work "workflowWaits" `fallback` obj []
+      previous=get waits key
+      receipt=get (get (trace work context) "nodes") nodeId
+      requestHash=get receipt "requestHash"
+  require (not (boolean (get receipt "fixtureSimulation")) && requestHash/=Null) 409 "Business timer requires an actual retained admission"
+  (due,value)<-if previous==Null then either (failure 422) pure (Workflow.waitSpec wall deadline selected) else do
+   require (get previous "requestHash"==requestHash && get previous "selected"==selected && get previous "reference"==get version "reference" && get previous "next"==get node "next" && at previous "status" `elem` ["waiting","completed"]) 409 "Deferred request identity changed or was blocked"
+   due<-maybe (failure 409 "Retained wake time is invalid") pure (parseTime (at previous "due"))
+   pure (due,get selected "value")
+  let record=mergeFields [("call",toJSON (runId running)),("node",str nodeId),("next",get node "next"),("due",str (timestamp due)),("progress",get selected "progress"),("selected",selected),("reference",get version "reference"),("requestHash",requestHash),("version",version)] (if previous==Null then obj [] else previous)
+  if wall>=due then do
+   let completed=mergeFields [("status",str "completed"),("resumedAt",str (timestamp wall))] record
+       nodeReceipt=mergeFields [("status",str "completed"),("output",value),("outputHash",str (canonicalHash value)),("wait",str key)] receipt
+   DB.putValueOn db DB.Workloads (D.workloadId work) (toJSON (publish context nodeId nodeReceipt (D.setWorkField "workflowWaits" (put key completed waits) work)))
+   pure (Right value)
+   else do
+    clock<-toInteger <$> getMonotonicTimeNSec
+    let budget=tick clock (D.workField work "workflowBudget")
+        idle=put "activities" (put (runIdText (runId running)) (Bool False) (get budget "activities")) budget
+        waiting=put "status" (str "waiting") record
+        nodeReceipt=mergeFields [("status",str "waiting"),("wait",str key)] receipt
+        changed=publish context nodeId nodeReceipt (D.setWorkField "workflowBudget" idle (D.setWorkField "workflowWaits" (put key waiting waits) work))
+        queued=changed {D.workCalls=fmap (\call->if D.callIdentity call==runId running then D.setCallFields [("workflowWait",str key)] (call {D.callState=D.CallQueued}) else call) (D.workCalls changed)}
+    DB.putValueOn db DB.Workloads (D.workloadId work) (toJSON queued)
+    Managed.transitionOn db (runIdText (runId running)) (put "workflowWait" (str key) . put "status" (str "queued"))
+    pure (Left key)
+ DB.project s (agentIdText (runOwner running))
+ either (throwIO . Workflow.Yield) pure result
+
+-- Called by the existing Pulse/command lock; readiness is not another timer queue.
+timeReady :: Service -> D.Workload -> D.WorkCall -> Text -> IO Bool
+timeReady s work call key=do
+ wall<-getCurrentTime
+ let record=get (D.workField work "workflowWaits") key
+     due=parseTime (at record "due")
+     deadline=parseTime (at (D.workField work "codeExecution") "workflowDeadline")
+ retired<-Population.retired s (agentIdText (D.callOwner call))
+ let reason | retired="Owner permissions were revoked before wake"
+            | maybe True (<=wall) deadline="Original business wall deadline expired before wake"
+            | isNothing due="Retained wake time is invalid"
+            | otherwise=""
+ if at record "status"/="waiting" then pure False else if reason/="" then block record reason else if maybe False (>wall) due then pure False else do
+  result<-try (DB.connection s (\db->SQL.withTransaction db (validateOn db work (get record "version") (obj [])))) :: IO (Either APIError ())
+  case result of Right ()->pure True; Left (APIError _ message)->block record message
+ where
+ block record reason=do
+  stop s (D.callIdentity call)
+  DB.connection s $ \db->SQL.withTransaction db $ do
+   rows<-DB.queryRowsOn db "SELECT value FROM workloads WHERE id=?" ["value"] [SQL.SQLText (D.workloadId work)]
+   current<-case rows of [row]->DB.decodeStored (at row "value") >>= decodeValue 500; _->failure 409 "Waiting workflow disappeared"
+   let updated=put "workflowWaits" (put key (mergeFields [("status",str "blocked"),("reason",str reason)] record) (D.workField current "workflowWaits")) (toJSON current)
+   DB.putValueOn db DB.Workloads (D.workloadId current) updated
+   Managed.transitionOn db (runIdText (D.callIdentity call)) (put "status" (str "cancelled") . put "error" (str reason))
+  DB.project s (agentIdText (D.callOwner call))
+  pure False
+
+dispatchWaits :: Service -> IO ()
+dispatchWaits s=do
+ works<-D.readWorks s
+ forM_ works $ \work->forM_ (pairs (D.workField work "workflowWaits")) $ \(key,record)->when (at record "status"=="waiting") $
+  forM_ (find ((==get record "call") . toJSON . D.callIdentity) (D.workCalls work)) $ \call->when (D.callState call==D.CallQueued) (void (timeReady s work call key))
 
 validateOn :: SQL.Connection -> D.Workload -> Value -> Value -> IO ()
 validateOn db work version context=do
@@ -183,7 +259,7 @@ finishBudget s running=do
  change s (runId running) (\work->D.setWorkField "workflowBudget" (put "status" (str "settled") (D.workField work "workflowBudget")) work)
 
 safeIdle :: D.Workload -> Bool
-safeIdle work=not (null (pairs (D.workField work "workflowCohorts")))
+safeIdle work=(not (null (pairs (D.workField work "workflowCohorts"))) || any ((=="waiting") . (`at` "status") . snd) (pairs (D.workField work "workflowWaits")))
  && at (D.workField work "workflowBudget") "status"=="reserved"
  && not (any ((==Bool True) . snd) (pairs (get (D.workField work "workflowBudget") "activities")))
  && all ((`elem` [D.CallQueued,D.CallCompleted]) . D.callState) (D.workCalls work)
@@ -222,9 +298,10 @@ quiesce s running=do
 stop :: Service -> RunId -> IO ()
 stop s identity=do
  found<-D.findWork s identity
- forM_ found $ \(work,_)->unless (null (pairs (D.workField work "workflowCohorts"))) $ do
+ forM_ found $ \(work,_)->unless (null (pairs (D.workField work "workflowCohorts")) && null (pairs (D.workField work "workflowWaits"))) $ do
   DB.connection s $ \db->SQL.withTransaction db $ do
-   let changed=D.setWorkField "workflowHalt" (str "Stopped by Admin") (D.setWorkField "executionGate" (toJSON ExecutionStopped) work)
+   let waits=obj [(key,if at value "status"=="waiting" then mergeFields [("status",str "cancelled"),("reason",str "Stopped before wake")] value else value) | (key,value)<-pairs (D.workField work "workflowWaits")]
+       changed=D.setWorkField "workflowWaits" waits (D.setWorkField "workflowHalt" (str "Stopped by Admin") (D.setWorkField "executionGate" (toJSON ExecutionStopped) work))
        stopped=changed {D.workCalls=fmap (\call->if D.callState call==D.CallQueued then call {D.callState=D.CallCancelled} else call) (D.workCalls changed)}
    DB.putValueOn db DB.Workloads (D.workloadId work) (toJSON stopped)
    forM_ [call | call<-NE.toList (D.workCalls stopped),child call,D.callState call==D.CallCancelled] $ \call->
