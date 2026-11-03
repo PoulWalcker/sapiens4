@@ -361,3 +361,41 @@ retry remains explicit, and prior receipts are retained. Back up SQLite and
 `agentpy/` together. Managed turns and their command/receipt history currently stay
 in the active projection; archival and large-history scaling are not implemented
 for this opt-in mode yet.
+
+
+### Doctor repair for personal routines
+
+A fresh Corpora creates ChiefSapi and a separate Doctor Sapi, assigning that
+Doctor by default. Interrupted fresh initialization resumes those identities;
+existing Corpora receive no automatic agent backfill or reassignment. Chief can
+assign another active personal specialist with `corpora_update`'s optional
+`doctor_id` field; `null` clears it. Chief and Groups cannot be Doctor. The
+existing workspace settings message includes this assignment.
+
+This slice gives Doctor response-only diagnosis from retained evidence, without
+tools or environment repair. The routine owner prepares and checks candidates.
+Tool-enabled diagnosis and recovery remain a separate migration slice.
+
+The first proven implementation fault immediately retains a repair case, even
+without a Doctor. Safe ordinary execution and bounded fallback proceed under
+their existing effect checks. The Doctor distinguishes an implementation defect
+from a structural revision or a justified stop. Structural revisions retain a
+recommendation instead of regenerating the unchanged structure.
+
+The Agency and Doctor choose further candidate iterations from newly failed
+checks or verification and a changed hypothesis. There is no fixed attempt
+count. Every case has one persisted aggregate allowance of 30 active minutes,
+covering diagnosis, generation, fixture execution, review and the authorized
+verification and audit. Waiting for a Doctor, queue or authorized occurrence
+consumes no active allowance. A stage reserves its remaining allowance before
+work, and only an observed completion returns proven unused time. An unfinished
+reservation after a crash remains consumed, with unknown spend shown explicitly.
+Restart, new run/request, edits or restoring an old failed version do not refill
+that case. Provider failures and lost responses are not automatically retried.
+
+Checked repair candidates wait for the existing authorized routine run; only a
+successful result and activation audit adopt the new version. The routine view
+shows diagnosis, attempts, current candidate, measured/reserved active resource,
+terminal reason and purpose-indexed usage receipts. Missing tokens or prices are
+unknown. The state snapshot retains `repairCases`; `repair` is the current case
+and usage projection over its existing Workload operations.

@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module Composer (requestOn, stopOn, detail, projection, run, recover ) where
+module Composer (repairOn, requestOn, stopOn, detail, projection, run, recover ) where
 
 import Control.Exception
 import Control.Monad
@@ -136,7 +136,9 @@ askConfigured s running node purpose context explanation = do
  let rendered=render envelope [("node",node),("instruction",template),("context",jsonText (put "selfId" (toJSON (runOwner running)) context))]
  identity<-newId
  started<-now
- let operation=obj (concat [[("modelSettings",toJSON selected),("input",context),("inputHash",str (canonicalHash context)),("reference",get context "reference"),("implementationHash",get context "implementationHash")] | selected<-maybeToList settings]++[("id",str identity),("purpose",str purpose),("status",str "running"),("started",str started),("promptHash",str (sourceHash rendered))])
+ owning<-load s (runIdText (runId running))
+ let recordedPurpose=if has (toJSON owning) "repairPin" then "repair_"<>purpose else purpose
+     operation=obj (concat [[("modelSettings",toJSON selected),("input",context),("inputHash",str (canonicalHash context)),("reference",get context "reference"),("implementationHash",get context "implementationHash")] | selected<-maybeToList settings]++[("id",str identity),("purpose",str recordedPurpose),("status",str "running"),("started",str started),("promptHash",str (sourceHash rendered))])
      save fields=update s (runIdText (runId running)) (\p->put "operations" (arr [if at op "id"==identity then merge op fields else op | op<-items p "operations"]) p)
  update s (runIdText (runId running)) (appendItems "operations" [operation])
  (do
@@ -190,7 +192,7 @@ prepare s running = do
  require (at saved "status"=="queued") 409 "Preparation already started; request a new explicit attempt"
  spec<-decodeValue 422 (get saved "contract")
  phase s running Fixtures
- oracle<-ask s running "PreparationFixtures" "fixture_design" (put "criteria" (D.criterionContext spec) (select ["contract","sourceEvidence","parameters","feedProfile","sourceInput"] saved))
+ oracle<-ask s running "PreparationFixtures" "fixture_design" (put "criteria" (D.criterionContext spec) (select ["contract","sourceEvidence","parameters","feedProfile","sourceInput","repairContext"] saved))
  rawFixtures<-field 422 oracle "fixtures" :: IO [Fixture]
  feedMode<-if get saved "feedProfile"==Null then pure Nothing else Just <$> field 422 oracle "contentInterface"
  typedFixtures<-forM rawFixtures $ \(Fixture input expected)->case feedMode of
@@ -209,7 +211,7 @@ prepare s running = do
  update s identity (mergeFields [("fixtures",arr fixtures),("sourceCases",toJSON rawFixtures),("contentInterface",maybe Null toJSON feedMode),("rubric",get oracle "rubric")])
  profile<-environment s running
  phase s running Generation
- candidate<-ask s running "PreparationGeneration" "candidate_generation" (mergeFields [("availableProfiles",arr [Code.profileJSON profile]),("interface",str "json-stdin-result-v1"),("contentInterface",maybe Null toJSON feedMode)] (select ["contract","sourceEvidence","parameters","feedProfile","sourceInput"] saved))
+ candidate<-ask s running "PreparationGeneration" "candidate_generation" (mergeFields [("availableProfiles",arr [Code.profileJSON profile]),("interface",str "json-stdin-result-v1"),("contentInterface",maybe Null toJSON feedMode)] (select ["contract","sourceEvidence","parameters","feedProfile","sourceInput","repairContext"] saved))
  Candidate source<-decodeValue 422 candidate
  forM_ feedMode $ \content->require ((content==HybridText)==has candidate "explanation") 422 "Generated implementation differs from the frozen feed content interface"
  hybridFields<-if not (has candidate "explanation") then pure [] else do
@@ -320,3 +322,26 @@ renderDetail s work = do
      stopped=at (toJSON work) "executionGate"=="stopped"
      status=if at prepared "status"=="cleanup_pending" then "cleanup_pending" else if stopped then "stopped" else if not allowed then "stale" else at prepared "status"
  pure (mergeFields [("id",str (D.workloadId work)),("status",str status)] (merge (select ["owner","routine","contractGeneration"] (D.workField work "preparationPin")) prepared))
+
+-- Repair uses the existing candidate pipeline and immutable original contract.
+-- Its caller atomically owns the case transition and this Workload admission.
+repairOn :: SQL.Connection -> R.Definition -> Value -> Value -> Value -> RunId -> Text -> IO Value
+repairOn db definition failedReference casePin context identity time = do
+ works<-readOn db
+ source<-maybe (failure 409 "Failed implementation preparation is unavailable") pure
+  (find ((==at failedReference "preparation") . D.workloadId) works)
+ let original=D.workField source "preparation"
+     pin=D.workField source "preparationPin"
+ require (get pin "owner"==str (R.definitionOwner definition) && get pin "routine"==str (R.definitionId definition)
+  && get pin "contractGeneration"==toJSON (R.contractGeneration definition)) 409 "Repair contract changed"
+ require (not (any D.generatedCleanupPending works)) 503 "Owned container cleanup remains unresolved"
+ let origin=obj [("preparation",toJSON identity)]
+     prepared=mergeFields [("status",str "queued"),("repairContext",context),("operations",arr []),("checks",arr [])]
+       (select ["analysis","contract","sourceEvidence","parameters","feedProfile","sourceInput"] original)
+     call=D.newCall identity (AgentId (R.definitionOwner definition)) Nothing D.Preparation D.CallQueued (R.definitionGoal definition)
+     work=D.Workload (runIdText identity) False (call :| []) (KM.fromList
+       [("origin",origin),("created",str time),("originalIntent",str (R.definitionGoal definition)),("executionGate",toJSON ExecutionOpen)
+       ,("repairPin",casePin),("preparationPin",pin),("preparation",prepared)])
+ SQL.execute db "INSERT INTO workloads(id,value) VALUES (?,?)" (D.workloadId work,jsonText (toJSON work))
+ Managed.enrollOn db (R.definitionOwner definition) (newTurn identity Chat (R.definitionGoal definition) time origin False) Null (R.definitionGoal definition) []
+ pure (toJSON identity)

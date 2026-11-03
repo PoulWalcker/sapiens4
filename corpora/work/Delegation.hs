@@ -119,7 +119,10 @@ selectRoutineCodeOn db owner work snapshot (Just accepted) = do
   Nothing->pure False
   Just candidate->do
    pin<-decodeValue 409 (workField candidate "preparationPin")
-   pure (DB.analysisFeedbackIds operations snapshot (map toJSON works) (analysisSources pin)==analysisFeedback pin)
+   let casePin=workField candidate "repairPin"
+       repairCase=find ((==get casePin "case") . (`get` "id")) (items snapshot "repairCases")
+       repairEligible=casePin==Null || maybe False (\saved->at saved "status"=="awaiting_verification" && at saved "candidate"==workloadId candidate && int (get saved "spentMilliseconds")<int (get saved "limitMilliseconds")) repairCase
+   pure (repairEligible && DB.analysisFeedbackIds operations snapshot (map toJSON works) (analysisSources pin)==analysisFeedback pin)
  let chosen=case newest of
       Just candidate | eligible && not busy && not (has (get (workField candidate "preparation") "trial") "run") -> Just (reference candidate,CandidateTrial,Just candidate)
       _ | at active "status"=="active" && get active "contractGeneration"==get snapshot "contractGeneration" -> Just (get active "reference",ActiveCode,Nothing)
@@ -136,7 +139,7 @@ selectRoutineCodeOn db owner work snapshot (Just accepted) = do
    forM_ candidate $ \preparedWork->do
     let claim=obj [("run",str (workloadId work)),("reference",toJSON reference_),("status",str "claimed")]
     DB.putValueOn db DB.Workloads (workloadId preparedWork) (toJSON (setWorkField "preparation" (put "trial" claim (workField preparedWork "preparation")) preparedWork))
-   pure changed
+   pure (maybe changed (\preparedWork->if has (toJSON preparedWork) "repairPin" then setWorkField "repairPin" (workField preparedWork "repairPin") changed else changed) candidate)
 
 -- Both preparation checks and business execution resolve the exact persisted bytes.
 resolveCandidateBytes :: AgentId -> Workload -> CandidateReference -> IO Value

@@ -362,12 +362,12 @@ instance FromJSON CorporaStatus where parseJSON = parseWire
 instance ToJSON CorporaStatus where toJSON = String . wireName
 data CorporaConfig = CorporaConfig
  { corporaName :: Maybe Text, corporaDevice :: Text, corporaScope :: Text
- , corporaStatus :: CorporaStatus, corporaRevision :: Int, corporaOperations :: M.Map Text Value
+ , corporaStatus :: CorporaStatus, corporaRevision :: Int, corporaOperations :: M.Map Text Value, corporaDoctor :: Maybe AgentId
  } deriving (Eq, Show)
 instance FromJSON CorporaConfig where
- parseJSON = withObject "Corpora settings" $ \o -> CorporaConfig <$> o .:? "name" <*> o .: "device" <*> o .: "scope" <*> o .: "status" <*> o .: "revision" <*> o .:? "operations" .!= M.empty
+ parseJSON = withObject "Corpora settings" $ \o -> CorporaConfig <$> o .:? "name" <*> o .: "device" <*> o .: "scope" <*> o .: "status" <*> o .: "revision" <*> o .:? "operations" .!= M.empty <*> o .:? "doctor_id"
 instance ToJSON CorporaConfig where
- toJSON config = object ["name" .= corporaName config, "device" .= corporaDevice config, "scope" .= corporaScope config, "status" .= corporaStatus config, "revision" .= corporaRevision config, "operations" .= corporaOperations config]
+ toJSON config = object ["name" .= corporaName config, "device" .= corporaDevice config, "scope" .= corporaScope config, "status" .= corporaStatus config, "revision" .= corporaRevision config, "operations" .= corporaOperations config, "doctor_id" .= corporaDoctor config]
 data Frequency = Bpm120 | Bpm60 | Bph60 deriving (Eq, Ord, Show, Enum, Bounded)
 instance Wire Frequency where wireName frequency = case frequency of Bpm120 -> "bpm120"; Bpm60 -> "bpm60"; Bph60 -> "bph60"
 instance FromJSON Frequency where parseJSON = parseWire

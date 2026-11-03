@@ -1,7 +1,10 @@
 require 'yaml'
 
 RSpec.describe 'Delegation and completion contracts' do
-  before { host.configure(mode: 'Exec') }
+  before do
+    host.configure(mode: 'Exec')
+    @initial_agents = host.state.fetch('agents')
+  end
 
   def tasks(owner = chief)
     YAML.safe_load(host.api('GET', "/api/agents/#{owner}/tasks")).fetch('tasks')
@@ -58,7 +61,7 @@ RSpec.describe 'Delegation and completion contracts' do
     task = tasks.first
     expect(task['workloadId']).to eq(original)
     expect(task['execution']).to include('state' => 'Completed', 'owner' => specialist['id'])
-    expect(host.state['agents'].size).to eq(2)
+    expect(host.state['agents'].size).to eq(@initial_agents.length + 1)
     expect(host.state['orchestration'][specialist['id']]['manager']).to eq(chief)
   end
 
@@ -85,7 +88,7 @@ RSpec.describe 'Delegation and completion contracts' do
     id = host.submit(chief)
     expect(host.turn(id, 'failed')['error']).to include('Unknown decision event')
     expect(host.calls.size).to eq(1)
-    expect(host.state['agents'].size).to eq(1)
+    expect(host.state['agents']).to eq(@initial_agents)
   end
 
   {
@@ -97,7 +100,7 @@ RSpec.describe 'Delegation and completion contracts' do
       host.configure(rules: {'Assessing' => {response: {reason: 'Fixture', evidence: []}.merge(response)}})
       host.turn(host.submit(chief), 'failed')
       expect(host.calls.map { |call| call['node'] }).to eq(['Assessing'])
-      expect(host.state['agents'].size).to eq(1)
+      expect(host.state['agents']).to eq(@initial_agents)
     end
   end
 

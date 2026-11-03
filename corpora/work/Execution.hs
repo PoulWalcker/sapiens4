@@ -199,7 +199,7 @@ launch s a batch tick slot batching = do
  DB.pulseCall s tick a "chatInput" slot (nub [at (turnField t "origin") "group" | t <- NE.toList batch,has (turnField t "origin") "group"])
  DB.project s a
  void $ forkIO $ do
-  result <- try (withActor s a (Just "chatInput") (if has (turnField execution "origin") "group" then G.runGroup s run execution else if has (turnField execution "origin") "preparation" then Composer.run s run execution else dispatchOrdinary s run execution snapshot))
+  result <- try (Automation.withRepairBudget s run $ \repairRun -> withActor s a (Just "chatInput") (if has (turnField execution "origin") "group" then G.runGroup s repairRun execution else if has (turnField execution "origin") "repair" then Automation.runDiagnosis s repairRun execution else if has (turnField execution "origin") "preparation" then Composer.run s repairRun execution else dispatchOrdinary s repairRun execution snapshot))
   locked s $ finish s run execution result `finally` do
    lease <- readIORef (serviceLease s)
    when (lease==Just (AgentId a,i)) $ writeIORef (serviceLease s) Nothing
@@ -246,6 +246,7 @@ codeGuard s running = do
  require (not cancelled) 409 "Code occurrence stopped"
  (work,call)<-D.getWork s (runId running)
  DB.requireOccurrence s (D.workField work "origin")
+ when (has (toJSON work) "repairPin") $ DB.repairPinAllowed s (D.workField work "repairPin") >>= \clear->require clear 409 "Repair case is stopped or changed"
  Effects.requireCurrentInput s (toJSON work)
  void (D.resolveCandidate s work call)
  works<-D.readWorks s
@@ -557,6 +558,7 @@ markCodeFault s running reason = locked s $ do
  cancelled<-readIORef (runCancel running)
  allowed<-DB.occurrenceAllowed s (D.workField work "origin")
  unless (cancelled || not allowed) $ DB.connection s $ \db->SQL.withTransaction db $ do
+  Automation.recordRepairFaultOn db work reference reason
   definitions<-DB.queryRowsOn db "SELECT value FROM scheduled_routines ORDER BY sequence" ["value"] [] >>= traverse (DB.decodeStored . (`at` "value"))
   forM_ [d | d<-definitions,get d "id"==get (D.workField work "routineSnapshot") "id",get d "owner"==toJSON (runOwner running),get (get d "activeCode") "reference"==reference] $ \definition->
    void (DB.saveRoutineOn db (put "activeCode" (mergeFields [("status",str "suspect"),("reason",str reason),("failedRun",toJSON (runId running))] (get definition "activeCode")) definition))
@@ -615,6 +617,7 @@ onPulse s tick = do
  when (pulseFrequency tick==Bph60 || (pulseFrequency tick==Bpm60 && even (pulseNumber tick))) $ do
   D.pendingWorks s
   Automation.dispatch s
+  Automation.dispatchRepairs s
   G.reconcileGroups s
   G.dispatchGroups s
   rows <- DB.agents s

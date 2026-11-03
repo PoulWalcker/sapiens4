@@ -70,7 +70,7 @@ openService path = do
       identity <- readJSON identityPath empty
       require (get identity "version"==num 1 && maybe False ((==at identity "corpora_id") . UUID.toText) (UUID.fromText (at identity "corpora_id"))) 409 "Invalid CORPORA identity. Restore corpora-identity.json from backup."
       rows <- DB.agents s
-      when (null rows) $ void (createAgent s (obj [("name",str "ChiefSapi"),("role",str "Head of Corpora")]))
+      initializeAgents s identity rows
       repairAvatars s
       agents <- DB.agents s
       mapM_ (ensureAgent s) agents
@@ -78,6 +78,7 @@ openService path = do
       d <- directory s
       saveDirectory s $ foldl (\dir row -> let a=at row "id"; entry=get dir a in put a (put "parent" (if a==chief then Null else get entry "parent" `fallback` str chief) entry) dir) d agents
       mapM_ (E.recover s . (`at` "id")) agents
+      Automation.recoverRepairs s
       Composer.recover s
       E.recoverCode s
       Effects.recover s
@@ -234,3 +235,32 @@ dispatchLocked s method target body = locked s $ do
    require ("workspace_" `T.isPrefixOf` at d "op") 400 "Only workspace operations are supported here"
    json 200 (workspaceControl s gid (T.drop 10 (at d "op")) d)
   _ -> failure 404 "Not found"
+
+
+-- A fresh population spans SQLite and projected files. The identity's pending
+-- marker makes interrupted creation resumable without backfilling old Corpora.
+initializeAgents :: Service -> Value -> [Value] -> IO ()
+initializeAgents s identity rows = do
+ let marker=get identity "initialPopulation"
+ require (marker==Null || marker==str "chief_doctor") 409 "Unknown initial population marker; inspect the saved Corpora identity"
+ when (null rows || marker/=Null) $ do
+  let identityPath=serviceRoot s </> "corpora-identity.json"
+  when (marker==Null) (writeJSON identityPath (put "initialPopulation" (str "chief_doctor") identity))
+  require (null rows || any (\row->at row "name"=="ChiefSapi" && at row "role"=="Head of Corpora") rows) 409 "Interrupted population has no expected Chief; inspect the retained agents"
+  let ensure name role predecessor manager = do
+       current<-DB.agents s
+       let matches=filter ((==T.toCaseFold name) . T.toCaseFold . (`at` "name")) current
+       row<-case matches of
+        []->createAgentAfter s predecessor (obj ([("name",str name),("role",str role)]++[("manager",str parent) | parent<-maybeToList manager]))
+        [existing] | at existing "role"==role->ensureAgent s existing >> pure existing
+        _->failure 409 "Initial population name or role is ambiguous; inspect the retained agents"
+       pure row
+  chief<-ensure "ChiefSapi" "Head of Corpora" Nothing Nothing
+  chiefTime<-maybe (failure 409 "Initial Chief creation time is invalid") pure (parseTime (at chief "created"))
+  dir<-directory s
+  saveDirectory s (put (at chief "id") (put "parent" Null (get dir (at chief "id"))) dir)
+  doctor<-ensure "Doctor" "System diagnostics and authorized recovery" (Just chiefTime) (Just (at chief "id"))
+  require (at doctor "created">at chief "created") 409 "Initial Doctor ordering is invalid; inspect the retained agents"
+  config<-corporaSettings s
+  writeJSON (serviceRoot s </> "corpora-settings.json") config {corporaDoctor=Just (AgentId (at doctor "id"))}
+  writeJSON identityPath (remove ["initialPopulation"] identity)

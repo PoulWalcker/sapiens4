@@ -7,6 +7,7 @@ import Control.Monad
 import Data.Aeson hiding (pairs)
 import Data.Char
 import Data.IORef
+import Data.Time (UTCTime, getCurrentTime, addUTCTime)
 import System.Random (randomRIO)
 import Data.Maybe
 import Data.Text (Text)
@@ -129,7 +130,11 @@ repairAvatars s = do
   modifyIORef' used (face:)
  where sqlId row=SQLText (at row "id")
 createAgent :: Service -> Value -> IO Value
-createAgent s d = do
+createAgent s = createAgentAfter s Nothing
+
+-- Bootstrap can pin ordering before insertion; ordinary creation uses the clock.
+createAgentAfter :: Service -> Maybe UTCTime -> Value -> IO Value
+createAgentAfter s predecessor d = do
  name <- validName d
  role <- textField d "role" 60
  let color = get d "color" `fallback` str "#d8e5f4"; face = get d "face" `fallback` str "◠‿◠"
@@ -142,8 +147,9 @@ createAgent s d = do
  (randomFace,randomColor) <- randomAvatar (map (`at` "face") rows)
  let selected=if has d "face" && text face `notElem` map (`at` "face") rows then text face else randomFace
      selectedColor=if has d "color" then color else str randomColor
- time <- now
- let row = obj [("id",str a),("name",str name),("role",str role),("color",selectedColor),("face",str selected),("created",str time)]
+ clock <- getCurrentTime
+ let time=timestamp (maybe clock (max clock . addUTCTime 0.000001) predecessor)
+     row = obj [("id",str a),("name",str name),("role",str role),("color",selectedColor),("face",str selected),("created",str time)]
  DB.addAgent s row
  dir <- directory s
  saveDirectory s (put a (obj [("parent",parent),("scope",str "")]) dir)
@@ -206,7 +212,7 @@ changeRetirement s a retire reason = do
   DB.record s [a] a (if retire then "sapi.retired" else "sapi.restored") (obj [("reason",str reason)]) "admin" Nothing
   pure (obj [("id",str a),("retired",Bool retire),("changed",Bool True)])
 corporaSettings :: Service -> IO CorporaConfig
-corporaSettings s = readJSON (serviceRoot s </> "corpora-settings.json") (CorporaConfig Nothing "This computer" "" Active 1 mempty)
+corporaSettings s = readJSON (serviceRoot s </> "corpora-settings.json") (CorporaConfig Nothing "This computer" "" Active 1 mempty Nothing)
 corporaIdentity :: Service -> IO Value
 corporaIdentity s = do
  cfg <- corporaSettings s

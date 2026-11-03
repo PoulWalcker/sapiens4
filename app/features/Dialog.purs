@@ -56,7 +56,7 @@ make kind record m = {kind,title,record,fields,content:D.null,error:"",busy:fals
     M.GroupSettings -> record
     M.GroupTask -> D.merge (D.json {assignee: D.get "lead" $ M.selected m, state: "backlog"}) record
     M.RoutineRun -> D.json {inputs: ""}
-    M.EditCorpora -> D.json {message: replaceFields (D.fallback (D.str $ D.at ["corpora","settings_template"] m.snapshot) $ D.s "settings_template" record) ["name","device","scope"]}
+    M.EditCorpora -> D.json {message: replaceFields (D.fallback (D.str $ D.at ["corpora","settings_template"] m.snapshot) $ D.s "settings_template" record) ["name","device","scope","doctor_id"]}
     M.RelayAdd -> D.json {name: D.get "name" record, connection: if D.valid $ D.get "connection" record then D.encode $ D.get "connection" record else ""}
     M.Notice -> D.json {message: record}
     _ -> D.empty

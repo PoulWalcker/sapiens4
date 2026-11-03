@@ -177,6 +177,7 @@ pulseCall s tick a kind slot groups = do
 -- Legacy calls without an occurrence retain their original behavior.
 occurrenceAllowed :: Service -> Value -> IO Bool
 occurrenceAllowed s origin
+ | has origin "repair" = repairAllowed s (get origin "repair")
  | has origin "preparation" = preparationAllowed s (get origin "preparation")
  | has origin "analysis" = analysisAllowed s (get origin "analysis")
  | not (has origin "occurrence") = pure True
@@ -252,5 +253,24 @@ pinnedMaintenanceAllowed s pinField identityValue = do
      generation <- field 500 definition "contractGeneration"
      operations <- routineOperations s
      works <- values s Workloads
-     pure (gate==ExecutionOpen && not (boolean (get definition "deleted")) && generation==analysisGeneration pin
+     repairClear<-if has work "repairPin" then repairPinAllowed s (get work "repairPin") else pure True
+     pure (repairClear && gate==ExecutionOpen && not (boolean (get definition "deleted")) && generation==analysisGeneration pin
        && analysisFeedbackIds operations definition works (analysisSources pin)==analysisFeedback pin)
+
+-- Repair identity and allowance belong to the retained consumer, not a new Run.
+repairAllowed :: Service -> Value -> IO Bool
+repairAllowed s identity = do
+ rows<-queryRows s "SELECT value FROM workloads WHERE id=?" ["value"] [SQLText (text identity)]
+ case rows of
+  []->pure False
+  row:_->do
+   work<-decodeStored (at row "value")
+   clear<-repairPinAllowed s (get work "repairPin")
+   pure (clear && at work "executionGate"=="open")
+repairPinAllowed :: Service -> Value -> IO Bool
+repairPinAllowed s pin = do
+ definitions<-values s ScheduledRoutines
+ pure $ case find (\definition->get definition "id"==get pin "routine" && get definition "owner"==get pin "owner") definitions of
+  Nothing->False
+  Just definition->not (boolean (get definition "deleted")) && get definition "contractGeneration"==get pin "contractGeneration"
+   && any (\saved->get saved "id"==get pin "case" && at saved "status" `elem` ["waiting_doctor","diagnosing","diagnosed","repairing","awaiting_verification","verifying"]) (items definition "repairCases")

@@ -51,7 +51,7 @@ prepare s a = do
  let context= obj [("currentSapi",str a),("chief",get facts "main_agent_id"),("groups",get facts "groups"),("team",get facts "team"),("workspace",obj [("path",str (T.pack (workspaceRoot s a)))])]
  writeText (agentRoot s a </> "manifests/corpora-state.md") (jsonText context)
 operationFields :: [(Text,[Text])]
-operationFields = [("corpora_get",[]),("corpora_update",["name","device","scope","revision","archived"]),("batch",["operations"]),("status",["target"]),("delegate",["decision"]),("routines",[]),("routine_create",["minutes","prompt"]),("routine_update",["id","minutes","prompt"]),("routine_pause",["id"]),("routine_resume",["id"]),("group_create",["name","description","lead","members"]),("group_get",["group"]),("group_update",["group","revision","name","description","lead","members","archived"]),("group_message",["group","text","target"]),("group_task_create",["group","title","body","assignee"]),("group_task_update",["group","task","revision","title","body","assignee","state","deleted"]),("group_task_run",["group","task","revision"]),("create_agent",["name","role","manager"]),("retire_agent",["target","reason"]),("rehire_agent",["target"]),("computer_acquire",[]),("manager",["manager","target"]),("workspace",["group"]),("workspace_open",["url","path","id","group"]),("workspace_zoom",["id","factor","group"])] ++ [("workspace_"<>action,["id","group"]) | action<- ["close","focus","reload","back","forward","bookmark","unbookmark"]]
+operationFields = [("corpora_get",[]),("corpora_update",["name","device","scope","revision","archived","doctor_id"]),("batch",["operations"]),("status",["target"]),("delegate",["decision"]),("routines",[]),("routine_create",["minutes","prompt"]),("routine_update",["id","minutes","prompt"]),("routine_pause",["id"]),("routine_resume",["id"]),("group_create",["name","description","lead","members"]),("group_get",["group"]),("group_update",["group","revision","name","description","lead","members","archived"]),("group_message",["group","text","target"]),("group_task_create",["group","title","body","assignee"]),("group_task_update",["group","task","revision","title","body","assignee","state","deleted"]),("group_task_run",["group","task","revision"]),("create_agent",["name","role","manager"]),("retire_agent",["target","reason"]),("rehire_agent",["target"]),("computer_acquire",[]),("manager",["manager","target"]),("workspace",["group"]),("workspace_open",["url","path","id","group"]),("workspace_zoom",["id","factor","group"])] ++ [("workspace_"<>action,["id","group"]) | action<- ["close","focus","reload","back","forward","bookmark","unbookmark"]]
 control :: Service -> Text -> Value -> IO Value
 control s a payload = do
  void (DB.agent s a)
@@ -134,15 +134,21 @@ control s a payload = do
  pause receipt paused=do i<-textField d "id" 80; receipt . obj . (:[]) . ("routine",) <$> R.setPaused s a i paused
 updateCorpora :: Service -> Value -> IO Value
 updateCorpora s d = do
- require (not (null (keys d)) && all (`elem` ["name","device","scope","revision","archived"]) (keys d)) 400 "Unknown corpora setting"
+ require (not (null (keys d)) && all (`elem` ["name","device","scope","revision","archived","doctor_id"]) (keys d)) 400 "Unknown corpora setting"
  cfg <- corporaSettings s
  require (get d "revision"==num (corporaRevision cfg)) 409 "Corpora changed. Read its settings again."
  forM_ [("name",200),("device",200),("scope",16000)] $ \(k,limit) -> when (has d k) $ require (case get d k of String value -> T.length (T.strip value)<=limit && (k=="scope" || not (T.null (T.strip value))); _ -> False) 400 ("Invalid "<>k)
  when (has d "archived") $ do
   require (case get d "archived" of Bool _ -> True; _ -> False) 400 "archived must be a boolean"
   when (boolean (get d "archived")) $ readMVar (serviceRuns s) >>= mapM_ (\r->writeIORef (runCancel r) True) . M.elems
+ when (has d "doctor_id" && get d "doctor_id"/=Null) $ do
+  doctor<-textField d "doctor_id" 128
+  chief<-DB.mainAgent s
+  require (doctor/=chief && not ("group_" `T.isPrefixOf` doctor)) 400 "Assign an active personal specialist as Doctor"
+  requireActive s doctor
  let updated=cfg
-      { corporaName=if has d "name" then Just (T.strip (at d "name")) else corporaName cfg
+      { corporaDoctor=if has d "doctor_id" then if get d "doctor_id"==Null then Nothing else Just (AgentId (at d "doctor_id")) else corporaDoctor cfg
+      , corporaName=if has d "name" then Just (T.strip (at d "name")) else corporaName cfg
       , corporaDevice=if has d "device" then T.strip (at d "device") else corporaDevice cfg
       , corporaScope=if has d "scope" then T.strip (at d "scope") else corporaScope cfg
       , corporaRevision=corporaRevision cfg+1

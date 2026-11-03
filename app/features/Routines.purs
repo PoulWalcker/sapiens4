@@ -111,7 +111,8 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     ,V.p "routine-muted" $ whenText routine
     ,V.node "nav" [V.cls "routine-tabs",V.label "Routine views"] [V.control [V.cls $ "routine-link" <> if not history then " selected" else "",V.attr "aria-current" $ if not history then "page" else "false"] "Latest result" (RoutineNavigate $ M.RoutineLatest id),V.control [V.cls $ "routine-link" <> if history then " selected" else "",V.attr "aria-current" $ if history then "page" else "false"] "History" (RoutineNavigate $ M.RoutineHistory id)]
     ,V.when (managed routine) $ analysisPanel routine
-    ,V.when (managed routine) $ codePanel routine]
+    ,V.when (managed routine) $ codePanel routine
+    ,V.when (managed routine) $ repairPanel routine]
     where r = record routine
           id = D.s "id" r
   analysisPanel routine = V.div "routine-notice" $
@@ -160,6 +161,22 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     reference = D.get "reference" active
     trial = D.get "trial" prepared
     trialRun = fromMaybe D.empty $ A.find (\run -> D.s "id" run == D.s "run" trial) (D.rows "runs" r)
+  repairPanel routine = V.when (D.s "id" repair /= "") $ V.div "routine-notice"
+    [V.textNode "h3" [] "Doctor repair"
+    ,V.p "routine-muted" "Doctor diagnoses retained evidence without tools. The routine owner prepares and checks candidates."
+    ,V.p "" $ "Repair: " <> D.s "status" repair
+    ,V.p "routine-muted" $ "Doctor: " <> D.fallback "Not assigned" (D.s "doctor" repair)
+    ,V.p "" $ D.s "waitingReason" repair
+    ,V.p "" $ D.s "diagnosis" (D.get "diagnosis" repair)
+    ,V.p "routine-muted" $ D.s "recommendation" (D.get "diagnosis" repair)
+    ,V.p "routine-muted" $ "Attempts: " <> show (A.length $ D.rows "attempts" repair) <> " · Measured active time (ms): " <> show (D.int $ D.get "measuredMilliseconds" repair) <> " · Reserved (ms): " <> show (D.int $ D.get "reservedMilliseconds" repair) <> " / " <> show (D.int $ D.get "limitMilliseconds" repair)
+    ,V.p "routine-muted" $ "Current candidate: " <> D.fallback "None" (D.s "candidate" repair)
+    ,V.p "" $ D.s "terminalReason" repair
+    ,V.when (D.b "usageUnknown" repair) $ V.p "routine-problem" "Repair spend is unknown for interrupted activity. Its reserved resource remains consumed."
+    ,V.p "routine-muted" "Safe ordinary execution remains available while repair waits or stops."
+    ,V.node "details" [] ([V.node "summary" [] [V.text "Repair usage"], V.p "routine-muted" "Unreported tokens and price are unknown."] <> map (\op -> V.p "routine-muted" $ D.s "purpose" op <> " · " <> D.s "status" op <> " · Input tokens: " <> known "inputTokens" (D.get "usage" $ D.get "evidence" op) <> " · Output tokens: " <> known "outputTokens" (D.get "usage" $ D.get "evidence" op) <> " · Duration (ms): " <> known "durationMs" (D.get "evidence" op)) (D.rows "usage" repair))]
+    where
+    repair = D.get "repair" $ record routine
   result routine run =
     [V.p "routine-muted" $ status (D.s "status" run) <> " · " <> formatDate (timestamp run) <> " · " <> triggerLabel run
     ,V.when (managed routine) $ V.p "routine-muted" $ "Assessment: " <> D.s "status" (D.get "assessment" run) <> if D.b "historical" run then " · Historical revision" else ""
