@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 -- Owner-personal immutable scripts; consumer contracts and acceptance stay local.
-module Kit (catalog, resolve, resolvePreparation, descriptor, targetContext) where
+module Kit (catalog, resolve, resolvePreparation, descriptor, targetContext, issues, issueFor, executionAllowed, consumers, bindingPin, bindingCurrent) where
 
 import Control.Exception
 import Control.Monad
@@ -48,11 +48,46 @@ checked work version=let prepared=get work "preparation"; checks=items prepared 
  && all (\check->get check "matched"==Bool True && get check "version"==get version "reference" && get check "sourceHash"==get version "sourceHash" && has check "actual" && has check "expected" && get check "actual"==get check "expected" && at check "status"=="exited" && get check "exitCode"==num 0 && not (boolean (get check "wasRunning"))) checks
  && (not (has version "explanation") || all (\check->at (get check "actual") "status"/="ok" || get check "rubricAccepted"==Bool True && has check "explanationOperation") checks)
 
-badIdentities :: Text -> [Value] -> ([Text],[Text])
-badIdentities owner works=(map (canonicalHash . descriptor) versions,concat [[at version "sourceHash",sourceHash (at version "source")] | version<-versions])
+-- One stable issue per owner/source bytes. Repeated failures do not mint work.
+issues :: Text -> [Value] -> [Value]
+issues owner works=nubBy (\left right->get left "id"==get right "id")
+ [obj [("id",str (canonicalHash (obj [("owner",str owner),("sourceHash",str hash_)]))),("owner",str owner),("sourceHash",str hash_),("artifact",str artifact),("reference",reference),("run",get work "workloadId"),("routine",get (get work "origin") "routine"),("reason",get fault "reason"),("scope",get fault "scope")]
+ | work<-works,let code=get work "codeExecution",let reference=get code "reference",at reference "owner"==owner
+ ,let version=fromMaybe Null (listToMaybe [get (get source "preparation") "version" | source<-works,get (get (get source "preparation") "version") "reference"==reference])
+ ,fault<-items code "faults",shared version code fault
+ ,let hash_=at fault "sourceHash" `otherwiseText` at version "sourceHash",not (T.null hash_)
+ ,let artifact=at fault "artifact" `otherwiseText` canonicalHash (descriptor version)]
  where
- references=[get code "reference" | work<-works,let code=get work "codeExecution",not (null (items code "faults")),at (get code "reference") "owner"==owner]
- versions=[get (get work "preparation") "version" | work<-works,personal owner work,get (get (get work "preparation") "version") "reference" `elem` references]
+ otherwiseText left right=if T.null left then right else left
+ shared version code fault=case at fault "scope" of
+  "explanation"->False
+  "calculation"->True
+  "composition"->not (has version "explanation") || any numericFailure (items code "operations")
+   where numericFailure op=any (\criterion->at criterion "status"=="fail" && any (\rubric->get rubric "id"==get criterion "id" && at rubric "kind"=="numeric") (items version "rubric")) (items (get op "response") "criteria")
+  _->True -- Unattributed legacy evidence remains suspect, never silently healthy.
+
+badIdentities :: Text -> [Value] -> ([Text],[Text])
+badIdentities owner works=(map (`at` "artifact") found,map (`at` "sourceHash") found)
+ where found=issues owner works
+
+issueFor :: Text -> Value -> [Value] -> Maybe Value
+issueFor owner version works=find ((==get version "sourceHash") . (`get` "sourceHash")) (issues owner works)
+
+executionAllowed :: Value -> Value -> [Value] -> Bool
+executionAllowed definition version works=case issueFor (at definition "owner") version works of
+ Nothing->True
+ Just issue->any (\inspection->get inspection "issue"==get issue "id" && get inspection "reference"==get version "reference" && get inspection "contractGeneration"==get definition "contractGeneration" && at inspection "status"=="completed" && get (get inspection "verdict") "affected"==Bool False) [inspection | saved<-items definition "repairCases",inspection<-items saved "kitInspections"]
+
+consumers :: Text -> Value -> [Value] -> [Value]
+consumers owner version works=[obj [("routine",get (get work "preparationPin") "routine"),("reference",get candidate "reference"),("sourceHash",get candidate "sourceHash")] | work<-works,personal owner work,let candidate=get (get work "preparation") "version",get candidate "sourceHash"==get version "sourceHash",checked work candidate]
+
+bindingPin :: Value -> Value
+bindingPin definition=mergeFields [("case",get saved "id") | saved<-items definition "repairCases",get saved "id"==get definition "repairCase",get saved "contractGeneration"==get definition "contractGeneration",any (\inspection->get inspection "reference"==get (get definition "activeCode") "reference") (items saved "kitInspections")]
+ (obj [("reference",get (get definition "activeCode") "reference"),("contractGeneration",get definition "contractGeneration"),("revision",get definition "revision")])
+
+bindingCurrent :: Value -> Value -> Bool
+bindingCurrent definition pin=(not (has pin "revision") || get definition "revision"==get pin "revision") && get (get definition "activeCode") "reference"==get pin "reference" && get definition "contractGeneration"==get pin "contractGeneration"
+ && (not (has pin "case") || get definition "repairCase"==get pin "case" && any (\saved->get saved "id"==get pin "case" && not (has saved "userStop") && at saved "status" `notElem` ["stopped","stale"]) (items definition "repairCases"))
 
 reason :: Value -> Value -> Maybe Value -> Text
 reason target version available
@@ -76,7 +111,7 @@ catalog owner target works=do
  rows<-forM [work | work<-reverse works,personal owner work,has (get work "preparation") "version",get (get (get work "preparation") "review") "accepted"==Bool True] $ \work->do
   let version=get (get work "preparation") "version"; ref=get version "reference"
       identity=canonicalHash (descriptor version)
-      summary=obj [("id",str identity),("reference",ref),("owner",str owner),("scope",str "personal"),("sourceHash",get version "sourceHash"),("language",get version "language"),("interface",get version "interface"),("runtime",get version "runtime"),("dependencies",get version "dependencies"),("capabilities",get version "capabilities"),("family",family version),("provenance",provenance work version)]
+      summary=obj [("id",str identity),("reference",ref),("owner",str owner),("scope",str "personal"),("sourceHash",get version "sourceHash"),("language",get version "language"),("interface",get version "interface"),("runtime",get version "runtime"),("dependencies",get version "dependencies"),("capabilities",get version "capabilities"),("family",family version),("provenance",provenance work version),("consumers",arr (consumers owner version works))]
   validated<-try (decodeValue 409 ref >>= resolvePreparation (AgentId owner) work) :: IO (Either APIError Value)
   let refusal=case validated of
        Left (APIError _ message)->message

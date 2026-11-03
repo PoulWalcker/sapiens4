@@ -123,10 +123,10 @@ selectRoutineCodeOn db owner work snapshot (Just accepted) = do
    let casePin=workField candidate "repairPin"
        repairCase=find ((==get casePin "case") . (`get` "id")) (items snapshot "repairCases")
        repairEligible=casePin==Null || maybe False (\saved->at saved "status"=="awaiting_verification" && at saved "candidate"==workloadId candidate && int (get saved "spentMilliseconds")<int (get saved "limitMilliseconds")) repairCase
-   pure (repairEligible && DB.analysisFeedbackIds operations snapshot (map toJSON works) (analysisSources pin)==analysisFeedback pin)
+   pure (repairEligible && (not (has (get (workField candidate "preparation") "version") "expectedBinding") || Kit.bindingCurrent snapshot (get (get (workField candidate "preparation") "version") "expectedBinding")) && Kit.executionAllowed snapshot (get (workField candidate "preparation") "version") (map toJSON works) && DB.analysisFeedbackIds operations snapshot (map toJSON works) (analysisSources pin)==analysisFeedback pin)
  let chosen=case newest of
       Just candidate | eligible && not busy && not (has (get (workField candidate "preparation") "trial") "run") -> Just (reference candidate,CandidateTrial,Just candidate)
-      _ | at active "status"=="active" && get active "contractGeneration"==get snapshot "contractGeneration" -> Just (get active "reference",ActiveCode,Nothing)
+      _ | at active "status"=="active" && get active "contractGeneration"==get snapshot "contractGeneration" && maybe False (\source->Kit.executionAllowed snapshot (get (workField source "preparation") "version") (map toJSON works)) (find ((==at (get active "reference") "preparation") . workloadId) works) -> Just (get active "reference",ActiveCode,Nothing)
       _ -> Nothing
  case chosen of
   Nothing->pure work
@@ -135,7 +135,7 @@ selectRoutineCodeOn db owner work snapshot (Just accepted) = do
    version<-resolveCandidateFrom works owner snapshot accepted reference_
    let initial=NE.head (workCalls work)
        binding=ScriptBinding owner RoutineSnapshotSource reference_ role
-       code=obj ([("reference",toJSON reference_),("role",toJSON role),("status",str "queued"),("operations",arr [])]++[("structureHash",get version "structureHash") | has version "structureHash"])
+       code=obj ([("upgradePin",get version "expectedBinding") | role==CandidateTrial && has (get version "expectedBinding") "case"]++[("reference",toJSON reference_),("role",toJSON role),("status",str "queued"),("operations",arr [])]++[("structureHash",get version "structureHash") | has version "structureHash"])
        changed=setWorkField "codeExecution" code work {workCalls=setCallFields [("executionBinding",toJSON binding)] initial :| NE.tail (workCalls work)}
    forM_ candidate $ \preparedWork->do
     let claim=obj [("run",str (workloadId work)),("reference",toJSON reference_),("status",str "claimed")]

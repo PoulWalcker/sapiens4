@@ -37,3 +37,25 @@ wrapper under one guarded transaction. Isolated checks and business execution re
 target's own canonical bytes and Kit descriptor again. Missing/tampered local content is
 refused before execution. Existing consumers are not silently updated or reassigned when
 another source changes or becomes suspect.
+
+When a calculation fault identifies shared bytes, other consumers retain their exact pin
+and history while using ordinary LLM execution until a local inspection resolves their
+applicability. Explanation-only faults do not mark calculation bytes suspect. Inspection
+is automatic, response-only and deduplicated for the same issue, consumer binding and
+contract. Its persisted 90-second deadline is a sublimit of the existing repair-case
+allowance; retries, refreshes and restart do not grant fresh inspection time. Existing
+unrelated repair activity is preserved. An unknown inspection remains visibly held rather
+than repeating indefinitely. Existing uncertain-effect guards still apply to ordinary
+execution and inspection admission.
+
+An unaffected verdict authorizes only that consumer's exact current binding and contract;
+it does not clear the shared suspect fact. An affected verdict enters that consumer's own
+bounded repair using the same case ledger. A repaired version accepted by another
+consumer is a proposal, not an upgrade authorization. Preparation, independent checks,
+an authorized occurrence and its activation audit still belong to the receiving consumer.
+The final activation compares its expected prior binding and current contract; Stop,
+deletion or superseding changes prevent a late inspection or upgrade from taking effect.
+
+The existing Routine UI shows shared suspect status, local inspection evidence, checked
+consumers, proposed versions and the expected prior pin for its own upgrade. Case Stop
+cancels future inspection/repair admission without changing the retained active pin.

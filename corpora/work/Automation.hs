@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE CPP #-}
-module Automation (dispatch, requestOn, stopOn, projection, detail, preflight, recordRepairFaultOn, withRepairBudget, runDiagnosis, dispatchRepairs, recoverRepairs, repairProjection, selectDoctorResources, configureDoctorAccessOn, recordAuditFailure, savedAuditSourceOn, providerDue, deferProvider, cancelProviderWait, grantRepairOn, stopRepairOn) where
+module Automation (dispatch, requestOn, stopOn, projection, detail, preflight, recordRepairFaultOn, withRepairBudget, runDiagnosis, dispatchRepairs, recoverRepairs, repairProjection, selectDoctorResources, configureDoctorAccessOn, recordAuditFailure, savedAuditSourceOn, providerDue, deferProvider, cancelProviderWait, grantRepairOn, stopRepairOn, runKitInspection) where
 
 import Control.Exception hiding (handle)
 import Control.Monad
@@ -33,6 +33,7 @@ import qualified ManagedState as Managed
 import qualified Effects
 import qualified Delegation as D
 import qualified Routines as R
+import qualified Kit
 import qualified Provider
 import Population (requireActive)
 import qualified Population
@@ -250,7 +251,7 @@ renderAnalysis s definition work full = do
 -- A case retains one aggregate allowance. Workloads remain the only executable
 -- operations; the case is consumer-owned evidence and authorization history.
 repairTerminal :: Value -> Bool
-repairTerminal saved = at saved "status" `elem` ["recovered","exhausted","interrupted","stopped","structure_revision","declined","stale"]
+repairTerminal saved = at saved "status" `elem` ["recovered","exhausted","interrupted","stopped","structure_revision","declined","stale","inspection_complete","kit_inspection_unknown"]
 repairCasesOn :: SQL.Connection -> IO [Value]
 repairCasesOn db = DB.queryRowsOn db "SELECT value FROM scheduled_routines ORDER BY sequence" ["value"] [] >>= traverse (DB.decodeStored . (`at` "value"))
 repairCaseIn :: Value -> Value -> Maybe Value
@@ -530,7 +531,7 @@ stopRepairOn db definition identity reason time=do
  works<-readWorksOn db
  forM_ [work | work<-works,D.workField work "repairPin"==casePin definition saved,repairWorkActive work] $ \work->
   DB.putValueOn db DB.Workloads (D.workloadId work) (toJSON (D.setWorkField "executionGate" (toJSON ExecutionStopped) work))
- let stopped=put "userStop" (obj [("at",str time),("reason",str reason),("authority",str "admin")]) (stopRepair "stopped" reason saved)
+ let stopped=put "kitInspections" (arr [if at record "status" `elem` ["queued","running"] then put "status" (str "stopped") record else record | record<-items saved "kitInspections"]) $ put "userStop" (obj [("at",str time),("reason",str reason),("authority",str "admin")]) (stopRepair "stopped" reason saved)
  void (DB.saveRoutineOn db (put "revision" (num (int (get definition "revision")+1)) (putRepair definition stopped)))
  pure (obj [("routine",get definition "id"),("case",str identity),("status",str "stopped")])
 
@@ -839,6 +840,7 @@ recoverRepairs s = do
          DoctorScopedResponseOnly->[op | op<-items saved "operations",at op "purpose"=="repair_diagnosis"]
          RepairPreparationResponseOnly->[op | op<-items (D.workField work "preparation") "operations",at op "purpose"/= "fixture_check"]
          SavedAuditResponseOnly->[]
+         KitInspectionResponseOnly->[]
         proven op=let evidence=get op "evidence" in at evidence "policy"=="response_only" && at evidence "providerVersion"=="codex-cli 0.162.1" && not (Effects.positiveAnomaly evidence)
     when (not (null operations) && all proven operations) (D.saveWork s (D.setWorkField "repairInvocationPolicy" (toJSON policy) work))
   forM_ [op | op<-items saved "operations",has op "runtime",at (get op "runtime") "status"/="removed"] $ \op->do
@@ -870,9 +872,180 @@ recoverRepairs s = do
   forM_ faults $ \work->DB.connection s $ \db->SQL.withTransaction db $
    recordRepairFaultOn db work (get (D.workField work "codeExecution") "reference") "Retained implementation fault from an earlier application version"
 
+-- Same independently audited adoption proof used by repair lineage admission.
+kitIndependentAdoption :: Value -> Value -> [D.Workload] -> Bool
+kitIndependentAdoption definition saved works=case find ((==at (get definition "activeCode") "run") . D.workloadId) works of
+ Nothing->False
+ Just proof->let activeCode=get definition "activeCode"; code=D.workField proof "codeExecution"; snapshot=D.workField proof "routineSnapshot" in
+  at activeCode "status"=="active" && get code "reference"==get activeCode "reference" && get snapshot "id"==get definition "id" && get snapshot "owner"==get definition "owner" && get snapshot "contractGeneration"==get definition "contractGeneration"
+  && at (get code "activation") "status"=="activated" && get (get code "activationAudit") "accepted"==Bool True && not (boolean (get code "completedViaFallback")) && at (D.workField proof "outcome") "status"=="Completed" && all ((==D.CallCompleted) . D.callState) (D.workCalls proof)
+  && case (parseTime (at activeCode "decidedAt"),parseTime (at saved "created")) of (Just adopted,Just created)->adopted>created; _->False
+
+kitLocalEvidence :: Value -> Value -> Value -> [D.Workload] -> Text
+kitLocalEvidence definition saved reference works=canonicalHash (obj [("active",select ["status","reference","reason","failedRun"] (get definition "activeCode")),("evidence",get saved "evidence"),("faults",arr [obj [("run",str (D.workloadId work)),("faults",get code "faults")] | work<-works,let code=D.workField work "codeExecution",get code "reference"==reference,not (null (items code "faults"))])])
+
+-- One persisted, response-only inspection uses the consumer's existing case.
+-- The issue key is stable across new failures of the same source bytes.
+ensureKitInspections :: Service -> IO ()
+ensureKitInspections s=do
+ definitions<-R.readDefinitions s
+ works<-D.readWorks s
+ forM_ definitions $ \typed->do
+  let definition=toJSON typed; owner=R.definitionOwner typed; activeCode=get definition "activeCode"; reference=get activeCode "reference"
+      source=find ((==at reference "preparation") . D.workloadId) works
+  forM_ source $ \prepared->forM_ (Kit.issueFor owner (get (D.workField prepared "preparation") "version") (map toJSON works)) $ \issue->do
+   let key=canonicalHash (obj [("issue",get issue "id"),("routine",get definition "id"),("reference",reference),("contractGeneration",get definition "contractGeneration")])
+       existing=any (any ((==key) . (`at` "id")) . (`items` "kitInspections")) (items definition "repairCases")
+   unless (existing || get issue "reference"==reference || R.definitionDeleted typed || "group_" `T.isPrefixOf` owner) $ do
+    time<-now
+    identity<-newId
+    DB.connection s $ \db->SQL.withTransaction db $ do
+     current<-Effects.definitionOn db (R.definitionId typed)
+     let prior_=find ((==get current "repairCase") . (`get` "id")) (items current "repairCases")
+         newLineage=maybe False (\old->at old "status" `elem` ["recovered","inspection_complete"] && kitIndependentAdoption current old works) prior_
+         prior=if newLineage then Nothing else prior_
+         base=fromMaybe (obj [("id",str identity),("status",str "waiting_kit_inspection"),("kind",str "kit_inspection"),("created",str time),("contractGeneration",get current "contractGeneration"),("rootReference",reference),("references",arr [reference]),("limitMilliseconds",num 1800000),("spentMilliseconds",num 0),("reservations",arr []),("attempts",arr []),("operations",arr []),("evidence",arr [])]) prior
+         localFault=at activeCode "status"=="suspect" || at base "kind"=="implementation_defect" && at base "status" `notElem` ["recovered","inspection_complete"]
+         blocked=(repairTerminal base && at base "status" `notElem` ["recovered","inspection_complete"]) || int (get base "spentMilliseconds")>=int (get base "limitMilliseconds") || has base "userStop" || get base "contractGeneration"/=get current "contractGeneration" || reference `notElem` items base "references"
+         record=obj [("id",str key),("issue",get issue "id"),("cause",issue),("reference",reference),("contractGeneration",get current "contractGeneration"),("revision",get current "revision"),("status",str (if localFault then "already_affected" else if blocked then "blocked" else "queued")),("created",str time),("reason",str (if localFault then "This consumer already has its own implementation fault" else if blocked then "Existing repair lineage is stopped, exhausted, stale or owns another binding; no fresh allowance" else "Shared suspect artifact requires this consumer's own applicability inspection"))]
+         appended=appendItems "kitInspections" [record] base
+         ready=if not localFault && not blocked && at base "kind"=="kit_inspection" && not (any ((=="reserved") . (`at` "status")) (items base "reservations")) then put "status" (str "waiting_kit_inspection") appended else appended
+     when (get current "contractGeneration"==get definition "contractGeneration" && get (get current "activeCode") "reference"==reference) (void (DB.saveRoutineOn db (putRepair current ready)))
+
+-- A queued inspection never replaces an unrelated active repair/audit phase.
+promoteKitInspections :: Service -> IO ()
+promoteKitInspections s=do
+ definitions<-R.readDefinitions s
+ forM_ definitions $ \definition->forM_ (items (toJSON definition) "repairCases") $ \saved->
+  when (at saved "status" `elem` ["recovered","inspection_complete"] && any ((=="queued") . (`at` "status")) (items saved "kitInspections") && not (has saved "userStop") && not (any ((`elem` ["reserved","uncertain"]) . (`at` "status")) (items saved "reservations"))) $
+   updateRepairUnlocked s (casePin (toJSON definition) saved) (\latest->if at latest "status"==at saved "status" then mergeFields [("kitReturnPhase",get latest "status"),("status",str "waiting_kit_inspection")] latest else latest)
+
+inspectionOn :: SQL.Connection -> Value -> Text -> IO (Value,Value,Value)
+inspectionOn db pin identity=do
+ (definition,saved)<-loadRepairOn db pin
+ inspection<-maybe (failure 409 "Kit inspection disappeared") pure (find ((==identity) . (`at` "id")) (items saved "kitInspections"))
+ require (not (boolean (get definition "deleted")) && get definition "contractGeneration"==get inspection "contractGeneration" && get definition "revision"==get inspection "revision" && get (get definition "activeCode") "reference"==get inspection "reference") 409 "Kit consumer binding or contract changed"
+ require (not (has saved "userStop") && at saved "status"=="inspecting_kit" && at inspection "status" `elem` ["queued","running"]) 409 "Kit inspection is stopped or no longer current"
+ pure (definition,saved,inspection)
+
+saveKitOperation :: Service -> Run -> Value -> Text -> Value -> IO ()
+saveKitOperation s running pin identity operation=locked s $ DB.connection s $ \db->SQL.withTransaction db $ do
+ (definition,saved)<-loadRepairOn db pin
+ works<-readWorksOn db
+ work<-maybe (failure 409 "Kit inspection authority disappeared") pure (find ((==runIdText (runId running)) . D.workloadId) works)
+ let entries=filter ((/=at operation "id") . (`at` "id")) (items saved "operations")++[operation]
+     inspections=[if at record "id"==identity then mergeFields [("status",str (if at record "status" `elem` ["queued","running"] then "running" else at record "status")),("deadline",get operation "deadline"),("operation",get operation "id")] record else record | record<-items saved "kitInspections"]
+     updated=D.setWorkField "kitInspection" (put "operation" operation (D.workField work "kitInspection")) work
+     observed=if any Effects.positiveAnomaly (Provider.operationEvidence operation) && D.workField updated "routineEffectUnknown"==Null then D.setWorkField "routineEffectUnknown" (obj [("decisionId",get operation "id"),("reason",str "Kit inspection trace contains unexpected activity")]) updated else updated
+ void (DB.saveRoutineOn db (putRepair definition (mergeFields [("operations",arr entries),("kitInspections",arr inspections)] saved)))
+ DB.putValueOn db DB.Workloads (D.workloadId work) (toJSON observed)
+
+runKitInspection :: Service -> Run -> Turn -> IO (Text,[Value])
+runKitInspection s running _=do
+ (work,_)<-D.getWork s (runId running)
+ let pin=D.workField work "repairPin"; request=D.workField work "kitInspection"; identity=at request "id"
+     guard=do
+      requireActive s (agentIdText (runOwner running))
+      cancelled<-readIORef (runCancel running)
+      require (not cancelled) 409 "Kit inspection stopped"
+      Effects.requireRunClear s (runId running)
+      (latest,_)<-D.getWork s (runId running)
+      require (D.workField latest "executionGate"==toJSON ExecutionOpen) 409 "Kit inspection authority stopped"
+      (definition,saved,_)<-DB.connection s (\db->inspectionOn db pin identity)
+      works<-D.readWorks s
+      require (kitLocalEvidence definition saved (get request "reference") works==at request "localEvidence") 409 "Local Kit evidence changed before inspection admission"
+     finishUnknown problem=do
+      locked s $ DB.connection s $ \db->SQL.withTransaction db $ do
+       (definition,saved)<-loadRepairOn db pin
+       works<-readWorksOn db
+       let changed=kitLocalEvidence definition saved (get request "reference") works/=at request "localEvidence"
+           localFault=changed && get (get definition "activeCode") "reference"==get request "reference" && get definition "contractGeneration"==get request "contractGeneration" && (at (get definition "activeCode") "status"=="suspect" || not (null (items saved "evidence")))
+           phase=if localFault then "waiting_doctor" else if at saved "kind"/="kit_inspection" && has saved "kitReturnPhase" then at saved "kitReturnPhase" else "kit_inspection_unknown"
+           updated=mergeFields ([("status",str phase),("terminalReason",str (D.exceptionText problem)),("kitInspections",arr [if at record "id"==identity then mergeFields [("status",str (if localFault then "stale" else "unknown")),("reason",str (D.exceptionText problem))] record else record | record<-items saved "kitInspections"])]++[("kind",str "implementation_defect") | localFault]) saved
+       unless (repairTerminal saved) (void (DB.saveRoutineOn db (putRepair definition updated)))
+      throwIO problem
+     execute=do
+      guard
+      instruction<-prompt s "kit-inspection"
+      envelope<-prompt s "preparation-envelope"
+      let context=get request "context"
+          rendered=render envelope [("node","KitInspection"),("instruction",instruction),("context",jsonText context)]
+      require (BL.length (encode context)<=262144) 413 "Kit inspection evidence exceeds the bounded context; no automatic retry"
+      (_,saved)<-DB.connection s (\db->loadRepairOn db pin)
+      clock<-getMonotonicTimeNSec
+      let capped=running {runDeadline=min (runDeadline running) (clock+90000000000)}
+      operation<-Provider.operationFor s capped "KitInspection" "kit_inspection" ("KitInspection:"<>runIdText (runId running)) rendered Nothing (items saved "operations")
+      raw<-Provider.invokeRetained s capped operation (saveKitOperation s running pin identity)
+      verdict<-pure (parseJSONText raw)
+      void (parseValue 422 (onlyFields ["affected","reason"]) verdict)
+      affected<-field 422 verdict "affected" :: IO Bool
+      reason<-parseValue 422 (textFieldP "reason" 8000) verdict
+      guard
+      locked s $ DB.connection s $ \db->SQL.withTransaction db $ do
+       (definition,latest,inspection)<-inspectionOn db pin identity
+       currentWorks<-readWorksOn db
+       current<-maybe (failure 409 "Kit inspection Workload disappeared") pure (find ((==runIdText (runId running)) . D.workloadId) currentWorks)
+       require (D.workField current "executionGate"==toJSON ExecutionOpen) 409 "Kit inspection stopped before receipt"
+       Effects.requireDefinitionClearOn db definition
+       require (kitLocalEvidence definition latest (get inspection "reference") currentWorks==at request "localEvidence") 409 "Local fault evidence changed during Kit inspection; the verdict is stale"
+       let records=[if at record "id"==identity then mergeFields [("status",str "completed"),("verdict",verdict),("reason",str reason)] record else record | record<-items latest "kitInspections"]
+           ownKind=at latest "kind"=="kit_inspection"
+           phase=if affected then "waiting_doctor" else if ownKind then "inspection_complete" else at latest "kitReturnPhase"
+           assessed=mergeFields [("kitInspections",arr records),("status",str phase)] latest
+           repaired=if affected then mergeFields [("kind",str "implementation_defect"),("lastFailure",obj [("kitIssue",get inspection "issue"),("reason",str reason),("scope",str "consumer_applicability")]) ] assessed else assessed
+           recordDefinition=if affected then put "activeCode" (mergeFields [("status",str "suspect"),("reason",str reason)] (get definition "activeCode")) definition else definition
+       void (DB.saveRoutineOn db (putRepair recordDefinition repaired))
+       DB.putValueOn db DB.Workloads (D.workloadId current) (toJSON current {D.workCalls=fmap (\call->call {D.callState=D.CallCompleted,D.callOutput=Just reason}) (D.workCalls current)})
+      pure (reason,[])
+ execute `catch` (\(problem::SomeException)->case fromException problem :: Maybe Provider.RetryDeferred of Just _->throwIO problem; Nothing->finishUnknown problem)
+
+admitKitInspection :: Service -> R.Definition -> Value -> IO ()
+admitKitInspection s definition saved=do
+ works<-D.readWorks s
+ let waiting=find ((=="queued") . (`at` "status")) (items saved "kitInspections")
+ forM_ waiting $ \inspection->do
+  let reference=get inspection "reference"
+  source<-maybe (failure 409 "Pinned Kit consumer preparation disappeared") pure (find ((==at reference "preparation") . D.workloadId) works)
+  version<-decodeValue 409 reference >>= D.resolveCandidateBytes (AgentId (R.definitionOwner definition)) source
+  identity<-RunId <$> newId
+  time<-now
+  let context=obj [("selfId",str (R.definitionOwner definition)),("consumer",select ["id","owner","goal","criteria","contractGeneration"] (toJSON definition)),("reference",reference),("version",select ["source","sourceHash","language","runtime","dependencies","capabilities","inputBinding"] version),("fixtures",get (D.workField source "preparation") "fixtures"),("issue",get inspection "cause")]
+      pin=casePin (toJSON definition) saved
+      request=mergeFields [("context",context),("localEvidence",str (kitLocalEvidence (toJSON definition) saved reference works))] (select ["id","issue","reference","contractGeneration","revision"] inspection)
+  DB.connection s $ \db->SQL.withTransaction db $ do
+   (current,latest)<-loadRepairOn db pin
+   require (at latest "status"=="waiting_kit_inspection" && get (get current "activeCode") "reference"==reference && not (has latest "userStop")) 409 "Kit inspection changed before admission"
+   require (not (any ((=="reserved") . (`at` "status")) (items latest "reservations"))) 409 "Existing repair work owns the allowance"
+   let call=D.newCall identity (AgentId (R.definitionOwner definition)) Nothing D.Preparation D.CallQueued "Inspect this consumer's applicability of a shared suspect artifact"
+       origin=obj [("kitInspection",toJSON identity)]
+       work=D.Workload (runIdText identity) False (call :| []) (KM.fromList [("origin",origin),("repairPin",pin),("repairInvocationPolicy",toJSON KitInspectionResponseOnly),("kitInspection",request),("executionGate",toJSON ExecutionOpen),("created",str time)])
+       records=[if get record "id"==get inspection "id" then put "run" (toJSON identity) record else record | record<-items latest "kitInspections"]
+   SQL.execute db "INSERT INTO workloads(id,value) VALUES (?,?)" (D.workloadId work,jsonText (toJSON work))
+   Managed.enrollOn db (R.definitionOwner definition) (newTurn identity Chat "Inspect shared suspect Kit applicability" time origin False) Null "Inspect shared suspect Kit applicability" []
+   void (DB.saveRoutineOn db (putRepair current (mergeFields [("status",str "inspecting_kit"),("kitInspections",arr records)] latest)))
+
+-- Offers are provenance, not activation or another consumer's accepted result.
+refreshKitOffers :: Service -> IO ()
+refreshKitOffers s=do
+ definitions<-R.readDefinitions s
+ works<-D.readWorks s
+ forM_ definitions $ \target->forM_ (items (toJSON target) "repairCases") $ \saved->forM_ (items saved "kitInspections") $ \inspection->do
+  let issue=get inspection "cause"; owner=R.definitionOwner target
+  forM_ [source | source<-definitions,R.definitionOwner source==owner] $ \source->forM_ [repaired | repaired<-items (toJSON source) "repairCases",at repaired "status"=="recovered",get issue "reference" `elem` items repaired "references",get repaired "recoveredReference"/=get issue "reference"] $ \repaired->do
+   let offered=get repaired "recoveredReference"
+       key=canonicalHash (obj [("consumer",str (R.definitionId target)),("binding",get inspection "reference"),("contractGeneration",get inspection "contractGeneration"),("offered",offered),("issue",get inspection "issue")])
+   unless (any ((==key) . (`at` "id")) (items saved "kitOffers")) $ do
+    let offer=obj [("id",str key),("reference",offered),("expectedReference",get inspection "reference"),("contractGeneration",get inspection "contractGeneration"),("issue",get inspection "issue"),("sourceRoutine",str (R.definitionId source)),("sourceCase",get repaired "id"),("reason",str "The source consumer independently accepted this repair; this consumer still requires its own checks and authorized audit"),("status",str "offered")]
+    forM_ (find ((==at offered "preparation") . D.workloadId) works) $ \candidate->do
+     version<-decodeValue 409 offered >>= D.resolveCandidateBytes (AgentId owner) candidate
+     unless (isJust (Kit.issueFor owner version (map toJSON works))) (updateRepairUnlocked s (casePin (toJSON target) saved) (appendItems "kitOffers" [offer]))
+
 -- Called from the existing pulse dispatcher, never from a read/projection.
 dispatchRepairs :: Service -> IO ()
 dispatchRepairs s = do
+ ensureKitInspections s
+ promoteKitInspections s
+ refreshKitOffers s
  definitions<-R.readDefinitions s
  forM_ definitions $ \definition->forM_ (filter (not . repairTerminal) (items (toJSON definition) "repairCases")) $ \saved->do
   let pin=casePin (toJSON definition) saved
@@ -891,6 +1064,7 @@ advanceRepair s definition saved = do
      ongoing=any ((=="reserved") . (`at` "status")) (items saved "reservations")
  if R.definitionDeleted definition || get raw "contractGeneration"/=get saved "contractGeneration" then updateRepairUnlocked s pin (stopRepair "stale" "Routine contract or source profile changed; retained repair allowance is not reset")
  else unless ongoing $ if int (get saved "spentMilliseconds")>=int (get saved "limitMilliseconds") then updateRepairUnlocked s pin (stopRepair "exhausted" "The case's aggregate active repair allowance is exhausted") else case at saved "status" of
+  "waiting_kit_inspection"->admitKitInspection s definition saved
   "waiting_doctor"->do
    config<-Population.corporaSettings s
    case corporaDoctor config of
@@ -940,7 +1114,7 @@ advanceRepair s definition saved = do
        (current,latest)<-loadRepairOn db pin
        when (at latest "status"=="diagnosed") $ do
         typed<-decodeValue 500 current
-        candidate<-Composer.repairOn db typed (get latest "rootReference") pin (select ["diagnosis","evidence","attempts"] latest) identity time
+        candidate<-Composer.repairOn db typed (get latest "rootReference") pin (select ["diagnosis","evidence","attempts","kitOffers"] latest) identity time
         let attempt=obj [("number",num (length (items latest "attempts")+1)),("hypothesis",get latest "hypothesis"),("preparation",candidate),("status",str "preparing")]
         void (DB.saveRoutineOn db (putRepair current (appendItems "attempts" [attempt] (mergeFields [("status",str "repairing"),("candidate",candidate)] latest))))
    _->pure ()

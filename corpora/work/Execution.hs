@@ -32,6 +32,7 @@ import qualified Delegation as D
 import qualified Routines as R
 import qualified GeneratedCode as Code
 import qualified Effects
+import qualified Kit
 import qualified Composer
 import qualified Automation
 import Provider
@@ -201,7 +202,7 @@ launch s a batch tick slot batching = do
  DB.pulseCall s tick a "chatInput" slot (nub [at (turnField t "origin") "group" | t <- NE.toList batch,has (turnField t "origin") "group"])
  DB.project s a
  void $ forkIO $ do
-  result <- try (Automation.withRepairBudget s run $ \repairRun -> withActor s a (Just "chatInput") (if has (turnField execution "origin") "group" then G.runGroup s repairRun execution else if has (turnField execution "origin") "repairAudit" then runSavedAudit s repairRun execution else if has (turnField execution "origin") "repair" then Automation.runDiagnosis s repairRun execution else if has (turnField execution "origin") "preparation" then Composer.run s repairRun execution else dispatchOrdinary s repairRun execution snapshot))
+  result <- try (Automation.withRepairBudget s run $ \repairRun -> withActor s a (Just "chatInput") (if has (turnField execution "origin") "group" then G.runGroup s repairRun execution else if has (turnField execution "origin") "kitInspection" then Automation.runKitInspection s repairRun execution else if has (turnField execution "origin") "repairAudit" then runSavedAudit s repairRun execution else if has (turnField execution "origin") "repair" then Automation.runDiagnosis s repairRun execution else if has (turnField execution "origin") "preparation" then Composer.run s repairRun execution else dispatchOrdinary s repairRun execution snapshot))
   locked s $ finish s run execution result `finally` do
    lease <- readIORef (serviceLease s)
    when (lease==Just (AgentId a,i)) $ writeIORef (serviceLease s) Nothing
@@ -284,7 +285,31 @@ runCode s running turn = do
    throwIO exception
 
 executeCode :: Service -> Run -> IO Text
-executeCode s running = do
+data KitPending = KitPending Text deriving (Show)
+instance Exception KitPending
+
+-- This check is used only before the calculation admission. It cannot replay a
+-- calculation or an external action that already completed.
+requireKitBody :: Service -> Run -> Value -> IO ()
+requireKitBody s running version=do
+ (work,_)<-D.getWork s (runId running)
+ definition<-DB.connection s (\db->Effects.definitionOn db (at (D.workField work "routineSnapshot") "id"))
+ works<-D.readWorks s
+ unless (Kit.executionAllowed definition version (map toJSON works)) (throwIO (KitPending "Shared Kit bytes await this consumer's own applicability inspection"))
+
+executeCode s running = executeCodeBody s running `catch` (\(KitPending reason)->do
+ codeGuard s running
+ (work,call)<-D.getWork s (runId running)
+ (version,role)<-D.resolveCandidate s work call
+ spec<-D.executionContract work call >>= maybe (failure 409 "Accepted task disappeared before safe fallback") pure
+ explanation<-either (failure 409 . T.pack) pure (parseEither candidateExplanation version)
+ let input=get (D.workField work "codeExecution") "input"
+ (invocation,verdict,response,outcome,audit)<-wholeResult s running version role spec input (obj [("status",str "not_started"),("reason",str reason)]) explanation reason
+ commitCodeOutcome s running version role invocation verdict response outcome audit
+ case D.decisionBody response of D.ReportOutcome reply _->pure reply; _->failure 500 "Safe Kit fallback has no accepted outcome")
+
+executeCodeBody :: Service -> Run -> IO Text
+executeCodeBody s running = do
  codeGuard s running
  (work,call)<-D.getWork s (runId running)
  (version,role)<-D.resolveCandidate s work call
@@ -294,6 +319,8 @@ executeCode s running = do
       [raw]->either (const (str raw)) id (eitherDecodeStrict (TE.encodeUtf8 raw))
       values->toJSON values
  input<-if Effects.profileBound (toJSON work) then either (failure 409 . T.pack) (pure . (`get` "input")) (Effects.observedInput (toJSON work)) else pure ordinaryInput
+ codeUpdate s running (put "input" input)
+ requireKitBody s running version
  explanation<-either (failure 409 . T.pack) pure (parseEither candidateExplanation version)
  calculated<-try (executeCalculation s running version input) :: IO (Either CodeRunError (Value,Value))
  (actual,runtime)<-case calculated of
@@ -371,7 +398,9 @@ faultScope CompositionFault="composition"
 recordImplementationFault :: Service -> Run -> ImplementationFault -> Text -> IO ()
 recordImplementationFault s running scope reason = do
  codeGuard s running
- codeUpdate s running (\code->appendItems "faults" [obj [("scope",str (faultScope scope)),("reference",get code "reference"),("reason",str reason)]] code)
+ (source,call)<-D.getWork s (runId running)
+ (version,_)<-D.resolveCandidate s source call
+ codeUpdate s running (\code->appendItems "faults" [obj [("scope",str (faultScope scope)),("reference",get code "reference"),("reason",str reason),("sourceHash",get version "sourceHash"),("artifact",str (canonicalHash (Kit.descriptor version)))]] code)
  markCodeFault s running reason
 
 executeCalculation :: Service -> Run -> Value -> Value -> IO (Value,Value)
@@ -392,7 +421,11 @@ executeCalculation s running version input = do
  started<-now
  let reserved=Code.businessReservation profile (agentIdText (runOwner running)) (runIdText (runId running)) nonce
      operation=obj [("id",str nonce),("purpose",str "code_execution"),("stage",str "calculate"),("status",str "running"),("started",str started),("durationMs",Null),("reference",reference),("inputHash",str (canonicalHash input))]
- codeUpdate s running (mergeFields [("input",input),("status",str "running"),("container",reserved)] . appendItems "operations" [operation])
+ locked s $ do
+  requireKitBody s running version
+  (current,_)<-D.getWork s (runId running)
+  let code=mergeFields [("input",input),("status",str "running"),("container",reserved)] (appendItems "operations" [operation] (D.workField current "codeExecution"))
+  D.saveWork s (D.setWorkField "codeExecution" code current)
  result<-Code.runFixture profile running reserved (at version "source") input (\receipt->do
   when (at receipt "status"/="removed") (codeGuard s running)
   codeUpdate s running (put "container" receipt))
@@ -607,7 +640,7 @@ commitCodeOutcomeFor s running selected version role invocation verdict response
    Effects.ContentConflict value->(,) <$> decodeValue 500 value <*> pure False
   let snapshot=D.workField current "routineSnapshot"
       definition=find (\d->get d "id"==get snapshot "id" && get d "owner"==toJSON (runOwner running)) definitions
-      applicable=maybe False (\d->not (boolean (get d "deleted")) && get d "contractGeneration"==get snapshot "contractGeneration" && DB.analysisFeedbackIds feedback d (map toJSON works) (analysisSources pin)==analysisFeedback pin) definition
+      applicable=maybe False (\d->not (boolean (get d "deleted")) && get d "contractGeneration"==get snapshot "contractGeneration" && DB.analysisFeedbackIds feedback d (map toJSON works) (analysisSources pin)==analysisFeedback pin && Kit.executionAllowed d version (map toJSON works) && (not (has version "expectedBinding") || Kit.bindingCurrent d (get version "expectedBinding"))) definition
       accepted=contentAccepted
       fallbackUsed=not (null (pairs (get (D.workField current "codeExecution") "fallbacks")))
       activating=not fallbackUsed && role==CandidateTrial && accepted && get audit "accepted"==Bool True && applicable

@@ -82,7 +82,7 @@ requestOn db definition analysis identity time = do
  contract<-D.executionContract original (NE.head (D.workCalls original)) >>= maybe (failure 409 "Preparation requires an accepted pinned source task") pure
  sourceInput<-if get (toJSON definition) "externalProfile"==Null then pure Null else Effects.preparationInput (toJSON definition) (toJSON original)
  let origin=obj [("preparation",toJSON identity)]
-     preparation=obj [("kitEnabled",Bool True),("feedProfile",get (toJSON definition) "externalProfile"),("sourceInput",sourceInput),("status",str "queued"),("analysis",toJSON analysis),("contract",toJSON contract),("sourceEvidence",D.workField source "analysisEvidence"),("parameters",get (D.workField source "analysisDecision") "parameters"),("operations",arr []),("checks",arr [])]
+     preparation=obj [("expectedBinding",Kit.bindingPin (toJSON definition)),("kitEnabled",Bool True),("feedProfile",get (toJSON definition) "externalProfile"),("sourceInput",sourceInput),("status",str "queued"),("analysis",toJSON analysis),("contract",toJSON contract),("sourceEvidence",D.workField source "analysisEvidence"),("parameters",get (D.workField source "analysisDecision") "parameters"),("operations",arr []),("checks",arr [])]
      call=D.newCall identity (analysisOwner pin) Nothing D.Preparation D.CallQueued (R.definitionGoal definition)
      work=D.Workload (runIdText identity) False (call :| []) (KM.fromList [("origin",origin),("created",str time),("originalIntent",str (R.definitionGoal definition)),("executionGate",toJSON ExecutionOpen),("preparationPin",toJSON pin),("preparation",preparation)])
      turn=newTurn identity Chat (R.definitionGoal definition) time origin False
@@ -261,7 +261,7 @@ prepare s running = do
    profile<-decodeValue 422 (get saved "feedProfile")
    revision<-field 422 (get saved "sourceInput") "externalProfileRevision"
    pure [("inputBinding",toJSON (feedDescriptor profile revision content))]
- let content=mergeFields (kitFields++feedFields++hybridFields++ [("runtime",Code.profileJSON profile),("contract",get saved "contract"),("contractGeneration",get (D.workField work "preparationPin") "contractGeneration"),("sourceHash",str (sourceHash source))]) (select ["source","language","interface","dependencies","capabilities"] candidate)
+ let content=mergeFields (pairs (selectPresent ["expectedBinding"] saved)++kitFields++feedFields++hybridFields++ [("runtime",Code.profileJSON profile),("contract",get saved "contract"),("contractGeneration",get (D.workField work "preparationPin") "contractGeneration"),("sourceHash",str (sourceHash source))]) (select ["source","language","interface","dependencies","capabilities"] candidate)
      reference=obj [("owner",toJSON (runOwner running)),("preparation",str identity),("digest",str (canonicalHash content))]
      version=put "reference" reference content
  when (has saved "version") (require (version==get saved "version") 409 "Retained candidate identity or stage inputs changed")
@@ -369,7 +369,7 @@ detail s owner routine identity = do
 projection :: Service -> R.Definition -> [D.Workload] -> IO Value
 projection s definition works = maybe (pure Null) (fmap project . renderDetail s) (listToMaybe (reverse (filter (consumer definition) works)))
  where
- project detail_ = mergeFields [("kitArtifact",get (get detail_ "version") "kitArtifact"),("reference",get (get detail_ "version") "reference"),("applicable",Bool (get detail_ "contractGeneration"==toJSON (R.contractGeneration definition)))] (select ["id","status","analysis","owner","routine","contractGeneration","error","trial","providerWait","maintenanceBudget","contentInterface","rubric"] detail_)
+ project detail_ = mergeFields [("expectedBinding",get (get detail_ "version") "expectedBinding"),("kitArtifact",get (get detail_ "version") "kitArtifact"),("reference",get (get detail_ "version") "reference"),("applicable",Bool (get detail_ "contractGeneration"==toJSON (R.contractGeneration definition)))] (select ["id","status","analysis","owner","routine","contractGeneration","error","trial","providerWait","maintenanceBudget","contentInterface","rubric"] detail_)
 renderDetail :: Service -> D.Workload -> IO Value
 renderDetail s work = do
  allowed<-DB.occurrenceAllowed s (D.workField work "origin")
@@ -391,7 +391,7 @@ repairOn db definition failedReference casePin context identity time = do
   && get pin "contractGeneration"==toJSON (R.contractGeneration definition)) 409 "Repair contract changed"
  require (not (any D.generatedCleanupPending works)) 503 "Owned container cleanup remains unresolved"
  let origin=obj [("preparation",toJSON identity)]
-     prepared=mergeFields [("status",str "queued"),("repairContext",context),("operations",arr []),("checks",arr [])]
+     prepared=mergeFields [("expectedBinding",Kit.bindingPin (toJSON definition)),("kitEnabled",Bool True),("status",str "queued"),("repairContext",context),("operations",arr []),("checks",arr [])]
        (select ["analysis","contract","sourceEvidence","parameters","feedProfile","sourceInput"] original)
      call=D.newCall identity (AgentId (R.definitionOwner definition)) Nothing D.Preparation D.CallQueued (R.definitionGoal definition)
      work=D.Workload (runIdText identity) False (call :| []) (KM.fromList

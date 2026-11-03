@@ -148,10 +148,12 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     ,V.p "" $ case D.s "status" active of
       "active" -> "Script active · " <> CU.take 8 (D.s "digest" reference)
       "suspect" -> "Script suspended"
+      "kit_pending" -> "Script held · ordinary LLM execution until local inspection"
       "stale" -> "Script needs reconsideration"
       _ -> if D.s "id" prepared /= "" && not (D.b "applicable" prepared) then "Prepared version needs reconsideration" else if D.s "run" trial /= "" then if A.elem (D.s "status" trialRun) ["queued", "running", "waiting", "blocked"] then "Trial claimed" else "Trial finished without activation" else if D.s "status" prepared == "awaiting_occurrence" then "Prepared · awaiting an authorized run" else "Preparation: " <> D.s "status" prepared
     ,kitSource $ D.get "kitArtifact" active
     ,kitSource $ D.get "kitArtifact" prepared
+    ,V.when (D.s "digest" (D.at ["expectedBinding","reference"] prepared) /= "") $ V.p "routine-muted" $ "Upgrade basis · expected prior pin " <> CU.take 12 (D.s "digest" $ D.at ["expectedBinding","reference"] prepared)
     ,V.when (D.s "error" prepared /= "") $ V.p "routine-problem" $ D.s "error" prepared
     ,providerWaitPanel $ D.get "providerWait" prepared
     ,V.when (D.s "status" active == "stale" || D.s "id" prepared /= "" && not (D.b "applicable" prepared)) $ V.p "routine-muted" "This historical version no longer applies to the current task or source profile. Its history is retained."
@@ -170,13 +172,20 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
   kitPanel routine = V.node "details" []
     ([V.node "summary" [] [V.text "Kit · personal scripts"]
      ,V.p "routine-muted" "This Sapi's personal scope only. Preparation may select compatible code automatically; this Routine still needs its own checks and authorized activation audit."] <>
+     [V.when (D.s "id" (D.get "issue" local) /= "") $ V.p "routine-problem" $ "Shared suspect bytes · " <> CU.take 12 (D.s "sourceHash" $ D.get "issue" local) <> " · " <> D.s "reason" (D.get "issue" local)
+     ,V.when (D.b "held" local) $ V.p "routine-muted" "The old pin is retained. Ordinary LLM work is used while local applicability is unresolved; it may cost more. Unknown inspection is held without automatic repetition."] <>
+     map (\inspection -> V.p "routine-muted" $ "Local inspection: " <> D.s "status" inspection <> " · " <> D.s "reason" inspection) (D.rows "inspections" local) <>
+     map (\offer -> V.p "routine-muted" $ "Proposed version · " <> CU.take 12 (D.s "digest" $ D.get "reference" offer) <> " · " <> D.s "reason" offer) (D.rows "offers" local) <>
      map (\entry -> V.div "routine-notice"
        [V.p "" $ "Artifact " <> CU.take 12 (D.s "id" entry) <> " · " <> D.s "language" entry
        ,V.p "routine-muted" $ D.s "objective" (D.at ["provenance","contract"] entry)
        ,V.p "routine-muted" $ "Required runtime: " <> D.s "profile" (D.get "runtime" entry) <> " · scope: " <> D.s "scope" entry
-       ,V.p (if D.b "compatible" entry then "routine-muted" else "routine-problem") $ D.s "reason" entry]) (D.rows "entries" catalog) <>
+       ,V.p (if D.b "compatible" entry then "routine-muted" else "routine-problem") $ D.s "reason" entry
+       ,V.node "details" [] ([V.node "summary" [] [V.text "Checked consumers"]] <> map (\consumer -> V.p "routine-muted" $ D.s "routine" consumer <> " · " <> CU.take 12 (D.s "digest" $ D.get "reference" consumer)) (D.rows "consumers" entry))]) (D.rows "entries" catalog) <>
      [V.when (D.int (D.get "omittedEntries" catalog) > 0) $ V.p "routine-muted" $ "Additional catalog entries omitted from the bounded summary: " <> show (D.int $ D.get "omittedEntries" catalog)])
-    where catalog = D.get "kit" $ record routine
+    where
+    catalog = D.get "kit" $ record routine
+    local = D.get "kitConsumer" $ record routine
   providerWaitPanel waiting = V.when (D.s "id" waiting /= "") $ V.div "routine-notice"
     [V.p "" $ "Provider: " <> D.s "status" waiting <> " · host attempts " <> show (D.int $ D.get "attemptCount" waiting) <> "/3"
     ,V.p "routine-muted" $ D.s "reason" waiting
@@ -186,6 +195,7 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     [V.textNode "h3" [] "Doctor repair"
     ,V.p "routine-muted" "Doctor can inspect selected text files, stage isolated repairs and run isolated checks. Live writes require explicit file access and clear effect receipts."
     ,V.p "routine-muted" $ case D.s "phase" repair of
+      "kit_inspection" -> "The owner is inspecting this consumer under its existing finite repair allowance."
       "tool_work" -> "Doctor is performing a scoped tool operation."
       "waiting_independent_confirmation" -> "Waiting for file access or independent confirmation."
       _ -> "Doctor diagnoses saved evidence."

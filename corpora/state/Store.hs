@@ -177,6 +177,7 @@ pulseCall s tick a kind slot groups = do
 -- Legacy calls without an occurrence retain their original behavior.
 occurrenceAllowed :: Service -> Value -> IO Bool
 occurrenceAllowed s origin
+ | has origin "kitInspection" = kitInspectionAllowed s (get origin "kitInspection")
  | has origin "repairAudit" = repairAllowed s (get origin "repairAudit")
  | has origin "repair" = repairAllowed s (get origin "repair")
  | has origin "preparation" = preparationAllowed s (get origin "preparation")
@@ -190,7 +191,8 @@ occurrenceAllowed s origin
      row:_ -> do
       work <- decodeStored (at row "value")
       gate <- field 500 work "executionGate"
-      pure (gate==ExecutionOpen)
+      upgrade<-kitUpgradeAllowed s (get (get work "codeExecution") "upgradePin")
+      pure (upgrade && gate==ExecutionOpen)
 requireOccurrence :: Service -> Value -> IO ()
 requireOccurrence s origin = occurrenceAllowed s origin >>= \ok -> require ok 409 "Routine run was stopped or deleted; start a new run explicitly"
 
@@ -255,7 +257,8 @@ pinnedMaintenanceAllowed s pinField identityValue = do
      operations <- routineOperations s
      works <- values s Workloads
      repairClear<-if has work "repairPin" then repairPinAllowed s (get work "repairPin") else pure True
-     pure (repairClear && gate==ExecutionOpen && not (boolean (get definition "deleted")) && generation==analysisGeneration pin
+     upgrade<-kitUpgradeAllowed s (get (get work "preparation") "expectedBinding")
+     pure (upgrade && repairClear && gate==ExecutionOpen && not (boolean (get definition "deleted")) && generation==analysisGeneration pin
        && analysisFeedbackIds operations definition works (analysisSources pin)==analysisFeedback pin)
 
 -- Repair identity and allowance belong to the retained consumer, not a new Run.
@@ -268,10 +271,31 @@ repairAllowed s identity = do
    work<-decodeStored (at row "value")
    clear<-repairPinAllowed s (get work "repairPin")
    pure (clear && at work "executionGate"=="open")
+kitUpgradeAllowed :: Service -> Value -> IO Bool
+kitUpgradeAllowed s pin
+ | not (has pin "case")=pure True
+ | otherwise=do
+  definitions<-values s ScheduledRoutines
+  pure (any (\definition->not (boolean (get definition "deleted")) && get definition "repairCase"==get pin "case" && get definition "contractGeneration"==get pin "contractGeneration" && (not (has pin "revision") || get definition "revision"==get pin "revision") && any (\saved->get saved "id"==get pin "case" && not (has saved "userStop") && at saved "status" `notElem` ["stopped","stale"]) (items definition "repairCases")) definitions)
+
+kitInspectionAllowed :: Service -> Value -> IO Bool
+kitInspectionAllowed s identity=do
+ rows<-queryRows s "SELECT value FROM workloads WHERE id=?" ["value"] [SQLText (text identity)]
+ case rows of
+  []->pure False
+  row:_->do
+   work<-decodeStored (at row "value")
+   let pin=get work "repairPin"; request=get work "kitInspection"
+   definitions<-values s ScheduledRoutines
+   pure $ case find (\definition->get definition "id"==get pin "routine" && get definition "owner"==get pin "owner") definitions of
+    Nothing->False
+    Just definition->not (boolean (get definition "deleted")) && get definition "contractGeneration"==get pin "contractGeneration" && at work "executionGate"=="open"
+     && any (\saved->get saved "id"==get pin "case" && not (has saved "userStop") && any (\inspection->get inspection "id"==get request "id" && (at saved "status"=="inspecting_kit" && at inspection "status" `elem` ["queued","running"] || at inspection "status"=="completed" && all ((==str "Completed") . (`get` "state")) (items work "calls"))) (items saved "kitInspections")) (items definition "repairCases")
+
 repairPinAllowed :: Service -> Value -> IO Bool
 repairPinAllowed s pin = do
  definitions<-values s ScheduledRoutines
  pure $ case find (\definition->get definition "id"==get pin "routine" && get definition "owner"==get pin "owner") definitions of
   Nothing->False
   Just definition->not (boolean (get definition "deleted")) && get definition "contractGeneration"==get pin "contractGeneration"
-   && any (\saved->get saved "id"==get pin "case" && at saved "status" `elem` ["waiting_doctor","waiting_access","diagnosing","diagnosed","repairing","awaiting_verification","verifying","auditing_saved_result"]) (items definition "repairCases")
+   && any (\saved->get saved "id"==get pin "case" && at saved "status" `elem` ["waiting_doctor","waiting_access","diagnosing","diagnosed","repairing","awaiting_verification","verifying","auditing_saved_result","waiting_kit_inspection","inspecting_kit"]) (items definition "repairCases")

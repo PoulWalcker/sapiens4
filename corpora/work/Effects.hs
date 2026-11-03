@@ -165,6 +165,7 @@ routineRisk startup work
   Success DoctorScopedResponseOnly->not (has work "preparation" || has work "codeExecution")
   Success RepairPreparationResponseOnly->has work "preparation" && not (has work "codeExecution")
   Success SavedAuditResponseOnly->has work "savedAudit" && not (has work "preparation")
+  Success KitInspectionResponseOnly->has work "kitInspection" && not (has work "preparation" || has work "codeExecution")
   Error _->False
  noAnomalies=not (any (positiveAnomaly . (`get` "evidence")) (concatMap nested (items work "decisions"++items (get work "preparation") "operations"++items (get work "codeExecution") "operations")))
  nested entry=entry:items entry "attempts"++concatMap nested [get entry "correction" | get entry "correction"/=Null]

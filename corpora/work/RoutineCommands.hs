@@ -270,9 +270,14 @@ snapshot s = do
   kit<-Kit.catalog (definitionOwner d) (mergeFields (pairs (selectPresent ["contentInterface","rubric"] preparation)) (toJSON d)) (map toJSON works)
   let active_=get (toJSON d) "activeCode"
       activeVersion=maybe Null (\work->get (D.workField work "preparation") "version") (find ((==at (get active_ "reference") "preparation") . D.workloadId) works)
+      issue=fromMaybe Null (Kit.issueFor (definitionOwner d) activeVersion (map toJSON works))
+      held=activeVersion/=Null && issue/=Null && not (Kit.executionAllowed (toJSON d) activeVersion (map toJSON works))
       active=if active_==Null then Null else put "kitArtifact" (get activeVersion "kitArtifact") active_
-      visibleActive=if has active "reference" && get active "contractGeneration"/=get (toJSON d) "contractGeneration" then put "status" (str "stale") active else active
-  pure (merge (toJSON d) (obj [("kit",kit),("repair",Automation.repairProjection d works),("activeCode",visibleActive),("preparation",preparation),("analysis",analysis),("trigger",str (maybe "manual" (const "interval") (definitionSchedule d))),("title",str (R.definitionTitle d)),("goal",str (R.definitionGoal d)),("criteria",maybe Null toJSON (R.definitionCriteria d)),("revision",toJSON (definitionRevision d)),("deleted",Bool (definitionDeleted d)),("runs",arr history)]))
+      visibleActive=if has active "reference" && get active "contractGeneration"/=get (toJSON d) "contractGeneration" then put "status" (str "stale") active else if held && at active "status"=="active" then mergeFields [("status",str "kit_pending"),("reason",str "Shared suspect bytes await this consumer's own applicability evidence; ordinary LLM execution is used meanwhile")] active else active
+      inspections=[mergeFields ([("case",get saved "id") ]++[("status",str "stopped") | has saved "userStop" && at inspection "status" `elem` ["queued","running"]]) inspection | saved<-items (toJSON d) "repairCases",inspection<-items saved "kitInspections"]
+      offers=concatMap (`items` "kitOffers") (items (toJSON d) "repairCases")
+      kitConsumer=obj [("reference",get active "reference"),("held",Bool held),("issue",issue),("inspections",arr inspections),("offers",arr offers)]
+  pure (merge (toJSON d) (obj [("kitConsumer",kitConsumer),("kit",kit),("repair",Automation.repairProjection d works),("activeCode",visibleActive),("preparation",preparation),("analysis",analysis),("trigger",str (maybe "manual" (const "interval") (definitionSchedule d))),("title",str (R.definitionTitle d)),("goal",str (R.definitionGoal d)),("criteria",maybe Null toJSON (R.definitionCriteria d)),("revision",toJSON (definitionRevision d)),("deleted",Bool (definitionDeleted d)),("runs",arr history)]))
  pure (obj [("definitions",arr rendered),("errors",arr [remove ["request"] op|op<-reverse operations,int (get op "code")>=400])])
 
 detail :: Service -> Text -> Text -> Text -> IO Value
