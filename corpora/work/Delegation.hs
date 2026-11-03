@@ -27,6 +27,7 @@ import System.Directory
 import System.FilePath
 import Types
 import qualified Store as DB
+import qualified Kit
 import qualified Effects
 import qualified ManagedState as Managed
 import Population
@@ -143,12 +144,7 @@ selectRoutineCodeOn db owner work snapshot (Just accepted) = do
 
 -- Both preparation checks and business execution resolve the exact persisted bytes.
 resolveCandidateBytes :: AgentId -> Workload -> CandidateReference -> IO Value
-resolveCandidateBytes owner source reference@(CandidateReference refOwner preparation digest) = do
- let version=get (workField source "preparation") "version"
- require (refOwner==owner && workloadId source==runIdText preparation && get (workField source "preparationPin") "owner"==toJSON owner) 409 "Candidate reference belongs to another preparation or owner"
- require (get version "reference"==toJSON reference && canonicalHash (remove ["reference"] version)==digest && sourceHash (at version "source")==at version "sourceHash") 409 "Pinned candidate content or reference changed"
- void (either (failure 409 . T.pack) pure (parseEither candidateExplanation version))
- pure version
+resolveCandidateBytes owner source reference = Kit.resolvePreparation owner (toJSON source) reference
 
 resolveCandidateFrom :: [Workload] -> AgentId -> Value -> TaskSpec -> CandidateReference -> IO Value
 resolveCandidateFrom works owner snapshot accepted reference@(CandidateReference _ preparation _) = do

@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module GeneratedCode (Profile, profileJSON, available, reservation, businessReservation, runFixture, reconcile) where
+module GeneratedCode (Profile, profileJSON, acceptsProfile, available, reservation, businessReservation, runFixture, reconcile) where
 
 import Control.Concurrent
 import Control.Concurrent.Async hiding (wait)
@@ -35,6 +35,12 @@ image :: Text
 image = "python@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a"
 profileJSON :: Profile -> Value
 profileJSON (Profile _ _ config) = obj [("profile",str "python-3.13.15-linux-arm64"),("image",str image),("imageConfig",str config),("platform",str "linux/arm64"),("hostTarget",str "macos/arm64"),("languageVersion",str "3.13.15"),("engineVersion",str "29.4.0"),("dependencies",arr []),("capabilities",arr []),("limits",obj [("memoryBytes",num 134217728),("swapBytes",num 0),("pids",num 16),("cpus",num 1),("cpuSeconds",num 3),("wallMs",num 5000),("sourceBytes",num 65536),("inputBytes",num 65536),("outputBytes",num 65536),("tmpfsBytes",num 16777216),("shmBytes",num 1048576)])]
+-- Structural metadata only; available still verifies the actual daemon/image.
+acceptsProfile :: Value -> Bool
+acceptsProfile value=Platform.os=="darwin" && Platform.arch=="aarch64"
+ && remove ["imageConfig"] value==remove ["imageConfig"] (profileJSON (Profile "" "" ""))
+ && "sha256:" `T.isPrefixOf` at value "imageConfig" && T.length (at value "imageConfig")==71
+
 reservation :: Profile -> Text -> Text -> Text -> Value
 reservation (Profile _ socket config) owner preparation nonce = obj [("name",str ("sapiens-"<>nonce)),("nonce",str nonce),("owner",str owner),("preparation",str preparation),("socket",str socket),("imageConfig",str config),("status",str "reserved")]
 businessReservation :: Profile -> Text -> Text -> Text -> Value

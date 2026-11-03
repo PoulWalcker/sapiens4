@@ -417,7 +417,7 @@ validateCodeResult version actual = do
 
 explainCalculation :: Service -> Run -> Value -> D.TaskSpec -> Value -> Value -> Maybe Explanation -> IO (Maybe Text)
 explainCalculation s running version spec input actual explanation = forM explanation $ \selected->do
- let context=obj [("instruction",str (explanationInstruction selected)),("acceptedInput",input),("facts",get actual "value"),("result",actual),("criteria",D.criterionContext spec),("reference",get version "reference"),("structureHash",get version "structureHash"),("implementationHash",get (get version "explanation") "implementationHash")]
+ let context=mergeFields [("contract",toJSON spec) | has version "kitArtifact"] (obj [("instruction",str (explanationInstruction selected)),("acceptedInput",input),("facts",get actual "value"),("result",actual),("criteria",D.criterionContext spec),("reference",get version "reference"),("structureHash",get version "structureHash"),("implementationHash",get (get version "explanation") "implementationHash")])
  (identity,produced)<-invokeCodeModel s running "HybridExplanation" "hybrid_explanation" "hybrid-explanation" context (Just selected)
  let parsed=parseEither narrativeText produced
  codeUpdate s running (\code->put "operations" (arr [if at op "id"==identity then put "status" (str (either (const "failed") (const "completed") parsed)) op else op | op<-items code "operations"]) code)

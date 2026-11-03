@@ -27,6 +27,7 @@ import qualified Delegation as D
 import qualified Routines as R
 import qualified Provider
 import qualified GeneratedCode as Code
+import qualified Kit
 import qualified Effects
 
 -- Stages have different admission/evidence requirements; a successful process
@@ -81,7 +82,7 @@ requestOn db definition analysis identity time = do
  contract<-D.executionContract original (NE.head (D.workCalls original)) >>= maybe (failure 409 "Preparation requires an accepted pinned source task") pure
  sourceInput<-if get (toJSON definition) "externalProfile"==Null then pure Null else Effects.preparationInput (toJSON definition) (toJSON original)
  let origin=obj [("preparation",toJSON identity)]
-     preparation=obj [("feedProfile",get (toJSON definition) "externalProfile"),("sourceInput",sourceInput),("status",str "queued"),("analysis",toJSON analysis),("contract",toJSON contract),("sourceEvidence",D.workField source "analysisEvidence"),("parameters",get (D.workField source "analysisDecision") "parameters"),("operations",arr []),("checks",arr [])]
+     preparation=obj [("kitEnabled",Bool True),("feedProfile",get (toJSON definition) "externalProfile"),("sourceInput",sourceInput),("status",str "queued"),("analysis",toJSON analysis),("contract",toJSON contract),("sourceEvidence",D.workField source "analysisEvidence"),("parameters",get (D.workField source "analysisDecision") "parameters"),("operations",arr []),("checks",arr [])]
      call=D.newCall identity (analysisOwner pin) Nothing D.Preparation D.CallQueued (R.definitionGoal definition)
      work=D.Workload (runIdText identity) False (call :| []) (KM.fromList [("origin",origin),("created",str time),("originalIntent",str (R.definitionGoal definition)),("executionGate",toJSON ExecutionOpen),("preparationPin",toJSON pin),("preparation",preparation)])
      turn=newTurn identity Chat (R.definitionGoal definition) time origin False
@@ -132,7 +133,7 @@ askConfigured s running node purpose context explanation = do
  checkGate s running
  (template,envelope)<-case explanation of
   Just selected->Provider.explanationTemplates s selected
-  Nothing->(,) <$> prompt s (case node of "PreparationFixtures"->"preparation-fixtures"; "PreparationGeneration"->"preparation-generation"; "PreparationRubricReview"->"hybrid-rubric-review"; _->"preparation-review") <*> prompt s "preparation-envelope"
+  Nothing->(,) <$> prompt s (case node of "PreparationFixtures"->"preparation-fixtures"; "PreparationGeneration"->if has context "availableKit" then "preparation-generation-kit" else "preparation-generation"; "PreparationRubricReview"->"hybrid-rubric-review"; _->"preparation-review") <*> prompt s "preparation-envelope"
  let rendered=render envelope [("node",node),("instruction",template),("context",jsonText (put "selfId" (toJSON (runOwner running)) context))]
  owning<-load s (runIdText (runId running))
  let recordedPurpose=if has (toJSON owning) "repairPin" then "repair_"<>purpose else purpose
@@ -150,7 +151,10 @@ askConfigured s running node purpose context explanation = do
   require (case result of Object _->True; _->False) 422 "Preparation model response must be a JSON object"
   case node of
    "PreparationFixtures"->void (field 422 result "fixtures" :: IO [Fixture])
-   "PreparationGeneration"->void (decodeValue 422 result :: IO Candidate)
+   "PreparationGeneration"->if has result "reuse" && has context "availableKit" then do
+    void (parseValue 422 (onlyFields ["reuse"]) result)
+    void (decodeValue 422 (get result "reuse") :: IO CandidateReference)
+    else void (decodeValue 422 result :: IO Candidate)
    "PreparationReview"->do
     void (field 422 result "accepted" :: IO Bool)
     void (parseValue 422 (textFieldP "reason" 8000) result)
@@ -226,7 +230,21 @@ prepare s running = do
  update s identity (mergeFields [("fixtures",arr fixtures),("sourceCases",toJSON rawFixtures),("contentInterface",maybe Null toJSON feedMode),("rubric",get oracle "rubric")])
  profile<-environment s running
  phase s running Generation
- candidate<-if has saved "version" then pure (mergeFields [("profile",get (get (get saved "version") "runtime") "profile"),("explanation",select ["instruction"] (get (get saved "version") "explanation"))] (select ["source","language","interface","dependencies","capabilities"] (get saved "version"))) else ask s running "PreparationGeneration" "candidate_generation" (mergeFields [("availableProfiles",arr [Code.profileJSON profile]),("interface",str "json-stdin-result-v1"),("contentInterface",maybe Null toJSON feedMode)] (select ["contract","sourceEvidence","parameters","feedProfile","sourceInput","repairContext"] saved))
+ let target=mergeFields [("contentInterface",maybe Null toJSON feedMode),("rubric",get oracle "rubric")] saved
+ catalog_<-if not (boolean (get saved "kitEnabled")) then pure Null else if has saved "kitCatalog" then pure (get saved "kitCatalog") else do
+  works<-map toJSON <$> D.readWorks s
+  selected<-Kit.catalog (agentIdText (runOwner running)) target works
+  update s identity (put "kitCatalog" selected)
+  pure selected
+ produced<-if has saved "version" then pure (mergeFields [("profile",get (get (get saved "version") "runtime") "profile"),("explanation",select ["instruction"] (get (get saved "version") "explanation"))] (select ["source","language","interface","dependencies","capabilities"] (get saved "version"))) else ask s running "PreparationGeneration" "candidate_generation" (mergeFields ([("availableProfiles",arr [Code.profileJSON profile]),("interface",str "json-stdin-result-v1"),("contentInterface",maybe Null toJSON feedMode)]++[("availableKit",catalog_) | catalog_/=Null]) (select ["contract","sourceEvidence","parameters","feedProfile","sourceInput","repairContext"] saved))
+ (candidate,kitFields)<-if has saved "version" then pure (produced,pairs (selectPresent ["kitArtifact"] (get saved "version"))) else if not (has produced "reuse") then pure (produced,[]) else do
+  checkGate s running
+  require (any (\entry->get entry "reference"==get produced "reuse" && get entry "compatible"==Bool True) (items catalog_ "entries")) 409 "Selected Kit artifact is not an applicable entry in this preparation's catalog"
+  works<-map toJSON <$> D.readWorks s
+  (reused,artifact)<-Kit.resolve (agentIdText (runOwner running)) target (Code.profileJSON profile) works (get produced "reuse")
+  instruction<-if has reused "explanation" then Just <$> prompt s "kit-explanation" else pure Nothing
+  let candidate=mergeFields ([("profile",get (get reused "runtime") "profile")]++[("explanation",obj [("instruction",str text_)]) | text_<-maybeToList instruction]) (select ["source","language","interface","dependencies","capabilities"] reused)
+  pure (candidate,[("kitArtifact",artifact)])
  let selectedCandidate=if get (get saved "version") "explanation"==Null && has saved "version" then remove ["explanation"] candidate else candidate
  Candidate source<-decodeValue 422 selectedCandidate
  forM_ feedMode $ \content->require ((content==HybridText)==has selectedCandidate "explanation") 422 "Generated implementation differs from the frozen feed content interface"
@@ -243,11 +261,20 @@ prepare s running = do
    profile<-decodeValue 422 (get saved "feedProfile")
    revision<-field 422 (get saved "sourceInput") "externalProfileRevision"
    pure [("inputBinding",toJSON (feedDescriptor profile revision content))]
- let content=mergeFields (feedFields++hybridFields++ [("runtime",Code.profileJSON profile),("contract",get saved "contract"),("contractGeneration",get (D.workField work "preparationPin") "contractGeneration"),("sourceHash",str (sourceHash source))]) (select ["source","language","interface","dependencies","capabilities"] candidate)
+ let content=mergeFields (kitFields++feedFields++hybridFields++ [("runtime",Code.profileJSON profile),("contract",get saved "contract"),("contractGeneration",get (D.workField work "preparationPin") "contractGeneration"),("sourceHash",str (sourceHash source))]) (select ["source","language","interface","dependencies","capabilities"] candidate)
      reference=obj [("owner",toJSON (runOwner running)),("preparation",str identity),("digest",str (canonicalHash content))]
      version=put "reference" reference content
  when (has saved "version") (require (version==get saved "version") 409 "Retained candidate identity or stage inputs changed")
- update s identity (put "version" version)
+ if has produced "reuse" && not (has saved "version") then locked s $ do
+  checkGate s running
+  DB.connection s $ \db->SQL.withTransaction db $ do
+   works<-readOn db
+   current<-maybe (failure 409 "Target preparation disappeared before Kit attachment") pure (find ((==identity) . D.workloadId) works)
+   require (D.workField current "executionGate"==toJSON ExecutionOpen) 409 "Target preparation stopped before Kit attachment"
+   (_,fresh)<-Kit.resolve (agentIdText (runOwner running)) target (Code.profileJSON profile) (map toJSON works) (get produced "reuse")
+   require (fresh==get content "kitArtifact" && at fresh "id"==canonicalHash (Kit.descriptor version)) 409 "Selected Kit artifact changed before attachment"
+   DB.putValueOn db DB.Workloads identity (toJSON (D.setWorkField "preparation" (put "version" version (D.workField current "preparation")) current))
+  else update s identity (put "version" version)
  checkedProfile<-environment s running
  require (Code.profileJSON checkedProfile==get content "runtime") 409 "Candidate runtime identity changed before verification"
  phase s running Checks
@@ -282,7 +309,7 @@ prepare s running = do
     pure (actual,receipt)
   explanation<-either (failure 422 . T.pack) pure (parseEither candidateExplanation stored)
   forM_ explanation $ \selected->when (at actual "status"=="ok") $ do
-   let context=obj [("instruction",str (explanationInstruction selected)),("acceptedInput",get fixture "input"),("facts",get actual "value"),("criteria",D.criterionContext spec),("reference",reference),("implementationHash",get (get stored "explanation") "implementationHash")]
+   let context=mergeFields [("contract",toJSON spec) | has stored "kitArtifact"] (obj [("instruction",str (explanationInstruction selected)),("acceptedInput",get fixture "input"),("facts",get actual "value"),("criteria",D.criterionContext spec),("reference",reference),("implementationHash",get (get stored "explanation") "implementationHash")])
    (explainId,narrative)<-askConfigured s running "PreparationExplanation" "fixture_explanation" context (Just selected)
    let parsedNarrative=parseEither narrativeText narrative
    update s identity (\p->put "operations" (arr [if at op "id"==explainId then mergeFields [("status",str (either (const "failed") (const "completed") parsedNarrative))] op else op | op<-items p "operations"]) p)
@@ -342,7 +369,7 @@ detail s owner routine identity = do
 projection :: Service -> R.Definition -> [D.Workload] -> IO Value
 projection s definition works = maybe (pure Null) (fmap project . renderDetail s) (listToMaybe (reverse (filter (consumer definition) works)))
  where
- project detail_ = mergeFields [("reference",get (get detail_ "version") "reference"),("applicable",Bool (get detail_ "contractGeneration"==toJSON (R.contractGeneration definition)))] (select ["id","status","analysis","owner","routine","contractGeneration","error","trial","providerWait","maintenanceBudget"] detail_)
+ project detail_ = mergeFields [("kitArtifact",get (get detail_ "version") "kitArtifact"),("reference",get (get detail_ "version") "reference"),("applicable",Bool (get detail_ "contractGeneration"==toJSON (R.contractGeneration definition)))] (select ["id","status","analysis","owner","routine","contractGeneration","error","trial","providerWait","maintenanceBudget","contentInterface","rubric"] detail_)
 renderDetail :: Service -> D.Workload -> IO Value
 renderDetail s work = do
  allowed<-DB.occurrenceAllowed s (D.workField work "origin")

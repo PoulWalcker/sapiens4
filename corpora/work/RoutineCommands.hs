@@ -20,6 +20,7 @@ import Routines (Revision(..), Minutes, RoutineFields(..), RoutineContract(..), 
 import qualified Routines as R
 import qualified Delegation as D
 import qualified Effects
+import qualified Kit
 import qualified Composer
 import qualified Automation
 
@@ -266,9 +267,12 @@ snapshot s = do
   history <- traverse (renderRun RunSummary operations (definitionRevision d)) [w|w<-works,at (D.workField w "origin") "routine"==definitionId d]
   preparation <- Composer.projection s d works
   analysis <- Automation.projection s d works
-  let active=get (toJSON d) "activeCode"
+  kit<-Kit.catalog (definitionOwner d) (mergeFields (pairs (selectPresent ["contentInterface","rubric"] preparation)) (toJSON d)) (map toJSON works)
+  let active_=get (toJSON d) "activeCode"
+      activeVersion=maybe Null (\work->get (D.workField work "preparation") "version") (find ((==at (get active_ "reference") "preparation") . D.workloadId) works)
+      active=if active_==Null then Null else put "kitArtifact" (get activeVersion "kitArtifact") active_
       visibleActive=if has active "reference" && get active "contractGeneration"/=get (toJSON d) "contractGeneration" then put "status" (str "stale") active else active
-  pure (merge (toJSON d) (obj [("repair",Automation.repairProjection d works),("activeCode",visibleActive),("preparation",preparation),("analysis",analysis),("trigger",str (maybe "manual" (const "interval") (definitionSchedule d))),("title",str (R.definitionTitle d)),("goal",str (R.definitionGoal d)),("criteria",maybe Null toJSON (R.definitionCriteria d)),("revision",toJSON (definitionRevision d)),("deleted",Bool (definitionDeleted d)),("runs",arr history)]))
+  pure (merge (toJSON d) (obj [("kit",kit),("repair",Automation.repairProjection d works),("activeCode",visibleActive),("preparation",preparation),("analysis",analysis),("trigger",str (maybe "manual" (const "interval") (definitionSchedule d))),("title",str (R.definitionTitle d)),("goal",str (R.definitionGoal d)),("criteria",maybe Null toJSON (R.definitionCriteria d)),("revision",toJSON (definitionRevision d)),("deleted",Bool (definitionDeleted d)),("runs",arr history)]))
  pure (obj [("definitions",arr rendered),("errors",arr [remove ["request"] op|op<-reverse operations,int (get op "code")>=400])])
 
 detail :: Service -> Text -> Text -> Text -> IO Value

@@ -112,7 +112,8 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     ,V.node "nav" [V.cls "routine-tabs",V.label "Routine views"] [V.control [V.cls $ "routine-link" <> if not history then " selected" else "",V.attr "aria-current" $ if not history then "page" else "false"] "Latest result" (RoutineNavigate $ M.RoutineLatest id),V.control [V.cls $ "routine-link" <> if history then " selected" else "",V.attr "aria-current" $ if history then "page" else "false"] "History" (RoutineNavigate $ M.RoutineHistory id)]
     ,V.when (managed routine) $ repairPanel routine
     ,V.when (managed routine) $ analysisPanel routine
-    ,V.when (managed routine) $ codePanel routine]
+    ,V.when (managed routine) $ codePanel routine
+    ,V.when (managed routine) $ kitPanel routine]
     where r = record routine
           id = D.s "id" r
   analysisPanel routine = V.div "routine-notice" $
@@ -149,6 +150,9 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
       "suspect" -> "Script suspended"
       "stale" -> "Script needs reconsideration"
       _ -> if D.s "id" prepared /= "" && not (D.b "applicable" prepared) then "Prepared version needs reconsideration" else if D.s "run" trial /= "" then if A.elem (D.s "status" trialRun) ["queued", "running", "waiting", "blocked"] then "Trial claimed" else "Trial finished without activation" else if D.s "status" prepared == "awaiting_occurrence" then "Prepared · awaiting an authorized run" else "Preparation: " <> D.s "status" prepared
+    ,kitSource $ D.get "kitArtifact" active
+    ,kitSource $ D.get "kitArtifact" prepared
+    ,V.when (D.s "error" prepared /= "") $ V.p "routine-problem" $ D.s "error" prepared
     ,providerWaitPanel $ D.get "providerWait" prepared
     ,V.when (D.s "status" active == "stale" || D.s "id" prepared /= "" && not (D.b "applicable" prepared)) $ V.p "routine-muted" "This historical version no longer applies to the current task or source profile. Its history is retained."
     ,V.when (D.s "digest" (D.get "reference" prepared) /= "") $ V.p "routine-muted" $ "Prepared version · " <> CU.take 8 (D.s "digest" (D.get "reference" prepared))
@@ -162,6 +166,17 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     reference = D.get "reference" active
     trial = D.get "trial" prepared
     trialRun = fromMaybe D.empty $ A.find (\run -> D.s "id" run == D.s "run" trial) (D.rows "runs" r)
+  kitSource artifact = V.when (D.s "id" artifact /= "") $ V.p "routine-muted" $ "Kit source · " <> CU.take 12 (D.s "id" artifact) <> " · owner " <> D.s "owner" artifact <> " · personal scope · preparation " <> D.s "preparation" (D.at ["provenance","preparation"] artifact)
+  kitPanel routine = V.node "details" []
+    ([V.node "summary" [] [V.text "Kit · personal scripts"]
+     ,V.p "routine-muted" "This Sapi's personal scope only. Preparation may select compatible code automatically; this Routine still needs its own checks and authorized activation audit."] <>
+     map (\entry -> V.div "routine-notice"
+       [V.p "" $ "Artifact " <> CU.take 12 (D.s "id" entry) <> " · " <> D.s "language" entry
+       ,V.p "routine-muted" $ D.s "objective" (D.at ["provenance","contract"] entry)
+       ,V.p "routine-muted" $ "Required runtime: " <> D.s "profile" (D.get "runtime" entry) <> " · scope: " <> D.s "scope" entry
+       ,V.p (if D.b "compatible" entry then "routine-muted" else "routine-problem") $ D.s "reason" entry]) (D.rows "entries" catalog) <>
+     [V.when (D.int (D.get "omittedEntries" catalog) > 0) $ V.p "routine-muted" $ "Additional catalog entries omitted from the bounded summary: " <> show (D.int $ D.get "omittedEntries" catalog)])
+    where catalog = D.get "kit" $ record routine
   providerWaitPanel waiting = V.when (D.s "id" waiting /= "") $ V.div "routine-notice"
     [V.p "" $ "Provider: " <> D.s "status" waiting <> " · host attempts " <> show (D.int $ D.get "attemptCount" waiting) <> "/3"
     ,V.p "routine-muted" $ D.s "reason" waiting
