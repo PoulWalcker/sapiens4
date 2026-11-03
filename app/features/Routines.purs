@@ -234,6 +234,7 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
       [V.p "" $ if D.s "status" (D.get "fallbackSummary" run) == "completed" then "Completed through fallback" else "Fallback · " <> D.s "status" (D.get "fallbackSummary" run)
       ,V.when (D.b "faultyImplementation" $ D.get "fallbackSummary" run) $ V.p "routine-muted" "Automation needs repair; successful fallback does not repair its implementation."]
     ,externalPanel routine run
+    ,parallelPanel run
     ,stagePanel run
     ,V.when (managed routine) $ evidencePanel routine run
     ,V.when (managed routine && not (active run)) $ V.button "routine-link" "Reject result…" $ OpenDialog M.RoutineReject $ D.put "revision" (D.at ["snapshot","revision"] run) $ D.put "run" (D.get "id" run) (record routine)
@@ -262,6 +263,14 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     external = D.get "externalSummary" run
     delivery = D.get "delivery" external
     deliveryStatus = D.s "status" delivery
+  parallelPanel run = V.when (D.valid parallel) $ V.div "routine-notice" $
+    [V.textNode "h3" [] "Parallel steps"
+    ,V.p "routine-muted" $ "Active time (union): " <> show (D.int $ D.get "activeMilliseconds" parallel) <> " ms · " <> D.s "resourceStatus" parallel
+    ,V.p "routine-muted" "Provider usage is summed separately; overlapping child time is counted once."
+    ,V.when (D.s "reason" parallel /= "") $ V.p "routine-problem" $ D.s "reason" parallel] <>
+    map (\join -> V.p "" $ "Join " <> D.s "id" join <> " · " <> D.s "status" join) (D.rows "joins" parallel) <>
+    map (\child -> V.p "" $ "Child " <> D.s "entry" child <> " · " <> D.s "status" child <> " · " <> D.s "reason" child) (D.rows "children" parallel)
+    where parallel = D.get "workflowParallel" run
   stagePanel run = V.when (not (A.null stages)) $ V.div "routine-notice" $
     [V.textNode "h3" [] "Execution steps"] <> map (\stage -> V.div "routine-stage"
       [V.p "" $ (if D.s "kind" stage /= "" then D.s "id" stage else if D.s "id" stage == "calculate" then "Calculation" else "Explanation") <> " · " <> stageStatus (D.s "status" stage)

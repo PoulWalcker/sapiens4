@@ -195,6 +195,11 @@ sameSemanticContract :: TaskSpec -> TaskSpec -> Bool
 sameSemanticContract left right = specObjective left==specObjective right && specOutputs left==specOutputs right && specCriteria left==specCriteria right
 
 resolveCandidate :: Service -> Workload -> WorkCall -> IO (Value,CodeRole)
+resolveCandidate s work call | has (toJSON call) "workflowChild" = do
+ require (inheritedWorkflowCall work call) 409 "Workflow child does not belong to the canonical root cohort"
+ (version,role)<-resolveCandidate s work (NE.head (workCalls work))
+ require (version==get (callField call "workflowChild") "version") 409 "Workflow child version differs from its root binding"
+ pure (version,role)
 resolveCandidate s work call = do
  binding<-decodeValue 409 (callField call "executionBinding")
  case binding of
@@ -239,7 +244,7 @@ codeVerification :: Value -> Value
 codeVerification code=fromMaybe Null (find (\op->get op "id"==get (get code "verification") "id") (items code "operations"))
 
 generatedCleanupPending :: Workload -> Bool
-generatedCleanupPending work=any (\key->at (workField work key) "status"=="cleanup_pending") ["preparation","codeExecution"]
+generatedCleanupPending work=any ((`elem` ["cleanup_pending","uncertain"]) . (`at` "status") . snd) (pairs (workField work "workflowContainers")) || any (\key->at (workField work key) "status"=="cleanup_pending") ["preparation","codeExecution"]
 
 routineSpecPinned :: Workload -> Bool
 routineSpecPinned work = has (workField work "routineSnapshot") "criteria"
@@ -255,7 +260,28 @@ instance ToJSON TaskSpec where
  toJSON spec = obj [("objective",str (specObjective spec)),("inputs",toJSON (specInputs spec)),("expectedOutputs",toJSON (NE.toList (specOutputs spec))),("completionCriteria",toJSON (NE.toList (specCriteria spec)))]
 -- Resolve only local durable sources. Mutable future Routine definitions are not
 -- execution contracts, and old installations are not assigned invented versions.
+inheritedWorkflowCall :: Workload -> WorkCall -> Bool
+inheritedWorkflowCall work call=walk [] call
+ where
+ root=NE.head (workCalls work)
+ reference=get (workField work "codeExecution") "reference" `fallback` get (get (workField work "preparation") "version") "reference"
+ walk seen current
+  | callIdentity current `elem` seen=False
+  | otherwise=
+   let context=callField current "workflowChild"
+       cohort=get (workField work "workflowCohorts") (at context "cohort")
+       parent=find ((==callParent current) . Just . callIdentity) (workCalls work)
+   in callIdentity current/=callIdentity root && callOwner current==callOwner root
+    && callField current "executionBinding"==callField root "executionBinding"
+    && at context "root"==workloadId work && get context "parent"==toJSON (callParent current)
+    && get cohort "parent"==get context "parent" && toJSON (callIdentity current) `elem` items cohort "children"
+    && get (get context "version") "reference"==reference
+    && maybe False (\value->callOwner value==callOwner root && (callIdentity value==callIdentity root || walk (callIdentity current:seen) value)) parent
+
 executionContract :: Workload -> WorkCall -> IO (Maybe TaskSpec)
+executionContract work call | has (toJSON call) "workflowChild" = do
+ require (inheritedWorkflowCall work call) 409 "Workflow child has no canonical inherited contract"
+ executionContract work (NE.head (workCalls work))
 executionContract work call = do
  let marker=workField work "bindingSchema"
      acceptedDecisionForCall entry = get entry "callId"==toJSON (callIdentity call) && boolean (get entry "accepted") && at (get entry "response") "event"=="TaskPrepared"

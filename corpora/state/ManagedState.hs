@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveDataTypeable #-}
-module ManagedState (Conflict(..), load, enroll, enrollOn, save, acknowledge, restore, commands) where
+module ManagedState (Conflict(..), load, enroll, enrollOn, transitionOn, save, acknowledge, restore, commands) where
 
 import Control.Exception
 import Control.Monad
@@ -84,6 +84,16 @@ enrollOn db owner turn message input attachments = do
  execute db "INSERT INTO managed_turns(id,agent,value,projection,pending) VALUES (?,?,?,NULL,1)" (runIdText (turnId turn),owner,encodeText (put "managed" metadata value))
 
 -- Canonical facts, command consumption and the projection intent commit together.
+-- Internal queue transitions share the transaction that creates a child cohort.
+transitionOn :: Connection -> Text -> (Value -> Value) -> IO ()
+transitionOn db identity change = do
+ rows<-query db "SELECT value FROM managed_turns WHERE id=?" (Only identity) :: IO [Only Text]
+ check (length rows==1) "Workflow queue transition needs its canonical managed parent"
+ forM_ rows $ \(Only raw)->do
+  old<-either (throwIO . userError) pure (eitherDecodeStrict (TE.encodeUtf8 raw))
+  let value=put "managed" (put "revision" (Number (fromIntegral (int (get (get old "managed") "revision")+1))) (get old "managed")) (change old)
+  execute db "UPDATE managed_turns SET value=?,pending=1 WHERE id=?" (encodeText value,identity)
+
 -- File I/O happens after this transaction; an interrupted projection is replayable.
 save :: Connection -> Text -> AgentState -> Maybe (Text,Value) -> IO AgentState
 save db owner state command = withTransaction db $ do

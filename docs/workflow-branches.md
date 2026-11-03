@@ -3,7 +3,8 @@
 Ordinary agent work keeps its existing loop. When preparation chooses a workflow, it
 produces a finite immutable structure containing isolated Python calculations,
 response-only model steps, strict Boolean branches and result steps. Tool-capable
-model steps, external effects, parallel work, deferred work and cycles are unavailable.
+model steps, external effects, deferred work and cycles are unavailable. Finite same-owner
+fork/join may run independent prepared regions in parallel.
 
 A condition is retained data, not a prose edge evaluated implicitly. A calculation or
 explicit model step produces {value:boolean,reason:text}; a branch selects its existing
@@ -27,3 +28,28 @@ admission. Restart reuses completed matching receipts; an admitted node without 
 result stays held and is never automatically replayed. The original workflow deadline
 is retained across restart. A completed workflow is not recalculated merely to assess
 or display its retained result.
+
+A fork declares its complete ordered child set and matching join before execution. Child
+regions are disjoint, finite and must reach that join; nested forks are supported. Join
+reads only outputs guaranteed by each required child. Failed, stopped or unknown children
+block the join rather than becoming missing values or partial success.
+
+Children use existing managed Calls, Pulse admission, owner capacity and process cleanup.
+A waiting parent is durably queued and releases its execution slot and lease; it reacquires
+capacity before continuing. It remains addressable by Stop. Each child has its own process
+handle and exact inherited root contract, implementation and cohort membership; other-Sapi
+assignment is unavailable. Ordinary work by other owners competes for the same host capacity.
+
+A root repair/preparation reserves its existing resource once while its fork cohort is
+active. Children inherit that reservation rather than receiving fresh time. Recorded active
+time is the union of active parent/child intervals; overlapping children are counted once,
+and proven all-queued idle time does not consume active resource. Original business wall
+deadlines still apply. Provider usage is summed separately. A known provider backoff closes
+its measured segment and later uses the original remaining resource; it does not reset
+completed children or preparation checks.
+
+Stop revokes the canonical root gate and propagates to queued and live descendants.
+Reservation settlement waits for confirmed live-process exit. Completed child receipts
+remain visible. Restart can preserve a proven idle cohort with complete/never-admitted
+children; an open or uncertain activity keeps its reservation consumed and blocks free
+replay. The Routine history shows child states, waiting/blocked joins and union accounting.

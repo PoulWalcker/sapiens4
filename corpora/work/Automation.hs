@@ -3,10 +3,14 @@
 {-# LANGUAGE CPP #-}
 module Automation (dispatch, requestOn, stopOn, projection, detail, preflight, recordRepairFaultOn, withRepairBudget, runDiagnosis, dispatchRepairs, recoverRepairs, repairProjection, selectDoctorResources, configureDoctorAccessOn, recordAuditFailure, savedAuditSourceOn, providerDue, deferProvider, cancelProviderWait, grantRepairOn, stopRepairOn, runKitInspection) where
 
+import Control.Concurrent (readMVar)
+import qualified Data.Map.Strict as M
 import Control.Exception hiding (handle)
 import Control.Monad
 import Data.Aeson hiding (pairs)
 import Data.Aeson.Types (Parser)
+import qualified Workflow
+import qualified WorkflowCalls as WC
 import qualified Data.ByteString as BS
 import qualified Data.Text.Encoding as TE
 import System.Directory
@@ -390,29 +394,41 @@ withRepairBudget s running action = do
  found<-D.findWork s (runId running)
  case found of
   Nothing->action running
-  Just (work,_) | not (has (toJSON work) "repairPin")->if has (toJSON work) "preparation" then withPreparationBudget s running action else action running
+  Just (_,call) | WC.child call->(WC.cap s running >>= action) `finally` WC.activity s running False
+  Just (work,_) | not (has (toJSON work) "repairPin")->if has (toJSON work) "preparation" then withPreparationBudget s running action else if has (D.workField work "codeExecution") "workflowDefinition" then do
+   WC.openBudget s running 1800000
+   runBudgetAction s running (WC.cap s running >>= action) (WC.quiesce s running >> WC.finishBudget s running)
+   else action running
   Just (work,_)->mask $ \restore->do
    let pin=D.workField work "repairPin"; token=runIdText (runId running)
    started<-getMonotonicTimeNSec
    allowance<-locked s $ DB.connection s $ \db->SQL.withTransaction db $ do
     (definition,saved)<-loadRepairOn db pin
     require (not (repairTerminal saved) && get definition "contractGeneration"==get pin "contractGeneration" && not (boolean (get definition "deleted"))) 409 "Repair is stopped or its consumer changed"
-    require (not (any ((=="reserved") . (`at` "status")) (items saved "reservations"))) 409 "Another repair activity already owns the allowance"
-    let remaining=int (get saved "limitMilliseconds")-int (get saved "spentMilliseconds")
-    require (remaining>0) 409 "Repair active allowance is exhausted"
-    let reservation=obj [("operation",str token),("status",str "reserved"),("milliseconds",num remaining)]
-    void (DB.saveRoutineOn db (putRepair definition (appendItems "reservations" [reservation] (put "spentMilliseconds" (get saved "limitMilliseconds") saved))))
-    pure remaining
+    let own=find (\receipt->at receipt "operation"==token && at receipt "status"=="reserved") (items saved "reservations")
+    case own of
+     Just receipt | at (D.workField work "workflowBudget") "status"=="reserved"->pure (int (get receipt "milliseconds"))
+     _->do
+      require (not (any ((=="reserved") . (`at` "status")) (items saved "reservations"))) 409 "Another repair activity already owns the allowance"
+      let remaining=int (get saved "limitMilliseconds")-int (get saved "spentMilliseconds")
+      require (remaining>0) 409 "Repair active allowance is exhausted"
+      let reservation=obj [("operation",str token),("status",str "reserved"),("milliseconds",num remaining)]
+      void (DB.saveRoutineOn db (putRepair definition (appendItems "reservations" [reservation] (put "spentMilliseconds" (get saved "limitMilliseconds") saved))))
+      pure remaining
+   let parallel=has (D.workField work "codeExecution") "workflowDefinition" || boolean (get (D.workField work "preparation") "workflowEnabled")
+   when parallel (WC.openBudget s running allowance)
    let available=if runDeadline running>started then runDeadline running-started else 0
        capped=running {runDeadline=started+fromInteger (min (toInteger available) (toInteger allowance*1000000))}
        settle=do
         ended<-getMonotonicTimeNSec
-        let used=min allowance (max 1 (fromIntegral ((ended-started+999999) `div` 1000000)))
+        measured<-if parallel then WC.quiesce s running >> WC.used s running else pure (fromIntegral ((ended-started+999999) `div` 1000000))
+        let used=min allowance (max 1 measured)
+        when parallel (WC.finishBudget s running)
         updateRepair s pin $ \saved->
          let reservations=[if at r "operation"==token && at r "status"=="reserved" then mergeFields [("status",str "settled"),("usedMilliseconds",num used)] r else r | r<-items saved "reservations"]
              measured=put "reservations" (arr reservations) (put "spentMilliseconds" (num (int (get saved "spentMilliseconds")-allowance+used)) saved)
          in if used>=allowance && at saved "status" `notElem` ["recovered","stopped"] && not (has saved "userStop") then stopRepair "exhausted" "The case's aggregate active repair allowance is exhausted" measured else measured
-   restore (action capped) `finally` settle
+   runBudgetAction s running (do activeRun<-if parallel then WC.cap s capped else pure capped; restore (action activeRun)) settle
 
 withPreparationBudget :: Service -> Run -> (Run -> IO a) -> IO a
 withPreparationBudget s running action=mask $ \restore->do
@@ -426,16 +442,57 @@ withPreparationBudget s running action=mask $ \restore->do
   (work,_)<-D.getWork s identity
   let budget=D.workField work "maintenanceBudget" `fallback` obj [("limitMilliseconds",num 1800000),("spentMilliseconds",num 0),("reservations",arr [])]
       remaining=int (get budget "limitMilliseconds")-int (get budget "spentMilliseconds")
-  require (remaining>0 && not (any ((=="reserved") . (`at` "status")) (items budget "reservations"))) 409 "Original preparation active allowance is exhausted or uncertain"
-  let reservation=obj [("status",str "reserved"),("milliseconds",num remaining)]
-  D.saveWork s (D.setWorkField "maintenanceBudget" (appendItems "reservations" [reservation] (put "spentMilliseconds" (get budget "limitMilliseconds") budget)) work)
-  pure remaining
- let capped=running {runDeadline=min (runDeadline running) (started+fromIntegral allowance*1000000)}
+  case find ((=="reserved") . (`at` "status")) (items budget "reservations") of
+   Just receipt | at (D.workField work "workflowBudget") "status"=="reserved"->pure (int (get receipt "milliseconds"))
+   _->do
+    require (remaining>0 && not (any ((=="reserved") . (`at` "status")) (items budget "reservations"))) 409 "Original preparation active allowance is exhausted or uncertain"
+    let reservation=obj [("operation",toJSON identity),("status",str "reserved"),("milliseconds",num remaining)]
+    D.saveWork s (D.setWorkField "maintenanceBudget" (appendItems "reservations" [reservation] (put "spentMilliseconds" (get budget "limitMilliseconds") budget)) work)
+    pure remaining
+ (own,_)<-D.getWork s identity
+ let parallel=boolean (get (D.workField own "preparation") "workflowEnabled")
+ when parallel (WC.openBudget s running allowance)
+ let available=if runDeadline running>started then runDeadline running-started else 0
+     capped=running {runDeadline=started+fromInteger (min (toInteger available) (toInteger allowance*1000000))}
      settle=do
       ended<-getMonotonicTimeNSec
-      let used=min allowance (max 1 (fromIntegral ((ended-started+999999) `div` 1000000)))
+      measured<-if parallel then WC.quiesce s running >> WC.used s running else pure (fromIntegral ((ended-started+999999) `div` 1000000))
+      let used=min allowance (max 1 measured)
+      when parallel (WC.finishBudget s running)
       change (\budget->put "spentMilliseconds" (num (int (get budget "spentMilliseconds")-allowance+used)) (put "reservations" (arr [if at receipt "status"=="reserved" then mergeFields [("status",str "settled"),("usedMilliseconds",num used)] receipt else receipt | receipt<-items budget "reservations"]) budget))
- restore (action capped) `finally` settle
+ runBudgetAction s running (do activeRun<-if parallel then WC.cap s capped else pure capped; restore (action activeRun)) settle
+
+runBudgetAction :: Service -> Run -> IO a -> IO () -> IO a
+runBudgetAction s running action settle=do
+ result<-try action
+ case result of
+  Left problem | Just (_::Workflow.Yield)<-fromException problem->throwIO (problem::SomeException)
+  _->do
+   settle
+   case result of
+    Left problem | isNothing (fromException problem :: Maybe Provider.RetryDeferred)->locked s $ do
+     cancelled<-readIORef (runCancel running)
+     (work,_)<-D.getWork s (runId running)
+     when (has (toJSON work) "preparation" && at (D.workField work "preparation") "status" `notElem` ["failed","stopped","stale","interrupted","cleanup_pending","awaiting_occurrence"]) $
+      D.saveWork s (D.setWorkField "preparation" (mergeFields [("status",str (if cancelled || D.workField work "executionGate"==toJSON ExecutionStopped then "stopped" else if at (D.workField work "workflowBudget") "status"=="uncertain" then "interrupted" else "failed")),("error",str (D.exceptionText problem))] (D.workField work "preparation")) work)
+    _->pure ()
+   either throwIO pure result
+
+settleStoppedWorkflows :: Service -> IO ()
+settleStoppedWorkflows s=do
+ works<-D.readWorks s
+ live<-readMVar (serviceRuns s)
+ forM_ works $ \work->when (has (toJSON work) "workflowHalt" && at (D.workField work "workflowBudget") "status"=="reserved" && not (any (\call->M.member (D.callIdentity call) live) (D.workCalls work)) && not (D.generatedCleanupPending work)) $ DB.connection s $ \db->SQL.withTransaction db $ do
+  let budget=D.workField work "workflowBudget"
+      allowance=int (get budget "allowance")
+      used=min allowance ((int (get budget "usedNanoseconds")+999999) `div` 1000000)
+      settle value=put "spentMilliseconds" (num (max 0 (int (get value "spentMilliseconds")-allowance+used))) (put "reservations" (arr [if at receipt "status"=="reserved" && (get receipt "operation"==Null || at receipt "operation"==D.workloadId work) then mergeFields [("status",str "settled"),("usedMilliseconds",num used)] receipt else receipt | receipt<-items value "reservations"]) value)
+      changed=D.setWorkField "workflowBudget" (put "status" (str "settled") budget) work
+  if has (toJSON work) "repairPin" then do
+   (definition,saved)<-loadRepairOn db (D.workField work "repairPin")
+   void (DB.saveRoutineOn db (putRepair definition (settle saved)))
+   DB.putValueOn db DB.Workloads (D.workloadId work) (toJSON changed)
+   else DB.putValueOn db DB.Workloads (D.workloadId work) (toJSON (if has (toJSON work) "maintenanceBudget" then D.setWorkField "maintenanceBudget" (settle (D.workField work "maintenanceBudget")) changed else changed))
 
 providerWaitProjection :: [Value] -> Value
 providerWaitProjection=Provider.waitProjection
@@ -468,7 +525,7 @@ deferProvider s running operation due=do
  cancelled<-readIORef (runCancel running)
  allowed<-DB.occurrenceAllowed s (D.workField work "origin")
  require (not cancelled && allowed && D.workField work "executionGate"==toJSON ExecutionOpen) 409 "Provider wait was stopped before publication"
- let queued=(D.setWorkField "providerWait" (obj [("operation",str operation)]) work) {D.workCalls=fmap (\call->call {D.callState=D.CallQueued}) (D.workCalls work)}
+ let queued=(D.setWorkField "providerWait" (obj [("operation",str operation)]) work) {D.workCalls=fmap (\call->if D.callIdentity call==runId running then call {D.callState=D.CallQueued} else call) (D.workCalls work)}
  D.saveWork s queued
  state<-agentState s (agentIdText (runOwner running))
  let changed=mapTurns (\turn->if turnId turn==runId running then (withTurnFields (put "providerWait" (obj [("operation",str operation),("retryAt",str due)]) . remove ["error"]) turn) {turnStatus=Queued} else turn) state
@@ -853,7 +910,9 @@ recoverRepairs s = do
   forM_ [op | op<-unfinished,boolean (get op "liveEffect")] $ \op->do
    found<-D.findWork s (RunId (at saved "diagnosisRun"))
    forM_ found $ \(work,_)->D.saveWork s (D.setWorkField "routineEffectUnknown" (obj [("decisionId",get op "id"),("reason",str "Doctor live file action was interrupted without a confirmed outcome")]) work)
-  when (any ((=="reserved") . (`at` "status")) (items saved "reservations")) $
+  relatedWorkflow<-D.readWorks s
+  let safelyWaiting=any (\work->D.workField work "repairPin"==pin && WC.safeIdle work) relatedWorkflow
+  when (not safelyWaiting && any ((=="reserved") . (`at` "status")) (items saved "reservations")) $
    updateRepairUnlocked s pin $ \current->
     stopRepair "interrupted" "Host stopped during active repair; unfinished reservation remains consumed and spend is unknown"
      (mergeFields [("usageUnknown",Bool True),("reservations",arr [if at r "status"=="reserved" then put "status" (str "uncertain") r else r | r<-items current "reservations"])
@@ -1043,6 +1102,7 @@ refreshKitOffers s=do
 -- Called from the existing pulse dispatcher, never from a read/projection.
 dispatchRepairs :: Service -> IO ()
 dispatchRepairs s = do
+ settleStoppedWorkflows s
  ensureKitInspections s
  promoteKitInspections s
  refreshKitOffers s

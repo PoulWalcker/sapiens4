@@ -289,10 +289,17 @@ detail s owner identity run = do
  operations <- readOperations s
  renderRun RunDetail operations (definitionRevision definition) work
 
+workflowParallel :: D.Workload -> Value
+workflowParallel work=let cohorts=D.workField work "workflowCohorts"; budget=D.workField work "workflowBudget" in
+ if null (pairs cohorts) then Null else obj
+ [("activeMilliseconds",num ((int (get budget "usedNanoseconds")+999999) `div` 1000000)),("resourceStatus",get budget "status"),("reason",get budget "reason")
+ ,("children",arr [obj [("id",toJSON (D.callIdentity call)),("entry",get context "entry"),("parent",get context "parent"),("status",toJSON (D.callState call)),("reason",D.callField call "error")] | call<-NE.toList (D.workCalls work),let context=D.callField call "workflowChild",context/=Null])
+ ,("joins",arr [obj [("id",get cohort "join"),("status",str (if any ((`elem` [D.CallFailed,D.CallInterrupted,D.CallCancelled,D.CallUnresolved]) . D.callState) children then "blocked" else if all ((==D.CallCompleted) . D.callState) children then "ready" else "waiting"))] | (_,cohort)<-pairs cohorts,let children=[call | call<-NE.toList (D.workCalls work),toJSON (D.callIdentity call) `elem` items cohort "children"]])]
+
 renderRun :: RunProjection -> [Value] -> Revision -> D.Workload -> IO Value
 renderRun projection operations revision work = do
  gate <- if has (D.workField work "origin") "occurrence" then field 500 (toJSON work) "executionGate" else pure ExecutionOpen
- let call=NE.last (D.workCalls work)
+ let call=if null (pairs (D.workField work "workflowCohorts")) then NE.last (D.workCalls work) else NE.head (D.workCalls work)
      status=if gate==ExecutionStopped then "stopped" else if Effects.pendingTransport (toJSON work) then "running" else case D.callState call of
       D.CallQueued -> "queued"
       D.CallRunning -> "running"
@@ -326,4 +333,4 @@ renderRun projection operations revision work = do
      details=case projection of
       RunSummary -> []
       RunDetail -> [("routineEffectUnknown",D.workField work "routineEffectUnknown"),("routineIdentityError",D.workField work "routineIdentityError"),("externalExecution",D.workField work "externalExecution"),("codeExecution",D.codeProjection (D.workField work "codeExecution")),("executionBinding",binding),("criteriaAssessment",arr criteriaAssessment),("invocations",arr invocations),("observations",observations),("feedback",arr feedback),("rejection",fromMaybe Null (listToMaybe feedback)),("outcome",D.workField work "outcome")]
- pure (obj (details++[("fallbackSummary",fallbackSummary),("externalSummary",Effects.summary (toJSON work)),("executionStages",D.executionStages (D.workField work "codeExecution")),("assessment",assessment),("originalAssessment",original),("detailVersion",str version),("invocationCount",num (length invocations)),("currentRevision",toJSON revision),("historical",Bool (get (D.workField work "routineSnapshot") "revision"/=toJSON revision)),("id",str (D.workloadId work)),("created",D.workField work "created"),("trigger",get (D.workField work "origin") "trigger"),("snapshot",D.workField work "routineSnapshot"),("status",str status),("result",if gate==ExecutionStopped then Null else get (D.workField work "outcome") "reply"),("message",if gate==ExecutionOpen && D.callState call==D.CallWaiting then toJSON (D.callOutput call) else Null),("error",publicError),("currentOwner",toJSON (D.callOwner call))]))
+ pure (obj (details++[("workflowParallel",workflowParallel work),("fallbackSummary",fallbackSummary),("externalSummary",Effects.summary (toJSON work)),("executionStages",D.executionStages (D.workField work "codeExecution")),("assessment",assessment),("originalAssessment",original),("detailVersion",str version),("invocationCount",num (length invocations)),("currentRevision",toJSON revision),("historical",Bool (get (D.workField work "routineSnapshot") "revision"/=toJSON revision)),("id",str (D.workloadId work)),("created",D.workField work "created"),("trigger",get (D.workField work "origin") "trigger"),("snapshot",D.workField work "routineSnapshot"),("status",str status),("result",if gate==ExecutionStopped then Null else get (D.workField work "outcome") "reply"),("message",if gate==ExecutionOpen && D.callState call==D.CallWaiting then toJSON (D.callOutput call) else Null),("error",publicError),("currentOwner",toJSON (D.callOwner call))]))

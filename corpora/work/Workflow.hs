@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module Workflow (validate, selectInput, run, contentHash) where
+module Workflow (Yield(..), validate, selectInput, run, runRegion, contentHash) where
 
 import Control.Exception
 import Control.Monad
@@ -13,6 +13,9 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Read (readMaybe)
 import Types
+
+data Yield = Yield Text deriving (Show)
+instance Exception Yield
 
 contentHash :: Value -> Text
 contentHash=canonicalHash
@@ -29,16 +32,27 @@ validate graph=either (Left . T.pack) Right (parseEither definition graph)
   unless (case nodes of Object _->True; _->False) (fail "Workflow nodes must be an object")
   unless (not (null ids) && length ids<=256 && BL.length (encode value)<=65536) (fail "Workflow exceeds the finite node/source bound")
   unless (entry `elem` ids && all (\i->not (T.null i) && T.length i<=100) ids) (fail "Invalid workflow entry or node identity")
-  forM_ (pairs nodes) $ \(_,node)->do
+  forM_ (pairs nodes) $ \(identity,node)->do
    let kind=at node "kind"
-   onlyFields (case kind of "script"->["kind","source","input","next"]; "model"->["kind","instruction","input","next"]; "branch"->["kind","input","true","false"]; "finish"->["kind","input"]; _->[]) node
-   unless (kind `elem` ["script","model","branch","finish"]) (fail "Unsupported workflow node kind")
+   onlyFields (case kind of "script"->["kind","source","input","next"]; "model"->["kind","instruction","input","next"]; "branch"->["kind","input","true","false"]; "finish"->["kind","input"]; "fork"->["kind","children","join"]; "join"->["kind","fork","input","next"]; _->[]) node
+   unless (kind `elem` ["script","model","branch","finish","fork","join"]) (fail "Unsupported workflow node kind")
    when (kind=="script") (void (textFieldP "source" 65536 node))
    when (kind=="model") (void (textFieldP "instruction" 16000 node))
-   selector (get node "input")
+   unless (kind=="fork") (selector (get node "input"))
+   when (kind=="fork") $ do
+    children<-withObject "Fork" (.: "children") node :: Parser [Text]
+    unless (length children>=2 && length children<=256 && length (unique children)==length children) (fail "Fork needs distinct finite children")
+    join<-textFieldP "join" 100 node
+    unless (at (get nodes join) "kind"=="join" && at (get nodes join) "fork"==identity) (fail "Fork/join identity mismatch")
+   when (kind=="join") $ unless (at (get nodes (at node "fork")) "kind"=="fork" && at (get nodes (at node "fork")) "join"==identity) (fail "Join has no matching fork")
    unless (all (`elem` ids) (edges node)) (fail "Workflow successor does not exist")
   unless (all (`elem` reachable nodes [] [entry]) ids) (fail "Workflow contains unreachable nodes")
   order<-topological nodes [] ids
+  forM_ (pairs nodes) $ \(identity,node)->when (at node "kind"=="fork") $ do
+   let join=at node "join"; groups=[region nodes join [] child | child<-map text (items node "children")]
+   unless (all (\group->not (null group) && all (\key->at (get nodes key) "kind"/="finish" && all (\next->next==join || next `elem` group) (edges (get nodes key))) group) groups) (fail "Fork child must terminate at its matching join")
+   unless (sum (map length groups)==length (unique (concat groups))) (fail "Fork child regions overlap")
+   unless (all (`elem` concat groups) (predecessors nodes join)) (fail "Join has an unrelated incoming path")
   void (foldM (dominators nodes entry) [] order)
  selector value=do
   let shape=filter (/="pointer") (keys value)
@@ -64,10 +78,24 @@ validate graph=either (Left . T.pack) Right (parseEither definition graph)
  dominators nodes entry known identity=do
   let parents=predecessors nodes identity
       sets=[parent:fromMaybe [] (lookup parent known) | parent<-parents]
-      available=case sets of []->[]; first:rest->foldl intersect first rest
+      available=if at (get nodes identity) "kind"=="join" then
+       let fork=get nodes (at (get nodes identity) "fork")
+           groups=[region nodes identity [] child | child<-map text (items fork "children")]
+           guaranteed group=case [parent:fromMaybe [] (lookup parent known) | parent<-parents,parent `elem` group] of []->[]; first:rest->foldl intersect first rest
+       in unique (concatMap guaranteed groups)
+       else case sets of []->[]; first:rest->foldl intersect first rest
   unless (identity==entry || not (null parents)) (fail "Workflow node is unreachable")
   unless (all (`elem` available) (references (get (get nodes identity) "input"))) (fail "Workflow output reference is unavailable on an incoming path")
   pure ((identity,available):known)
+ region nodes stop initial identity=walk initial [identity]
+  where
+  walk visited []=visited
+  walk visited (key:pending)
+   | key==stop || key `elem` visited=walk visited pending
+   | otherwise=walk (key:visited) (edges (get nodes key)++pending)
+ unique=map head . groupItems
+ groupItems []=[]
+ groupItems (x:xs)=(x:filter (==x) xs):groupItems (filter (/=x) xs)
  predecessors nodes identity=[key | (key,node)<-pairs nodes,identity `elem` edges node]
  reachable _ visited []=visited
  reachable nodes visited (identity:pending)
@@ -81,7 +109,7 @@ validEscapes value=case T.uncons value of
  Just (_,rest)->validEscapes rest
 
 edges :: Value -> [Text]
-edges node=case at node "kind" of "finish"->[]; "branch"->[at node "true",at node "false"]; _->[at node "next"]
+edges node=case at node "kind" of "finish"->[]; "fork"->map text (items node "children"); "branch"->[at node "true",at node "false"]; _->[at node "next"]
 references :: Value -> [Text]
 references value=[at value "output" | has value "output"]++concatMap (references . snd) (pairs (get value "object"))++concatMap references (items value "array")
 
@@ -103,20 +131,25 @@ selectInput input receipts selector=do
 
 -- All authority and actual execution remain with the caller. Publication performs
 -- its gate check under the existing transaction before an admitted node can run.
-run :: Value -> Value -> Value -> IO Value -> (Value -> IO ()) -> (Text -> Value -> Value -> IO Value) -> IO Value
-run graph input authority load publish invoke=do
+run :: Value -> Value -> Value -> IO Value -> (Text -> Value -> IO ()) -> (Text -> Value -> Value -> IO Value) -> IO Value
+run graph input authority load publish invoke=runRegion graph input authority (at graph "entry") Nothing load publish invoke
+
+runRegion :: Value -> Value -> Value -> Text -> Maybe Text -> IO Value -> (Text -> Value -> IO ()) -> (Text -> Value -> Value -> IO Value) -> IO Value
+runRegion graph input authority entry stop load publish invoke=do
  either (failure 422) pure (validate graph)
- advance (at graph "entry")
+ advance entry
  where
+ advance identity | Just identity==stop=pure Null
  advance identity=do
   saved<-load
   let receipts=get saved "nodes"; node=get (get graph "nodes") identity
-  selected<-either (failure 422) pure (selectInput input receipts (get node "input"))
+  selected<-either (failure 422) pure (if at node "kind"=="fork" then Right Null else selectInput input receipts (get node "input"))
   let request=obj [("node",node),("input",selected),("structureHash",str (contentHash graph)),("authority",authority)]
       hash_=canonicalHash request
       previous=get receipts identity
-      store receipt=publish (put "current" (str identity) (put "nodes" (put identity receipt receipts) saved))
-  output<-if previous/=Null then do
+      store receipt=publish identity receipt
+  when (previous/=Null) (require (at previous "requestHash"==hash_) 409 "Retained workflow request authority changed")
+  output<-if previous/=Null && not (at node "kind"=="fork" && at previous "status"=="admitted") then do
    require (at previous "requestHash"==hash_ && at previous "status"=="completed") 409 "Workflow admission is failed or uncertain; no automatic replay"
    require (at previous "outputHash"==canonicalHash (get previous "output")) 409 "Retained workflow output changed"
    pure (get previous "output")
@@ -130,8 +163,10 @@ run graph input authority load publish invoke=do
       void (parseValue 422 (textFieldP "reason" 8000) selected)
       pure selected
      "finish"->pure selected
+     "join"->pure selected
      _->invoke identity node selected) :: IO (Either SomeException Value)
     case result of
+     Left exception | Just (_::Yield)<-fromException exception->throwIO exception
      Left exception->store (mergeFields [("status",str "unknown"),("reason",str (T.pack (displayException exception)))] admitted) >> throwIO exception
      Right value->do
       require (BL.length (encode value)<=65536) 422 "Workflow output exceeds 64 KiB"
@@ -140,5 +175,6 @@ run graph input authority load publish invoke=do
       pure value
   case at node "kind" of
    "finish"->pure output
+   "fork"->advance (at node "join")
    "branch"->advance (at node (if get output "value"==Bool True then "true" else "false"))
    _->advance (at node "next")

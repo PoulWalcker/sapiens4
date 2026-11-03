@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module Composer (repairOn, requestOn, stopOn, detail, projection, run, recover ) where
+module Composer (repairOn, requestOn, stopOn, detail, projection, run, runWorkflowChild, recover ) where
 
 import Control.Exception
 import Control.Monad
@@ -29,6 +29,7 @@ import qualified Provider
 import qualified GeneratedCode as Code
 import qualified Kit
 import qualified Workflow
+import qualified WorkflowCalls as WC
 import qualified Effects
 
 -- Stages have different admission/evidence requirements; a successful process
@@ -87,7 +88,7 @@ requestOn db definition analysis identity time = do
  contract<-D.executionContract original (NE.head (D.workCalls original)) >>= maybe (failure 409 "Preparation requires an accepted pinned source task") pure
  sourceInput<-if get (toJSON definition) "externalProfile"==Null then pure Null else Effects.preparationInput (toJSON definition) (toJSON original)
  let origin=obj [("preparation",toJSON identity)]
-     preparation=obj [("expectedBinding",Kit.bindingPin (toJSON definition)),("workflowEnabled",Bool True),("kitEnabled",Bool True),("feedProfile",get (toJSON definition) "externalProfile"),("sourceInput",sourceInput),("status",str "queued"),("analysis",toJSON analysis),("contract",toJSON contract),("sourceEvidence",D.workField source "analysisEvidence"),("parameters",get (D.workField source "analysisDecision") "parameters"),("operations",arr []),("checks",arr [])]
+     preparation=obj [("expectedBinding",Kit.bindingPin (toJSON definition)),("parallelEnabled",Bool True),("workflowEnabled",Bool True),("kitEnabled",Bool True),("feedProfile",get (toJSON definition) "externalProfile"),("sourceInput",sourceInput),("status",str "queued"),("analysis",toJSON analysis),("contract",toJSON contract),("sourceEvidence",D.workField source "analysisEvidence"),("parameters",get (D.workField source "analysisDecision") "parameters"),("operations",arr []),("checks",arr [])]
      call=D.newCall identity (analysisOwner pin) Nothing D.Preparation D.CallQueued (R.definitionGoal definition)
      work=D.Workload (runIdText identity) False (call :| []) (KM.fromList [("origin",origin),("created",str time),("originalIntent",str (R.definitionGoal definition)),("executionGate",toJSON ExecutionOpen),("preparationPin",toJSON pin),("preparation",preparation)])
      turn=newTurn identity Chat (R.definitionGoal definition) time origin False
@@ -116,7 +117,7 @@ checkGate s running = do
  requireActive s (agentIdText (runOwner running))
  cancelled<-readIORef (runCancel running)
  require (not cancelled) 409 "Preparation stopped"
- work<-load s (runIdText (runId running))
+ (work,_)<-D.getWork s (runId running)
  DB.requireOccurrence s (D.workField work "origin")
 phase :: Service -> Run -> Phase -> IO ()
 phase s running value = phaseChecked s running value (pure ())
@@ -139,7 +140,7 @@ askConfigured s running node purpose context explanation = do
  (template,envelope)<-case explanation of
   Just selected->Provider.explanationTemplates s selected
   Nothing->(,) <$> prompt s (case node of "PreparationFixtures"->"preparation-fixtures"; "PreparationGeneration"->if has context "availableKit" then "preparation-generation-kit" else "preparation-generation"; "PreparationRubricReview"->"hybrid-rubric-review"; _->"preparation-review") <*> prompt s "preparation-envelope"
- workflowInstruction<-if boolean (get context "workflowEnabled") && node `elem` ["PreparationGeneration","PreparationFixtures"] then prompt s "preparation-workflow" else pure ""
+ workflowInstruction<-if boolean (get context "workflowEnabled") && node `elem` ["PreparationGeneration","PreparationFixtures"] then prompt s (if boolean (get context "parallelEnabled") then "preparation-workflow-parallel" else "preparation-workflow") else pure ""
  let rendered=render envelope [("node",node),("instruction",template<>workflowInstruction),("context",jsonText (put "selfId" (toJSON (runOwner running)) context))]
  owning<-load s (runIdText (runId running))
  let recordedPurpose=if has (toJSON owning) "repairPin" then "repair_"<>purpose else purpose
@@ -180,6 +181,9 @@ run s running _ = do
  outcome<-try (prepare s running) :: IO (Either SomeException ())
  case outcome of
   Right () -> pure ("Candidate awaits an authorized occurrence",[])
+  Left exception | Just (_::Workflow.Yield)<-fromException exception -> do
+   update s identity (put "status" (str "waiting_children"))
+   throwIO exception
   Left exception | Just (_::Provider.RetryDeferred)<-fromException exception -> do
    update s identity (put "status" (str "waiting_provider"))
    throwIO exception
@@ -213,10 +217,10 @@ prepare s running = do
  let identity=runIdText (runId running)
  work<-load s identity
  let saved=D.workField work "preparation"
- require (at saved "status" `elem` ["queued","waiting_provider"]) 409 "Preparation already started; request a new explicit attempt"
+ require (at saved "status" `elem` ["queued","waiting_provider","waiting_children"]) 409 "Preparation already started; request a new explicit attempt"
  spec<-decodeValue 422 (get saved "contract")
  phase s running Fixtures
- oracle<-if has saved "fixtures" then pure (obj [("fixtures",get saved "sourceCases"),("contentInterface",get saved "contentInterface"),("rubric",get saved "rubric")]) else ask s running "PreparationFixtures" "fixture_design" (put "criteria" (D.criterionContext spec) (mergeFields (pairs (selectPresent ["workflowEnabled"] saved)) (select ["contract","sourceEvidence","parameters","feedProfile","sourceInput","repairContext"] saved)))
+ oracle<-if has saved "fixtures" then pure (obj [("fixtures",get saved "sourceCases"),("contentInterface",get saved "contentInterface"),("rubric",get saved "rubric")]) else ask s running "PreparationFixtures" "fixture_design" (put "criteria" (D.criterionContext spec) (mergeFields (pairs (selectPresent ["workflowEnabled","parallelEnabled"] saved)) (select ["contract","sourceEvidence","parameters","feedProfile","sourceInput","repairContext"] saved)))
  rawFixtures<-field 422 oracle "fixtures" :: IO [Fixture]
  feedMode<-if get saved "feedProfile"==Null then pure Nothing else Just <$> field 422 oracle "contentInterface"
  typedFixtures<-forM rawFixtures $ \(Fixture input expected stubs)->case feedMode of
@@ -242,7 +246,7 @@ prepare s running = do
   selected<-Kit.catalog (agentIdText (runOwner running)) target works
   update s identity (put "kitCatalog" selected)
   pure selected
- produced<-if has (get saved "version") "workflow" then pure (select ["workflow"] (get saved "version")) else if has saved "version" then pure (mergeFields [("profile",get (get (get saved "version") "runtime") "profile"),("explanation",select ["instruction"] (get (get saved "version") "explanation"))] (select ["source","language","interface","dependencies","capabilities"] (get saved "version"))) else ask s running "PreparationGeneration" "candidate_generation" (mergeFields ([("availableProfiles",arr [Code.profileJSON profile]),("interface",str "json-stdin-result-v1"),("contentInterface",maybe Null toJSON feedMode)]++[("availableKit",catalog_) | catalog_/=Null]) (mergeFields (pairs (selectPresent ["workflowEnabled"] saved)) (select ["contract","sourceEvidence","parameters","feedProfile","sourceInput","repairContext"] saved)))
+ produced<-if has (get saved "version") "workflow" then pure (select ["workflow"] (get saved "version")) else if has saved "version" then pure (mergeFields [("profile",get (get (get saved "version") "runtime") "profile"),("explanation",select ["instruction"] (get (get saved "version") "explanation"))] (select ["source","language","interface","dependencies","capabilities"] (get saved "version"))) else ask s running "PreparationGeneration" "candidate_generation" (mergeFields ([("availableProfiles",arr [Code.profileJSON profile]),("interface",str "json-stdin-result-v1"),("contentInterface",maybe Null toJSON feedMode)]++[("availableKit",catalog_) | catalog_/=Null]) (mergeFields (pairs (selectPresent ["workflowEnabled","parallelEnabled"] saved)) (select ["contract","sourceEvidence","parameters","feedProfile","sourceInput","repairContext"] saved)))
  (candidate,kitFields)<-if has saved "version" then pure (produced,pairs (selectPresent ["kitArtifact"] (get saved "version"))) else if not (has produced "reuse") then pure (produced,[]) else do
   checkGate s running
   require (any (\entry->get entry "reference"==get produced "reuse" && get entry "compatible"==Bool True) (items catalog_ "entries")) 409 "Selected Kit artifact is not an applicable entry in this preparation's catalog"
@@ -344,15 +348,18 @@ prepare s running = do
 
 workflowFixture :: Service -> Run -> Code.Profile -> Value -> Value -> IO Value
 workflowFixture s running profile version fixture = do
- let identity=runIdText (runId running)
+ (own,call)<-D.getWork s (runId running)
+ let identity=D.workloadId own
      key=canonicalHash (get fixture "input")
+     context=obj [("fixture",fixture),("fixtureKey",str key)]
      loadTrace=do current<-load s identity; pure (get (get (D.workField current "preparation") "workflowFixtures") key `fallback` obj [])
-     saveTrace trace=locked s $ do
+     saveTrace node receipt=locked s $ do
       checkGate s running
       current<-load s identity
       let prepared=D.workField current "preparation"
-      D.saveWork s (D.setWorkField "preparation" (put "workflowFixtures" (put key trace (get prepared "workflowFixtures" `fallback` obj [])) prepared) current)
+      D.saveWork s (D.setWorkField "preparation" (put "workflowFixtures" (put key (put "nodes" (put node receipt (get (get (get prepared "workflowFixtures") key) "nodes" `fallback` obj [])) (get (get prepared "workflowFixtures") key `fallback` obj [])) (get prepared "workflowFixtures" `fallback` obj [])) prepared) current)
      invoke nodeId node input=case at node "kind" of
+      "fork"->WC.fork s running version (get fixture "input") context nodeId node
       "model"->do
        let stubs=get fixture "modelStubs"
        require (has stubs nodeId) 422 "Independent fixture has no response-only model stub for the selected node"
@@ -361,14 +368,30 @@ workflowFixture s running profile version fixture = do
        checkGate s running
        nonce<-newId
        let reserved=Code.reservation profile (agentIdText (runOwner running)) identity nonce
-       update s identity (put "container" reserved)
+       locked s $ do (current,_)<-D.getWork s (runId running); D.saveWork s (WC.container running reserved current)
        result<-Code.runFixture profile running reserved (at node "source") input (\receipt->do
         when (at receipt "status"/="removed") (checkGate s running)
-        update s identity (put "container" receipt))
+        locked s $ do (current,_)<-D.getWork s (runId running); D.saveWork s (WC.container running receipt current))
        require (at result "status"=="exited" && get result "exitCode"==num 0 && not (boolean (get result "wasRunning"))) 422 "Workflow fixture script failed"
        either (failure 422 . T.pack) pure (eitherDecodeStrict (TE.encodeUtf8 (at result "output")))
- value<-Workflow.run (get version "workflow") (get fixture "input") (select ["reference","workflowModel","workflowPrompt","runtime"] version) loadTrace saveTrace invoke
+ let entry=if WC.child call then at (WC.childData call) "entry" else at (get version "workflow") "entry"
+     stop=if WC.child call then Just (at (WC.childData call) "join") else Nothing
+ value<-Workflow.runRegion (get version "workflow") (get fixture "input") (select ["reference","workflowModel","workflowPrompt","runtime"] version) entry stop loadTrace saveTrace invoke
  pure (obj [("status",str "exited"),("exitCode",num 0),("wasRunning",Bool False),("output",str (jsonText value)),("workflow",Bool True)])
+
+runWorkflowChild :: Service -> Run -> Turn -> IO (Text,[Value])
+runWorkflowChild s running turn=do
+ locked s (D.begin s (runOwner running) turn)
+ (_,call)<-D.getWork s (runId running)
+ let context=WC.childData call
+ profile<-Code.available
+ require (Code.profileJSON profile==get (get context "version") "runtime") 409 "Pinned child runtime changed"
+ void (workflowFixture s running profile (get context "version") (get context "fixture"))
+ locked s $ do
+  WC.allowed s running
+  (work,current)<-D.getWork s (runId running)
+  D.saveWork s (D.withCall work (current {D.callState=D.CallCompleted,D.callOutput=Just "Completed pinned fixture region; canonical outputs retained in the parent trace"}))
+ pure ("Pinned workflow child region completed",[])
 
 resolveVersion :: Service -> Run -> Value -> IO Value
 resolveVersion s running expected = do
@@ -382,7 +405,7 @@ recover s = do
  forM_ works $ \work->when (has (toJSON work) "preparation") $ do
   let identity=D.workloadId work; prepared=D.workField work "preparation"; container=get prepared "container"
   let budget=D.workField work "maintenanceBudget"
-  when (any ((=="reserved") . (`at` "status")) (items budget "reservations")) $
+  when (not (WC.safeIdle work) && any ((=="reserved") . (`at` "status")) (items budget "reservations")) $
    D.saveWork s (D.setWorkField "maintenanceBudget" (mergeFields [("usageUnknown",Bool True),("reservations",arr [if at receipt "status"=="reserved" then put "status" (str "uncertain") receipt else receipt | receipt<-items budget "reservations"])] budget) work)
 
   when (has container "name" && at container "status"/="removed") $ do
@@ -430,7 +453,7 @@ repairOn db definition failedReference casePin context identity time = do
   && get pin "contractGeneration"==toJSON (R.contractGeneration definition)) 409 "Repair contract changed"
  require (not (any D.generatedCleanupPending works)) 503 "Owned container cleanup remains unresolved"
  let origin=obj [("preparation",toJSON identity)]
-     prepared=mergeFields [("expectedBinding",Kit.bindingPin (toJSON definition)),("workflowEnabled",Bool True),("kitEnabled",Bool True),("status",str "queued"),("repairContext",context),("operations",arr []),("checks",arr [])]
+     prepared=mergeFields [("expectedBinding",Kit.bindingPin (toJSON definition)),("parallelEnabled",Bool True),("workflowEnabled",Bool True),("kitEnabled",Bool True),("status",str "queued"),("repairContext",context),("operations",arr []),("checks",arr [])]
        (select ["analysis","contract","sourceEvidence","parameters","feedProfile","sourceInput"] original)
      call=D.newCall identity (AgentId (R.definitionOwner definition)) Nothing D.Preparation D.CallQueued (R.definitionGoal definition)
      work=D.Workload (runIdText identity) False (call :| []) (KM.fromList

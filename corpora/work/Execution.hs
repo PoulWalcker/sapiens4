@@ -35,6 +35,7 @@ import qualified GeneratedCode as Code
 import qualified Effects
 import qualified Kit
 import qualified Workflow
+import qualified WorkflowCalls as WC
 import qualified Composer
 import qualified Automation
 import Provider
@@ -110,7 +111,7 @@ turnCommand s a identity rawAction external = do
   require (not (boolean (turnField turn "codeBound"))) 409 "Code-run evidence is retained; start a new authorized occurrence instead of Retry"
   D.requireCallAllowed s turn
  work <- D.findWork s (RunId identity)
- require (not (maybe False (any ((==Just (RunId identity)) . D.callParent) . D.workCalls . fst) work)) 409 "This request was delegated; use the recipient call controls"
+ require (rawAction=="cancel" && maybe False (not . null . pairs . (`D.workField` "workflowCohorts") . fst) work || not (maybe False (any ((==Just (RunId identity)) . D.callParent) . D.workCalls . fst) work)) 409 "This request was delegated; use the recipient call controls"
  command <- if has (toJSON turn) "managed" then do
   cmd <- case external of
    Just value -> pure value
@@ -132,7 +133,7 @@ turnCommand s a identity rawAction external = do
      if isJust command then saveStateCommitted s a (update (withTurnFields (put "cancel_requested" (Bool True))) state) command (writeIORef (runCancel run) True)
       else writeIORef (runCancel run) True
     Nothing -> saveStateCommand s a (update (\t -> t { turnStatus = Cancelled }) state) command
- when (action==Cancel) (Automation.cancelProviderWait s (RunId identity))
+ when (action==Cancel) (WC.stop s (RunId identity) >> Automation.cancelProviderWait s (RunId identity))
  DB.project s a
  trimConversation s a
  D.reconcileWorks s
@@ -145,6 +146,7 @@ recover s a = do
   (withTurnFields (put "error" (str "Runner stopped before saving a reply; inspect effects before retrying")) t) { turnStatus = Interrupted } else t
  DB.project s a
 finish :: Service -> Run -> Turn -> Either SomeException (Text,[Value]) -> IO ()
+finish s run _ outcome | Left problem<-outcome, Just (_::Workflow.Yield)<-fromException problem = WC.yielding s run
 finish s run turn outcome | Left problem<-outcome, Just (RetryDeferred operation due)<-fromException problem = Automation.deferProvider s run operation due `catch` (\(problem::APIError)->finish s run turn (Left (toException problem)))
 finish s run turn outcome = do
  fenced <- not <$> D.callAllowed s turn
@@ -189,7 +191,7 @@ launch s a batch tick slot batching = do
  let first=NE.head batch; i=turnId first; ids=map turnId (NE.toList batch)
      reserve t
       | turnId t `notElem` ids = t
-      | otherwise = (withTurnFields (mergeFields (batchFields ++ [("batch_members",toJSON ids) | batching && turnId t==i]) . remove ["error"]) t) { turnStatus = Running, turnBatchId = if batching then Just i else turnBatchId t }
+      | otherwise = (withTurnFields (mergeFields (batchFields ++ [("batch_members",toJSON ids) | batching && turnId t==i]) . remove ["error","workflowWait"]) t) { turnStatus = Running, turnBatchId = if batching then Just i else turnBatchId t }
      batchFields = if batching then [("agency_kind",str "chatInput"),("slot",num slot),("pulseId",str (pulseIdentity tick))] else []
      marked=mapTurns reserve state
      snapshot=mapStateFields (mergeFields ([("current_turn",toJSON i)] ++ [("agency_batch",arr [obj [("id",toJSON (turnId t)),("content",str (turnInput t))] | t <- NE.toList batch]) | batching])) marked
@@ -204,7 +206,7 @@ launch s a batch tick slot batching = do
  DB.pulseCall s tick a "chatInput" slot (nub [at (turnField t "origin") "group" | t <- NE.toList batch,has (turnField t "origin") "group"])
  DB.project s a
  void $ forkIO $ do
-  result <- try (Automation.withRepairBudget s run $ \repairRun -> withActor s a (Just "chatInput") (if has (turnField execution "origin") "group" then G.runGroup s repairRun execution else if has (turnField execution "origin") "kitInspection" then Automation.runKitInspection s repairRun execution else if has (turnField execution "origin") "repairAudit" then runSavedAudit s repairRun execution else if has (turnField execution "origin") "repair" then Automation.runDiagnosis s repairRun execution else if has (turnField execution "origin") "preparation" then Composer.run s repairRun execution else dispatchOrdinary s repairRun execution snapshot))
+  result <- try (Automation.withRepairBudget s run $ \repairRun -> withActor s a (Just "chatInput") (if has (turnField execution "origin") "workflowChild" then (if get (get (turnField execution "origin") "workflowChild") "fixture"/=Null then Composer.runWorkflowChild s repairRun execution else runWorkflowChild s repairRun execution) else if has (turnField execution "origin") "group" then G.runGroup s repairRun execution else if has (turnField execution "origin") "kitInspection" then Automation.runKitInspection s repairRun execution else if has (turnField execution "origin") "repairAudit" then runSavedAudit s repairRun execution else if has (turnField execution "origin") "repair" then Automation.runDiagnosis s repairRun execution else if has (turnField execution "origin") "preparation" then Composer.run s repairRun execution else dispatchOrdinary s repairRun execution snapshot))
   locked s $ finish s run execution result `finally` do
    lease <- readIORef (serviceLease s)
    when (lease==Just (AgentId a,i)) $ writeIORef (serviceLease s) Nothing
@@ -271,6 +273,7 @@ runCode s running turn = do
  result<-try (executeCode s running) :: IO (Either SomeException Text)
  case result of
   Right reply->pure (reply,[])
+  Left exception | Just (_::Workflow.Yield)<-fromException exception->throwIO exception
   Left exception->do
    let asynchronous=isJust (fromException exception :: Maybe SomeAsyncException) || isJust (fromException exception :: Maybe AsyncCancelled)
    cancelled<-readIORef (runCancel running)
@@ -471,27 +474,30 @@ workflowBudget s originalRun = do
 
 executeWorkflowCalculation :: Service -> Run -> Value -> Value -> IO (Value,Value)
 executeWorkflowCalculation s running version input = do
+ (ownerWork,ownerCall)<-D.getWork s (runId running)
+ let context=WC.childData ownerCall
  profile<-Code.available
  require (Code.profileJSON profile==get version "runtime") 409 "Pinned workflow runtime is unavailable"
  settings<-decodeValue 409 (get version "workflowModel")
  let loadTrace=do (work,_)<-D.getWork s (runId running); pure (get (D.workField work "codeExecution") "workflowRun" `fallback` obj [])
-     publish trace=locked s $ do
+     publish node receipt=locked s $ do
       currentClock<-getMonotonicTimeNSec
       require (currentClock<runDeadline running) 409 "Original workflow allowance expired"
       codeGuard s running
       (work,call)<-D.getWork s (runId running)
       (current,_)<-D.resolveCandidate s work call
       require (current==version) 409 "Workflow candidate changed"
-      D.saveWork s (D.setWorkField "codeExecution" (put "workflowRun" trace (D.workField work "codeExecution")) work)
+      D.saveWork s (D.setWorkField "codeExecution" (let code=D.workField work "codeExecution"; trace=get code "workflowRun" `fallback` obj [] in put "workflowRun" (put "nodes" (put node receipt (get trace "nodes" `fallback` obj [])) trace) code) work)
      invoke identity node selected=case at node "kind" of
+      "fork"->WC.fork s running version input (obj []) identity node
       "script"->do
        codeGuard s running
        nonce<-newId
        let reserved=Code.businessReservation profile (agentIdText (runOwner running)) (runIdText (runId running)) nonce
-       codeUpdate s running (put "container" reserved)
+       locked s $ do (current,_)<-D.getWork s (runId running); D.saveWork s (WC.container running reserved current)
        receipt<-Code.runFixture profile running reserved (at node "source") selected (\value->do
         when (at value "status"/="removed") (codeGuard s running)
-        codeUpdate s running (put "container" value))
+        locked s $ do (current,_)<-D.getWork s (runId running); D.saveWork s (WC.container running value current))
        require (at receipt "status"=="exited" && get receipt "exitCode"==num 0 && not (boolean (get receipt "wasRunning"))) 503 "Workflow script did not establish a successful result"
        either (failure 422 . T.pack) pure (eitherDecodeStrict (TE.encodeUtf8 (at receipt "output")))
       _->do
@@ -513,11 +519,28 @@ executeWorkflowCalculation s running version input = do
        value<-either (failure 422 . T.pack) pure (eitherDecodeStrict (TE.encodeUtf8 raw))
        codeUpdate s running (\code->put "operations" (arr [if at op "id"==invocation then mergeFields [("status",str "completed"),("response",value)] op else op | op<-items code "operations"]) code)
        pure value
- actual<-Workflow.run (get version "workflow") input (select ["reference","workflowModel","workflowPrompt","runtime"] version) loadTrace publish invoke
- validateCodeResult version actual
- let runtime=obj [("status",str "exited"),("exitCode",num 0),("wasRunning",Bool False),("actual",actual),("reference",get version "reference"),("sourceHash",get version "sourceHash"),("inputHash",str (canonicalHash input)),("workflow",Bool True)]
- codeUpdate s running (appendItems "operations" [obj [("id",str (canonicalHash runtime)),("purpose",str "code_execution"),("stage",str "calculate"),("status",str "completed"),("result",runtime)]])
- pure (actual,runtime)
+ let entry=if WC.child ownerCall then at context "entry" else at (get version "workflow") "entry"
+     stop=if WC.child ownerCall then Just (at context "join") else Nothing
+ actual<-Workflow.runRegion (get version "workflow") input (select ["reference","workflowModel","workflowPrompt","runtime"] version) entry stop loadTrace publish invoke
+ if WC.child ownerCall then pure (Null,Null) else do
+  validateCodeResult version actual
+  let runtime=obj [("status",str "exited"),("exitCode",num 0),("wasRunning",Bool False),("actual",actual),("reference",get version "reference"),("sourceHash",get version "sourceHash"),("inputHash",str (canonicalHash input)),("workflow",Bool True)]
+  codeUpdate s running (appendItems "operations" [obj [("id",str (canonicalHash runtime)),("purpose",str "code_execution"),("stage",str "calculate"),("status",str "completed"),("result",runtime)]])
+  pure (actual,runtime)
+
+runWorkflowChild :: Service -> Run -> Turn -> IO (Text,[Value])
+runWorkflowChild s running turn=do
+ locked s (D.begin s (runOwner running) turn)
+ codeGuard s running
+ WC.allowed s running
+ (work,call)<-D.getWork s (runId running)
+ (version,_)<-D.resolveCandidate s work call
+ void (executeWorkflowCalculation s running version (get (WC.childData call) "input"))
+ locked s $ do
+  WC.allowed s running
+  (current,completed)<-D.getWork s (runId running)
+  D.saveWork s (D.withCall current (completed {D.callState=D.CallCompleted,D.callOutput=Just "Completed pinned child region; canonical outputs retained in the parent trace"}))
+ pure ("Pinned workflow child region completed",[])
 
 validateCodeResult :: Value -> Value -> IO ()
 validateCodeResult version actual = do
@@ -765,6 +788,7 @@ markCodeFault s running reason = locked s $ do
 
 recoverCode :: Service -> IO ()
 recoverCode s = do
+ WC.recover s
  works<-D.readWorks s
  forM_ works $ \work->when (has (toJSON work) "codeExecution") $ do
   let code=D.workField work "codeExecution"; container=get code "container"
@@ -826,8 +850,12 @@ admit s a tick = do
      scheduled=pulseFrequency tick==Bph60
      queued=[t | t<-agentTurns state,turnStatus t==Queued,boolean (turnField t "batchable"),has (turnField t "origin") "routine"==scheduled]
      legacyCandidates=[t | t<-agentTurns state,turnStatus t==Queued,not (boolean (turnField t "batchable"))]
- legacy<-filterM (Automation.providerDue s) legacyCandidates
- when (AgentId a `elem` owners || length owners<4) $ case (legacy,available,NE.nonEmpty queued) of
+ ready<-filterM (WC.ready s) legacyCandidates
+ legacy<-filterM (Automation.providerDue s) ready
+ let children=filter (\turn->has (turnField turn "origin") "workflowChild") legacy
+     roots=filter (not . (\turn->has (turnField turn "origin") "workflowChild")) legacy
+ when (AgentId a `elem` owners || length owners<4) $ case (roots,available,NE.nonEmpty queued) of
+  _ | first:_<-children, slot:_<-available, all ((/=0) . runSlot) mine, not scheduled -> launch s a (first :| []) tick slot False
   (first:_,_,_) | null mine && not scheduled -> launch s a (first :| []) tick 0 False
   (_,slot:_,Just batch) | all ((/=0) . runSlot) mine -> launch s a (if scheduled then NE.head batch :| [] else batch) tick slot True
   _ -> pure ()
