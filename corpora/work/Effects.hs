@@ -5,7 +5,7 @@ module Effects
  ( configureOn, definitionOn, pinOn, profileBound, external
  , beforeContent, ContentCommit(..), acceptContentOn, deliver, finishOccurrence
  , completeActionFree, positiveAnomaly, observedInput, preparationInput, fixtureInput, requireCandidateInput, requireCurrentInput
- , requireRunClear, prepareRoutineAttempt, admitRoutineAttempt, sealRoutineAttempt, requireContentTrace, observeEvidence, recover, reconcile, summary, pendingTransport
+ , auditPublication, requireRunClear, prepareRoutineAttempt, admitRoutineAttempt, sealRoutineAttempt, requireContentTrace, observeEvidence, recover, reconcile, summary, pendingTransport
  ) where
 
 import Control.Concurrent (threadDelay)
@@ -103,6 +103,11 @@ data RoutineRisk = RoutineClear | RoutineUnverified | RoutineUnknown Text Text d
 -- another addressedTo owner and does not become a different consumer.
 routineConsumerOn :: SQL.Connection -> Value -> IO (Maybe RoutineConsumer)
 routineConsumerOn db work
+ | has work "repairPin" = do
+  let pin=get work "repairPin"
+  definition<-definitionOn db (at pin "routine")
+  require (get definition "owner"==get pin "owner" && any ((==get pin "case") . (`get` "id")) (items definition "repairCases")) 409 "Doctor ancestry contradicts its original Routine consumer"
+  pure (Just (RoutineConsumer (at pin "owner") (at pin "routine")))
  | not (has origin "routine") && snapshot==Null = pure Nothing
  | has origin "group" = pure Nothing
  | otherwise = do
@@ -153,8 +158,15 @@ invocationAdmission = parseEither $ \value -> if value==Null then pure LegacyAdm
 routineRisk :: Bool -> Value -> RoutineRisk
 routineRisk startup work
  | get work "routineEffectUnknown"/=Null = RoutineUnknown (at (get work "routineEffectUnknown") "decisionId") (at (get work "routineEffectUnknown") "reason")
+ | verifiedRepairActivity = RoutineClear
  | otherwise = fromMaybe (if failedWork && null entries && get work "routineAttemptSchema"/=num 1 then RoutineUnverified else RoutineClear) (listToMaybe unknowns `mplus` listToMaybe unverified)
  where
+ verifiedRepairActivity=has work "repairPin" && noAnomalies && case fromJSON (get work "repairInvocationPolicy") :: Result RepairInvocationPolicy of
+  Success DoctorScopedResponseOnly->not (has work "preparation" || has work "codeExecution")
+  Success RepairPreparationResponseOnly->has work "preparation" && not (has work "codeExecution")
+  Success SavedAuditResponseOnly->has work "savedAudit" && not (has work "preparation")
+  Error _->False
+ noAnomalies=not (any (positiveAnomaly . (`get` "evidence")) (items work "decisions"++items (get work "preparation") "operations"++items (get work "codeExecution") "operations"))
  entries=items work "decisions"
  failedState call=at call "state" `elem` ["Failed","Interrupted","Unresolved","Cancelled"] || startup && at call "state"=="Running"
  failedWork=any failedState (items work "calls")
@@ -194,7 +206,7 @@ retainRoutineRisk startup work = case routineRisk startup work of
 requireClearOn :: SQL.Connection -> RoutineConsumer -> Maybe Text -> IO ()
 requireClearOn db owner@(RoutineConsumer _ identity) except=do
  works<-worksOn db
- forM_ [work | work<-works,at (get work "routineSnapshot") "id"==identity || at (get work "origin") "routine"==identity] $ \work->do
+ forM_ [work | work<-works,at (get work "routineSnapshot") "id"==identity || at (get work "origin") "routine"==identity || at (get work "repairPin") "routine"==identity] $ \work->do
   actual<-routineConsumerOn db work
   when (actual==Just owner) $ do
    let retained=retainRoutineRisk False work
@@ -432,6 +444,19 @@ checkedReservation work=do
  expected<-requestPayload work (at (get work "outcome") "reply")
  unless (request==expected && all (\key->get delivery key==get request key) ["operationKey","scope","profileHash","requestHash"]) (fail "Saved delivery payload or immutable identity changed")
  pure request
+
+-- Audit-only recovery never creates a new publication or cursor reservation.
+auditPublication :: Value -> Either String (Maybe Text)
+auditPublication work
+ | not (profileBound work)=Right Nothing
+ | otherwise=parseEither (const checked) Null
+ where
+ checked=do
+  let e=external work; delivery=get e "delivery"
+  unless (at (get e "contentAcceptance") "status"=="accepted" && at (get e "cursorCommit") "status"=="committed" && at delivery "status" `elem` ["confirmed","not_required"]) (fail "Saved receipt-feed result still requires original content acceptance or publication; audit-only recovery cannot advance its cursor or send it")
+  request<-checkedReservation work
+  unless (if at delivery "status"=="confirmed" then validReceipt request (get delivery "receipt") else null (items request "recordIds") && get request "recordIds"==arr []) (fail "Saved publication lacks an independent confirmed receipt or a no-delivery proof")
+  pure (Just (at (get request "content") "text"))
 
 validReceipt :: Value -> Value -> Bool
 validReceipt request receipt = case fromJSON receipt :: Result Receipt of

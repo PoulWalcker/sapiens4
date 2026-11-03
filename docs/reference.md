@@ -372,9 +372,49 @@ assign another active personal specialist with `corpora_update`'s optional
 `doctor_id` field; `null` clears it. Chief and Groups cannot be Doctor. The
 existing workspace settings message includes this assignment.
 
-This slice gives Doctor response-only diagnosis from retained evidence, without
-tools or environment repair. The routine owner prepares and checks candidates.
-Tool-enabled diagnosis and recovery remain a separate migration slice.
+Doctor uses retained evidence and scoped host tools. Its provider process remains
+verified response-only, with no ambient host-control token. The host can read
+explicitly selected existing UTF-8 files, retain isolated repair artifacts, check
+staged Python against the original saved fixtures in the existing runtime, and
+inspect that exact runtime. Staged code has no host mounts or network. The routine
+owner still prepares and checks immutable implementation candidates.
+
+Use **Doctor file access…** on a waiting repair to select exact read-only or writable
+files. Writable files also permit reading; directories, symbolic/hard links,
+application state, known private directories (`~/.codex`, `~/.ssh`, `~/.aws`),
+repository metadata and host implementation writes are unavailable.
+Application source may be explicitly selected for reading. Resources are pinned
+by filesystem identity and opened through directory descriptors without following
+links. Files are limited to 256 KiB; staged content to 64 KiB. Live writes require
+explicit write authority, clear original-consumer effects and the observed content
+hash. Hash checking detects ordinary conflicts optimistically; it is not atomic
+compare-and-swap against external editors. Writes change the verified open file in
+place, so interrupted/partial changes remain unknown until independently confirmed.
+File tools fail closed on Windows. No general shell, installation, network sends,
+desktop or administrative operations are granted.
+
+A Doctor request for access only waits; it does not grant paths. Saving selected
+access replaces that waiting case's file authority and resumes diagnosis without
+extending its 30-minute allowance. It cannot revive stopped or exhausted work.
+Confirmed tool effects retain receipts and are not automatically repeated. Stop
+and restart preserve resource accounting and unknown outcomes, which fence the
+original Routine even after Doctor reassignment. Read observations and isolated
+checks do not clear that fence. Fixed runtime inspection does not include arbitrary
+hardware commands such as diskutil.
+
+A failed assessment of an otherwise established calculation can also create a
+case without quarantining healthy code. When the exact latest original run,
+version, inputs, result, optional explanation and criteria remain applicable, a
+separate maintenance call independently audits that retained result. It neither
+recalculates nor replays delivery, and does not generate a replacement candidate.
+The guarded result updates the original occurrence; a trial activates only after
+its exact original claim and activation audit pass. Missing evidence, fallback,
+negative or unknown semantic verdicts, later runs, Stop and stale authority refuse
+audit-only recovery. Receipt-feed results requiring content acceptance or
+publication wait visibly without advancing their cursor or sending anything;
+audit-only recovery can preserve an already confirmed or unnecessary publication
+only when its immutable receipt is valid. Audit and tool usage remain with the
+same repair case.
 
 The first proven implementation fault immediately retains a repair case, even
 without a Doctor. Safe ordinary execution and bounded fallback proceed under
@@ -385,7 +425,7 @@ recommendation instead of regenerating the unchanged structure.
 The Agency and Doctor choose further candidate iterations from newly failed
 checks or verification and a changed hypothesis. There is no fixed attempt
 count. Every case has one persisted aggregate allowance of 30 active minutes,
-covering diagnosis, generation, fixture execution, review and the authorized
+covering diagnosis, scoped tools, saved-result audits, generation, fixture execution, review and the authorized
 verification and audit. Waiting for a Doctor, queue or authorized occurrence
 consumes no active allowance. A stage reserves its remaining allowance before
 work, and only an observed completion returns proven unused time. An unfinished
@@ -395,7 +435,8 @@ that case. Provider failures and lost responses are not automatically retried.
 
 Checked repair candidates wait for the existing authorized routine run; only a
 successful result and activation audit adopt the new version. The routine view
-shows diagnosis, attempts, current candidate, measured/reserved active resource,
+shows diagnosis, tool actions, selected file rights, confirmation waits, attempts,
+current candidate, measured/reserved active resource,
 terminal reason and purpose-indexed usage receipts. Missing tokens or prices are
 unknown. The state snapshot retains `repairCases`; `repair` is the current case
 and usage projection over its existing Workload operations.

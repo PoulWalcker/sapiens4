@@ -341,7 +341,7 @@ repairOn db definition failedReference casePin context identity time = do
      call=D.newCall identity (AgentId (R.definitionOwner definition)) Nothing D.Preparation D.CallQueued (R.definitionGoal definition)
      work=D.Workload (runIdText identity) False (call :| []) (KM.fromList
        [("origin",origin),("created",str time),("originalIntent",str (R.definitionGoal definition)),("executionGate",toJSON ExecutionOpen)
-       ,("repairPin",casePin),("preparationPin",pin),("preparation",prepared)])
+       ,("repairPin",casePin),("repairInvocationPolicy",toJSON RepairPreparationResponseOnly),("preparationPin",pin),("preparation",prepared)])
  SQL.execute db "INSERT INTO workloads(id,value) VALUES (?,?)" (D.workloadId work,jsonText (toJSON work))
  Managed.enrollOn db (R.definitionOwner definition) (newTurn identity Chat (R.definitionGoal definition) time origin False) Null (R.definitionGoal definition) []
  pure (toJSON identity)

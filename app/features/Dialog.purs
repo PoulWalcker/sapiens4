@@ -37,6 +37,7 @@ make kind record m = {kind,title,record,fields,content:D.null,error:"",busy:fals
     M.RoutineStop -> "Stop this run?"
     M.RoutineAnalyze -> "Analyze saved evidence"
     M.RoutineStopAnalysis -> "Stop analysis?"
+    M.DoctorAccess -> "Doctor file access"
     M.RoutineReject -> "Reject this result?"
     M.RoutineDiscard -> "Discard changes?"
     M.RoutineRun -> "Run " <> D.s "title" record
@@ -56,6 +57,7 @@ make kind record m = {kind,title,record,fields,content:D.null,error:"",busy:fals
     M.GroupSettings -> record
     M.GroupTask -> D.merge (D.json {assignee: D.get "lead" $ M.selected m, state: "backlog"}) record
     M.RoutineRun -> D.json {inputs: ""}
+    M.DoctorAccess -> D.json {readFiles:S.joinWith "\n" $ map (D.s "path") $ A.filter (\resource -> D.s "access" resource == "read") $ D.rows "resources" $ D.at ["repair","access"] record,writeFiles:S.joinWith "\n" $ map (D.s "path") $ A.filter (\resource -> D.s "access" resource == "write") $ D.rows "resources" $ D.at ["repair","access"] record}
     M.EditCorpora -> D.json {message: replaceFields (D.fallback (D.str $ D.at ["corpora","settings_template"] m.snapshot) $ D.s "settings_template" record) ["name","device","scope","doctor_id"]}
     M.RelayAdd -> D.json {name: D.get "name" record, connection: if D.valid $ D.get "connection" record then D.encode $ D.get "connection" record else ""}
     M.Notice -> D.json {message: record}
@@ -106,6 +108,11 @@ body m d = case d.kind of
     [V.p "" "This stops this run and its delegated work. Completed external actions cannot be undone. Other runs are unchanged."]
   M.RoutineAnalyze -> form "Analyze evidence"
     [V.p "" "The owner will make a new analysis of saved results and feedback. This uses a model call and does not start a routine run."]
+  M.DoctorAccess -> form "Save Doctor access"
+    [textarea "Read-only files (absolute paths, one per line)" "readFiles" 4 [V.attr "maxlength" "16000"]
+    ,textarea "Writable files (absolute paths, one per line)" "writeFiles" 4 [V.attr "maxlength" "16000"]
+    ,V.p "form-hint" "Select exact existing text files for this case. Writable files can also be read. Directories, links and application state are unavailable. Live writes require clear effect receipts."
+    ,V.p "form-hint" "This replaces this case's file access and resumes diagnosis with the same remaining repair allowance. It does not extend time or repeat an interrupted action."]
   M.RoutineStopAnalysis -> form "Stop analysis"
     [V.p "" "Stop the current analysis. Saved results and the routine schedule stay available."]
   M.RoutineDiscard -> form "Discard changes"

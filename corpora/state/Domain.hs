@@ -571,3 +571,17 @@ data ToolSummary = ToolSummary
  } deriving (Eq, Show)
 instance ToJSON ToolSummary where
  toJSON s = obj [("fields",toJSON (summaryFields s)),("omittedFields",num (summaryOmittedFields s)),("redactedFields",num (summaryRedactedFields s)),("truncatedFields",num (summaryTruncatedFields s))]
+
+-- Admission proof for the two repair activities with no ambient tool capability.
+data RepairInvocationPolicy = DoctorScopedResponseOnly | RepairPreparationResponseOnly | SavedAuditResponseOnly deriving (Eq,Show)
+instance ToJSON RepairInvocationPolicy where
+ toJSON policy=obj [("schema",num 1),("kind",str (case policy of DoctorScopedResponseOnly->"doctor_scoped_response_only"; RepairPreparationResponseOnly->"isolated_preparation_response_only"; SavedAuditResponseOnly->"saved_audit_response_only"))]
+instance FromJSON RepairInvocationPolicy where
+ parseJSON value=do
+  onlyFields ["schema","kind"] value
+  unless (get value "schema"==num 1) (fail "Unknown repair invocation admission schema")
+  case at value "kind" of
+   "doctor_scoped_response_only"->pure DoctorScopedResponseOnly
+   "isolated_preparation_response_only"->pure RepairPreparationResponseOnly
+   "saved_audit_response_only"->pure SavedAuditResponseOnly
+   _->fail "Unknown repair invocation admission policy"

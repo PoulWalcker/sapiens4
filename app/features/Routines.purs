@@ -110,9 +110,9 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     ,V.div "routine-heading routine-page-heading" [V.textNode "h1" [] $ title routine,V.div "routine-actions" $ if D.b "deleted" r then [badge "Deleted"] else [runButton routine] <> scheduleControl routine <> [menu routine]]
     ,V.p "routine-muted" $ whenText routine
     ,V.node "nav" [V.cls "routine-tabs",V.label "Routine views"] [V.control [V.cls $ "routine-link" <> if not history then " selected" else "",V.attr "aria-current" $ if not history then "page" else "false"] "Latest result" (RoutineNavigate $ M.RoutineLatest id),V.control [V.cls $ "routine-link" <> if history then " selected" else "",V.attr "aria-current" $ if history then "page" else "false"] "History" (RoutineNavigate $ M.RoutineHistory id)]
+    ,V.when (managed routine) $ repairPanel routine
     ,V.when (managed routine) $ analysisPanel routine
-    ,V.when (managed routine) $ codePanel routine
-    ,V.when (managed routine) $ repairPanel routine]
+    ,V.when (managed routine) $ codePanel routine]
     where r = record routine
           id = D.s "id" r
   analysisPanel routine = V.div "routine-notice" $
@@ -163,7 +163,13 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     trialRun = fromMaybe D.empty $ A.find (\run -> D.s "id" run == D.s "run" trial) (D.rows "runs" r)
   repairPanel routine = V.when (D.s "id" repair /= "") $ V.div "routine-notice"
     [V.textNode "h3" [] "Doctor repair"
-    ,V.p "routine-muted" "Doctor diagnoses retained evidence without tools. The routine owner prepares and checks candidates."
+    ,V.p "routine-muted" "Doctor can inspect selected text files, stage isolated repairs and run isolated checks. Live writes require explicit file access and clear effect receipts."
+    ,V.p "routine-muted" $ case D.s "phase" repair of
+      "tool_work" -> "Doctor is performing a scoped tool operation."
+      "waiting_independent_confirmation" -> "Waiting for file access or independent confirmation."
+      _ -> "Doctor diagnoses saved evidence."
+    ,V.when (A.elem (D.s "status" repair) ["waiting_access","waiting_doctor"]) $ V.button "routine-link" "Doctor file access…" $ OpenDialog M.DoctorAccess $ record routine
+    ,V.node "details" [] ([V.node "summary" [] [V.text "Doctor access and actions"]] <> map (\resource -> V.p "routine-muted" $ D.s "access" resource <> " · " <> D.s "path" resource) (D.rows "resources" $ D.get "access" repair) <> map (\op -> V.p "routine-muted" $ D.s "tool" op <> " · " <> D.s "status" op <> " · " <> D.s "error" op) (A.filter (\op -> D.s "purpose" op == "repair_tool") $ D.rows "operations" repair))
     ,V.p "" $ "Repair: " <> D.s "status" repair
     ,V.p "routine-muted" $ "Doctor: " <> D.fallback "Not assigned" (D.s "doctor" repair)
     ,V.p "" $ D.s "waitingReason" repair

@@ -25,13 +25,13 @@ import qualified Automation
 
 newtype OperationId = OperationId Text deriving (Eq, Show)
 
-data RoutineCommand = Create RoutineFields | Edit Revision RoutineFields | RunNow Revision Text | StopRun Revision RunId | Delete Revision | Schedule Revision Minutes | Pause Revision Bool | RejectRun Revision RunId Text | Analyze Revision | StopAnalysis Revision RunId | Prepare Revision RunId | StopPreparation Revision RunId deriving (Eq, Show)
+data RoutineCommand = Create RoutineFields | Edit Revision RoutineFields | RunNow Revision Text | StopRun Revision RunId | Delete Revision | Schedule Revision Minutes | Pause Revision Bool | RejectRun Revision RunId Text | Analyze Revision | StopAnalysis Revision RunId | Prepare Revision RunId | StopPreparation Revision RunId | DoctorAccess Revision Text Value deriving (Eq, Show)
 data CommandError = CommandError Int Text deriving (Eq, Show)
-data CommandPlan = CreateDefinition RoutineFields | UpdateDefinition Definition | Admit Definition Text | StopOccurrences [D.Workload] | DeleteDefinition Definition [D.Workload] | RecordFeedback Text RunId | AnalyzeDefinition Definition | StopAnalysisCall Definition RunId | PrepareDefinition Definition RunId | StopPreparationCall Definition RunId
+data CommandPlan = CreateDefinition RoutineFields | UpdateDefinition Definition | Admit Definition Text | StopOccurrences [D.Workload] | DeleteDefinition Definition [D.Workload] | RecordFeedback Text RunId | AnalyzeDefinition Definition | StopAnalysisCall Definition RunId | PrepareDefinition Definition RunId | StopPreparationCall Definition RunId | ConfigureDoctorAccess Definition Text Value
 
 parseCommand :: Text -> Value -> Parser RoutineCommand
 parseCommand action value = withObject "Routine command" (\o -> do
- unless (all (`elem` ["operation","revision","title","goal","criteria","inputs","run","minutes","reason","analysis","preparation","externalProfile"]) (keys value)) (fail "Unknown Routine command field")
+ unless (all (`elem` ["operation","revision","title","goal","criteria","inputs","run","minutes","reason","analysis","preparation","externalProfile","case","resources"]) (keys value)) (fail "Unknown Routine command field")
  case action of
   "create" -> Create <$> parseJSON value
   "edit" -> Edit <$> o .: "revision" <*> parseJSON value
@@ -52,6 +52,7 @@ parseCommand action value = withObject "Routine command" (\o -> do
   "pause" -> Pause <$> o .: "revision" <*> pure True
   "resume" -> Pause <$> o .: "revision" <*> pure False
   "analyze" -> Analyze <$> o .: "revision"
+  "doctor-access" -> DoctorAccess <$> o .: "revision" <*> o .: "case" <*> o .: "resources"
   "prepare" -> Prepare <$> o .: "revision" <*> o .: "analysis"
   "stop-preparation" -> StopPreparation <$> o .: "revision" <*> o .: "preparation"
   "stop-analysis" -> StopAnalysis <$> o .: "revision" <*> o .: "analysis"
@@ -65,6 +66,7 @@ decide time current occurrences request = case request of
   d <- existing revision
   let changed=R.changeContract (AcceptedContract fields) d
   pure (UpdateDefinition (R.bumpRevision changed {definitionFields=KM.delete "prompt" (definitionFields changed)}))
+ DoctorAccess revision identity resources -> ConfigureDoctorAccess <$> existing revision <*> pure identity <*> pure resources
  Prepare revision analysis -> (`PrepareDefinition` analysis) <$> existing revision
  StopPreparation revision identity -> (`StopPreparationCall` identity) <$> existing revision
  Analyze revision -> AnalyzeDefinition <$> existing revision
@@ -119,7 +121,10 @@ command s owner action identity payload = do
    runIdentity <- RunId <$> newId
    result <- try $ do
     requireActive s owner
-    request_ <- parseValue 400 (parseCommand action) payload
+    parsed <- parseValue 400 (parseCommand action) payload
+    request_ <- case parsed of
+     DoctorAccess revision caseId _ -> DoctorAccess revision caseId <$> Automation.selectDoctorResources s payload
+     _ -> pure parsed
     case request_ of
      RunNow _ _ -> do
       cfg <- corporaSettings s
@@ -168,6 +173,9 @@ command s owner action identity payload = do
 
 applyPlan :: SQL.Connection -> AgentId -> RunId -> Text -> CommandPlan -> IO (Text,Value)
 applyPlan db owner runIdentity time plan = case plan of
+ ConfigureDoctorAccess definition identity resources -> do
+  response<-Automation.configureDoctorAccessOn db (toJSON definition) identity resources
+  pure (definitionId definition,response)
  PrepareDefinition definition analysis -> do
   response <- Composer.requestOn db definition analysis runIdentity time
   pure (definitionId definition,response)

@@ -81,16 +81,26 @@ defaults = {
   'Delegation' => {event: 'HandoffPrepared', request: 'Compare the products.'},
   'CreatingSapi' => {event: 'SapiSpecified', name: 'NewResearcher', role: 'Research'}
 }
-reply = rule.fetch('response') do
+reply = if rule['responses']
+  rule.fetch('responses').fetch(context.fetch('observations', []).length)
+else
+ rule.fetch('response') do
   if defaults[node]
     defaults[node].merge(reason: 'Based on the supplied request.', evidence: ['Fixture evidence.'])
   else
     'Contract test reply'
   end
 end
+end
 reply = JSON.generate(reply) unless reply.is_a?(String)
 puts JSON.generate(type: 'thread.started', thread_id: 'fixture-session')
+sleep rule.fetch('event_delay', 0)
 Array(rule['events']).each { |event| puts JSON.generate(event) }
+STDOUT.flush
+if (gate = rule['after_events_gate'])
+  File.write(File.join(root, gate + '-started'), '')
+  sleep 0.02 until File.exist?(File.join(root, gate))
+end
 puts JSON.generate(type: 'item.completed', item: {type: 'agent_message', text: reply})
 
 puts JSON.generate(type: 'turn.completed', usage: rule['usage']) if rule['usage']
