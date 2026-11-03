@@ -23,9 +23,11 @@ if ARGV.take(3) == %w[debug models --bundled]
 end
 
 text = STDIN.read
-context = text.include?("\nContext:\n") ? JSON.parse(text.split("\nContext:\n", 2).last) : {}
+request_text = text.start_with?('Repair only the response shape') ? text.split("\nOriginal request:\n", 2).last.split("\nOriginal response:\n", 2).first : text
+context = request_text.include?("\nContext:\n") ? JSON.parse(request_text.split("\nContext:\n", 2).last) : {}
 node = text[/decision at node (\w+)/, 1] || (text.start_with?('You are acting as yourself inside') ? 'group' :
   text.start_with?('You are the current Lead updating') ? 'group-memo' : 'other')
+node += 'Correction' if text.start_with?('Repair only the response shape')
 owner = context['selfId'] || File.basename(Dir.pwd)
 key = "#{owner}:#{node}"
 rule = config.fetch('rules', {}).fetch(key, config.fetch('rules', {}).fetch(node, {}))
@@ -41,6 +43,14 @@ if (catalog_argument = ARGV.find { |argument| argument.start_with?('model_catalo
   record[:invocation_catalog] = JSON.parse(File.read(catalog_path)).fetch('models').map do |model|
     model.slice('slug', 'shell_type', 'apply_patch_tool_type', 'experimental_supported_tools', 'tool_mode', 'supports_search_tool')
   end
+end
+if rule['attempts']
+  prior = Dir[File.join(root, 'calls', '*.json')].count do |file|
+    call = JSON.parse(File.read(file))
+    call['node'] == node && call['prompt'] == text
+  end
+  choices = rule.fetch('attempts')
+  rule = rule.merge(choices.fetch([prior, choices.length - 1].min))
 end
 path = File.join(root, 'calls', SecureRandom.hex(12) + '.json')
 if rule['child']
@@ -94,6 +104,11 @@ end
 end
 reply = JSON.generate(reply) unless reply.is_a?(String)
 puts JSON.generate(type: 'thread.started', thread_id: 'fixture-session')
+if (failure = rule['terminal_failure'])
+  puts JSON.generate(type: 'error', message: failure)
+  puts JSON.generate(type: 'turn.failed', error: {message: failure})
+  exit 1
+end
 sleep rule.fetch('event_delay', 0)
 Array(rule['events']).each { |event| puts JSON.generate(event) }
 STDOUT.flush

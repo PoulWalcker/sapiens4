@@ -149,6 +149,7 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
       "suspect" -> "Script suspended"
       "stale" -> "Script needs reconsideration"
       _ -> if D.s "id" prepared /= "" && not (D.b "applicable" prepared) then "Prepared version needs reconsideration" else if D.s "run" trial /= "" then if A.elem (D.s "status" trialRun) ["queued", "running", "waiting", "blocked"] then "Trial claimed" else "Trial finished without activation" else if D.s "status" prepared == "awaiting_occurrence" then "Prepared · awaiting an authorized run" else "Preparation: " <> D.s "status" prepared
+    ,providerWaitPanel $ D.get "providerWait" prepared
     ,V.when (D.s "status" active == "stale" || D.s "id" prepared /= "" && not (D.b "applicable" prepared)) $ V.p "routine-muted" "This historical version no longer applies to the current task or source profile. Its history is retained."
     ,V.when (D.s "digest" (D.get "reference" prepared) /= "") $ V.p "routine-muted" $ "Prepared version · " <> CU.take 8 (D.s "digest" (D.get "reference" prepared))
     ,V.when (D.s "run" active /= "") $ V.p "routine-muted" $ "Activated by run " <> D.s "run" active <> " · " <> formatDate (D.s "decidedAt" active)
@@ -161,6 +162,11 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     reference = D.get "reference" active
     trial = D.get "trial" prepared
     trialRun = fromMaybe D.empty $ A.find (\run -> D.s "id" run == D.s "run" trial) (D.rows "runs" r)
+  providerWaitPanel waiting = V.when (D.s "id" waiting /= "") $ V.div "routine-notice"
+    [V.p "" $ "Provider: " <> D.s "status" waiting <> " · host attempts " <> show (D.int $ D.get "attemptCount" waiting) <> "/3"
+    ,V.p "routine-muted" $ D.s "reason" waiting
+    ,V.when (D.s "retryAt" waiting /= "") $ V.p "routine-muted" $ "Resume after " <> formatDate (D.s "retryAt" waiting)
+    ,V.p "routine-muted" "The original maintenance allowance is retained. Waiting uses no active slot. Provider spend may be unknown."]
   repairPanel routine = V.when (D.s "id" repair /= "") $ V.div "routine-notice"
     [V.textNode "h3" [] "Doctor repair"
     ,V.p "routine-muted" "Doctor can inspect selected text files, stage isolated repairs and run isolated checks. Live writes require explicit file access and clear effect receipts."
@@ -170,6 +176,7 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
       _ -> "Doctor diagnoses saved evidence."
     ,V.when (A.elem (D.s "status" repair) ["waiting_access","waiting_doctor"]) $ V.button "routine-link" "Doctor file access…" $ OpenDialog M.DoctorAccess $ record routine
     ,V.node "details" [] ([V.node "summary" [] [V.text "Doctor access and actions"]] <> map (\resource -> V.p "routine-muted" $ D.s "access" resource <> " · " <> D.s "path" resource) (D.rows "resources" $ D.get "access" repair) <> map (\op -> V.p "routine-muted" $ D.s "tool" op <> " · " <> D.s "status" op <> " · " <> D.s "error" op) (A.filter (\op -> D.s "purpose" op == "repair_tool") $ D.rows "operations" repair))
+    ,providerWaitPanel $ D.get "providerWait" repair
     ,V.p "" $ "Repair: " <> D.s "status" repair
     ,V.p "routine-muted" $ "Doctor: " <> D.fallback "Not assigned" (D.s "doctor" repair)
     ,V.p "" $ D.s "waitingReason" repair

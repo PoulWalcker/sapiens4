@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE CPP #-}
-module Automation (dispatch, requestOn, stopOn, projection, detail, preflight, recordRepairFaultOn, withRepairBudget, runDiagnosis, dispatchRepairs, recoverRepairs, repairProjection, selectDoctorResources, configureDoctorAccessOn, recordAuditFailure, savedAuditSourceOn) where
+module Automation (dispatch, requestOn, stopOn, projection, detail, preflight, recordRepairFaultOn, withRepairBudget, runDiagnosis, dispatchRepairs, recoverRepairs, repairProjection, selectDoctorResources, configureDoctorAccessOn, recordAuditFailure, savedAuditSourceOn, providerDue, deferProvider, cancelProviderWait) where
 
 import Control.Exception hiding (handle)
 import Control.Monad
@@ -389,7 +389,7 @@ withRepairBudget s running action = do
  found<-D.findWork s (runId running)
  case found of
   Nothing->action running
-  Just (work,_) | not (has (toJSON work) "repairPin")->action running
+  Just (work,_) | not (has (toJSON work) "repairPin")->if has (toJSON work) "preparation" then withPreparationBudget s running action else action running
   Just (work,_)->mask $ \restore->do
    let pin=D.workField work "repairPin"; token=runIdText (runId running)
    started<-getMonotonicTimeNSec
@@ -411,6 +411,79 @@ withRepairBudget s running action = do
              measured=put "reservations" (arr reservations) (put "spentMilliseconds" (num (int (get saved "spentMilliseconds")-allowance+used)) saved)
          in if used>=allowance && not (at saved "status"=="recovered") then stopRepair "exhausted" "The case's aggregate active repair allowance is exhausted" measured else measured
    restore (action capped) `finally` settle
+
+withPreparationBudget :: Service -> Run -> (Run -> IO a) -> IO a
+withPreparationBudget s running action=mask $ \restore->do
+ started<-getMonotonicTimeNSec
+ let identity=runId running
+     change transform=locked s $ do
+      (work,_)<-D.getWork s identity
+      let budget=D.workField work "maintenanceBudget" `fallback` obj [("limitMilliseconds",num 1800000),("spentMilliseconds",num 0),("reservations",arr [])]
+      D.saveWork s (D.setWorkField "maintenanceBudget" (transform budget) work)
+ allowance<-locked s $ do
+  (work,_)<-D.getWork s identity
+  let budget=D.workField work "maintenanceBudget" `fallback` obj [("limitMilliseconds",num 1800000),("spentMilliseconds",num 0),("reservations",arr [])]
+      remaining=int (get budget "limitMilliseconds")-int (get budget "spentMilliseconds")
+  require (remaining>0 && not (any ((=="reserved") . (`at` "status")) (items budget "reservations"))) 409 "Original preparation active allowance is exhausted or uncertain"
+  let reservation=obj [("status",str "reserved"),("milliseconds",num remaining)]
+  D.saveWork s (D.setWorkField "maintenanceBudget" (appendItems "reservations" [reservation] (put "spentMilliseconds" (get budget "limitMilliseconds") budget)) work)
+  pure remaining
+ let capped=running {runDeadline=min (runDeadline running) (started+fromIntegral allowance*1000000)}
+     settle=do
+      ended<-getMonotonicTimeNSec
+      let used=min allowance (max 1 (fromIntegral ((ended-started+999999) `div` 1000000)))
+      change (\budget->put "spentMilliseconds" (num (int (get budget "spentMilliseconds")-allowance+used)) (put "reservations" (arr [if at receipt "status"=="reserved" then mergeFields [("status",str "settled"),("usedMilliseconds",num used)] receipt else receipt | receipt<-items budget "reservations"]) budget))
+ restore (action capped) `finally` settle
+
+providerWaitProjection :: [Value] -> Value
+providerWaitProjection=Provider.waitProjection
+
+providerOperations :: Service -> D.Workload -> IO [Value]
+providerOperations s work
+ | has (toJSON work) "preparation"=pure (items (D.workField work "preparation") "operations")
+ | has (toJSON work) "savedAudit"=pure (items (D.workField work "codeExecution") "operations")
+ | has (toJSON work) "repairPin"=do
+    (_,saved)<-DB.connection s (\db->loadRepairOn db (D.workField work "repairPin"))
+    pure (items saved "operations")
+ | otherwise=pure []
+
+providerDue :: Service -> Turn -> IO Bool
+providerDue s turn=do
+ found<-D.findWork s (turnId turn)
+ case found of
+  Nothing->pure True
+  Just (work,_) | not (has (toJSON work) "providerWait")->pure True
+  Just (work,_)->do
+   operations<-Provider.retainedOperations <$> providerOperations s work
+   time<-now
+   pure $ case find ((==get (D.workField work "providerWait") "operation") . (`get` "id")) operations of
+    Just op->case (parseTime (at op "retryAt"),parseTime time) of (Just due,Just clock)->clock>=due; _->True
+    Nothing->True
+
+deferProvider :: Service -> Run -> Text -> Text -> IO ()
+deferProvider s running operation due=do
+ (work,_)<-D.getWork s (runId running)
+ cancelled<-readIORef (runCancel running)
+ allowed<-DB.occurrenceAllowed s (D.workField work "origin")
+ require (not cancelled && allowed && D.workField work "executionGate"==toJSON ExecutionOpen) 409 "Provider wait was stopped before publication"
+ let queued=(D.setWorkField "providerWait" (obj [("operation",str operation)]) work) {D.workCalls=fmap (\call->call {D.callState=D.CallQueued}) (D.workCalls work)}
+ D.saveWork s queued
+ state<-agentState s (agentIdText (runOwner running))
+ let changed=mapTurns (\turn->if turnId turn==runId running then (withTurnFields (put "providerWait" (obj [("operation",str operation),("retryAt",str due)]) . remove ["error"]) turn) {turnStatus=Queued} else turn) state
+ saveState s (agentIdText (runOwner running)) changed
+ DB.project s (agentIdText (runOwner running))
+
+cancelProviderWait :: Service -> RunId -> IO ()
+cancelProviderWait s identity=do
+ found<-D.findWork s identity
+ forM_ found $ \(work,_)->when (has (toJSON work) "providerWait") $ do
+  let operation=at (D.workField work "providerWait") "operation"
+      cancel=map cancelOne
+      cancelOne op=let nested=if get op "correction"/=Null then put "correction" (cancelOne (get op "correction")) op else op
+                   in if at op "id"==operation && at op "status"=="retry_wait" then mergeFields [("status",str "cancelled"),("reason",str "Stopped by Admin")] nested else nested
+  if has (toJSON work) "preparation" then D.saveWork s (D.setWorkField "preparation" (put "operations" (arr (cancel (items (D.workField work "preparation") "operations"))) (D.workField work "preparation")) work)
+  else if has (toJSON work) "savedAudit" then D.saveWork s (D.setWorkField "codeExecution" (put "operations" (arr (cancel (items (D.workField work "codeExecution") "operations"))) (D.workField work "codeExecution")) work)
+  else when (has (toJSON work) "repairPin") (updateRepairUnlocked s (D.workField work "repairPin") (\saved->put "operations" (arr (cancel (items saved "operations"))) saved))
 
 -- Resource authority comes only from the explicit Admin command, never model paths.
 selectDoctorResources :: Service -> Value -> IO Value
@@ -634,7 +707,7 @@ runDiagnosis s running _ = do
  let pin=D.workField work "repairPin"
  template<-prompt s "repair-diagnosis"
  envelope<-prompt s "preparation-envelope"
- let loop observations = do
+ let loop step observations = do
       locked s (requireDoctorCurrent s running pin)
       (definition,saved)<-DB.connection s (\db->loadRepairOn db pin)
       works<-D.readWorks s
@@ -646,34 +719,34 @@ runDiagnosis s running _ = do
            ,("stages",arr [remove ["content"] staged | staged<-items saved "stages"]),("observations",arr observations)]
           rendered=render envelope [("node","DoctorDiagnosis"),("instruction",template),("context",jsonText context)]
       require (BL.length (encode context)<=262144) 413 "Required repair evidence exceeds 256 KiB; inspect retained evidence before another repair"
-      identity<-newId
-      started<-now
-      let operation=obj [("id",str identity),("purpose",str "repair_diagnosis"),("status",str "running"),("started",str started),("doctor",toJSON (runOwner running))]
-          save=saveDoctorOperation s pin identity
-      captured<-newIORef Null
-      updateRepair s pin (appendItems "operations" [operation] . put "phase" (str "saved_data_diagnosis"))
-      raw<-(Provider.invokeAnalysisObserved s running rendered (\evidence->do
-       let trace=toJSON evidence
-       writeIORef captured trace
-       save (obj [("evidence",trace)])
-       when (Effects.positiveAnomaly trace) $ locked s $ do
-        (current,_)<-D.getWork s (runId running)
-        D.saveWork s (D.setWorkField "routineEffectUnknown" (obj [("decisionId",str identity),("reason",str "Doctor provider trace contains unexpected activity"),("evidence",trace)]) current))) `catch` (\(problem::SomeException)->do
-       trace<-readIORef captured
-       save (obj [("status",str "failed"),("error",str (D.exceptionText problem)),("usageUnknown",Bool (get (get trace "usage") "inputTokens"==Null || get (get trace "usage") "outputTokens"==Null))])
-       throwIO problem)
-      trace<-readIORef captured
-      when (Effects.positiveAnomaly trace) $ locked s $ do
-       (current,_)<-D.getWork s (runId running)
-       D.saveWork s (D.setWorkField "routineEffectUnknown" (obj [("decisionId",str identity),("reason",str "Doctor response-only invocation contains unexpected activity"),("evidence",trace)]) current)
+      operation<-Provider.operationFor s running "DoctorDiagnosis" "repair_diagnosis" ("Doctor:"<>runIdText (runId running)<>":"<>T.pack (show step)) rendered Nothing (items saved "operations")
+      let identity=at operation "id"
+          save value=do
+           saveDoctorOperation s pin identity value
+           when (any Effects.positiveAnomaly (Provider.operationEvidence value)) $ locked s $ do
+            (current,_)<-D.getWork s (runId running)
+            D.saveWork s (D.setWorkField "routineEffectUnknown" (obj [("decisionId",str identity),("reason",str "Doctor provider trace contains unexpected activity"),("evidence",get value "evidence")]) current)
+      updateRepair s pin (\current->put "phase" (str "saved_data_diagnosis") (put "operations" (arr (if any ((==identity) . (`at` "id")) (items current "operations") then items current "operations" else items current "operations"++[operation])) current))
+      (_,response,())<-Provider.validatedResponse s running operation save $ \response->if has response "action" then do
+       void (parseValue 422 (onlyFields ["action"]) response)
+       void (decodeValue 422 (get response "action") :: IO DoctorAction)
+       else do
+        verdict<-field 422 response "verdict" :: IO RepairVerdict
+        void (parseValue 422 (textFieldP "diagnosis" 4000) response)
+        void (parseValue 422 (textFieldP "recommendation" 8000) response)
+        when (verdict==ImplementationDefect) (void (parseValue 422 (textFieldP "hypothesis" 8000) response))
+      (_,after)<-DB.connection s (\db->loadRepairOn db pin)
+      let trace=maybe Null (`get` "evidence") (find ((==identity) . (`at` "id")) (items after "operations"))
       require (Effects.completeActionFree trace) 409 "Doctor response lacks complete action-free terminal evidence; no automatic replay is authorized"
       locked s (requireDoctorCurrent s running pin)
-      let response=parseJSONText raw
-      save (obj [("status",str "completed"),("response",response)])
+      saveDoctorOperation s pin identity (obj [("response",response)])
       if has response "action" then do
        _<-parseValue 422 (onlyFields ["action"]) response
        observation<-performDoctorAction s running pin (get response "action")
-       loop (observations++[observation])
+       locked s $ do
+        (current,_)<-D.getWork s (runId running)
+        D.saveWork s (D.setWorkField "diagnosisObservations" (arr (observations++[observation])) (D.setWorkField "diagnosisCursor" (num (step+1)) current))
+       loop (step+1) (observations++[observation])
       else do
        verdict<-field 422 response "verdict" :: IO RepairVerdict
        diagnosis<-textField response "diagnosis" 4000
@@ -696,7 +769,10 @@ runDiagnosis s running _ = do
        pure (diagnosis,[])
  (_,initial)<-DB.connection s (\db->loadRepairOn db pin)
  let retained=[put "tool" (get op "tool") (get op "result") | op<-items initial "operations",at op "purpose"=="repair_tool",at op "status"=="completed"]
- loop retained `catch` (\(problem::SomeException)->do
+ loop (int (D.workField work "diagnosisCursor")) (if has (toJSON work) "diagnosisObservations" then D.workItems work "diagnosisObservations" else retained) `catch` (\(problem::SomeException)->do
+  case fromException problem :: Maybe Provider.RetryDeferred of
+   Just _->throwIO problem
+   Nothing->pure ()
   updateRepair s pin (\current->if repairTerminal current then current else stopRepair "interrupted" (D.exceptionText problem) current)
   throwIO problem)
 
@@ -720,7 +796,7 @@ recoverRepairs s = do
    Code.reconcile (get op "runtime")
    updateRepairUnlocked s pin (\current->put "operations" (arr [if get entry "id"==get op "id" then put "runtime" (put "status" (str "removed") (get entry "runtime")) entry else entry | entry<-items current "operations"]) current)
   let unfinished=[op | op<-items saved "operations",at op "status" `elem` ["running","reserved","admitted"]]
-  when (any (Effects.positiveAnomaly . (`get` "evidence")) (items saved "operations")) $ do
+  when (any Effects.positiveAnomaly (concatMap Provider.operationEvidence (items saved "operations"))) $ do
    found<-D.findWork s (RunId (at saved "diagnosisRun"))
    forM_ found $ \(work,_)->when (D.workField work "routineEffectUnknown"==Null) (D.saveWork s (D.setWorkField "routineEffectUnknown" (obj [("reason",str "Doctor provider trace contains unexpected or incomplete activity")]) work))
   forM_ [op | op<-unfinished,boolean (get op "liveEffect")] $ \op->do
@@ -867,5 +943,5 @@ repairProjection definition works = case find ((==get raw "repairCase") . (`get`
        | work<-owned,op<-items (D.workField work "preparation") "operations"++items (D.workField work "codeExecution") "operations"]
       measured=sum [int (get reservation "usedMilliseconds") | reservation<-items saved "reservations",at reservation "status"=="settled"]
       reserved=sum [int (get reservation "milliseconds") | reservation<-items saved "reservations",at reservation "status" `elem` ["reserved","uncertain"]]
-  in mergeFields [("usage",arr (nubBy (\left right->get left "id"==get right "id") entries)),("measuredMilliseconds",num measured),("reservedMilliseconds",num reserved)] saved
+  in mergeFields [("providerWait",providerWaitProjection entries),("usage",arr (concatMap Provider.operationUsage (nubBy (\left right->get left "id"==get right "id") entries))),("measuredMilliseconds",num measured),("reservedMilliseconds",num reserved)] saved
  where raw=toJSON definition

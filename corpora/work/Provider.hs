@@ -25,6 +25,7 @@ import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import Data.Time.Clock (getCurrentTime,addUTCTime,diffUTCTime)
 import Data.Time.Clock.POSIX
 import GHC.Clock (getMonotonicTimeNSec)
 import System.Directory
@@ -42,6 +43,7 @@ import System.Posix.Signals
 import Types
 import Population (executionSettings)
 import qualified Computer as Computer
+import qualified Effects
 
 data ProviderEvent
  = SessionStarted Text | ToolStarted Text Text | ToolCompleted Text Text
@@ -65,6 +67,156 @@ instance FromJSON ProviderEvent where
    if kind `elem` ["command_execution","mcp_tool_call","web_search","file_change"] then
     pure ((if started then ToolStarted else ToolCompleted) identity label)
    else if not started && kind=="agent_message" then AgentMessage <$> item .: "text" else pure OtherEvent
+
+-- Adapter-owned outcome facts; host owners decide retry and resource policy.
+data FailureClass = Temporary503 | PermanentProviderFailure | UnknownProviderOutcome deriving (Eq,Show)
+data ProviderFailure = ProviderFailure FailureClass EvidenceSnapshot
+instance Show ProviderFailure where
+ show (ProviderFailure Temporary503 _)="Provider temporarily unavailable (503); usage may be unknown"
+ show (ProviderFailure PermanentProviderFailure _)="Provider authentication or configuration refused"
+ show (ProviderFailure UnknownProviderOutcome _)="Provider outcome unknown; no automatic retry"
+instance Exception ProviderFailure
+data RetryDeferred = RetryDeferred Text Text deriving (Show)
+instance Exception RetryDeferred
+
+failureClass :: Text -> FailureClass
+failureClass message
+ | "unexpected status 503 Service Unavailable:" `T.isPrefixOf` message = Temporary503
+ | any (`T.isPrefixOf` message) ["unexpected status 401 Unauthorized:","unexpected status 403 Forbidden:","unexpected status 400 Bad Request:"] = PermanentProviderFailure
+ | otherwise = UnknownProviderOutcome
+
+operationFor :: Service -> Run -> Text -> Text -> Text -> Text -> Maybe ModelSettings -> [Value] -> IO Value
+operationFor s running node purpose stage request settings operations = case findOperation of
+ Just saved->do
+  require (at saved "policy"=="response_only" && at saved "node"==node && (node=="DoctorDiagnosis" || at saved "promptHash"==sourceHash request) && maybe True ((==get saved "modelSettings") . toJSON) settings) 409 "Saved provider operation policy changed"
+  pure saved
+ Nothing->do
+  identity<-newId
+  time<-getCurrentTime
+  clock<-getMonotonicTimeNSec
+  selected<-maybe (resolveModelSettings s running) pure settings
+  let remaining=if runDeadline running>clock then runDeadline running-clock else 0
+  pure (obj [("id",str identity),("node",str node),("purpose",str purpose),("stageKey",str stage),("status",str "ready"),("request",str request),("promptHash",str (sourceHash request)),("modelSettings",toJSON selected),("pinnedSettings",Bool (isJust settings)),("policy",str "response_only"),("deadline",str (timestamp (addUTCTime (fromIntegral remaining/1000000000) time))),("attempts",arr [])])
+ where findOperation=listToMaybe (reverse [op | op<-operations,at op "stageKey"==stage])
+
+-- Host-side maintenance coordination uses the existing owner receipts. The
+-- concrete adapter below reports failure facts; this helper proposes bounded
+-- waits but owns neither the queue nor the case/preparation allowance.
+invokeRetained :: Service -> Run -> Value -> (Value -> IO ()) -> IO Text
+invokeRetained s running saved save = do
+ let status=at saved "status"
+ require (at saved "promptHash"==sourceHash (at saved "request")) 409 "Saved provider request changed"
+ if status=="completed" then pure (at saved "rawResponse") else do
+  require (status `elem` ["ready","retry_wait"]) 409 "Provider operation is terminal or its prior admission is unknown"
+  time<-getCurrentTime
+  deadline<-maybe (failure 409 "Saved provider deadline is invalid") pure (parseTime (at saved "deadline"))
+  require (time<deadline) 409 "Original provider operation deadline expired"
+  forM_ (parseTime (at saved "retryAt")) $ \due->when (time<due) (throwIO (RetryDeferred (at saved "id") (at saved "retryAt")))
+  require (length (items saved "attempts")<3) 409 "Provider host-attempt limit exhausted"
+  let number=length (items saved "attempts")+1
+      attempt=obj [("number",num number),("status",str "reserved"),("started",str (timestamp time)),("usageUnknown",Bool True)]
+      initial=mergeFields [("status",str "running"),("attempts",arr (items saved "attempts"++[attempt]))] saved
+  current<-newIORef initial
+  let update fields=do
+       modifyIORef' current (`merge` fields)
+       readIORef current >>= save
+      observe evidence=do
+       value<-readIORef current
+       let snapshots=items value "attempts"
+           changed=[if get entry "number"==num number then put "evidence" (toJSON evidence) entry else entry | entry<-snapshots]
+       update (obj [("evidence",toJSON evidence),("attempts",arr changed)])
+  save initial
+  clock<-getMonotonicTimeNSec
+  let untilDeadline=clock+floor (realToFrac (diffUTCTime deadline time)*1000000000::Double)
+      capped=running {runDeadline=min (runDeadline running) untilDeadline}
+  settings<-decodeValue 409 (get saved "modelSettings")
+  outcome<-try (invokeWithSettingsFor True s capped EvidenceAnalysisResponseOnly settings (boolean (get saved "pinnedSettings")) (at saved "request") observe) :: IO (Either SomeException Text)
+  finished<-getCurrentTime
+  value<-readIORef current
+  let evidence=get value "evidence"
+      attempts result=[if get entry "number"==num number then mergeFields [("status",str result),("finished",str (timestamp finished)),("usageUnknown",Bool (get (get evidence "usage") "inputTokens"==Null || get (get evidence "usage") "outputTokens"==Null))] entry else entry | entry<-items value "attempts"]
+  case outcome of
+   Right _ | finished>=deadline->update (obj [("status",str "expired"),("reason",str "Original provider operation deadline expired"),("attempts",arr (attempts "completed"))]) >> failure 409 "Original provider operation deadline expired"
+   Right _ | not (Effects.completeActionFree evidence)->update (obj [("status",str "unknown"),("reason",str "Provider response lacks complete action-free evidence"),("attempts",arr (attempts "unknown"))]) >> failure 409 "Provider response lacks complete action-free evidence"
+   Right raw->update (obj [("status",str "completed"),("rawResponse",str raw),("attempts",arr (attempts "completed"))]) >> pure raw
+   Left problem | isJust (fromException problem :: Maybe SomeAsyncException) || isJust (fromException problem :: Maybe AsyncCancelled)->do
+    update (obj [("status",str "interrupted"),("reason",str "Provider process interrupted; admission and spend may be unknown"),("attempts",arr (attempts "interrupted"))])
+    throwIO problem
+   Left problem->do
+    stopped<-readIORef (runCancel running)
+    let classified=case fromException problem of Just (ProviderFailure kind _)->kind; Nothing->UnknownProviderOutcome
+        eligible=classified==Temporary503 && not stopped
+        delay=if number==1 then 1 else 2
+        due=addUTCTime delay finished
+        waiting=eligible && number<3 && due<deadline
+        terminal=if stopped then "cancelled" else if eligible && number>=3 then "exhausted" else if eligible && due>=deadline then "expired" else if classified==PermanentProviderFailure then "permanent" else "unknown"
+        reason=if eligible then "The provider rejected this request with 503; model spend may be unknown" else if classified==PermanentProviderFailure then "Provider authentication or configuration was refused; no code repair is authorized" else "Provider outcome is unknown; automatic retry is unavailable"
+    update (obj [("status",str (if waiting then "retry_wait" else terminal)),("reason",str reason),("retryAt",if waiting then str (timestamp due) else Null),("attempts",arr (attempts "failed")),("error",str reason)])
+    if waiting then throwIO (RetryDeferred (at saved "id") (timestamp due)) else throwIO problem
+
+-- Only an explicit response validator may request this single shape correction.
+-- Semantic fields already present in the original response remain immutable.
+validatedResponse :: Service -> Run -> Value -> (Value -> IO ()) -> (Value -> IO a) -> IO (Text,Value,a)
+validatedResponse s running operation save validate = do
+ latest<-newIORef operation
+ let saveParent value=writeIORef latest value >> save value
+ raw<-invokeRetained s running operation saveParent
+ completed<-readIORef latest
+ let original=parseJSONText raw
+ checked<-try (validate original)
+ case checked of
+  Right value->pure (at operation "id",original,value)
+  Left (APIError code reason) | code==422->do
+   let knownCriteria=case get original "criteria" of
+        Array values->not (V.null values) && all (\criterion->at criterion "status" `elem` ["pass","fail","unknown","not_applicable"] && has criterion "id") (V.toList values)
+        _->False
+       knownVerdict=at original "verdict" `elem` ["accepted","rejected","unknown"]
+       authority=case at operation "node" of
+        "PreparationReview"->case get original "accepted" of Bool _->True; _->False
+        "PreparationRubricReview"->knownCriteria
+        "CodeAssessment"->knownVerdict && at (get original "acceptance") "status" `elem` ["Completed","Unresolved"]
+        "HybridAssessment"->knownVerdict && knownCriteria
+        "DoctorDiagnosis"->at original "verdict" `elem` ["implementation_defect","structure_revision","stop","request_access"]
+        _->case original of Object _->True; _->False
+   require authority 422 "Original semantic authority is missing; shape correction is unavailable"
+   template<-prompt s "response-correction"
+   let request=render template [("request",at operation "request"),("response",raw),("validation",reason)]
+       stage=at operation "stageKey"<>":format-correction"
+       previous=get completed "correction"
+   correction<-if previous/=Null then pure previous else operationFor s running (at operation "node"<>"Correction") "format_correction" stage request Nothing []
+   let pinned=put "deadline" (get operation "deadline") correction
+       saveCorrection value=do
+        current<-readIORef latest
+        let changed=put "correction" value current
+        writeIORef latest changed
+        save changed
+   fixedRaw<-invokeRetained s running pinned saveCorrection
+   let fixed=parseJSONText fixedRaw
+       protected key=key `elem` ["verdict","accepted","acceptance","activationAudit","criteria","evidence","result","outcome","status","action","source","fixtures","input","expected"]
+       preserves before after=case before of
+        Object fields->all (\(key,value)->if K.toText key=="reason" && value==str "" then True else if protected (K.toText key) then get after (K.toText key)==value else preserves value (get after (K.toText key))) (KM.toList fields)
+          && all (\(key,value)->not (protected (K.toText key)) || get before (K.toText key)==value) (KM.toList (case after of Object fields->fields; _->KM.empty))
+        Array values->case after of Array next->V.length values==V.length next && and (V.toList (V.zipWith preserves values next)); _->False
+        _->before==after
+   require (authority && preserves original fixed) 422 "Shape correction cannot create or change semantic authority or source facts"
+   value<-validate fixed
+   pure (at operation "id",fixed,value)
+  Left problem->throwIO problem
+
+waitProjection :: [Value] -> Value
+waitProjection operations=fromMaybe Null (listToMaybe (reverse [mergeFields [("attemptCount",num (length (items op "attempts"))),("hostAttemptLimit",num 3)] (select ["id","node","status","retryAt","deadline","reason"] op) | op<-retainedOperations operations,at op "status" `elem` ["retry_wait","exhausted","expired","permanent","unknown","cancelled"]]))
+
+retainedOperations :: [Value] -> [Value]
+retainedOperations operations=concatMap (\op->op:retainedOperations [get op "correction" | get op "correction"/=Null]) operations
+
+operationEvidence :: Value -> [Value]
+operationEvidence operation=[get entry "evidence" | entry<-retainedOperations [operation]++concatMap (`items` "attempts") (retainedOperations [operation]),get entry "evidence"/=Null]
+
+operationUsage :: Value -> [Value]
+operationUsage operation=own++concatMap operationUsage [get operation "correction" | get operation "correction"/=Null]
+ where own=case items operation "attempts" of
+        []->[operation]
+        attempts->[mergeFields [("id",str (at operation "id"<>":"<>T.pack (show (int (get attempt "number"))))),("operation",get operation "id"),("attempt",get attempt "number"),("status",get attempt "status"),("evidence",get attempt "evidence"),("usageUnknown",get attempt "usageUnknown")] operation | attempt<-attempts]
 
 modelDefaults :: IO (Text,Text)
 modelDefaults = (,) <$> (maybe "gpt-6-sol" T.pack <$> lookupEnv "SAPIENS_CODEX_MODEL") <*> (maybe "high" T.pack <$> lookupEnv "SAPIENS_CODEX_REASONING_EFFORT")
@@ -238,7 +390,10 @@ invokeResponseOnlyObservedWith :: Service -> Run -> ModelSettings -> Text -> (Ev
 invokeResponseOnlyObservedWith s run settings = invokeWithSettings s run EvidenceAnalysisResponseOnly settings True
 
 invokeWithSettings :: Service -> Run -> InvocationPolicy -> ModelSettings -> Bool -> Text -> (EvidenceSnapshot -> IO ()) -> IO Text
-invokeWithSettings s run policy settings pinned input observe = withInvocationPolicy s run policy settings pinned $ \workdir args -> do
+invokeWithSettings s run policy settings pinned input observe = invokeWithSettingsFor False s run policy settings pinned input observe
+
+invokeWithSettingsFor :: Bool -> Service -> Run -> InvocationPolicy -> ModelSettings -> Bool -> Text -> (EvidenceSnapshot -> IO ()) -> IO Text
+invokeWithSettingsFor maintenance s run policy settings pinned input observe = withInvocationPolicy s run policy settings pinned $ \workdir args -> do
  cancelled <- readIORef (runCancel run)
  require (not cancelled) 409 "Stopped by Admin"
  before <- getMonotonicTimeNSec
@@ -271,6 +426,7 @@ invokeWithSettings s run policy settings pinned input observe = withInvocationPo
   tools <- newIORef M.empty
   final <- newIORef Nothing
   timedOut <- newIORef False
+  terminalFailure <- newIORef Nothing
   let secrets=[T.pack value | (key,value)<-environment,sensitiveKey (T.pack key),length value>=4]
       consume bytes payload = do
        received <- now
@@ -288,8 +444,9 @@ invokeWithSettings s run policy settings pinned input observe = withInvocationPo
            ToolStarted key label -> modifyIORef' tools (\current -> if T.length key<=256 && M.size current<256 then M.insert key label current else current)
            ToolCompleted key label -> modifyIORef' tools (M.delete key) >> modifyIORef' (runActivity run) (put "last_action" (str label))
            AgentMessage message -> writeIORef final (Just message)
+           ProviderFailed value | maintenance -> writeIORef terminalFailure (Just (failureClass (at (get value "error") "message")))
            ProviderFailed _ -> failure 500 "Codex turn failed; provider details omitted"
-           OtherEvent -> when (at rawEvent "type"=="error") (failure 500 "Codex reported an error; provider details omitted")
+           OtherEvent -> when (not maintenance && at rawEvent "type"=="error") (failure 500 "Codex reported an error; provider details omitted")
           current <- readIORef tools
           updated <- realToFrac . (*1000) <$> getPOSIXTime :: IO Double
           modifyIORef' (runActivity run) (mergeFields [("updated",toJSON updated),("phase",str (if M.null current then "Waiting for model" else "Running tool")),("tool",str (fromMaybe "" (listToMaybe (M.elems current))))])
@@ -313,6 +470,13 @@ invokeWithSettings s run policy settings pinned input observe = withInvocationPo
      expired <- readIORef timedOut
      require (not stop) 409 "Stopped by Admin; review external effects before retrying"
      require (not expired) 504 "Codex exceeded 1800s; its process tree was stopped."
+     terminal <- readIORef terminalFailure
+     forM_ terminal $ \kind -> do
+      snapshot<-captureSnapshot <$> readIORef capture
+      let closed=snapshot {evidenceFinished=True,evidenceExit=Just (case exit of ExitSuccess->0; ExitFailure n->n),evidenceStreamEnd=True}
+          noExecution=not (any (\receipt->receiptSummary receipt/=Nothing) (evidenceReceipts closed)) && not (evidenceFinal closed) && evidencePending closed==Just 0 && evidenceMalformed closed==0 && evidenceUnknown closed==0 && evidenceDropped closed==0 && evidenceOutOfOrder closed==0
+          verified=case evidencePolicy closed of ResponseOnlyEvidence "codex-cli 0.162.1"->True; _->False
+      throwIO (ProviderFailure (if verified && noExecution then kind else UnknownProviderOutcome) closed)
      require (exit == ExitSuccess) 500 "codex exec failed; provider stdout and stderr omitted"
      oversized <- captureOversized <$> readIORef capture
      require (not oversized) 500 "Provider event exceeded the 2 MiB transport limit; result is unresolved"

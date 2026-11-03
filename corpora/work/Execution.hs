@@ -129,6 +129,7 @@ turnCommand s a identity rawAction external = do
      if isJust command then saveStateCommitted s a (update (withTurnFields (put "cancel_requested" (Bool True))) state) command (writeIORef (runCancel run) True)
       else writeIORef (runCancel run) True
     Nothing -> saveStateCommand s a (update (\t -> t { turnStatus = Cancelled }) state) command
+ when (action==Cancel) (Automation.cancelProviderWait s (RunId identity))
  DB.project s a
  trimConversation s a
  D.reconcileWorks s
@@ -141,6 +142,7 @@ recover s a = do
   (withTurnFields (put "error" (str "Runner stopped before saving a reply; inspect effects before retrying")) t) { turnStatus = Interrupted } else t
  DB.project s a
 finish :: Service -> Run -> Turn -> Either SomeException (Text,[Value]) -> IO ()
+finish s run turn outcome | Left problem<-outcome, Just (RetryDeferred operation due)<-fromException problem = Automation.deferProvider s run operation due `catch` (\(problem::APIError)->finish s run turn (Left (toException problem)))
 finish s run turn outcome = do
  fenced <- not <$> D.callAllowed s turn
  stop <- (||fenced) <$> readIORef (runCancel run)
@@ -521,23 +523,50 @@ invokeCodeModel s running node purpose templateName context explanation = do
   Just selected->explanationTemplates s selected
   Nothing->(,) <$> prompt s templateName <*> prompt s "preparation-envelope"
  let rendered=render envelope [("node",node),("instruction",instruction),("context",jsonText (put "selfId" (toJSON (runOwner running)) context))]
- invocation<-if has context "fallbackOperation" then pure (at context "fallbackOperation") else newId
- started<-now
- let operation=obj ([("id",str invocation),("node",str node),("purpose",str purpose),("status",str "running"),("started",str started),("promptHash",str (sourceHash rendered))]++concat [[("stage",str "explain"),("modelSettings",toJSON (explanationModel selected)),("input",context),("inputHash",str (canonicalHash context)),("reference",get context "reference"),("structureHash",get context "structureHash"),("implementationHash",get context "implementationHash")] | selected<-maybeToList explanation])
-     save fields=codeUpdate s running (\code->put "operations" (arr [if at op "id"==invocation then merge op fields else op | op<-items code "operations"]) code)
-     phaseFields=if has context "fallbackOperation" then [("status",str "fallback")] else if isJust explanation then [("status",str "explanation")] else [("status",str "assessment"),("verification",obj [("id",str invocation)])]
- codeUpdate s running (mergeFields phaseFields . appendItems "operations" [operation])
- raw<-(maybe (invokeAnalysisObserved s running) (invokeResponseOnlyObservedWith s running . explanationModel) explanation) rendered (\evidence->locked s $ do
-  (work,_)<-D.getWork s (runId running)
-  let code=D.workField work "codeExecution"
-      updated=D.setWorkField "codeExecution" (put "operations" (arr [if at op "id"==invocation then put "evidence" (toJSON evidence) op else op | op<-items code "operations"]) code) work
-  observed<-decodeValue 500 (Effects.observeEvidence invocation evidence (toJSON updated))
-  D.saveWork s observed)
-  `catch` (\(exception::SomeException)->save (obj [("status",str "failed"),("error",str (D.exceptionText exception))]) >> throwIO exception)
- codeGuard s running
- let response=parseJSONText raw
- save (obj [("status",str (if isJust explanation then "validating" else "completed")),("response",response)])
- pure (invocation,response)
+ (ownerWork,_)<-D.getWork s (runId running)
+ if has (toJSON ownerWork) "savedAudit" then do
+  let stage=node<>":"<>canonicalHash context
+  operation<-Provider.operationFor s running node purpose stage rendered Nothing (items (D.workField ownerWork "codeExecution") "operations")
+  let identity=at operation "id"
+      save value=locked s $ do
+       (current,_)<-D.getWork s (runId running)
+       let code=D.workField current "codeExecution"
+           updated=D.setWorkField "codeExecution" (put "operations" (arr (filter ((/=identity) . (`at` "id")) (items code "operations")++[value])) code) current
+           observed=if any Effects.positiveAnomaly (Provider.operationEvidence value) && D.workField updated "routineEffectUnknown"==Null then D.setWorkField "routineEffectUnknown" (obj [("decisionId",str identity),("reason",str "Saved audit provider trace contains unexpected activity")]) updated else updated
+       D.saveWork s observed
+  codeUpdate s running (put "verification" (obj [("id",str identity)]) . put "status" (str "assessment"))
+  (_,response,())<-Provider.validatedResponse s running operation save $ \response->do
+   void (field 422 response "verdict" :: IO SemanticVerdict)
+   void (parseValue 422 (textFieldP "reason" 8000) response)
+   void (field 422 response "evidence" :: IO [Text])
+   if node=="HybridAssessment" then do
+    spec<-field 422 context "contract"
+    void (D.criterionAssessments spec (get response "criteria"))
+    else require (case get response "acceptance" of Object _->True; _->False) 422 "Assessment acceptance must be an outcome object"
+   when (get context "initialTrial"==Bool True) $ do
+    void (field 422 (get response "activationAudit") "accepted" :: IO Bool)
+    void (parseValue 422 (textFieldP "reason" 8000) (get response "activationAudit"))
+  codeGuard s running
+  codeUpdate s running (\code->put "operations" (arr [if at op "id"==identity then put "response" response op else op | op<-items code "operations"]) code)
+  pure (identity,response)
+ else do
+  invocation<-if has context "fallbackOperation" then pure (at context "fallbackOperation") else newId
+  started<-now
+  let operation=obj ([("id",str invocation),("node",str node),("purpose",str purpose),("status",str "running"),("started",str started),("promptHash",str (sourceHash rendered))]++concat [[("stage",str "explain"),("modelSettings",toJSON (explanationModel selected)),("input",context),("inputHash",str (canonicalHash context)),("reference",get context "reference"),("structureHash",get context "structureHash"),("implementationHash",get context "implementationHash")] | selected<-maybeToList explanation])
+      save fields=codeUpdate s running (\code->put "operations" (arr [if at op "id"==invocation then merge op fields else op | op<-items code "operations"]) code)
+      phaseFields=if has context "fallbackOperation" then [("status",str "fallback")] else if isJust explanation then [("status",str "explanation")] else [("status",str "assessment"),("verification",obj [("id",str invocation)])]
+  codeUpdate s running (mergeFields phaseFields . appendItems "operations" [operation])
+  raw<-(maybe (invokeAnalysisObserved s running) (invokeResponseOnlyObservedWith s running . explanationModel) explanation) rendered (\evidence->locked s $ do
+   (work,_)<-D.getWork s (runId running)
+   let code=D.workField work "codeExecution"
+       updated=D.setWorkField "codeExecution" (put "operations" (arr [if at op "id"==invocation then put "evidence" (toJSON evidence) op else op | op<-items code "operations"]) code) work
+   observed<-decodeValue 500 (Effects.observeEvidence invocation evidence (toJSON updated))
+   D.saveWork s observed)
+   `catch` (\(exception::SomeException)->save (obj [("status",str "failed"),("error",str (D.exceptionText exception))]) >> throwIO exception)
+  codeGuard s running
+  let response=parseJSONText raw
+  save (obj [("status",str (if isJust explanation then "validating" else "completed")),("response",response)])
+  pure (invocation,response)
 
 commitCodeOutcome :: Service -> Run -> Value -> CodeRole -> Text -> SemanticVerdict -> D.DecisionResponse -> D.Outcome -> Value -> IO ()
 commitCodeOutcome s running = commitCodeOutcomeFor s running Nothing
@@ -664,7 +693,8 @@ admit s a tick = do
      available=[n | n<-[1,2],n `notElem` map runSlot mine]
      scheduled=pulseFrequency tick==Bph60
      queued=[t | t<-agentTurns state,turnStatus t==Queued,boolean (turnField t "batchable"),has (turnField t "origin") "routine"==scheduled]
-     legacy=[t | t<-agentTurns state,turnStatus t==Queued,not (boolean (turnField t "batchable"))]
+     legacyCandidates=[t | t<-agentTurns state,turnStatus t==Queued,not (boolean (turnField t "batchable"))]
+ legacy<-filterM (Automation.providerDue s) legacyCandidates
  when (AgentId a `elem` owners || length owners<4) $ case (legacy,available,NE.nonEmpty queued) of
   (first:_,_,_) | null mine && not scheduled -> launch s a (first :| []) tick 0 False
   (_,slot:_,Just batch) | all ((/=0) . runSlot) mine -> launch s a (if scheduled then NE.head batch :| [] else batch) tick slot True

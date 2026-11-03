@@ -166,7 +166,8 @@ routineRisk startup work
   Success RepairPreparationResponseOnly->has work "preparation" && not (has work "codeExecution")
   Success SavedAuditResponseOnly->has work "savedAudit" && not (has work "preparation")
   Error _->False
- noAnomalies=not (any (positiveAnomaly . (`get` "evidence")) (items work "decisions"++items (get work "preparation") "operations"++items (get work "codeExecution") "operations"))
+ noAnomalies=not (any (positiveAnomaly . (`get` "evidence")) (concatMap nested (items work "decisions"++items (get work "preparation") "operations"++items (get work "codeExecution") "operations")))
+ nested entry=entry:items entry "attempts"++concatMap nested [get entry "correction" | get entry "correction"/=Null]
  entries=items work "decisions"
  failedState call=at call "state" `elem` ["Failed","Interrupted","Unresolved","Cancelled"] || startup && at call "state"=="Running"
  failedWork=any failedState (items work "calls")

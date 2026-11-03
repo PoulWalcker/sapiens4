@@ -4,7 +4,7 @@ module Composer (repairOn, requestOn, stopOn, detail, projection, run, recover )
 
 import Control.Exception
 import Control.Monad
-import Data.Aeson
+import Data.Aeson hiding (pairs)
 import Data.Aeson.Types (Parser,parseEither)
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
@@ -134,24 +134,35 @@ askConfigured s running node purpose context explanation = do
   Just selected->Provider.explanationTemplates s selected
   Nothing->(,) <$> prompt s (case node of "PreparationFixtures"->"preparation-fixtures"; "PreparationGeneration"->"preparation-generation"; "PreparationRubricReview"->"hybrid-rubric-review"; _->"preparation-review") <*> prompt s "preparation-envelope"
  let rendered=render envelope [("node",node),("instruction",template),("context",jsonText (put "selfId" (toJSON (runOwner running)) context))]
- identity<-newId
- started<-now
  owning<-load s (runIdText (runId running))
  let recordedPurpose=if has (toJSON owning) "repairPin" then "repair_"<>purpose else purpose
-     operation=obj (concat [[("modelSettings",toJSON selected),("input",context),("inputHash",str (canonicalHash context)),("reference",get context "reference"),("implementationHash",get context "implementationHash")] | selected<-maybeToList settings]++[("id",str identity),("purpose",str recordedPurpose),("status",str "running"),("started",str started),("promptHash",str (sourceHash rendered))])
-     save fields=update s (runIdText (runId running)) (\p->put "operations" (arr [if at op "id"==identity then merge op fields else op | op<-items p "operations"]) p)
- update s (runIdText (runId running)) (appendItems "operations" [operation])
- (do
-  raw<-(maybe (Provider.invokeAnalysisObserved s running) (Provider.invokeResponseOnlyObservedWith s running) settings) rendered (\evidence->save (obj [("evidence",toJSON evidence)]))
-  let result=parseJSONText raw
+     stage=node<>":"<>canonicalHash context
+ operation<-Provider.operationFor s running node recordedPurpose stage rendered settings (items (D.workField owning "preparation") "operations")
+ let identity=at operation "id"
+     saveOperation value=locked s $ do
+      current<-load s (runIdText (runId running))
+      let prepared=D.workField current "preparation"
+          updated=D.setWorkField "preparation" (put "operations" (arr (filter ((/=identity) . (`at` "id")) (items prepared "operations")++[value])) prepared) current
+          observed=if any Effects.positiveAnomaly (Provider.operationEvidence value) && D.workField updated "routineEffectUnknown"==Null then D.setWorkField "routineEffectUnknown" (obj [("decisionId",str identity),("reason",str "Preparation provider trace contains unexpected activity")]) updated else updated
+      D.saveWork s observed
+ saveOperation operation
+ (_,result,())<-Provider.validatedResponse s running operation saveOperation $ \result->do
   require (case result of Object _->True; _->False) 422 "Preparation model response must be a JSON object"
-  save (obj [("status",str (if isJust explanation then "validating" else "completed")),("response",result)])
-  checkGate s running
-  pure (identity,result)) `catch` (\(exception::SomeException)->do
-   cancelled<-readIORef (runCancel running)
-   permitted<-DB.occurrenceAllowed s (obj [("preparation",toJSON (runId running))])
-   save (obj [("status",str (if cancelled || not permitted then "interrupted" else "failed")),("error",str (D.exceptionText exception))])
-   throwIO exception)
+  case node of
+   "PreparationFixtures"->void (field 422 result "fixtures" :: IO [Fixture])
+   "PreparationGeneration"->void (decodeValue 422 result :: IO Candidate)
+   "PreparationReview"->do
+    void (field 422 result "accepted" :: IO Bool)
+    void (parseValue 422 (textFieldP "reason" 8000) result)
+   "PreparationRubricReview"->do
+    current<-load s (runIdText (runId running))
+    spec<-decodeValue 422 (get (D.workField current "preparation") "contract")
+    void (D.criterionAssessments spec (get result "criteria"))
+   "PreparationExplanation"->void (either (failure 422 . T.pack) pure (parseEither narrativeText result))
+   _->pure ()
+ update s (runIdText (runId running)) (\p->put "operations" (arr [if at op "id"==identity then mergeFields [("response",result)] op else op | op<-items p "operations"]) p)
+ checkGate s running
+ pure (identity,result)
 
 run :: Service -> Run -> Turn -> IO (Text,[Value])
 run s running _ = do
@@ -159,6 +170,9 @@ run s running _ = do
  outcome<-try (prepare s running) :: IO (Either SomeException ())
  case outcome of
   Right () -> pure ("Candidate awaits an authorized occurrence",[])
+  Left exception | Just (_::Provider.RetryDeferred)<-fromException exception -> do
+   update s identity (put "status" (str "waiting_provider"))
+   throwIO exception
   Left exception -> do
    cancelled<-readIORef (runCancel running)
    permitted<-DB.occurrenceAllowed s (obj [("preparation",str identity)])
@@ -189,10 +203,10 @@ prepare s running = do
  let identity=runIdText (runId running)
  work<-load s identity
  let saved=D.workField work "preparation"
- require (at saved "status"=="queued") 409 "Preparation already started; request a new explicit attempt"
+ require (at saved "status" `elem` ["queued","waiting_provider"]) 409 "Preparation already started; request a new explicit attempt"
  spec<-decodeValue 422 (get saved "contract")
  phase s running Fixtures
- oracle<-ask s running "PreparationFixtures" "fixture_design" (put "criteria" (D.criterionContext spec) (select ["contract","sourceEvidence","parameters","feedProfile","sourceInput","repairContext"] saved))
+ oracle<-if has saved "fixtures" then pure (obj [("fixtures",get saved "sourceCases"),("contentInterface",get saved "contentInterface"),("rubric",get saved "rubric")]) else ask s running "PreparationFixtures" "fixture_design" (put "criteria" (D.criterionContext spec) (select ["contract","sourceEvidence","parameters","feedProfile","sourceInput","repairContext"] saved))
  rawFixtures<-field 422 oracle "fixtures" :: IO [Fixture]
  feedMode<-if get saved "feedProfile"==Null then pure Nothing else Just <$> field 422 oracle "contentInterface"
  typedFixtures<-forM rawFixtures $ \(Fixture input expected)->case feedMode of
@@ -205,16 +219,18 @@ prepare s running = do
  let fixtures=map toJSON typedFixtures
      observedInputs=get (get (get saved "sourceEvidence") "source") "inputs"
      observedJSON=if get saved "sourceInput"/=Null then get (get saved "sourceInput") "input" else case observedInputs of String input->parseJSONText input; _->observedInputs
+ when (has saved "fixtures") (require (get saved "fixtures"==arr fixtures) 409 "Retained fixture design changed")
  require (not (null fixtures) && any (\fixture->get fixture "input"/=observedJSON) fixtures) 422 "Preparation requires independent examples on new inputs"
- when (has oracle "rubric") (void (D.candidateRubric spec (get oracle "rubric")))
+ when (get oracle "rubric"/=Null) (void (D.candidateRubric spec (get oracle "rubric")))
  when (feedMode==Just HybridText) (void (D.candidateRubric spec (get oracle "rubric")))
  update s identity (mergeFields [("fixtures",arr fixtures),("sourceCases",toJSON rawFixtures),("contentInterface",maybe Null toJSON feedMode),("rubric",get oracle "rubric")])
  profile<-environment s running
  phase s running Generation
- candidate<-ask s running "PreparationGeneration" "candidate_generation" (mergeFields [("availableProfiles",arr [Code.profileJSON profile]),("interface",str "json-stdin-result-v1"),("contentInterface",maybe Null toJSON feedMode)] (select ["contract","sourceEvidence","parameters","feedProfile","sourceInput","repairContext"] saved))
- Candidate source<-decodeValue 422 candidate
- forM_ feedMode $ \content->require ((content==HybridText)==has candidate "explanation") 422 "Generated implementation differs from the frozen feed content interface"
- hybridFields<-if not (has candidate "explanation") then pure [] else do
+ candidate<-if has saved "version" then pure (mergeFields [("profile",get (get (get saved "version") "runtime") "profile"),("explanation",select ["instruction"] (get (get saved "version") "explanation"))] (select ["source","language","interface","dependencies","capabilities"] (get saved "version"))) else ask s running "PreparationGeneration" "candidate_generation" (mergeFields [("availableProfiles",arr [Code.profileJSON profile]),("interface",str "json-stdin-result-v1"),("contentInterface",maybe Null toJSON feedMode)] (select ["contract","sourceEvidence","parameters","feedProfile","sourceInput","repairContext"] saved))
+ let selectedCandidate=if get (get saved "version") "explanation"==Null && has saved "version" then remove ["explanation"] candidate else candidate
+ Candidate source<-decodeValue 422 selectedCandidate
+ forM_ feedMode $ \content->require ((content==HybridText)==has selectedCandidate "explanation") 422 "Generated implementation differs from the frozen feed content interface"
+ hybridFields<-if has saved "version" then pure (pairs (selectPresent ["composition","structureHash","rubric","explanation"] (get saved "version"))) else if not (has candidate "explanation") then pure [] else do
   rubric<-D.candidateRubric spec (get oracle "rubric")
   settings<-Provider.verifiedResponseSettings s running
   template<-prompt s "hybrid-explanation"
@@ -230,6 +246,7 @@ prepare s running = do
  let content=mergeFields (feedFields++hybridFields++ [("runtime",Code.profileJSON profile),("contract",get saved "contract"),("contractGeneration",get (D.workField work "preparationPin") "contractGeneration"),("sourceHash",str (sourceHash source))]) (select ["source","language","interface","dependencies","capabilities"] candidate)
      reference=obj [("owner",toJSON (runOwner running)),("preparation",str identity),("digest",str (canonicalHash content))]
      version=put "reference" reference content
+ when (has saved "version") (require (version==get saved "version") 409 "Retained candidate identity or stage inputs changed")
  update s identity (put "version" version)
  checkedProfile<-environment s running
  require (Code.profileJSON checkedProfile==get content "runtime") 409 "Candidate runtime identity changed before verification"
@@ -238,24 +255,31 @@ prepare s running = do
   checkGate s running
   requireCleanRuntime s
   stored<-resolveVersion s running reference
-  nonce<-newId
-  let reserved=Code.reservation checkedProfile (agentIdText (runOwner running)) identity nonce
-  started<-now
-  let operation=obj [("id",str nonce),("purpose",str "fixture_check"),("status",str "running"),("started",str started),("inputHash",str (canonicalHash (get fixture "input"))),("sourceHash",get stored "sourceHash"),("version",reference),("durationMs",Null)]
-      saveOperation fields=update s identity (\p->put "operations" (arr [if at op "id"==nonce then merge op fields else op | op<-items p "operations"]) p)
-  update s identity (put "container" reserved . appendItems "operations" [operation])
-  result<-(Code.runFixture checkedProfile running reserved (at stored "source") (get fixture "input") (\receipt->do
-    when (at receipt "status"/="removed") $ checkGate s running >> requireCleanRuntime s >> void (resolveVersion s running reference)
-    update s identity (put "container" receipt))) `catch` (\(exception::SomeException)->do
-     cancelled<-readIORef (runCancel running)
-     permitted<-DB.occurrenceAllowed s (obj [("preparation",str identity)])
-     saveOperation (obj [("status",str (if cancelled || not permitted then "interrupted" else "failed")),("error",str (D.exceptionText exception))])
-     throwIO exception)
-  let actual=parseJSONText (at result "output")
-      matched=at result "status"=="exited" && get result "exitCode"==num 0 && not (boolean (get result "wasRunning")) && actual==get fixture "expected"
-      receipt=mergeFields [("inputHash",str (canonicalHash (get fixture "input"))),("sourceHash",get stored "sourceHash"),("version",reference),("actual",actual),("expected",get fixture "expected"),("matched",Bool matched)] result
-  update s identity (\p->put "operations" (arr [if at op "id"==nonce then merge op (put "status" (str (if matched then "completed" else if at result "status"=="stopped" then "interrupted" else "failed")) receipt) else op | op<-items p "operations"]) (appendItems "checks" [receipt] p))
-  require matched 422 "Candidate failed independent fixture comparison"
+  currentFixture<-load s identity
+  let retained=find (\check->get check "inputHash"==str (canonicalHash (get fixture "input")) && get check "version"==reference && get check "sourceHash"==get stored "sourceHash" && get check "expected"==get fixture "expected" && get check "actual"==get fixture "expected" && at check "status"=="exited" && get check "exitCode"==num 0 && not (boolean (get check "wasRunning")) && get check "matched"==Bool True) (items (D.workField currentFixture "preparation") "checks")
+  require (isJust retained || not (any ((==str (canonicalHash (get fixture "input"))) . (`get` "inputHash")) (items (D.workField currentFixture "preparation") "checks"))) 409 "Retained fixture receipt no longer matches the exact expected and actual result"
+  (actual,receipt)<-case retained of
+   Just receipt->pure (get receipt "actual",receipt)
+   Nothing->do
+    nonce<-newId
+    let reserved=Code.reservation checkedProfile (agentIdText (runOwner running)) identity nonce
+    started<-now
+    let operation=obj [("id",str nonce),("purpose",str "fixture_check"),("status",str "running"),("started",str started),("inputHash",str (canonicalHash (get fixture "input"))),("sourceHash",get stored "sourceHash"),("version",reference),("durationMs",Null)]
+        saveOperation fields=update s identity (\p->put "operations" (arr [if at op "id"==nonce then merge op fields else op | op<-items p "operations"]) p)
+    update s identity (put "container" reserved . appendItems "operations" [operation])
+    result<-(Code.runFixture checkedProfile running reserved (at stored "source") (get fixture "input") (\receipt->do
+      when (at receipt "status"/="removed") $ checkGate s running >> requireCleanRuntime s >> void (resolveVersion s running reference)
+      update s identity (put "container" receipt))) `catch` (\(exception::SomeException)->do
+       cancelled<-readIORef (runCancel running)
+       permitted<-DB.occurrenceAllowed s (obj [("preparation",str identity)])
+       saveOperation (obj [("status",str (if cancelled || not permitted then "interrupted" else "failed")),("error",str (D.exceptionText exception))])
+       throwIO exception)
+    let actual=parseJSONText (at result "output")
+        matched=at result "status"=="exited" && get result "exitCode"==num 0 && not (boolean (get result "wasRunning")) && actual==get fixture "expected"
+        receipt=mergeFields [("inputHash",str (canonicalHash (get fixture "input"))),("sourceHash",get stored "sourceHash"),("version",reference),("actual",actual),("expected",get fixture "expected"),("matched",Bool matched)] result
+    update s identity (\p->put "operations" (arr [if at op "id"==nonce then merge op (put "status" (str (if matched then "completed" else if at result "status"=="stopped" then "interrupted" else "failed")) receipt) else op | op<-items p "operations"]) (appendItems "checks" [receipt] p))
+    require matched 422 "Candidate failed independent fixture comparison"
+    pure (actual,receipt)
   explanation<-either (failure 422 . T.pack) pure (parseEither candidateExplanation stored)
   forM_ explanation $ \selected->when (at actual "status"=="ok") $ do
    let context=obj [("instruction",str (explanationInstruction selected)),("acceptedInput",get fixture "input"),("facts",get actual "value"),("criteria",D.criterionContext spec),("reference",reference),("implementationHash",get (get stored "explanation") "implementationHash")]
@@ -291,6 +315,10 @@ recover s = do
  works<-D.readWorks s
  forM_ works $ \work->when (has (toJSON work) "preparation") $ do
   let identity=D.workloadId work; prepared=D.workField work "preparation"; container=get prepared "container"
+  let budget=D.workField work "maintenanceBudget"
+  when (any ((=="reserved") . (`at` "status")) (items budget "reservations")) $
+   D.saveWork s (D.setWorkField "maintenanceBudget" (mergeFields [("usageUnknown",Bool True),("reservations",arr [if at receipt "status"=="reserved" then put "status" (str "uncertain") receipt else receipt | receipt<-items budget "reservations"])] budget) work)
+
   when (has container "name" && at container "status"/="removed") $ do
    result<-try (Code.reconcile container) :: IO (Either APIError ())
    update s identity (\p->case result of
@@ -314,14 +342,14 @@ detail s owner routine identity = do
 projection :: Service -> R.Definition -> [D.Workload] -> IO Value
 projection s definition works = maybe (pure Null) (fmap project . renderDetail s) (listToMaybe (reverse (filter (consumer definition) works)))
  where
- project detail_ = mergeFields [("reference",get (get detail_ "version") "reference"),("applicable",Bool (get detail_ "contractGeneration"==toJSON (R.contractGeneration definition)))] (select ["id","status","analysis","owner","routine","contractGeneration","error","trial"] detail_)
+ project detail_ = mergeFields [("reference",get (get detail_ "version") "reference"),("applicable",Bool (get detail_ "contractGeneration"==toJSON (R.contractGeneration definition)))] (select ["id","status","analysis","owner","routine","contractGeneration","error","trial","providerWait","maintenanceBudget"] detail_)
 renderDetail :: Service -> D.Workload -> IO Value
 renderDetail s work = do
  allowed<-DB.occurrenceAllowed s (D.workField work "origin")
  let prepared=D.workField work "preparation"
      stopped=at (toJSON work) "executionGate"=="stopped"
      status=if at prepared "status"=="cleanup_pending" then "cleanup_pending" else if stopped then "stopped" else if not allowed then "stale" else at prepared "status"
- pure (mergeFields [("id",str (D.workloadId work)),("status",str status)] (merge (select ["owner","routine","contractGeneration"] (D.workField work "preparationPin")) prepared))
+ pure (mergeFields [("id",str (D.workloadId work)),("status",str status),("providerWait",Provider.waitProjection (items prepared "operations")),("maintenanceBudget",D.workField work "maintenanceBudget")] (merge (select ["owner","routine","contractGeneration"] (D.workField work "preparationPin")) prepared))
 
 -- Repair uses the existing candidate pipeline and immutable original contract.
 -- Its caller atomically owns the case transition and this Workload admission.
