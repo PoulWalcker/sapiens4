@@ -113,6 +113,20 @@ class Desktop
       node = find(text, role: editable)
       unless node['value'].to_s.empty?
         previous = node.fetch('value')
+        # Observe readiness before destructive input; never retry a rejected key.
+        Contract.wait(description: "focused unchanged draft #{text.inspect}") do
+          current = find(text, role: editable)
+          out, error, code = Contract.capture(self.class.driver, 'focused', timeout: 15,
+            chdir: File.dirname(self.class.driver))
+          raise "Blindly4 focused: #{out}#{error}" unless code == 0
+          focused = JSON.parse(out)
+          current['enabled'] != false && current['focused'] == true &&
+            current['pid'] == process.pid && current['value'] == previous &&
+            focused['pid'] == process.pid && editable.include?(focused['role']) &&
+            focused['value'] == previous && %w[title description].any? do |key|
+              !current[key].to_s.empty? && focused[key] == current[key]
+            end
+        end
         act_on(text, role: editable) { |current| control('key', '--key', 'command+a', '--target-path', current.fetch('path'), '--require-value', previous) }
         act_on(text, role: editable) { |current| control('key', '--key', 'backspace', '--target-path', current.fetch('path'), '--require-value', previous) }
         self.value(text, '')

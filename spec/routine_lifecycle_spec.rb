@@ -264,6 +264,10 @@ RSpec.describe 'Personal routine lifecycle', :host do
     id = create
     run = command(id, 'run', 'gate').fetch('run')
     occurrence(id, run, 'running')
+    # Provider has persisted its initial decision before the public fixture blocks.
+    Contract.wait(description: 'blocked occurrence provider admission') do
+      host.calls.any? { |call| call['node'] == 'Execution' && call['agency_run'] == run }
+    end
     original = nil
     database do |db|
       original = db.get_first_value('SELECT value FROM workloads WHERE id=?', run)
