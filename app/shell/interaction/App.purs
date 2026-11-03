@@ -203,6 +203,8 @@ handle runtime input = session input
               E.save dispatch
               E.scrollBottom
               dispatch Poll
+    RoutineReconcile _ -> Routine.handle runtime dispatch action
+    RoutineRetryReconciliation -> Routine.handle runtime dispatch action
     RoutineEvidence _ _ -> Routine.handle runtime dispatch action
     RoutineRefreshEvidence -> Routine.handle runtime dispatch action
     RoutineNavigate _ -> Routine.handle runtime dispatch action

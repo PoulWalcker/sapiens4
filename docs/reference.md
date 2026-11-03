@@ -294,6 +294,8 @@ Transport uses fixed HTTPS endpoints or exact loopback HTTP, no credentials,
 environment proxies, redirects or automatic retries. URLs cannot contain userinfo,
 query or fragment. Responses are streamed with a 64 KiB bound; run IO shares the
 original deadline and Stop, while explicit receipt lookup has a 20-second bound.
+The routine screen separates content acceptance from delivery status and offers
+an explicit receipt check for unknown delivery. Polling performs no external IO.
 
 ### Opt-in managed calls
 

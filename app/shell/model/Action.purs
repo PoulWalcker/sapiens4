@@ -23,6 +23,8 @@ data Action
   | MessageKey Event
   | Send
   | RetryDocument String
+  | RoutineReconcile Json
+  | RoutineRetryReconciliation
   | RoutineEvidence String String
   | RoutineRefreshEvidence
   | RoutineNavigate RoutinePage

@@ -17,6 +17,21 @@ import Sapiens.Model as M
 
 handle :: C.Runtime -> E.Dispatch -> Action -> E.UI Unit
 handle runtime dispatch = case _ of
+  RoutineReconcile record -> do
+    m <- H.get
+    case (M.routineView m).reconciliation of
+      Just request | request.busy -> E.notify "The receipt lookup is still in progress."
+      Just _ -> do
+        operation <- liftEffect B.uuid
+        sendReconciliation m {record,operation,busy:false,error:""}
+      Nothing -> do
+        operation <- liftEffect B.uuid
+        sendReconciliation m {record,operation,busy:false,error:""}
+  RoutineRetryReconciliation -> do
+    m <- H.get
+    case (M.routineView m).reconciliation of
+      Just request | not request.busy -> sendReconciliation m request
+      _ -> pure unit
   RoutineEvidence routine run -> do
     m <- H.get
     fetchEvidence m routine run
@@ -103,6 +118,16 @@ handle runtime dispatch = case _ of
       Right snapshot -> H.modify_ \current -> M.modifyRoutineView key (\view -> if (_.operation <$> view.scheduleRequest) == operation then view {scheduleRequest=Nothing} else view) $ M.project snapshot current
   _ -> pure unit
   where
+  sendReconciliation m request = do
+    let key = M.routineKey m
+        record = request.record
+        path = "/api/agents/" <> B.encodeURI (D.s "owner" record) <> "/routines/" <> B.encodeURI (D.s "id" record) <> "/runs/" <> B.encodeURI (D.s "run" record) <> "/reconcile-delivery"
+    H.modify_ $ M.modifyRoutineView key _ {reconciliation=Just request {busy=true,error=""}}
+    E.attempt (E.api runtime m path "POST" $ D.json {operation:request.operation}) \result -> E.inEpoch m.epoch \_ -> case result of
+      Left failure -> H.modify_ $ M.modifyRoutineView key _ {reconciliation=Just request {busy=false,error=message failure}}
+      Right _ -> do
+        H.modify_ $ M.modifyRoutineView key _ {reconciliation=Nothing}
+        dispatch Poll
   fetchEvidence m routine run = do
     let key = M.routineKey m
         request = m.sequence + 1

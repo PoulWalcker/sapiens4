@@ -168,10 +168,35 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     ,V.when (D.s "error" run /= "") $ V.p "routine-problem" $ D.s "error" run
     ,V.when (active run && D.s "message" run == "") $ V.p "routine-muted" $ if D.s "status" run == "queued" then "Waiting to start." else "Work is in progress."
     ,V.when (managed routine) $ V.div "routine-run-inputs" [V.p "routine-muted" $ if D.n "revision" (D.get "snapshot" run) > 0.0 then "Definition revision " <> show (D.int $ D.at ["snapshot","revision"] run) else "Definition revision not recorded",V.p "" $ D.str $ D.at ["snapshot","inputs"] run]
+    ,externalPanel routine run
     ,stagePanel run
     ,V.when (managed routine) $ evidencePanel routine run
     ,V.when (managed routine && not (active run)) $ V.button "routine-link" "Reject result…" $ OpenDialog M.RoutineReject $ D.put "revision" (D.at ["snapshot","revision"] run) $ D.put "run" (D.get "id" run) (record routine)
     ,V.div "routine-actions" $ reply run <> if managed routine && active run then [V.button "button" "Stop this run…" $ OpenDialog M.RoutineStop $ D.put "run" (D.get "id" run) (record routine)] else []]
+  externalPanel routine run = V.when (D.valid external) $ V.div "routine-notice" $
+    [V.textNode "h3" [] "Content and delivery"
+    ,V.p "" $ "Content · " <> if D.s "status" (D.get "contentAcceptance" external) == "accepted" then "Accepted" else if active run then "Pending" else "Unresolved"
+    ,V.p "" $ "Delivery · " <> case deliveryStatus of
+      "confirmed" -> "Confirmed"
+      "unknown" -> "Outcome unknown"
+      "started" -> "In progress"
+      "prepared" -> "Not started"
+      "not_sent" -> "Not sent"
+      "not_required" -> "Not required — no new records"
+      _ -> "Not started"
+    ,V.when (D.b "possibleEffectUnknown" external) $ V.p "routine-problem" "Possible external effect · Unresolved"
+    ,V.when (deliveryStatus == "unknown" || deliveryStatus == "started") $ V.p "routine-muted" "Stopping does not undo a delivery already started."
+    ,V.when (D.s "error" delivery /= "") $ V.p "routine-problem" $ D.s "error" delivery
+    ,V.when (D.s "lookupError" delivery /= "") $ V.p "routine-problem" $ D.s "lookupError" delivery] <>
+    case state.reconciliation of
+      Just request | D.s "run" request.record == D.s "id" run ->
+        if request.busy then [V.p "routine-muted" "Checking delivery receipt…"]
+        else [V.p "routine-problem" request.error,V.button "routine-link" "Retry receipt lookup" RoutineRetryReconciliation,V.button "routine-link" "Start new receipt lookup" $ RoutineReconcile request.record]
+      _ -> if deliveryStatus == "unknown" then [V.button "routine-link" "Check delivery receipt" $ RoutineReconcile $ D.put "run" (D.get "id" run) (record routine)] else []
+    where
+    external = D.get "externalSummary" run
+    delivery = D.get "delivery" external
+    deliveryStatus = D.s "status" delivery
   stagePanel run = V.when (not (A.null stages)) $ V.div "routine-notice" $
     [V.textNode "h3" [] "Execution steps"] <> map (\stage -> V.p "" $ (if D.s "id" stage == "calculate" then "Calculation" else "Explanation") <> " · " <> stageStatus (D.s "status" stage)) stages
     where stages = D.rows "executionStages" run
