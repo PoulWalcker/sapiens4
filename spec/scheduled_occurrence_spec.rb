@@ -122,7 +122,7 @@ RSpec.describe 'Durable interval occurrences', :host do
     expect(wait_for_run(id, 'done')['result']).to eq('Preserved old result')
   end
 
-  it 'separates timer pause, a manual request and Stop of an active occurrence', :slow do
+  it 'preserves timer pause and fences the manual request after stopping an admitted unsafe occurrence', :slow do
     id = create_routine
     command(id, 'schedule', 'schedule-routine', 1, minutes: 60)
     overdue(id)
@@ -130,16 +130,22 @@ RSpec.describe 'Durable interval occurrences', :host do
     host.start
     timer = wait_for_run(id, 'running')
     expect(timer['trigger']).to eq('interval')
+    Contract.wait(description: 'unsafe timer provider admission') { host.calls.length == 1 }
     command(id, 'pause', 'pause-active', 2)
     expect(wait_for_run(id)['status']).to eq('running')
     manual = command(id, 'run', 'manual-during-pause', 3).fetch('run')
     expect(manual).not_to eq(timer['id'])
     command(id, 'stop', 'stop-timer', 3, run: timer['id'])
     host.release
-    host.turn(manual)
+    # Stopping an admitted unsafe invocation cannot prove absence of effects.
+    failed = host.turn(manual, 'failed')
+    expect(failed.fetch('error')).to include('independent absence proof')
+    expect(host.calls.length).to eq(1)
+    evidence = host.api('GET', "/api/agents/#{chief}/routines/#{id}/runs/#{timer.fetch('id')}")
+    expect(evidence.fetch('routineEffectUnknown')).not_to be_nil
     runs = definition(id).fetch('runs').to_h { |run| [run['id'], run] }
     expect(runs[timer['id']]).to include('status' => 'stopped', 'result' => nil)
-    expect(runs[manual]).to include('status' => 'done', 'trigger' => 'manual')
+    expect(runs[manual]).to include('status' => 'failed', 'trigger' => 'manual')
     expect(definition(id)).to include('paused' => true, 'runCount' => 1)
   end
 

@@ -220,7 +220,7 @@ resolveCandidate s work call = do
 
 codeProjection :: Value -> Value
 codeProjection Null = Null
-codeProjection code = mergeFields ([("runtimeResult",runtime),("verification",codeVerification code)]++[("hybridResult",obj [("facts",get (get runtime "actual") "value"),("explanation",get (get operation "response") "text")]) | operation<-maybeToList explanation]) code
+codeProjection code = mergeFields ([("runtimeResult",runtime),("verification",codeVerification code)]++[("hybridResult",obj [("facts",get (get code "evaluatedResult" `fallback` get runtime "actual") "value"),("explanation",get code "evaluatedExplanation" `fallback` get (get operation "response") "text")]) | operation<-maybeToList explanation]) code
  where
  runtime=maybe Null (`get` "result") (listToMaybe (reverse [op | op<-items code "operations",at op "purpose"=="code_execution"]))
  explanation=find ((=="hybrid_explanation") . (`at` "purpose")) (items code "operations")

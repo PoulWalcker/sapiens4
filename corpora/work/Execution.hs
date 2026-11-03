@@ -241,6 +241,7 @@ codeUpdate s running transform = locked s $ do
 codeGuard :: Service -> Run -> IO ()
 codeGuard s running = do
  requireActive s (agentIdText (runOwner running))
+ Effects.requireRunClear s (runId running)
  cancelled<-readIORef (runCancel running)
  require (not cancelled) 409 "Code occurrence stopped"
  (work,call)<-D.getWork s (runId running)
@@ -283,8 +284,59 @@ executeCode s running = do
       []->Null
       [raw]->either (const (str raw)) id (eitherDecodeStrict (TE.encodeUtf8 raw))
       values->toJSON values
-     reference=get version "reference"
  input<-if Effects.profileBound (toJSON work) then either (failure 409 . T.pack) (pure . (`get` "input")) (Effects.observedInput (toJSON work)) else pure ordinaryInput
+ explanation<-either (failure 409 . T.pack) pure (parseEither candidateExplanation version)
+ calculated<-try (executeCalculation s running version input) :: IO (Either CodeRunError (Value,Value))
+ (actual,runtime)<-case calculated of
+  Right (value,receipt)->pure (value,receipt)
+  Left (VerificationUnknown reason)->throwIO (VerificationUnknown reason)
+  Left (ProvenCodeFault reason)->do
+   recordImplementationFault s running CalculationFault reason
+   replacement<-runFallback s running CalculationFallback version spec input reason
+   retained<-fst <$> D.getWork s (runId running)
+   pure (get replacement "result",get (D.codeProjection (D.workField retained "codeExecution")) "runtimeResult")
+ useful<-try (explainCalculation s running version spec input actual explanation) :: IO (Either SomeException (Maybe Text))
+ initial<-case useful of
+  Right narrative->do
+   assessed<-assessCodeResult s running version role spec input actual runtime explanation narrative Nothing
+   case assessed of
+    (invocation,SemanticallyRejected,decision,outcome,audit)->do
+     recordImplementationFault s running CompositionFault (D.decisionReason decision)
+     wholeResult s running version role spec input runtime explanation (D.decisionReason decision)
+      `onException` void (try (commitCodeOutcome s running version role invocation SemanticallyRejected decision outcome audit) :: IO (Either APIError ()))
+    _->pure assessed
+  Left exception->do
+   -- Only an unsuccessful useful model step is replaceable here; cancellation,
+   -- stale authority and unknown effects remain hard fences.
+   codeGuard s running
+   case fromException exception :: Maybe APIError of
+    Just (APIError code reason) | code `elem` [422,500,503]->do
+     when (code==422) (recordImplementationFault s running ExplanationFault reason)
+     wholeResult s running version role spec input runtime explanation reason
+    _->throwIO exception
+ let (invocation,verdict,decision,outcome,audit)=initial
+ commitCodeOutcome s running version role invocation verdict decision outcome audit
+ case D.decisionBody decision of D.ReportOutcome reply _->pure reply; _->failure 500 "Invalid code assessment transition"
+
+data FallbackScope = CalculationFallback | WholeFallback deriving (Eq,Show)
+fallbackScope :: FallbackScope -> Text
+fallbackScope CalculationFallback="calculate"
+fallbackScope WholeFallback="whole"
+data ImplementationFault = CalculationFault | ExplanationFault | CompositionFault deriving (Eq,Show)
+faultScope :: ImplementationFault -> Text
+faultScope CalculationFault="calculation"
+faultScope ExplanationFault="explanation"
+faultScope CompositionFault="composition"
+
+recordImplementationFault :: Service -> Run -> ImplementationFault -> Text -> IO ()
+recordImplementationFault s running scope reason = do
+ codeGuard s running
+ codeUpdate s running (\code->appendItems "faults" [obj [("scope",str (faultScope scope)),("reference",get code "reference"),("reason",str reason)]] code)
+ markCodeFault s running reason
+
+executeCalculation :: Service -> Run -> Value -> Value -> IO (Value,Value)
+executeCalculation s running version input = do
+ let reference=get version "reference"
  environmentId<-newId
  began<-getMonotonicTimeNSec
  codeUpdate s running (appendItems "operations" [obj [("id",str environmentId),("purpose",str "environment"),("status",str "running")]])
@@ -312,19 +364,36 @@ executeCode s running = do
  when (at result "status" `elem` ["output_limit","timeout"] || boolean (get result "oomKilled")) (throwIO (ProvenCodeFault "Candidate exceeded its verified runtime budget"))
  require (at result "status"=="exited" && not (boolean (get result "wasRunning"))) 503 "Runtime attachment ended without an established process result"
  when (get result "exitCode"/=num 0) (throwIO (ProvenCodeFault "Candidate body exited unsuccessfully"))
+ validateCodeResult version actual
+ pure (actual,runtime)
+
+validateCodeResult :: Value -> Value -> IO ()
+validateCodeResult version actual = do
+ require (BL.length (encode actual)<=65536) 422 "Replacement result exceeds the existing output bound"
  unless ((at actual "status"=="ok" && has actual "value") || (at actual "status"=="rejected" && not (T.null (at actual "error")))) (throwIO (ProvenCodeFault "Candidate returned an invalid result envelope"))
  explanation<-either (failure 409 . T.pack) pure (parseEither candidateExplanation version)
- when ((isJust explanation || Effects.profileBound (toJSON work)) && at actual "status"=="rejected") $ failure 422 ("Input rejected: "<>at actual "error")
- scriptText<-if Effects.profileBound (toJSON work) && isNothing explanation then Just <$> either (throwIO . ProvenCodeFault . T.pack) pure (parseEither feedContentText (get actual "value")) else pure Nothing
- narrative<-forM explanation $ \selected->do
-  let explainContext=obj [("instruction",str (explanationInstruction selected)),("acceptedInput",input),("facts",get actual "value"),("result",actual),("criteria",D.criterionContext spec),("reference",reference),("structureHash",get version "structureHash"),("implementationHash",get (get version "explanation") "implementationHash")]
-  (explanationId,produced)<-invokeCodeModel s running "HybridExplanation" "hybrid_explanation" "hybrid-explanation" explainContext (Just selected)
-  text_<-either (failure 422 . T.pack) pure (parseEither narrativeText produced)
-  codeUpdate s running (\code->put "operations" (arr [if at op "id"==explanationId then put "status" (str "completed") op else op | op<-items code "operations"]) code)
-  codeGuard s running
-  pure text_
+ when ((isJust explanation || has version "inputBinding") && at actual "status"=="rejected") $ failure 422 ("Input rejected: "<>at actual "error")
+ when (has version "inputBinding" && isNothing explanation) (void (either (throwIO . ProvenCodeFault . T.pack) pure (parseEither feedContentText (get actual "value"))))
+
+explainCalculation :: Service -> Run -> Value -> D.TaskSpec -> Value -> Value -> Maybe Explanation -> IO (Maybe Text)
+explainCalculation s running version spec input actual explanation = forM explanation $ \selected->do
+ let context=obj [("instruction",str (explanationInstruction selected)),("acceptedInput",input),("facts",get actual "value"),("result",actual),("criteria",D.criterionContext spec),("reference",get version "reference"),("structureHash",get version "structureHash"),("implementationHash",get (get version "explanation") "implementationHash")]
+ (identity,produced)<-invokeCodeModel s running "HybridExplanation" "hybrid_explanation" "hybrid-explanation" context (Just selected)
+ let parsed=parseEither narrativeText produced
+ codeUpdate s running (\code->put "operations" (arr [if at op "id"==identity then put "status" (str (either (const "failed") (const "completed") parsed)) op else op | op<-items code "operations"]) code)
+ text_<-either (failure 422 . T.pack) pure parsed
+ codeGuard s running
+ pure text_
+
+type CodeAssessment = (Text,SemanticVerdict,D.DecisionResponse,D.Outcome,Value)
+assessCodeResult :: Service -> Run -> Value -> CodeRole -> D.TaskSpec -> Value -> Value -> Value -> Maybe Explanation -> Maybe Text -> Maybe Text -> IO CodeAssessment
+assessCodeResult s running version role spec input actual runtime explanation narrative fallbackText = do
+ codeUpdate s running (mergeFields [("evaluatedResult",actual),("evaluatedExplanation",maybe Null str narrative)])
+ (current,_)<-D.getWork s (runId running)
+ let replacement=not (null (pairs (get (D.workField current "codeExecution") "fallbacks")))
+ let scriptText=fallbackText `mplus` (if has version "inputBinding" && isNothing explanation then Just (at (get actual "value") "text") else Nothing)
  let purpose=if role==CandidateTrial then "code_acceptance_and_activation_audit" else "code_acceptance"
-     context=obj ([("contract",toJSON spec),("input",input),("result",actual),("runtime",runtime),("version",version),("initialTrial",Bool (role==CandidateTrial))]++concat [[("criteria",D.criterionContext spec),("rubric",get version "rubric"),("hybridResult",obj [("facts",get actual "value"),("explanation",str text_)])] | text_<-maybeToList narrative])
+     context=obj ([("contract",toJSON spec),("input",input),("result",actual),("runtime",runtime),("version",version),("initialTrial",Bool (role==CandidateTrial && not replacement)),("resultText",maybe Null str (fallbackText `mplus` narrative `mplus` scriptText)),("resultProvenance",str (if replacement then "fallback" else "implementation"))]++concat [[("criteria",D.criterionContext spec),("rubric",get version "rubric"),("hybridResult",obj [("facts",get actual "value"),("explanation",str text_)])] | text_<-maybeToList narrative])
  (invocation,response)<-invokeCodeModel s running (if isJust explanation then "HybridAssessment" else "CodeAssessment") purpose (if isJust explanation then "hybrid-assessment" else "code-assessment") context Nothing
  parsed<-try $ do
   verdict<-field 422 response "verdict"
@@ -349,9 +418,61 @@ executeCode s running = do
        auditFact=if role==CandidateTrial then if validAudit then put "invocation" (str invocation) audit else obj [("status",str "unknown"),("invocation",str invocation),("reason",str "Activation audit is missing or malformed")] else Null
        acceptance=obj [("verdict",toJSON verdict),("outcome",get (D.decisionRaw decision) "outcome"),("invocation",str invocation),("reason",str (D.decisionReason decision))]
    codeUpdate s running (mergeFields [("acceptance",acceptance),("activationAudit",auditFact)])
-   commitCodeOutcome s running version role invocation verdict decision outcome auditFact
-   when (verdict==SemanticallyRejected) (markCodeFault s running (D.decisionReason decision))
-   case D.decisionBody decision of D.ReportOutcome reply _->pure reply; _->failure 500 "Invalid code assessment transition"
+   pure (invocation,verdict,decision,outcome,auditFact)
+
+
+wholeResult :: Service -> Run -> Value -> CodeRole -> D.TaskSpec -> Value -> Value -> Maybe Explanation -> Text -> IO CodeAssessment
+wholeResult s running version role spec input runtime explanation reason = do
+ replacement<-runFallback s running WholeFallback version spec input reason
+ let actual=get replacement "result"; text_=at replacement "text"
+ assessCodeResult s running version role spec input actual runtime explanation (if isJust explanation then Just text_ else Nothing) (Just text_)
+
+runFallback :: Service -> Run -> FallbackScope -> Value -> D.TaskSpec -> Value -> Text -> IO Value
+runFallback s running scope version spec input reason = do
+ operation<-newId
+ clock<-getMonotonicTimeNSec
+ let key=fallbackScope scope; reference=get version "reference"
+ retained<-locked s $ do
+  codeGuard s running
+  require (clock<runDeadline running) 504 "Occurrence budget is exhausted; fallback cannot start"
+  (work,_)<-D.getWork s (runId running)
+  let code=D.workField work "codeExecution"; attempts=get code "fallbacks"
+  case get attempts key of
+   saved | saved/=Null->do
+    require (at saved "status"=="completed" && get saved "reference"==reference && at saved "inputHash"==canonicalHash input) 409 "Fallback scope has a failed, unknown or mismatched retained attempt; it cannot be replayed"
+    pure (Left (get saved "response"))
+   _->do
+    require (all (\attempt->at attempt "status"=="completed") (map snd (pairs attempts))) 409 "Failed or unknown fallback cannot escalate to another scope"
+    let context=obj [("scope",str key),("fallbackOperation",str operation),("reason",str reason),("contract",toJSON spec),("criteria",D.criterionContext spec),("originalIntent",D.workField work "originalIntent"),("input",input),("version",version),("progress",select ["operations","acceptance","faults","evaluatedResult","evaluatedExplanation"] code),("externalExecution",D.workField work "externalExecution"),("remainingMilliseconds",toJSON ((runDeadline running-clock) `div` 1000000))]
+        attempt=obj [("status",str "reserved"),("reason",str reason),("operation",str operation),("reference",reference),("inputHash",str (canonicalHash input)),("context",context)]
+    D.saveWork s (D.setWorkField "codeExecution" (mergeFields [("status",str "fallback"),("fallbacks",put key attempt attempts)] code) work)
+    pure (Right context)
+ case retained of
+  Left response->pure response
+  Right context->do
+   let save fields=codeUpdate s running (\code->put "operations" (arr [if at op "id"==operation then merge op fields else op | op<-items code "operations"]) (put "fallbacks" (put key (merge (get (get code "fallbacks") key) fields) (get code "fallbacks")) code))
+   result<-try $ do
+    (_,response)<-invokeCodeModel s running (if scope==CalculationFallback then "LocalFallback" else "WholeFallback") (if scope==CalculationFallback then "code_local_fallback" else "code_whole_fallback") "code-fallback" context Nothing
+    (work,_)<-D.getWork s (runId running)
+    let evidence=maybe Null (`get` "evidence") (find ((==operation) . (`at` "id")) (items (D.workField work "codeExecution") "operations"))
+        completeness=get evidence "completeness"
+    require (boolean (get evidence "finished") && get evidence "processExit"==num 0 && all (\key_->boolean (get completeness key_)) ["finalSeen","turnEndSeen","streamEndSeen"]) 422 "Fallback response lacks complete terminal evidence"
+    require (get response "resolved"==Bool True && not (T.null (T.strip (at response "reason")))) 422 "Fallback did not establish a resolved result"
+    require (BL.length (encode response)<=65536) 422 "Fallback output exceeds the existing output bound"
+    validateCodeResult version (get response "result") `catch` (\(fault::CodeRunError)->case fault of ProvenCodeFault message->failure 422 message; VerificationUnknown message->failure 422 message)
+    require (at (get response "result") "status"=="ok") 422 "Fallback did not produce a successful replacement result"
+    when (scope==WholeFallback) $ do
+     text_<-either (failure 422 . T.pack) pure (parseEither narrativeText (select ["text"] response))
+     when (has version "inputBinding" && not (has version "explanation")) (require (get (get (get response "result") "value") "text"==str text_) 422 "Whole fallback text differs from its feed result")
+    codeGuard s running
+    save (obj [("status",str "completed"),("response",response)])
+    pure response
+   case result of
+    Right response->pure response
+    Left (exception::SomeException)->do
+     cancelled<-readIORef (runCancel running)
+     save (obj [("status",str (if cancelled then "interrupted" else "failed")),("error",str (D.exceptionText exception))])
+     throwIO exception
 
 -- Both useful explanation and final assessment retain one canonical invocation.
 invokeCodeModel :: Service -> Run -> Text -> Text -> Text -> Value -> Maybe Explanation -> IO (Text,Value)
@@ -361,13 +482,20 @@ invokeCodeModel s running node purpose templateName context explanation = do
   Just selected->explanationTemplates s selected
   Nothing->(,) <$> prompt s templateName <*> prompt s "preparation-envelope"
  let rendered=render envelope [("node",node),("instruction",instruction),("context",jsonText (put "selfId" (toJSON (runOwner running)) context))]
- invocation<-newId
+ invocation<-if has context "fallbackOperation" then pure (at context "fallbackOperation") else newId
  started<-now
- let operation=obj ([("id",str invocation),("purpose",str purpose),("status",str "running"),("started",str started),("promptHash",str (sourceHash rendered))]++concat [[("stage",str "explain"),("modelSettings",toJSON (explanationModel selected)),("input",context),("inputHash",str (canonicalHash context)),("reference",get context "reference"),("structureHash",get context "structureHash"),("implementationHash",get context "implementationHash")] | selected<-maybeToList explanation])
+ let operation=obj ([("id",str invocation),("node",str node),("purpose",str purpose),("status",str "running"),("started",str started),("promptHash",str (sourceHash rendered))]++concat [[("stage",str "explain"),("modelSettings",toJSON (explanationModel selected)),("input",context),("inputHash",str (canonicalHash context)),("reference",get context "reference"),("structureHash",get context "structureHash"),("implementationHash",get context "implementationHash")] | selected<-maybeToList explanation])
      save fields=codeUpdate s running (\code->put "operations" (arr [if at op "id"==invocation then merge op fields else op | op<-items code "operations"]) code)
-     phaseFields=if isJust explanation then [("status",str "explanation")] else [("status",str "assessment"),("verification",obj [("id",str invocation)])]
+     phaseFields=if has context "fallbackOperation" then [("status",str "fallback")] else if isJust explanation then [("status",str "explanation")] else [("status",str "assessment"),("verification",obj [("id",str invocation)])]
  codeUpdate s running (mergeFields phaseFields . appendItems "operations" [operation])
- raw<-(maybe (invokeAnalysisObserved s running) (invokeResponseOnlyObservedWith s running . explanationModel) explanation) rendered (\evidence->save (obj [("evidence",toJSON evidence)]))
+ raw<-(maybe (invokeAnalysisObserved s running) (invokeResponseOnlyObservedWith s running . explanationModel) explanation) rendered (\evidence->locked s $ do
+  (work,_)<-D.getWork s (runId running)
+  let code=D.workField work "codeExecution"
+      updated=D.setWorkField "codeExecution" (put "operations" (arr [if at op "id"==invocation then put "evidence" (toJSON evidence) op else op | op<-items code "operations"]) code) work
+  observed<-decodeValue 500 (Effects.observeEvidence invocation evidence (toJSON updated))
+  D.saveWork s observed)
+  `catch` (\(exception::SomeException)->save (obj [("status",str "failed"),("error",str (D.exceptionText exception))]) >> throwIO exception)
+ codeGuard s running
  let response=parseJSONText raw
  save (obj [("status",str (if isJust explanation then "validating" else "completed")),("response",response)])
  pure (invocation,response)
@@ -401,13 +529,14 @@ commitCodeOutcome s running version role invocation verdict response outcome aud
       definition=find (\d->get d "id"==get snapshot "id" && get d "owner"==toJSON (runOwner running)) definitions
       applicable=maybe False (\d->not (boolean (get d "deleted")) && get d "contractGeneration"==get snapshot "contractGeneration" && DB.analysisFeedbackIds feedback d (map toJSON works) (analysisSources pin)==analysisFeedback pin) definition
       accepted=contentAccepted
-      activating=role==CandidateTrial && accepted && get audit "accepted"==Bool True && applicable
-      activationReason=if role==ActiveCode then "Previously activated version; no new activation required" else if not applicable then "Current routine contract or source feedback changed; candidate was not activated" else if modelAccepted && not contentAccepted then "Source cursor changed; content and candidate activation were not accepted" else if not accepted then "Task result was not accepted; candidate was not activated" else if get audit "accepted"/=Bool True then "Activation audit did not approve this candidate" else at audit "reason"
+      fallbackUsed=not (null (pairs (get (D.workField current "codeExecution") "fallbacks")))
+      activating=not fallbackUsed && role==CandidateTrial && accepted && get audit "accepted"==Bool True && applicable
+      activationReason=if fallbackUsed then "Fallback completion does not establish implementation health or authorize activation" else if role==ActiveCode then "Previously activated version; no new activation required" else if not applicable then "Current routine contract or source feedback changed; candidate was not activated" else if modelAccepted && not contentAccepted then "Source cursor changed; content and candidate activation were not accepted" else if not accepted then "Task result was not accepted; candidate was not activated" else if get audit "accepted"/=Bool True then "Activation audit did not approve this candidate" else at audit "reason"
       activation=obj [("status",str (if role==ActiveCode then "not_required" else if activating then "activated" else "not_activated")),("reference",reference),("run",toJSON (runId running)),("invocation",str invocation),("decidedAt",str decidedAt),("reason",str activationReason)]
       saved=if modelAccepted && not contentAccepted then mergeFields [("status",toJSON D.Unresolved),("hostReason",str "Source cursor changed concurrently; model proposal retained without content acceptance")] proposedOutcome else proposedOutcome
       assessment=put "decisionId" (str invocation) (assessmentValue (if accepted then AssessmentAccepted else if verdict==SemanticallyRejected then AssessmentRejected else AssessmentUnresolved) "model_contract_assessment" (D.decisionReason response))
       record=obj [("decisionId",str invocation),("callId",toJSON (runId running)),("node",str (if has version "explanation" then "HybridAssessment" else "CodeAssessment")),("accepted",Bool True),("response",D.decisionRaw response),("assessment",assessment),("evidenceOperation",str invocation)]
-      finished=D.withDecisionRecord record (D.setWorkField "outcome" saved (D.setWorkField "codeExecution" (mergeFields [("status",str "completed"),("activation",activation)] (D.workField contentWork "codeExecution")) contentWork))
+      finished=D.setWorkField "decisions" (arr (if any (\entry->get entry "decisionId"==str invocation) (D.workItems contentWork "decisions") then [if get entry "decisionId"==str invocation then merge entry record else entry | entry<-D.workItems contentWork "decisions"] else D.workItems contentWork "decisions"++[record])) (D.setWorkField "outcome" saved (D.setWorkField "codeExecution" (mergeFields [("status",str "completed"),("completedViaFallback",Bool (fallbackUsed && accepted)),("activation",activation)] (D.workField contentWork "codeExecution")) contentWork))
       complete=finished {D.workCalls=fmap (\c->c {D.callState=if accepted then D.CallCompleted else D.CallUnresolved,D.callOutput=Just (at saved "reply")}) (D.workCalls finished)}
   when activating $ forM_ definition $ \d->do
    -- Content acceptance just advanced sourceState in this same transaction.
@@ -440,9 +569,10 @@ recoverCode s = do
   recovered<-if has container "name" && at container "status"/="removed" then do
    result<-try (Code.reconcile container) :: IO (Either APIError ())
    pure (case result of Right ()->mergeFields [("status",str "interrupted"),("container",put "status" (str "removed") container)] code; Left (APIError _ reason)->mergeFields [("status",str "cleanup_pending"),("error",str reason)] code)
-   else pure (if at code "status" `elem` ["running","explanation","assessment"] then put "status" (str "interrupted") code else code)
+   else pure (if at code "status" `elem` ["running","explanation","assessment","fallback"] then put "status" (str "interrupted") code else code)
   let terminal=if at recovered "status"=="cleanup_pending" then "uncertain" else "interrupted"
-      finalized=put "operations" (arr [if at op "status" `elem` ["running","validating"] then put "status" (str terminal) op else op | op<-items recovered "operations"]) recovered
+      fallbackState=if not (has recovered "fallbacks") then recovered else put "fallbacks" (obj [(key,if at attempt "status"=="reserved" then put "status" (str "interrupted") attempt else attempt) | (key,attempt)<-pairs (get recovered "fallbacks")]) recovered
+      finalized=put "operations" (arr [if at op "status" `elem` ["running","validating"] then put "status" (str terminal) op else op | op<-items recovered "operations"]) fallbackState
   when (finalized/=code) (D.saveWork s (D.setWorkField "codeExecution" finalized work))
 
 publish :: Service -> Text -> Pulse -> IO ()

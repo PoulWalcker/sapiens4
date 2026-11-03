@@ -8,3 +8,5 @@ When initialTrial is true, also return "activationAudit":{"accepted":true or fal
 This is a separate activation fact from the same invocation, not a second independent review.
 A correct individual result may be accepted while future activation is rejected. Never approve
 activation from an unknown or incomplete criterion assessment. Do not invent or weaken criteria.
+
+When resultText is supplied, assess that exact proposed user-facing text together with the result against every original criterion. Do not substitute your own better answer. resultProvenance=fallback means the replacement is being assessed, not proof of implementation health; never grant activation on that basis.

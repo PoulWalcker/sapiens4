@@ -3,7 +3,7 @@ module RoutineCommands (command, snapshot, detail) where
 
 import Control.Exception
 import Control.Monad
-import Data.Aeson
+import Data.Aeson hiding (pairs)
 import Data.Aeson.Types (Parser)
 import qualified Data.Aeson.KeyMap as KM
 import Data.List (find,nubBy)
@@ -269,7 +269,7 @@ renderRun projection operations revision work = do
      feedback=DB.workFeedback operations (toJSON work)
      assessment=DB.workAssessment operations (toJSON work)
      recordedInvocations=[select ["decisionId","callId","node","evidence","assessment","routineAttempt"] (if has entry "evidenceOperation" then put "evidence" (get operation "evidence") entry else entry) | entry<-D.workItems work "decisions",let operation=fromMaybe Null (find (\op->get op "id"==get entry "evidenceOperation") (items (D.workField work "codeExecution") "operations")),has entry "evidence" || has operation "evidence"]
-     explanationInvocations=[obj [("decisionId",get operation "id"),("callId",str (D.workloadId work)),("node",str "HybridExplanation"),("evidence",get operation "evidence")] | operation<-items (D.workField work "codeExecution") "operations",at operation "purpose"=="hybrid_explanation",has operation "evidence"]
+     explanationInvocations=[merge (obj [("decisionId",get operation "id"),("callId",str (D.workloadId work)),("node",get operation "node" `fallback` str (if at operation "purpose"=="hybrid_explanation" then "HybridExplanation" else "CodeAssessment")),("purpose",get operation "purpose"),("status",get operation "status"),("evidence",get operation "evidence")]) (fromMaybe (obj []) (find (\record->get record "decisionId"==get operation "id") recordedInvocations)) | operation<-items (D.workField work "codeExecution") "operations",has operation "evidence"]
      invocations=nubBy (\left right->get left "decisionId"==get right "decisionId") (explanationInvocations++recordedInvocations)
      reported=get (maybe Null (`get` "response") (listToMaybe (reverse (D.workItems work "decisions")))) "outcome"
      criteriaAssessment=[obj [("criterion",criterion),("status",str (if criterion `elem` items reported "satisfiedCriteria" then "Model reports satisfied" else if has (get reported "notApplicableCriteria") (text criterion) then "Model reports not applicable" else "Unresolved")),("reason",get (get reported "notApplicableCriteria") (text criterion)),("source",str "model_statement")] | criterion<-items (D.workField work "routineSnapshot") "criteria"]
@@ -277,7 +277,10 @@ renderRun projection operations revision work = do
  binding <- D.bindingDetail work call
  let lastDecision=maybe Null (`get` "decisionId") (listToMaybe (reverse (D.workItems work "decisions")))
      lastFeedback=maybe Null (`get` "operation") (listToMaybe (reverse feedback))
-     version=jsonText (arr [str status,lastDecision,lastFeedback,toJSON revision,str (canonicalHash (Effects.summary (toJSON work)))])
+     code=D.workField work "codeExecution"
+     attempts=pairs (get code "fallbacks")
+     fallbackSummary=if null attempts then Null else obj [("status",str (if boolean (get code "completedViaFallback") then "completed" else if any (\(_,attempt)->at attempt "status"=="reserved") attempts then "running" else "unresolved")),("attempts",num (length attempts)),("faultyImplementation",Bool (not (null (items code "faults"))))]
+     version=jsonText (arr [fallbackSummary,str status,lastDecision,lastFeedback,toJSON revision,str (canonicalHash (Effects.summary (toJSON work)))])
      publicError=case projection of
       RunDetail -> D.callField call "error"
       RunSummary | Effects.profileBound (toJSON work) && D.callField call "error"/=Null -> str (if at (get (Effects.external (toJSON work)) "read") "status" `elem` ["failed","observed","conflict"] then "Source could not be read completely; see evidence for details." else "Content run could not complete; see evidence for details.")
@@ -285,4 +288,4 @@ renderRun projection operations revision work = do
      details=case projection of
       RunSummary -> []
       RunDetail -> [("routineEffectUnknown",D.workField work "routineEffectUnknown"),("routineIdentityError",D.workField work "routineIdentityError"),("externalExecution",D.workField work "externalExecution"),("codeExecution",D.codeProjection (D.workField work "codeExecution")),("executionBinding",binding),("criteriaAssessment",arr criteriaAssessment),("invocations",arr invocations),("observations",observations),("feedback",arr feedback),("rejection",fromMaybe Null (listToMaybe feedback)),("outcome",D.workField work "outcome")]
- pure (obj (details++[("externalSummary",Effects.summary (toJSON work)),("executionStages",D.executionStages (D.workField work "codeExecution")),("assessment",assessment),("originalAssessment",original),("detailVersion",str version),("invocationCount",num (length invocations)),("currentRevision",toJSON revision),("historical",Bool (get (D.workField work "routineSnapshot") "revision"/=toJSON revision)),("id",str (D.workloadId work)),("created",D.workField work "created"),("trigger",get (D.workField work "origin") "trigger"),("snapshot",D.workField work "routineSnapshot"),("status",str status),("result",if gate==ExecutionStopped then Null else get (D.workField work "outcome") "reply"),("message",if gate==ExecutionOpen && D.callState call==D.CallWaiting then toJSON (D.callOutput call) else Null),("error",publicError),("currentOwner",toJSON (D.callOwner call))]))
+ pure (obj (details++[("fallbackSummary",fallbackSummary),("externalSummary",Effects.summary (toJSON work)),("executionStages",D.executionStages (D.workField work "codeExecution")),("assessment",assessment),("originalAssessment",original),("detailVersion",str version),("invocationCount",num (length invocations)),("currentRevision",toJSON revision),("historical",Bool (get (D.workField work "routineSnapshot") "revision"/=toJSON revision)),("id",str (D.workloadId work)),("created",D.workField work "created"),("trigger",get (D.workField work "origin") "trigger"),("snapshot",D.workField work "routineSnapshot"),("status",str status),("result",if gate==ExecutionStopped then Null else get (D.workField work "outcome") "reply"),("message",if gate==ExecutionOpen && D.callState call==D.CallWaiting then toJSON (D.callOutput call) else Null),("error",publicError),("currentOwner",toJSON (D.callOwner call))]))

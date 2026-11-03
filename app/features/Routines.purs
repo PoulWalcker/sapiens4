@@ -169,6 +169,9 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     ,V.when (D.s "error" run /= "") $ V.p "routine-problem" $ D.s "error" run
     ,V.when (active run && D.s "message" run == "") $ V.p "routine-muted" $ if D.s "status" run == "queued" then "Waiting to start." else "Work is in progress."
     ,V.when (managed routine) $ V.div "routine-run-inputs" [V.p "routine-muted" $ if D.n "revision" (D.get "snapshot" run) > 0.0 then "Definition revision " <> show (D.int $ D.at ["snapshot","revision"] run) else "Definition revision not recorded",V.p "" $ D.str $ D.at ["snapshot","inputs"] run]
+    ,V.when (D.valid $ D.get "fallbackSummary" run) $ V.div "routine-notice"
+      [V.p "" $ if D.s "status" (D.get "fallbackSummary" run) == "completed" then "Completed through fallback" else "Fallback · " <> D.s "status" (D.get "fallbackSummary" run)
+      ,V.when (D.b "faultyImplementation" $ D.get "fallbackSummary" run) $ V.p "routine-muted" "Automation needs repair; successful fallback does not repair its implementation."]
     ,externalPanel routine run
     ,stagePanel run
     ,V.when (managed routine) $ evidencePanel routine run

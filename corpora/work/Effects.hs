@@ -473,7 +473,9 @@ requireContentTrace work decision=when (profileBound work) $ do
 
 observeEvidence :: Text -> EvidenceSnapshot -> Value -> Value
 observeEvidence identity evidence work
- | not (profileBound work) || not suspicious = work
+ | not suspicious = work
+ | has work "codeExecution" = put "routineEffectUnknown" (obj [("decisionId",str identity),("reason",str "Response-only code stage contains tool activity or lost event identity"),("evidence",toJSON evidence)]) work
+ | not (profileBound work) = work
  | otherwise=put "externalExecution" (put "opaqueEffectUnknown" (obj [("decisionId",str identity),("reason",str "Response-only protocol contains tool activity or lost event identity"),("evidence",toJSON evidence)]) (external work)) work
  where suspicious=maybe True (>0) (evidencePending evidence) || evidenceMalformed evidence>0 || evidenceUnknown evidence>0 || evidenceDropped evidence>0 || evidenceOutOfOrder evidence>0 || any (\receipt->isJust (receiptSummary receipt) || "tool" `T.isInfixOf` T.toLower (receiptKind receipt)) (evidenceReceipts evidence)
 
