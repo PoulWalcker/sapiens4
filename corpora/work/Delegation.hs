@@ -83,7 +83,7 @@ frontierCalls work = filter (\call -> not (any ((==Just (callIdentity call)) . c
 -- No files, model calls or nested transactions cross this admission interface.
 admitRoutineOn :: SQL.Connection -> AgentId -> Turn -> Value -> Maybe TaskSpec -> IO ()
 admitRoutineOn db owner turn snapshot accepted = do
- selected<-selectRoutineCodeOn db owner (routineWorkload owner turn snapshot accepted) snapshot accepted
+ selected<-selectRoutineCodeOn db owner (setWorkField "routineAttemptSchema" (num 1) (routineWorkload owner turn snapshot accepted)) snapshot accepted
  work<-Effects.pinOn db snapshot (toJSON selected) >>= decodeValue 500
  let message=obj [("role",str "user"),("content",str (turnInput turn)),("turn",toJSON (turnId turn)),("time",turnField turn "created"),("origin",turnField turn "origin")]
  SQL.execute db "INSERT INTO workloads(id,value) VALUES (?,?)" (workloadId work,jsonText (toJSON work))
@@ -154,6 +154,7 @@ resolveCandidateFrom works owner snapshot accepted reference@(CandidateReference
  let prepared=workField source "preparation"
      pin=workField source "preparationPin"
  require (get pin "owner"==toJSON owner && get pin "routine"==get snapshot "id" && get pin "contractGeneration"==get snapshot "contractGeneration" && get version "contractGeneration"==get snapshot "contractGeneration") 409 "Candidate does not belong to this accepted consumer contract"
+ Effects.requireCandidateInput snapshot version
  original<-decodeValue 409 (get version "contract")
  explanation<-either (failure 409 . T.pack) pure (parseEither candidateExplanation version)
  forM_ explanation $ \_->do
@@ -453,8 +454,9 @@ decide s run turn state node logs = do
    else pure Null
   wiki <- prompt s "notes-wiki"
   envelope <- prompt s "decision-envelope"
+  feedInput<-if Effects.profileBound (toJSON w) then either (failure 409 . T.pack) (pure . (`get` "input")) (Effects.observedInput (toJSON w)) else pure Null
   let instruction = at source "content" <> extra <> scheduled <> pinned <> externalInstruction
-      context = if node==AutomationAnalysis then obj [("selfId",toJSON (runOwner run)),("analysisEvidence",workField w "analysisEvidence")] else obj [("externalExecution",workField w "externalExecution"),("originalIntent",workField w "originalIntent"),("task",taskContext),("routine",routine),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
+      context = if node==AutomationAnalysis then obj [("selfId",toJSON (runOwner run)),("analysisEvidence",workField w "analysisEvidence")] else obj [("acceptedInput",feedInput),("externalExecution",workField w "externalExecution"),("originalIntent",workField w "originalIntent"),("task",taskContext),("routine",routine),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
       rendered = render envelope [("node",wireName node),("instruction",instruction),("notes_wiki",if node==AutomationAnalysis then "" else render wiki [("notes_example",T.pack (repositoryRoot s </> "corpora/prompts/examples/jarvis-notes.html"))]),("context",jsonText context),("events",T.intercalate ", " (sort (eventsFor node)))]
   (model,effort) <- modelDefaults
   policy <- executionSettings s (agentIdText (runOwner run))
@@ -463,7 +465,8 @@ decide s run turn state node logs = do
   let digest = T.pack (concatMap (\b -> let v=showHex b "" in if length v==1 then '0':v else v) (BS.unpack (hash (TE.encodeUtf8 instruction))))
       record = obj [("decisionId",str i),("callId",toJSON (turnId turn)),("node",toJSON node),("template",get source "template"),("promptHash",str digest),("templatePath",get source "path"),("renderedPrompt",str rendered),("model",str model),("effort",str (if executionMode policy == Deep then "xhigh" else effort)),("created",str t),("accepted",Bool False)]
       summary = merge (select ["decisionId","callId","node","promptHash","accepted"] record) (obj [("purpose",str (if node==AutomationAnalysis then "automation_analysis" else "ordinary_execution")),("agent",str (agentIdText (runOwner run))),("promptTemplate",get record "template")])
-  saveWork s (setWorkField "decisions" (arr (workItems w "decisions"++[summary])) w)
+  preparedSummary<-DB.connection s (\db->Effects.prepareRoutineAttempt db (toJSON w) (node==AutomationAnalysis || Effects.profileBound (toJSON w)) summary)
+  saveWork s (setWorkField "decisions" (arr (workItems w "decisions"++[preparedSummary])) w)
   writeJSON (archivePath s (agentIdText (runOwner run)) ("decisions/"<>i)) record
   pure (rendered,record,node==AutomationAnalysis || Effects.profileBound (toJSON w))
  logIndex <- length <$> readIORef logs
@@ -473,7 +476,7 @@ decide s run turn state node logs = do
  result <- try $ do
   let observe snapshot = locked s $ do
        (current,_) <- getWork s (turnId turn)
-       let update entry = if get entry "decisionId"==get record "decisionId" then put "evidence" (put "purpose" (str (if node==AutomationAnalysis then "automation_analysis" else "ordinary_execution")) (toJSON snapshot)) entry else entry
+       let update entry = if get entry "decisionId"==get record "decisionId" then Effects.admitRoutineAttempt (put "evidence" (put "purpose" (str (if node==AutomationAnalysis then "automation_analysis" else "ordinary_execution")) (toJSON snapshot)) entry) else entry
        let observed=Effects.observeEvidence (at record "decisionId") snapshot (toJSON (setWorkField "decisions" (arr (map update (workItems current "decisions"))) current))
        DB.putValue s DB.Workloads (workloadId current) observed
        require (get (Effects.external observed) "opaqueEffectUnknown"==Null) 409 "Response-only tool evidence is uncertain; external delivery is blocked"

@@ -5,6 +5,7 @@ require 'timeout'
 require 'sqlite3'
 require_relative 'support/candidate_fixtures'
 require_relative 'support/candidate_docker'
+require_relative 'support/effect_peer'
 
 RSpec.describe 'Authorized routine candidate activation with real execution' do
   include CandidateFixtures
@@ -444,24 +445,46 @@ RSpec.describe 'Authorized routine candidate activation with real execution' do
     expect(host.request('GET', "/api/agents/#{host.agent('OtherOwner')}/routines/#{@routine}/runs/#{id}").first).to eq(404)
   end
 
-  it 'refuses an external profile without replacing a genuinely checked or active code version' do
-    prepared = completed(prepare('checked-before-profile'))
-    version = prepared.fetch('version')
+  it 'invalidates checked and active code applicability on profile changes without erasing history or resurrecting old versions' do
+    peer = EffectPeer.new(File.join(host.root, 'profile-applicability-peer'))
+    peer.page('c0', records: [{id: 'source-1', value: 1}], next_cursor: 'c1')
     profile = {kind: 'receipt_feed_v1', taskBoundary: 'content_result', executionPolicy: 'response_only',
-      source: {url: 'http://127.0.0.1:9/feed', identity: 'sales-feed', initialCursor: 'c0'},
-      delivery: {url: 'http://127.0.0.1:9/deliveries', receiptUrl: 'http://127.0.0.1:9/receipts', identity: 'daily-inbox'}}
-    fields = {revision: 1, title: 'Sales report', goal: CandidateFixtures::GOAL, criteria: CandidateFixtures::CRITERIA, externalProfile: profile}
-    before = routine
-    expect(host.request('POST', "#{routine_path}/edit", fields.merge(operation: 'profile-over-checked')).first).to eq(409)
-    expect(routine).to eq(before)
-    expect(preparation(prepared.fetch('id')).fetch('version')).to eq(version)
-    trial = run_code('activate-unchanged', observed_input)
-    expect(trial.dig('codeExecution', 'reference')).to eq(version.fetch('reference'))
-    expect(routine.fetch('activeCode')).to include('status' => 'active', 'reference' => version.fetch('reference'))
-    active = routine
-    expect(host.request('POST', "#{routine_path}/edit", fields.merge(operation: 'profile-over-active')).first).to eq(409)
-    expect(routine).to eq(active)
-    expect(preparation(prepared.fetch('id')).fetch('version')).to eq(version)
+      source: {url: peer.url + '/feed', identity: 'sales-feed', initialCursor: 'c0'},
+      delivery: {url: peer.url + '/deliveries', receiptUrl: peer.url + '/receipts', identity: 'daily-inbox'}}
+    %w[checked active].each do |state|
+      if state == 'active'
+        @routine = host.api('POST', "/api/agents/#{@owner}/routines", operation: 'second-applicability-consumer', title: 'Sales report', goal: CandidateFixtures::GOAL, criteria: CandidateFixtures::CRITERIA).fetch('routine')
+        observed = host.api('POST', "#{routine_path}/run", operation: 'second-observed', revision: 1, inputs: JSON.generate(observed_input)).fetch('run')
+        host.turn(observed)
+        @analysis = Contract.wait { row = routine['analysis']; row if row && row['status'] == 'Ready' }
+      end
+      prepared = completed(prepare("prepare-#{state}"))
+      version = prepared.fetch('version')
+      run_code('activate-before-edit', observed_input) if state == 'active'
+      before = routine
+      fields = {title: 'Sales report', goal: CandidateFixtures::GOAL, criteria: CandidateFixtures::CRITERIA}
+      host.api('POST', "#{routine_path}/edit", fields.merge(operation: "profile-over-#{state}", revision: 1, externalProfile: profile))
+      changed = routine
+      expect(changed.fetch('contractGeneration')).to be > before.fetch('contractGeneration')
+      expect(changed.fetch('externalProfileRevision')).to be > (before['externalProfileRevision'] || 0)
+      expect(preparation(prepared.fetch('id')).fetch('version')).to eq(version)
+      expect(changed.fetch('activeCode')).to include('reference' => version.fetch('reference'), 'status' => 'stale') if state == 'active'
+      rules = host.provider.fetch('rules')
+      host.configure(rules: rules.merge('Execution' => rules.fetch('Execution').merge(usage: {input_tokens: 43, cached_input_tokens: 0, output_tokens: 17})))
+      next_run = host.api('POST', "#{routine_path}/run", operation: "ordinary-after-#{state}", revision: 2, inputs: JSON.generate(observed_input)).fetch('run')
+      expect(run_detail(next_run).dig('executionBinding', 'binding', 'mode')).to eq('ordinary')
+      host.turn(next_run)
+      expect(run_detail(next_run)['codeExecution']).to be_nil
+      host.api('POST', "#{routine_path}/edit", fields.merge(operation: "remove-profile-#{state}", revision: 2, externalProfile: nil))
+      restored = host.api('POST', "#{routine_path}/run", operation: "no-resurrection-#{state}", revision: 3, inputs: JSON.generate(observed_input)).fetch('run')
+      expect(run_detail(restored).dig('executionBinding', 'binding', 'mode')).to eq('ordinary')
+      host.turn(restored)
+      expect(preparation(prepared.fetch('id')).fetch('version')).to eq(version)
+      expect(routine.fetch('activeCode')).to include('reference' => version.fetch('reference'), 'status' => 'stale') if state == 'active'
+    end
+    expect(peer.deliveries.length).to eq(2)
+  ensure
+    peer&.close
   end
 
 end

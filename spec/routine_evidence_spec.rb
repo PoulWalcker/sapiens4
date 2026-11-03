@@ -102,12 +102,12 @@ RSpec.describe 'Ordinary routine evidence through public boundaries' do
 
   it 'S2 distinguishes rejected criteria, unresolved claims and malformed final from accepted transport success' do
     accepted_id, accepted = run_mode
-    _, rejected = run_mode('invalid_completed')
+    _, rejected = run_mode('clean_invalid_completed')
     expect(rejected.fetch('assessment')).to include('status' => 'Rejected', 'source' => 'application_validation')
     expect(rejected.fetch('assessment').fetch('reason')).not_to be_empty
-    _, unresolved = run_mode('unresolved')
+    _, unresolved = run_mode('clean_unresolved')
     expect(unresolved.fetch('assessment').fetch('status')).to eq('Unresolved')
-    _, malformed = run_mode('malformed_final')
+    _, malformed = run_mode('clean_malformed_final')
     expect(malformed.fetch('assessment').fetch('status')).to eq('Unresolved')
     expect(invocation(rejected).fetch('processExit')).to eq(0)
     expect(row(accepted_id)).to eq(accepted)
@@ -158,10 +158,10 @@ RSpec.describe 'Ordinary routine evidence through public boundaries' do
   end
 
   it 'S4 preserves separate invocation identities and partial usage across an explicit retry' do
-    identity, rejected = run_mode('invalid_completed')
+    identity, rejected = run_mode('clean_invalid_completed')
     first = rejected.fetch('invocations').last
     expect(first.fetch('evidence').fetch('usage')['inputTokens']).to eq(101)
-    host.configure(evidence_mode: 'missing_usage')
+    host.configure(evidence_mode: 'clean_missing_usage')
     host.api('POST', "/api/agents/#{@owner}/turns/#{identity}/retry")
     current = retried(identity)
     expect(current.fetch('assessment')['status']).to eq('Accepted')
@@ -186,7 +186,7 @@ RSpec.describe 'Ordinary routine evidence through public boundaries' do
   end
 
   it 'S2 does not reuse an earlier rejected assessment after an explicit retry loses its final response' do
-    identity, rejected = run_mode('invalid_completed')
+    identity, rejected = run_mode('clean_invalid_completed')
     expect(rejected.fetch('assessment')['status']).to eq('Rejected')
     host.configure(evidence_mode: 'loss')
     host.api('POST', "/api/agents/#{@owner}/turns/#{identity}/retry")
@@ -194,6 +194,8 @@ RSpec.describe 'Ordinary routine evidence through public boundaries' do
     expect(current.fetch('assessment')['status']).to eq('Unresolved')
     expect(current.fetch('invocations').length).to eq(2)
     expect(current.fetch('invocations').first).to eq(rejected.fetch('invocations').first)
+    expect(host.request('POST', "/api/agents/#{@owner}/turns/#{identity}/retry", {}).first).to eq(409)
+    expect(File.readlines(File.join(host.root, 'external-effect.txt'))).to eq(["effect\n"])
   end
 
   it 'S5 omits tool and stderr credentials from durable evidence and public failure output' do

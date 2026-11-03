@@ -113,7 +113,7 @@ RSpec.describe 'Owner analysis of accepted routine results' do
 
   it 'S2 waits for accepted evidence and retains unsuccessful history as unsuccessful' do
     configured_analysis
-    rules = host.provider.fetch('rules').merge('Execution' => {response: decision('Outcome', reply: 'Still missing sources', outcome: {status: 'Unresolved', satisfiedCriteria: [], artifacts: []})})
+    rules = host.provider.fetch('rules').merge('Execution' => {response: decision('Outcome', reply: 'Still missing sources', outcome: {status: 'Unresolved', satisfiedCriteria: [], artifacts: []}), usage: {input_tokens: 41, cached_input_tokens: 0, output_tokens: 17}})
     host.configure(rules: rules)
     failed = run('unresolved-source')
     host.restart

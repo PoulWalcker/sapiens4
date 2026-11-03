@@ -305,7 +305,7 @@ RSpec.describe 'Routine list, results and settings in the native app', :desktop 
     desktop.see('Stopped')
   end
 
-  it 'keeps pause, a manual run and stopping the current timer occurrence separate' do
+  it 'keeps pause and manual admission distinct while fencing execution after an unknown stopped timer' do
     @host = desktop_host
     owner, id = scheduled_fixture(1)
     host.configure(block: true)
@@ -336,12 +336,18 @@ RSpec.describe 'Routine list, results and settings in the native app', :desktop 
     click_button('Stop run')
     desktop.see('Stopped')
     host.release
+    # An admitted unsafe invocation without a complete trace cannot prove absence of effects.
     manual = Contract.wait do
-      routine_snapshot(id)['runs'].find { |run| run['trigger'] == 'manual' && run['status'] == 'done' }
+      routine_snapshot(id)['runs'].find { |run| run['trigger'] == 'manual' && run['status'] == 'failed' }
     end
+    evidence = host.api('GET', "/api/agents/#{owner}/routines/#{id}/runs/#{timer.fetch('id')}")
+    expect(evidence.fetch('routineEffectUnknown')).not_to be_nil
+    expect(evidence.fetch('invocations').first.fetch('routineAttempt')).to include('state' => 'admitted', 'policy' => 'unsafe_bypass')
+    expect(manual.fetch('error')).to include('independent absence proof')
+    expect(host.calls.length).to eq(1)
     click_button('History')
     click_button(/Run 2 ·/)
-    desktop.see('Verified comparison')
+    desktop.see('Manual run')
     desktop.see('Schedule paused')
     value = routine_snapshot(id)
     expect(value['paused']).to eq(true)

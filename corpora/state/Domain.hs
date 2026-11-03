@@ -92,6 +92,66 @@ instance FromJSON FeedPage where
          unless (has item "value") (fail "Feed record value is missing")
          (,) <$> textFieldP "id" 512 item <*> pure (get item "value")
 
+-- Source progress is host authority, not a model-provided input default.
+data FeedState = FeedState { feedStateRevision :: Int, feedStateCursor :: Text, feedStateSeen :: [Text] } deriving (Eq,Show)
+feedState :: ExternalProfile -> Value -> Parser FeedState
+feedState profile value = do
+ revision <- withObject "Feed state" (.: "revision") value
+ unless (revision > 0) (fail "Source state revision must be positive")
+ unless (get value "profileHash" == str (canonicalHash (toJSON profile)) && get value "sourceHash" == str (canonicalHash (toJSON (externalSource profile)))) (fail "Source state identity differs from its profile")
+ FeedState revision <$> cursorP (get value "cursor") <*> feedSeenIds (get value "seenIds")
+
+feedSeenIds :: Value -> Parser [Text]
+feedSeenIds value = do
+ ids <- parseJSON value
+ unless (all (\identity -> not (T.null (T.strip identity)) && T.length identity <= 512) ids && length (nub ids) == length ids) (fail "Source seen IDs must be unique bounded text")
+ pure ids
+
+data FeedContentInterface = ScriptText | HybridText deriving (Eq,Show)
+instance ToJSON FeedContentInterface where
+ toJSON value = str (case value of ScriptText -> "script-text-v1"; HybridText -> "hybrid-explanation-v1")
+instance FromJSON FeedContentInterface where
+ parseJSON value = case text value of
+  "script-text-v1" -> pure ScriptText
+  "hybrid-explanation-v1" -> pure HybridText
+  _ -> fail "Unsupported feed content interface"
+
+data FeedInputDescriptor = FeedInputDescriptor Text Int Text FeedContentInterface deriving (Eq,Show)
+instance FromJSON FeedInputDescriptor where
+ parseJSON value = do
+  onlyFields ["kind","interface","profileHash","externalProfileRevision","sourceHash","contentInterface"] value
+  unless (at value "kind" == "receipt_feed_v1" && at value "interface" == "receipt-feed-input-v1") (fail "Unsupported feed input interface")
+  revision <- withObject "Feed input descriptor" (.: "externalProfileRevision") value
+  unless (revision > 0) (fail "Invalid feed input profile revision")
+  FeedInputDescriptor <$> hashField "profileHash" <*> pure revision <*> hashField "sourceHash" <*> parseJSON (get value "contentInterface")
+  where hashField key = do
+         digest <- textFieldP key 64 value
+         unless (T.length digest == 64 && T.all isHexDigit digest) (fail "Invalid feed identity hash")
+         pure digest
+instance ToJSON FeedInputDescriptor where
+ toJSON (FeedInputDescriptor profile revision source content) = obj [("kind",str "receipt_feed_v1"),("interface",str "receipt-feed-input-v1"),("profileHash",str profile),("externalProfileRevision",num revision),("sourceHash",str source),("contentInterface",toJSON content)]
+
+feedDescriptor :: ExternalProfile -> Int -> FeedContentInterface -> FeedInputDescriptor
+feedDescriptor profile revision = FeedInputDescriptor (canonicalHash (toJSON profile)) revision (canonicalHash (toJSON (externalSource profile)))
+
+feedBusinessInput :: ExternalProfile -> Value -> Value -> [Text] -> Parser Value
+feedBusinessInput profile parameters observation seen = do
+ page <- parseJSON observation
+ unless (pageSource page == feedIdentity (externalSource profile)) (fail "Feed observation belongs to another source")
+ let records = pageRecords page
+     fresh = [obj [("id",str identity),("value",value)] | (identity,value) <- records, identity `notElem` seen]
+     relevant = [identity | (identity,_) <- records, identity `elem` seen]
+     input = obj [("schema",num 1),("interface",str "receipt-feed-input-v1"),("taskInputs",parameters),("observation",observation),("newRecords",arr fresh),("previouslySeenIds",toJSON relevant)]
+ unless (BL.length (encode input) <= 65536) (fail "Observed business input exceeds 64 KiB")
+ pure input
+
+feedContentText :: Value -> Parser Text
+feedContentText value = do
+ onlyFields ["text"] value
+ result <- textFieldP "text" 65536 value
+ unless (BS.length (TE.encodeUtf8 result) <= 65536) (fail "Feed content exceeds 64 KiB")
+ pure result
+
 data DeliveryState = DeliveryPrepared | DeliveryStarted | DeliveryUnknown | DeliveryConfirmed | DeliveryNotSent | DeliveryNotRequired deriving (Eq,Show)
 instance FromJSON DeliveryState where
  parseJSON value=case text value of

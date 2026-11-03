@@ -17,6 +17,7 @@ import qualified Database.SQLite.Simple as SQL
 import Types
 import qualified Store as DB
 import qualified ManagedState as Managed
+import qualified Effects
 import qualified Delegation as D
 import qualified Routines as R
 import qualified Provider
@@ -55,6 +56,7 @@ evidenceKey definition operations works = obj
 -- required facts fail visibly when oversized; optional values are kept whole.
 selectEvidence :: R.Definition -> [Value] -> [D.Workload] -> D.Workload -> Maybe D.Workload -> Either Text Value
 selectEvidence definition operations works source prior = do
+ sourceInput<-if Effects.profileBound (toJSON source) then either (Left . T.pack) Right (Effects.observedInput (toJSON source)) else Right Null
  let matching=filter (ordinary definition) works
      current=filter (currentOrdinary definition) matching
      accepted=filter (positive operations) current
@@ -76,7 +78,7 @@ selectEvidence definition operations works source prior = do
        ,("omittedRuns",num 0),("omittedReceipts",num 0),("omittedInvocations",num 0),("omittedBytes",num 0),("contextLimitBytes",num 262144)]
      required=obj [("consumer",obj [("owner",str (R.definitionOwner definition)),("routine",str (R.definitionId definition)),("contractGeneration",toJSON (R.contractGeneration definition))])
        ,("contract",obj [("goal",str (R.definitionGoal definition)),("criteria",maybe Null toJSON (R.definitionCriteria definition))])
-       ,("source",summary source),("positiveRuns",toJSON (map D.workloadId accepted)),("negativeFeedback",arr feedback)
+       ,("source",put "inputBinding" sourceInput (summary source)),("positiveRuns",toJSON (map D.workloadId accepted)),("negativeFeedback",arr feedback)
        ,("previousDecision",maybe Null (`D.workField` "analysisDecision") prior)
        ,("history",arr []),("invocations",arr []),("receipts",arr []),("coverage",accounting)]
      bytes=BL.length . encode

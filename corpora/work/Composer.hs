@@ -27,6 +27,7 @@ import qualified Delegation as D
 import qualified Routines as R
 import qualified Provider
 import qualified GeneratedCode as Code
+import qualified Effects
 
 -- Stages have different admission/evidence requirements; a successful process
 -- exit is deliberately not a preparation state.
@@ -67,7 +68,6 @@ consumer :: R.Definition -> D.Workload -> Bool
 consumer definition work = let pin=D.workField work "preparationPin" in at pin "routine"==R.definitionId definition && at pin "owner"==R.definitionOwner definition
 requestOn :: SQL.Connection -> R.Definition -> RunId -> RunId -> Text -> IO Value
 requestOn db definition analysis identity time = do
- require (get (toJSON definition) "externalProfile"==Null) 409 "Receipt-feed profile preparation requires observed-input integration; script/hybrid preparation is not yet supported for this profile"
  works<-readOn db
  require (not (any D.generatedCleanupPending works)) 503 "Owned container cleanup remains unresolved; restore the runtime and restart the app before another preparation"
  source<-maybe (failure 404 "Unknown Ready analysis") pure (find ((==runIdText analysis) . D.workloadId) works)
@@ -79,8 +79,9 @@ requestOn db definition analysis identity time = do
  original<-maybe (failure 409 "The accepted source task is unavailable") pure (find (\work->D.workloadId work==at (get (D.workField source "analysisEvidence") "source") "id") works)
  require (DB.sameRoutineContract (toJSON definition) (toJSON original)) 409 "Preparation needs an accepted task under the current Routine instructions; run it ordinarily first"
  contract<-D.executionContract original (NE.head (D.workCalls original)) >>= maybe (failure 409 "Preparation requires an accepted pinned source task") pure
+ sourceInput<-if get (toJSON definition) "externalProfile"==Null then pure Null else Effects.preparationInput (toJSON definition) (toJSON original)
  let origin=obj [("preparation",toJSON identity)]
-     preparation=obj [("status",str "queued"),("analysis",toJSON analysis),("contract",toJSON contract),("sourceEvidence",D.workField source "analysisEvidence"),("parameters",get (D.workField source "analysisDecision") "parameters"),("operations",arr []),("checks",arr [])]
+     preparation=obj [("feedProfile",get (toJSON definition) "externalProfile"),("sourceInput",sourceInput),("status",str "queued"),("analysis",toJSON analysis),("contract",toJSON contract),("sourceEvidence",D.workField source "analysisEvidence"),("parameters",get (D.workField source "analysisDecision") "parameters"),("operations",arr []),("checks",arr [])]
      call=D.newCall identity (analysisOwner pin) Nothing D.Preparation D.CallQueued (R.definitionGoal definition)
      work=D.Workload (runIdText identity) False (call :| []) (KM.fromList [("origin",origin),("created",str time),("originalIntent",str (R.definitionGoal definition)),("executionGate",toJSON ExecutionOpen),("preparationPin",toJSON pin),("preparation",preparation)])
      turn=newTurn identity Chat (R.definitionGoal definition) time origin False
@@ -189,18 +190,28 @@ prepare s running = do
  require (at saved "status"=="queued") 409 "Preparation already started; request a new explicit attempt"
  spec<-decodeValue 422 (get saved "contract")
  phase s running Fixtures
- oracle<-ask s running "PreparationFixtures" "fixture_design" (put "criteria" (D.criterionContext spec) (select ["contract","sourceEvidence","parameters"] saved))
- typedFixtures<-field 422 oracle "fixtures" :: IO [Fixture]
+ oracle<-ask s running "PreparationFixtures" "fixture_design" (put "criteria" (D.criterionContext spec) (select ["contract","sourceEvidence","parameters","feedProfile","sourceInput"] saved))
+ rawFixtures<-field 422 oracle "fixtures" :: IO [Fixture]
+ feedMode<-if get saved "feedProfile"==Null then pure Nothing else Just <$> field 422 oracle "contentInterface"
+ typedFixtures<-forM rawFixtures $ \(Fixture input expected)->case feedMode of
+  Nothing->pure (Fixture input expected)
+  Just content->do
+   profile<-decodeValue 422 (get saved "feedProfile")
+   normalized<-parseValue 422 (Effects.fixtureInput profile) input
+   when (content==ScriptText && at expected "status"=="ok") (void (parseValue 422 feedContentText (get expected "value")))
+   pure (Fixture normalized expected)
  let fixtures=map toJSON typedFixtures
      observedInputs=get (get (get saved "sourceEvidence") "source") "inputs"
-     observedJSON=case observedInputs of String input->parseJSONText input; _->observedInputs
+     observedJSON=if get saved "sourceInput"/=Null then get (get saved "sourceInput") "input" else case observedInputs of String input->parseJSONText input; _->observedInputs
  require (not (null fixtures) && any (\fixture->get fixture "input"/=observedJSON) fixtures) 422 "Preparation requires independent examples on new inputs"
  when (has oracle "rubric") (void (D.candidateRubric spec (get oracle "rubric")))
- update s identity (mergeFields [("fixtures",arr fixtures),("rubric",get oracle "rubric")])
+ when (feedMode==Just HybridText) (void (D.candidateRubric spec (get oracle "rubric")))
+ update s identity (mergeFields [("fixtures",arr fixtures),("sourceCases",toJSON rawFixtures),("contentInterface",maybe Null toJSON feedMode),("rubric",get oracle "rubric")])
  profile<-environment s running
  phase s running Generation
- candidate<-ask s running "PreparationGeneration" "candidate_generation" (mergeFields [("availableProfiles",arr [Code.profileJSON profile]),("interface",str "json-stdin-result-v1")] (select ["contract","sourceEvidence","parameters"] saved))
+ candidate<-ask s running "PreparationGeneration" "candidate_generation" (mergeFields [("availableProfiles",arr [Code.profileJSON profile]),("interface",str "json-stdin-result-v1"),("contentInterface",maybe Null toJSON feedMode)] (select ["contract","sourceEvidence","parameters","feedProfile","sourceInput"] saved))
  Candidate source<-decodeValue 422 candidate
+ forM_ feedMode $ \content->require ((content==HybridText)==has candidate "explanation") 422 "Generated implementation differs from the frozen feed content interface"
  hybridFields<-if not (has candidate "explanation") then pure [] else do
   rubric<-D.candidateRubric spec (get oracle "rubric")
   settings<-Provider.verifiedResponseSettings s running
@@ -208,7 +219,13 @@ prepare s running = do
   envelope<-prompt s "preparation-envelope"
   let explanation=mergeFields [("templateHash",str (sourceHash template)),("envelopeHash",str (sourceHash envelope)),("model",toJSON settings),("policy",str "response_only")] (get candidate "explanation")
   pure [("composition",hybridComposition),("structureHash",str (canonicalHash hybridComposition)),("rubric",toJSON rubric),("explanation",put "implementationHash" (str (canonicalHash explanation)) explanation)]
- let content=mergeFields (hybridFields++ [("runtime",Code.profileJSON profile),("contract",get saved "contract"),("contractGeneration",get (D.workField work "preparationPin") "contractGeneration"),("sourceHash",str (sourceHash source))]) (select ["source","language","interface","dependencies","capabilities"] candidate)
+ feedFields<-case feedMode of
+  Nothing->pure []
+  Just content->do
+   profile<-decodeValue 422 (get saved "feedProfile")
+   revision<-field 422 (get saved "sourceInput") "externalProfileRevision"
+   pure [("inputBinding",toJSON (feedDescriptor profile revision content))]
+ let content=mergeFields (feedFields++hybridFields++ [("runtime",Code.profileJSON profile),("contract",get saved "contract"),("contractGeneration",get (D.workField work "preparationPin") "contractGeneration"),("sourceHash",str (sourceHash source))]) (select ["source","language","interface","dependencies","capabilities"] candidate)
      reference=obj [("owner",toJSON (runOwner running)),("preparation",str identity),("digest",str (canonicalHash content))]
      version=put "reference" reference content
  update s identity (put "version" version)
@@ -293,7 +310,9 @@ detail s owner routine identity = do
  require (at pin "owner"==owner && at pin "routine"==routine) 404 "Unknown preparation in this Sapi context"
  renderDetail s work
 projection :: Service -> R.Definition -> [D.Workload] -> IO Value
-projection s definition works = maybe (pure Null) (fmap (\detail_ -> put "reference" (get (get detail_ "version") "reference") (select ["id","status","analysis","owner","routine","contractGeneration","error","trial"] detail_)) . renderDetail s) (listToMaybe (reverse (filter (consumer definition) works)))
+projection s definition works = maybe (pure Null) (fmap project . renderDetail s) (listToMaybe (reverse (filter (consumer definition) works)))
+ where
+ project detail_ = mergeFields [("reference",get (get detail_ "version") "reference"),("applicable",Bool (get detail_ "contractGeneration"==toJSON (R.contractGeneration definition)))] (select ["id","status","analysis","owner","routine","contractGeneration","error","trial"] detail_)
 renderDetail :: Service -> D.Workload -> IO Value
 renderDetail s work = do
  allowed<-DB.occurrenceAllowed s (D.workField work "origin")

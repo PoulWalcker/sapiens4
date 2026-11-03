@@ -250,9 +250,15 @@ RSpec.describe 'Receipt-aware routine feed and delivery' do
   it 'retains the same-consumer fence after profile removal even for Retry of an older ordinary run' do
     fields = {title: 'Feed summary', goal: GOAL, criteria: CRITERIA}
     @routine = host.api('POST', "/api/agents/#{@owner}/routines", fields.merge(operation: 'plain-create')).fetch('routine')
-    configure_summary('Never delivered', fail: true)
+    directory = File.join(host.root, 'decision-prompts')
+    FileUtils.mkdir_p(directory)
+    override = File.join(directory, 'decision-execution.md')
+    File.binwrite(override, [255].pack('C'))
+    before_calls = host.calls.length
     old = submit('old-ordinary')
     host.turn(old, 'failed')
+    expect(host.calls.length).to eq(before_calls)
+    File.delete(override)
     host.api('POST', "#{path}/edit", fields.merge(operation: 'enable-profile', revision: 1, externalProfile: @profile))
     configure_summary('New records: r1 = 10; r2 = 20.')
     @peer.delivery_mode = :drop_ack

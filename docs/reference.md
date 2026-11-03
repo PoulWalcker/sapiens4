@@ -249,10 +249,13 @@ Routine create/edit HTTP requests can explicitly configure `externalProfile`:
 
 The accepted Task creates content under its unchanged criteria. Delivery is a
 separate operation; Task completion does not prove delivery. The profile forces
-response-only content execution and refuses delegation. It currently cannot be
-combined with checked/active script or hybrid automation; configuration refuses
-that combination without erasing the existing version, and preparation refuses
-an enabled profile. Configuration is currently through HTTP.
+response-only ordinary content execution and refuses delegation. Checked pure code
+or the existing calculation/explanation hybrid can consume the same retained feed
+input; their containers remain networkless. Configuration and preparation controls
+are currently through HTTP. Changing or removing a profile advances applicability:
+old versions and accepted history remain, but future runs use ordinary execution
+until a candidate is prepared for the new contract/profile. Restoring old settings
+does not revive an older version.
 
 The source GET adds an opaque `cursor`. A complete response contains `schema: 1`,
 matching `source` and `cursor`, `nextCursor`, `complete: true`, and `records` with
@@ -282,13 +285,42 @@ operation for another GET. Reconciliation remains available for historical runs
 after Stop, deletion or profile replacement.
 
 Unknown deliveries or unexpected tool/protocol uncertainty block further attempts
-of the same Routine, including older ordinary Retry with a retained routine snapshot
-and after profile removal. Pre-snapshot legacy routine ownership and tool uncertainty
-are not yet covered by this compatibility guard. Unrelated routines remain available. Profile-bound occurrences cannot generic-Retry;
+of the same Routine, including ordinary Retry and after profile removal. Retained
+pre-snapshot Routine ancestry is checked against the original owner, including
+legitimate delegated calls. Standalone Tasks, Groups and unrelated routines keep
+their existing policy. Profile-bound occurrences cannot generic-Retry;
 a failed read without uncertain effects can be retried as a new authorized run.
 Omitting externalProfile on edit preserves it; explicit null removes configuration
 but preserves history and uncertainty. Profile revisions prevent old authorization
 from becoming valid again after replacement and restoration of identical settings.
+
+The immutable `receipt-feed-input-v1` input contains original `taskInputs`, the
+complete `observation`, host-derived `newRecords`, and page-relevant
+`previouslySeenIds`. It does not copy the entire growing source history. Candidate
+identity pins the input interface and profile revision; each occurrence also pins
+the observation and normalized input hashes. A malformed saved source state is
+not treated as an empty history. The existing 64 KiB code input bound applies;
+oversized observations are retained without silently truncating code input.
+
+Preparation freezes independent source examples and a content interface before
+code generation. Pure code produces `value.text`; hybrid delivery uses its actual
+explanation. The final assessment cannot rewrite this content. Successful task
+acceptance, cursor CAS, candidate activation and delivery reservation share one
+transaction. Delivery begins afterward; a lost acknowledgement can leave valid
+code active while the separate consumer uncertainty fence blocks another run.
+Previously accepted observations can supply preparation evidence only when their
+retained page, original parameters and deduplication facts agree. Derived legacy
+inputs explicitly retain unknown historical-state hashes rather than invent them.
+
+For ordinary Routine retries, new admissions retain whether an invocation was
+prepared or admitted before starting its provider. Failed or interrupted unsafe
+invocations with known admission and uncertain tool outcomes block the consumer;
+a later successful run does not clear that evidence. Complete clean no-tool traces
+and proven pre-admission failures permit Retry. Historical completed work without
+evidence is not retroactively quarantined. A legacy failed attempt with no retained
+start provenance cannot itself be retried, but does not automatically block all
+future runs: unrecorded historical starts remain an explicit migration limitation.
+An unrelated feed receipt or model assertion cannot clear arbitrary tool uncertainty.
 
 Transport uses fixed HTTPS endpoints or exact loopback HTTP, no credentials,
 environment proxies, redirects or automatic retries. URLs cannot contain userinfo,

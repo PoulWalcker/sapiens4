@@ -147,7 +147,8 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
       "active" -> "Script active · " <> CU.take 8 (D.s "digest" reference)
       "suspect" -> "Script suspended"
       "stale" -> "Script needs reconsideration"
-      _ -> if D.s "run" trial /= "" then if A.elem (D.s "status" trialRun) ["queued", "running", "waiting", "blocked"] then "Trial claimed" else "Trial finished without activation" else if D.s "status" prepared == "awaiting_occurrence" then "Prepared · awaiting an authorized run" else "Preparation: " <> D.s "status" prepared
+      _ -> if D.s "id" prepared /= "" && not (D.b "applicable" prepared) then "Prepared version needs reconsideration" else if D.s "run" trial /= "" then if A.elem (D.s "status" trialRun) ["queued", "running", "waiting", "blocked"] then "Trial claimed" else "Trial finished without activation" else if D.s "status" prepared == "awaiting_occurrence" then "Prepared · awaiting an authorized run" else "Preparation: " <> D.s "status" prepared
+    ,V.when (D.s "status" active == "stale" || D.s "id" prepared /= "" && not (D.b "applicable" prepared)) $ V.p "routine-muted" "This historical version no longer applies to the current task or source profile. Its history is retained."
     ,V.when (D.s "digest" (D.get "reference" prepared) /= "") $ V.p "routine-muted" $ "Prepared version · " <> CU.take 8 (D.s "digest" (D.get "reference" prepared))
     ,V.when (D.s "run" active /= "") $ V.p "routine-muted" $ "Activated by run " <> D.s "run" active <> " · " <> formatDate (D.s "decidedAt" active)
     ,V.when (D.s "reason" active /= "") $ V.p "routine-muted" $ D.s "reason" active

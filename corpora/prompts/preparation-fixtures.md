@@ -12,3 +12,11 @@ contains host-assigned IDs and the exact original criterion text. Classify every
 original criterion once as numeric or semantic, with at least one of each. Do not
 add, drop or rewrite criteria. Expected fixture values describe calculation facts,
 not prose. This rubric is frozen before any candidate generation.
+
+For a receipt-feed profile, freeze contentInterface before generation:
+"script-text-v1" for pure text production, or "hybrid-explanation-v1" for useful prose
+following computed facts. Every fixture input is {"taskInputs":JSON,"page":complete
+receipt-feed page,"priorSeenIds":["synthetic previously seen IDs"]}. The host derives
+the consumer input and newRecords; do not supply invented hashes. Pure successful
+expected values are {"text":"independently computed delivery text"}. Hybrid requires
+the original-criteria rubric above. Include overlap and a genuinely new observation.

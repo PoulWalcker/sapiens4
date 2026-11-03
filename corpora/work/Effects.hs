@@ -4,7 +4,8 @@
 module Effects
  ( configureOn, definitionOn, pinOn, profileBound, external
  , beforeContent, ContentCommit(..), acceptContentOn, deliver, finishOccurrence
- , requireRunClear, requireContentTrace, observeEvidence, recover, reconcile, summary, pendingTransport
+ , observedInput, preparationInput, fixtureInput, requireCandidateInput, requireCurrentInput
+ , requireRunClear, prepareRoutineAttempt, admitRoutineAttempt, sealRoutineAttempt, requireContentTrace, observeEvidence, recover, reconcile, summary, pendingTransport
  ) where
 
 import Control.Concurrent (threadDelay)
@@ -12,6 +13,7 @@ import Control.Concurrent.Async (race)
 import Control.Exception
 import Control.Monad
 import Data.Aeson
+import Data.Aeson.Types (Parser,parseEither)
 import qualified Data.ByteString as B
 import Data.IORef
 import Data.List (find,nub)
@@ -94,10 +96,131 @@ uncertainty work
  e=external work
  delivery=get e "delivery"
  pending=Just "A previous external action remains unknown; reconcile its receipt before a new occurrence"
-requireClearOn :: SQL.Connection -> (Text,Text) -> Maybe Text -> IO ()
-requireClearOn db owner except=do
+data RoutineConsumer = RoutineConsumer Text Text deriving (Eq,Show)
+data RoutineRisk = RoutineClear | RoutineUnverified | RoutineUnknown Text Text deriving (Eq,Show)
+
+-- Only retained Routine ancestry establishes scope; a delegated child may have
+-- another addressedTo owner and does not become a different consumer.
+routineConsumerOn :: SQL.Connection -> Value -> IO (Maybe RoutineConsumer)
+routineConsumerOn db work
+ | not (has origin "routine") && snapshot==Null = pure Nothing
+ | has origin "group" = pure Nothing
+ | otherwise = do
+  let identity=if snapshot/=Null then at snapshot "id" else at origin "routine"
+  require (not (T.null identity)) 409 "Routine ancestry is missing its identity"
+  definition<-definitionOn db identity
+  let owner=at definition "owner"
+      rootCall=listToMaybe [call | call<-items work "calls",get call "causedBy"==Null]
+      asserted=[at value key | (value,key)<-[(snapshot,"owner"),(origin,"routineOwner"),(origin,"agent")],has value key]
+      rootOwner=maybe "" (`at` "addressedTo") rootCall
+  require (not (T.null owner) && not (T.null rootOwner) && rootOwner==owner && all (==owner) asserted
+    && (not (has origin "routine") || at origin "routine"==identity)) 409 "Saved Routine ancestry contradicts its retained owner"
+  pure (Just (RoutineConsumer owner identity))
+ where origin=get work "origin"; snapshot=get work "routineSnapshot"
+
+completeActionFree :: Value -> Bool
+completeActionFree evidence = case parseEither checked evidence of Right value->value; Left _->False
+ where
+ checked value=do
+  finished<-withObject "Invocation evidence" (.: "finished") value
+  exit<-withObject "Invocation evidence" (.: "processExit") value :: Parser Int
+  events<-withObject "Invocation evidence" (.: "events") value :: Parser [Value]
+  let completeness=get value "completeness"
+  flags<-mapM (\key->withObject "Capture completeness" (.: key) completeness) ["finalSeen","turnEndSeen","streamEndSeen"] :: Parser [Bool]
+  counts<-mapM (\key->withObject "Capture completeness" (.: key) completeness) ["pendingTools","malformedEvents","unknownEvents","droppedEvents","outOfOrderEvents"] :: Parser [Int]
+  pure (finished && exit==0 && and flags && all (==0) counts && not (any toolEvent events))
+ toolEvent event=get event "summary"/=Null || "tool" `T.isInfixOf` T.toLower (at event "kind")
+
+positiveAnomaly :: Value -> Bool
+positiveAnomaly evidence =
+ let completeness=get evidence "completeness"
+ in any (\event->get event "summary"/=Null || "tool" `T.isInfixOf` T.toLower (at event "kind")) (items evidence "events")
+   || any (\key->case fromJSON (get completeness key) :: Result Int of Success count->count>0; Error _->False) ["pendingTools","malformedEvents","unknownEvents","droppedEvents","outOfOrderEvents"]
+   || (has completeness "pendingTools" && get completeness "pendingTools"==Null)
+
+data InvocationAdmission = LegacyAdmission | PreparedAdmission Text | AdmittedAdmission Text deriving (Eq,Show)
+invocationAdmission :: Value -> Either String InvocationAdmission
+invocationAdmission = parseEither $ \value -> if value==Null then pure LegacyAdmission else do
+ onlyFields ["schema","state","policy"] value
+ unless (get value "schema"==num 1) (fail "Unknown Routine invocation guard schema")
+ policy<-textFieldP "policy" 40 value
+ unless (policy `elem` ["unsafe_bypass","response_only"]) (fail "Unknown Routine invocation policy")
+ case at value "state" of
+  "prepared"->pure (PreparedAdmission policy)
+  "admitted"->pure (AdmittedAdmission policy)
+  _->fail "Unknown Routine invocation admission state"
+
+routineRisk :: Bool -> Value -> RoutineRisk
+routineRisk startup work
+ | get work "routineEffectUnknown"/=Null = RoutineUnknown (at (get work "routineEffectUnknown") "decisionId") (at (get work "routineEffectUnknown") "reason")
+ | otherwise = fromMaybe (if failedWork && null entries && get work "routineAttemptSchema"/=num 1 then RoutineUnverified else RoutineClear) (listToMaybe unknowns `mplus` listToMaybe unverified)
+ where
+ entries=items work "decisions"
+ failedState call=at call "state" `elem` ["Failed","Interrupted","Unresolved","Cancelled"] || startup && at call "state"=="Running"
+ failedWork=any failedState (items work "calls")
+ failed entry=has entry "error" || at (get entry "assessment") "status" `elem` ["Rejected","Unresolved"]
+   || at (get (get entry "response") "outcome") "status"=="Unresolved"
+   || not (boolean (get entry "accepted")) && any (\call->get call "callId"==get entry "callId" && failedState call) (items work "calls")
+ classify entry
+  | not (failed entry) = RoutineClear
+  | validPrepared && not actualStart = RoutineClear
+  | responseOnly && not (positiveAnomaly evidence) = RoutineClear
+  | consistent && completeActionFree evidence = RoutineClear
+  | admitted || actualStart = RoutineUnknown (at entry "decisionId") "An ordinary Routine invocation may have performed an external action; its failed or incomplete result has no independent absence proof"
+  | otherwise = RoutineUnverified
+  where
+   attempt=get entry "routineAttempt"; evidence=get entry "evidence"
+   decoded=invocationAdmission attempt
+   recordedPolicy=case decoded of Right (PreparedAdmission policy)->Just policy; Right (AdmittedAdmission policy)->Just policy; _->Nothing
+   capturedPolicy=case at evidence "policy" of "response_only"->Just "response_only"; "unsafe_bypass"->Just "unsafe_bypass"; _->Nothing
+   consistent=case decoded of
+    Left _->False
+    Right _->case (recordedPolicy,capturedPolicy) of (Just a,Just b)->a==b; (_,Nothing)->evidence==Null; _->True
+   validPrepared=consistent && case decoded of Right (PreparedAdmission _)->True; _->False
+   admitted=case decoded of Right (AdmittedAdmission _)->True; _->at attempt "state"=="admitted"
+   responseOnly=consistent && (recordedPolicy==Just "response_only" || capturedPolicy==Just "response_only")
+   actualStart=not (null (items evidence "events")) || get evidence "processExit"/=Null
+    || any (\key->case fromJSON (get (get evidence "completeness") key) :: Result Int of Success count->count>0; Error _->False) ["malformedEvents","unknownEvents","droppedEvents","outOfOrderEvents"]
+
+ risks=map classify entries
+ unknowns=[risk | risk@(RoutineUnknown _ _)<-risks]
+ unverified=[RoutineUnverified | RoutineUnverified<-risks]
+
+retainRoutineRisk :: Bool -> Value -> Value
+retainRoutineRisk startup work = case routineRisk startup work of
+ RoutineUnknown identity reason->put "routineEffectUnknown" (obj [("decisionId",str identity),("reason",str reason)]) work
+ _->work
+
+requireClearOn :: SQL.Connection -> RoutineConsumer -> Maybe Text -> IO ()
+requireClearOn db owner@(RoutineConsumer _ identity) except=do
  works<-worksOn db
- forM_ (listToMaybe [reason | work<-works,consumer work==owner,Just (at work "workloadId")/=except,Just reason<-[uncertainty work]]) (failure 409)
+ forM_ [work | work<-works,at (get work "routineSnapshot") "id"==identity || at (get work "origin") "routine"==identity] $ \work->do
+  actual<-routineConsumerOn db work
+  when (actual==Just owner) $ do
+   let retained=retainRoutineRisk False work
+   when (retained/=work) (saveWorkOn db retained)
+   case routineRisk False retained of RoutineUnknown _ reason->failure 409 reason; _->pure ()
+   when (Just (at work "workloadId")/=except) (forM_ (uncertainty work) (failure 409))
+
+requireConsumerClearOn :: SQL.Connection -> Value -> Maybe Text -> IO ()
+requireConsumerClearOn db work except=routineConsumerOn db work >>= mapM_ (\owner->requireClearOn db owner except)
+
+prepareRoutineAttempt :: SQL.Connection -> Value -> Bool -> Value -> IO Value
+prepareRoutineAttempt db work responseOnly record=do
+ scope<-routineConsumerOn db work
+ pure (if isNothing scope then record else put "routineAttempt" (obj [("schema",num 1),("state",str "prepared"),("policy",str (if responseOnly then "response_only" else "unsafe_bypass"))]) record)
+
+admitRoutineAttempt :: Value -> Value
+admitRoutineAttempt entry=if get (get entry "routineAttempt") "schema"==num 1 then put "routineAttempt" (put "state" (str "admitted") (get entry "routineAttempt")) entry else entry
+
+sealRoutineAttempt :: Service -> RunId -> IO ()
+sealRoutineAttempt s identity=DB.connection s $ \db->do
+ works<-worksOn db
+ forM_ [work | work<-works,any (\call->get call "callId"==toJSON identity) (items work "calls")] $ \work->do
+  scope<-routineConsumerOn db work
+  when (isJust scope) $ do
+   let retained=retainRoutineRisk False work
+   when (retained/=work) (saveWorkOn db retained)
 
 initialState :: ExternalProfile -> Value
 initialState profile=obj [("revision",num 1),("sourceHash",str (canonicalHash (toJSON (externalSource profile)))),("profileHash",str (canonicalHash (toJSON profile))),("cursor",str (feedInitialCursor (externalSource profile))),("seenIds",arr [])]
@@ -107,10 +230,7 @@ configureOn db old current change=case change of
  PreserveProfile->pure current
  RemoveProfile->save (put "externalProfile" Null current)
  ConfigureProfile profile->do
-  let prior=fromMaybe current old; generation=get prior "contractGeneration"
-  works<-worksOn db
-  let awaiting work=let pin=get work "preparationPin" in at pin "owner"==at prior "owner" && at pin "routine"==at prior "id" && get pin "contractGeneration"==generation && at (get work "preparation") "status"=="awaiting_occurrence"
-  require ((at (get prior "activeCode") "status"/="active" || get (get prior "activeCode") "contractGeneration"/=generation) && not (any awaiting works)) 409 "This profile cannot replace active or prepared script automation; profile/script integration is not yet supported"
+  let prior=fromMaybe current old
   let freshState=initialState profile; previous=get prior "sourceState"
       baseState=if at previous "sourceHash"==at freshState "sourceHash" then put "profileHash" (get freshState "profileHash") previous else freshState
       changed=get prior "externalProfile"/=toJSON profile
@@ -128,11 +248,10 @@ configureOn db old current change=case change of
 
 pinOn :: SQL.Connection -> Value -> Value -> IO Value
 pinOn db definition work=do
- requireClearOn db (at definition "owner",at definition "id") Nothing
+ requireClearOn db (RoutineConsumer (at definition "owner") (at definition "id")) Nothing
  if get definition "externalProfile"==Null then pure work else do
   profile<-decodeValue 409 (get definition "externalProfile") :: IO ExternalProfile
   revision<-profileRevision definition
-  require (get work "codeExecution"==Null) 409 "Receipt-feed profile does not yet support script/hybrid execution"
   pure (put "externalExecution" (obj [("profile",toJSON profile),("profileHash",str (canonicalHash (toJSON profile))),("externalProfileRevision",num revision)]) work)
 
 -- Every checkpoint reloads the canonical occurrence while holding the service
@@ -159,6 +278,11 @@ currentProfileOn db work=do
  require (currentRevision==pinnedRevision && canonicalHash (get definition "externalProfile")==at e "profileHash") 409 "External profile changed; start a new authorized occurrence"
  require (get e "opaqueEffectUnknown"==Null) 409 "Unexpected tool evidence leaves possible external effects unresolved"
  pure definition
+requireCurrentInput :: Service -> Value -> IO ()
+requireCurrentInput s work = when (profileBound work) $ do
+ void (either (failure 409 . T.pack) pure (observedInput work))
+ DB.connection s (\db->void (currentProfileOn db work))
+
 baseMatches :: Value -> Value -> Bool
 baseMatches state request= get state "revision"==get request "baseRevision" && all (\key->get state key==get request key) ["cursor","sourceHash","profileHash"]
 
@@ -166,13 +290,14 @@ beforeContent :: Service -> Run -> IO ()
 beforeContent s running=do
  prepared<-checkpoint s running $ \db work -> if not (profileBound work) then pure (work,Nothing) else do
   definition<-currentProfileOn db work
-  requireClearOn db (consumer work) (Just (at work "workloadId"))
+  requireConsumerClearOn db work (Just (at work "workloadId"))
   let e=external work; readState=get e "read"
   if at readState "status"=="received" then pure (work,Nothing) else do
    require (readState==Null) 409 "This occurrence already attempted its source read; start a new occurrence"
    profile<-decodeValue 409 (get e "profile")
    let state=get definition "sourceState"
-       request=merge (select ["cursor","sourceHash","profileHash"] state) (obj [("baseRevision",get state "revision")])
+   checked<-parseValue 409 (feedState profile) state
+   let request=merge (select ["cursor","sourceHash","profileHash"] state) (obj [("baseRevision",get state "revision"),("priorSeenIdsHash",str (canonicalHash (toJSON (feedStateSeen checked))))])
        next=put "externalExecution" (put "read" (obj [("status",str "started"),("request",request)]) e) work
    pure (next,Just (profile,request))
  forM_ prepared $ \(profile,request)->do
@@ -189,10 +314,76 @@ beforeContent s running=do
     valid<-checkpoint s running $ \db work ->do
      definition<-currentProfileOn db work
      let state=get definition "sourceState"; matches=baseMatches state request
-         unseen=filter (\(identity,_)->str identity `notElem` list (get state "seenIds")) (pageRecords page)
+     checked<-parseValue 409 (feedState profile) state
+     let unseen=filter (\(identity,_)->identity `notElem` feedStateSeen checked) (pageRecords page)
          readState=merge (get (external work) "read") (obj [("status",str (if matches then "received" else "conflict")),("newIds",arr (map (str . fst) unseen)),("newRecords",arr [obj [("id",str identity),("value",value)] | (identity,value)<-unseen])])
-     pure (put "externalExecution" (put "read" readState (external work)) work,matches)
+     input<-parseValue 409 (\_ -> do
+       parameters<-acceptedParameters work
+       feedBusinessInput profile parameters response (feedStateSeen checked)) Null
+     let binding=merge (select ["profileHash","externalProfileRevision"] (external work)) (obj [("interface",str "receipt-feed-input-v1"),("sourceObservationHash",str (canonicalHash response)),("priorSeenIdsHash",get request "priorSeenIdsHash"),("inputHash",str (canonicalHash input)),("input",input),("provenance",str "observed")])
+         next=put "read" readState (external work)
+     pure (put "externalExecution" (if matches then put "inputBinding" binding next else next) work,matches)
     require valid 409 "Source cursor advanced concurrently; observation retained without acceptance or delivery"
+
+-- The accepted Task remains unchanged; this only decodes its original parameters.
+acceptedParameters :: Value -> Parser Value
+acceptedParameters work = do
+ inputs<-parseJSON (get (get (get work "routineSnapshot") "acceptedTask") "inputs") :: Parser [Text]
+ pure (case inputs of []->Null; [raw]->either (const (str raw)) id (eitherDecodeStrict (TE.encodeUtf8 raw)); values->toJSON values)
+
+observedInput :: Value -> Either String Value
+observedInput work = parseEither validate work
+ where
+ validate _ = do
+  let e=external work; observed=get e "read"; response=get observed "response"; binding=get e "inputBinding"
+  profile<-parseJSON (get e "profile")
+  revision<-withObject "External execution" (.: "externalProfileRevision") e :: Parser Int
+  unless (revision>0 && get e "profileHash"==str (canonicalHash (toJSON (profile::ExternalProfile))) && get observed "observationHash"==str (canonicalHash response) && at observed "status"=="received") (fail "Retained source observation identity is invalid")
+  let request=get observed "request"
+  baseRevision<-withObject "Source request" (.: "baseRevision") request :: Parser Int
+  unless (baseRevision>0 && get request "profileHash"==get e "profileHash" && get request "sourceHash"==str (canonicalHash (toJSON (externalSource profile)))) (fail "Retained source request authority is invalid")
+  page<-parseJSON response
+  unless (pageCursor page==at request "cursor") (fail "Retained observation cursor changed")
+  ids<-feedSeenIds (get observed "newIds")
+  let pageIds=map fst (pageRecords page)
+      prior=[identity | identity<-pageIds,identity `notElem` ids]
+  unless (all (`elem` pageIds) ids) (fail "Retained new IDs are not part of the observation")
+  parameters<-acceptedParameters work
+  input<-feedBusinessInput profile parameters response prior
+  unless (get input "newRecords"==get observed "newRecords" && toJSON [at record "id" | record<-items input "newRecords"]==toJSON ids) (fail "Retained source deduplication is inconsistent")
+  if binding==Null then do
+   unless (at (get e "contentAcceptance") "status"=="accepted" && at (get e "cursorCommit") "status"=="committed") (fail "Historical source has no accepted content/cursor proof")
+   void (checkedReservation work)
+   pure (obj [("interface",str "receipt-feed-input-v1"),("profileHash",get e "profileHash"),("externalProfileRevision",num revision),("sourceObservationHash",get observed "observationHash"),("priorSeenIdsHash",Null),("inputHash",str (canonicalHash input)),("input",input),("provenance",str "derived_from_v13_observation")])
+  else do
+   digest<-textFieldP "priorSeenIdsHash" 64 binding
+   unless (T.length digest==64 && T.all (\c->c `elem` ("0123456789abcdef"::String)) digest && at binding "provenance"=="observed") (fail "Observed input lacks its prior-state hash or provenance")
+   unless (at binding "interface"=="receipt-feed-input-v1" && get binding "input"==input && get binding "inputHash"==str (canonicalHash input) && all (\key->get binding key==get e key) ["profileHash","externalProfileRevision"] && get binding "sourceObservationHash"==get observed "observationHash" && get binding "priorSeenIdsHash"==get (get observed "request") "priorSeenIdsHash") (fail "Pinned source input identity changed")
+   pure binding
+
+preparationInput :: Value -> Value -> IO Value
+preparationInput definition original = do
+ let e=external original
+ require (at (get e "contentAcceptance") "status"=="accepted" && at (get e "cursorCommit") "status"=="committed") 409 "Preparation requires accepted source content and committed cursor"
+ binding<-either (failure 409 . T.pack) pure (observedInput original)
+ require (get binding "profileHash"==str (canonicalHash (get definition "externalProfile")) && get binding "externalProfileRevision"==get definition "externalProfileRevision") 409 "Source observation belongs to an older profile; run the current profile first"
+ pure binding
+
+fixtureInput :: ExternalProfile -> Value -> Parser Value
+fixtureInput profile value = do
+ onlyFields ["taskInputs","page","priorSeenIds"] value
+ unless (has value "taskInputs") (fail "Fixture taskInputs is required, including explicit null")
+ seen<-feedSeenIds (get value "priorSeenIds")
+ feedBusinessInput profile (get value "taskInputs") (get value "page") seen
+
+requireCandidateInput :: Value -> Value -> IO ()
+requireCandidateInput snapshot version
+ | get snapshot "externalProfile"==Null = require (get version "inputBinding"==Null) 409 "Feed candidate cannot execute without its accepted source profile"
+ | otherwise = do
+  profile<-decodeValue 409 (get snapshot "externalProfile")
+  revision<-profileRevision snapshot
+  descriptor@(FeedInputDescriptor _ _ _ content)<-decodeValue 409 (get version "inputBinding")
+  require (descriptor==feedDescriptor profile revision content && (content==HybridText)==has version "explanation") 409 "Candidate input interface or profile identity does not match this occurrence"
 
 -- Called inside the existing accepted Outcome transaction, before saving work.
 data ContentCommit = ContentCommitted Value | ContentConflict Value
@@ -202,9 +393,12 @@ acceptContentOn db work decision reply
  | not (profileBound work)=pure (ContentCommitted work)
  | otherwise=do
   definition<-currentProfileOn db work
-  requireClearOn db (consumer work) (Just (at work "workloadId"))
+  requireConsumerClearOn db work (Just (at work "workloadId"))
   let e=external work; observed=get e "read"; request=get observed "request"; state=get definition "sourceState"
       acceptance=obj [("status",str "accepted"),("decisionId",str decision)]
+  profile<-decodeValue 409 (get e "profile")
+  void (parseValue 409 (feedState profile) state)
+  void (either (failure 409 . T.pack) pure (observedInput work))
   require (at observed "status"=="received") 409 "Content cannot be accepted without a complete source observation"
   if not (baseMatches state request) then pure (ContentConflict (put "externalExecution" (merge e (obj [("contentAcceptance",put "status" (str "conflict") acceptance),("cursorCommit",obj [("status",str "conflict")]),("delivery",obj [("status",toJSON DeliveryNotSent),("error",str "Source cursor changed before content acceptance")])])) work)) else do
    envelope<-expectedRequest work reply
@@ -215,21 +409,28 @@ acceptContentOn db work decision reply
    pure (ContentCommitted (put "externalExecution" (merge e (obj [("contentAcceptance",acceptance),("cursorCommit",obj [("status",str "committed"),("revision",get updatedState "revision")]),("delivery",delivery)])) work))
 
 expectedRequest :: Value -> Text -> IO Value
-expectedRequest work reply=do
+expectedRequest work reply=either (failure 409 . T.pack) pure (parseEither (const (requestPayload work reply)) Null)
+
+requestPayload :: Value -> Text -> Parser Value
+requestPayload work reply=do
  let e=external work; observed=get e "read"; snapshot=get work "routineSnapshot"
- profile<-decodeValue 409 (get e "profile") :: IO ExternalProfile
+ profile<-parseJSON (get e "profile") :: Parser ExternalProfile
  let ids=get observed "newIds"
      payload=obj [("schema",num 1),("operationKey",str (canonicalHash (arr [str (fst (consumer work)),str (snd (consumer work)),get work "workloadId",str "deliver"]))),("scope",str (canonicalHash (arr [str (fst (consumer work)),str (snd (consumer work))]))),("profileHash",get e "profileHash"),("externalProfileRevision",get e "externalProfileRevision"),("contractHash",str (canonicalHash (get snapshot "acceptedTask"))),("receiver",str (receiverIdentity (externalDelivery profile))),("sourceObservationHash",get observed "observationHash"),("recordIds",ids),("content",obj [("text",str reply)])]
  pure (put "requestHash" (str (canonicalHash payload)) payload)
 
 validateReservation :: Value -> IO Value
-validateReservation work=do
+validateReservation work=either (failure 409 . T.pack) pure (parseEither (const (checkedReservation work)) Null)
+
+checkedReservation :: Value -> Parser Value
+checkedReservation work=do
  let e=external work; delivery=get e "delivery"; request=get delivery "request"
- void (profileRevision e)
- require (at (get e "contentAcceptance") "status"=="accepted" && at (get e "cursorCommit") "status"=="committed") 409 "Delivery has no accepted content/cursor reservation"
- require (canonicalHash (get e "profile")==at e "profileHash" && canonicalHash (get (get e "read") "response")==at (get e "read") "observationHash") 409 "Pinned external observation/profile identity changed"
- expected<-expectedRequest work (at (get work "outcome") "reply")
- require (request==expected && all (\key->get delivery key==get request key) ["operationKey","scope","profileHash","requestHash"]) 409 "Saved delivery payload or immutable identity changed"
+ revision<-withObject "External execution" (.: "externalProfileRevision") e :: Parser Int
+ unless (revision>0) (fail "External profile revision is invalid")
+ unless (at (get e "contentAcceptance") "status"=="accepted" && at (get e "cursorCommit") "status"=="committed") (fail "Delivery has no accepted content/cursor reservation")
+ unless (canonicalHash (get e "profile")==at e "profileHash" && canonicalHash (get (get e "read") "response")==at (get e "read") "observationHash") (fail "Pinned external observation/profile identity changed")
+ expected<-requestPayload work (at (get work "outcome") "reply")
+ unless (request==expected && all (\key->get delivery key==get request key) ["operationKey","scope","profileHash","requestHash"]) (fail "Saved delivery payload or immutable identity changed")
  pure request
 
 validReceipt :: Value -> Value -> Bool
@@ -252,7 +453,7 @@ deliver s running=do
    void (currentProfileOn db work)
    stopped<-readIORef (runCancel running)
    require (not stopped) 409 "Routine stopped before delivery"
-   requireClearOn db (consumer work) (Just (at work "workloadId"))
+   requireConsumerClearOn db work (Just (at work "workloadId"))
    request<-validateReservation work
    profile<-decodeValue 409 (get e "profile")
    pure (put "externalExecution" (put "delivery" (put "status" (toJSON DeliveryStarted) delivery) e) work,Just (profile,request))
@@ -295,13 +496,23 @@ finishOccurrence s running=checkpoint s running (\_ work->pure (interrupted Fals
 requireRunClear :: Service -> RunId -> IO ()
 requireRunClear s identity=DB.connection s $ \db->do
  works<-worksOn db
- forM_ (find (\work->at work "workloadId"==runIdText identity) works) $ \work->
-  when (has (get work "origin") "routine") (requireClearOn db (consumer work) Nothing)
+ forM_ (find (\work->any (\call->get call "callId"==toJSON identity) (items work "calls")) works) $ \work->do
+  scope<-routineConsumerOn db work
+  forM_ scope $ \owner->do
+   requireClearOn db owner Nothing
+   require (routineRisk False work/=RoutineUnverified) 409 "This legacy Routine attempt has no retained start/absence proof; its exact Retry is unavailable"
 
 recover :: Service -> IO ()
 recover s=DB.connection s $ \db->SQL.withTransaction db $ do
  works<-worksOn db
- forM_ works $ \work->when (profileBound work) (saveWorkOn db (interrupted True work))
+ forM_ works $ \work->do
+  scope<-try (routineConsumerOn db work) :: IO (Either APIError (Maybe RoutineConsumer))
+  let retained=case scope of
+       Left (APIError _ reason)->put "routineIdentityError" (str reason) work
+       Right Nothing->work
+       Right (Just _)->retainRoutineRisk True work
+      updated=if profileBound retained then interrupted True retained else retained
+  when (updated/=work) (saveWorkOn db updated)
 
 reconcile :: Service -> Text -> Text -> Text -> Value -> IO Value
 reconcile s owner routine identity body=do

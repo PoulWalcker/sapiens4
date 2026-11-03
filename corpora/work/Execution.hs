@@ -176,6 +176,7 @@ finish s run turn outcome = do
  DB.project s a
  trimConversation s a
  D.reconcileWorks s
+ Effects.sealRoutineAttempt s (runId run)
 launch :: Service -> Text -> NonEmpty Turn -> Pulse -> Int -> Bool -> IO ()
 launch s a batch tick slot batching = do
  mapM_ (D.requireCallAllowed s) batch
@@ -212,12 +213,12 @@ dispatchOrdinary s running turn snapshot = do
  Effects.requireRunClear s (turnId turn)
  found<-D.findWork s (turnId turn)
  let profile=maybe False (Effects.profileBound . toJSON . fst) found
-     execute=if maybe False (\(work,call)->has (toJSON work) "codeExecution" || at (D.callField call "executionBinding") "mode"=="script") found
-      then runCode s running turn else do
-       when profile (Effects.beforeContent s running)
-       result<-D.runDecision s running turn snapshot
-       when profile (Effects.deliver s running)
-       pure result
+     execute=do
+      when profile (Effects.beforeContent s running)
+      result<-if maybe False (\(work,call)->has (toJSON work) "codeExecution" || at (D.callField call "executionBinding") "mode"=="script") found
+       then runCode s running turn else D.runDecision s running turn snapshot
+      when profile (Effects.deliver s running)
+      pure result
  if not profile then execute else mask $ \restore -> do
   result<-try (restore execute)
   cleanup<-try (Effects.finishOccurrence s running)
@@ -244,6 +245,7 @@ codeGuard s running = do
  require (not cancelled) 409 "Code occurrence stopped"
  (work,call)<-D.getWork s (runId running)
  DB.requireOccurrence s (D.workField work "origin")
+ Effects.requireCurrentInput s (toJSON work)
  void (D.resolveCandidate s work call)
  works<-D.readWorks s
  require (not (any D.generatedCleanupPending works)) 503 "Owned code cleanup is unresolved; restore the runtime and restart the app"
@@ -277,11 +279,12 @@ executeCode s running = do
  (work,call)<-D.getWork s (runId running)
  (version,role)<-D.resolveCandidate s work call
  spec<-D.executionContract work call >>= maybe (failure 409 "Code run has no accepted contract") pure
- let input=case D.specInputs spec of
+ let ordinaryInput=case D.specInputs spec of
       []->Null
       [raw]->either (const (str raw)) id (eitherDecodeStrict (TE.encodeUtf8 raw))
       values->toJSON values
      reference=get version "reference"
+ input<-if Effects.profileBound (toJSON work) then either (failure 409 . T.pack) (pure . (`get` "input")) (Effects.observedInput (toJSON work)) else pure ordinaryInput
  environmentId<-newId
  began<-getMonotonicTimeNSec
  codeUpdate s running (appendItems "operations" [obj [("id",str environmentId),("purpose",str "environment"),("status",str "running")]])
@@ -311,7 +314,8 @@ executeCode s running = do
  when (get result "exitCode"/=num 0) (throwIO (ProvenCodeFault "Candidate body exited unsuccessfully"))
  unless ((at actual "status"=="ok" && has actual "value") || (at actual "status"=="rejected" && not (T.null (at actual "error")))) (throwIO (ProvenCodeFault "Candidate returned an invalid result envelope"))
  explanation<-either (failure 409 . T.pack) pure (parseEither candidateExplanation version)
- when (isJust explanation && at actual "status"=="rejected") $ failure 422 ("Hybrid input rejected: "<>at actual "error")
+ when ((isJust explanation || Effects.profileBound (toJSON work)) && at actual "status"=="rejected") $ failure 422 ("Input rejected: "<>at actual "error")
+ scriptText<-if Effects.profileBound (toJSON work) && isNothing explanation then Just <$> either (throwIO . ProvenCodeFault . T.pack) pure (parseEither feedContentText (get actual "value")) else pure Nothing
  narrative<-forM explanation $ \selected->do
   let explainContext=obj [("instruction",str (explanationInstruction selected)),("acceptedInput",input),("facts",get actual "value"),("result",actual),("criteria",D.criterionContext spec),("reference",reference),("structureHash",get version "structureHash"),("implementationHash",get (get version "explanation") "implementationHash")]
   (explanationId,produced)<-invokeCodeModel s running "HybridExplanation" "hybrid_explanation" "hybrid-explanation" explainContext (Just selected)
@@ -325,7 +329,7 @@ executeCode s running = do
  parsed<-try $ do
   verdict<-field 422 response "verdict"
   body<-case narrative of
-   Nothing->pure (mergeFields [("event",str "Outcome"),("outcome",get response "acceptance")] (select ["reply","reason","evidence"] response))
+   Nothing->pure (mergeFields ([("event",str "Outcome"),("outcome",get response "acceptance")]++[("reply",str produced) | produced<-maybeToList scriptText]) (select ["reply","reason","evidence"] response))
    Just text_->do
     judgments<-D.criterionAssessments spec (get response "criteria")
     require (verdict/=SemanticallyRejected || any (\(CriterionAssessment _ result_ _)->result_==CriterionFail) judgments) 422 "Rejected hybrid assessment has no failed original criterion"
@@ -387,26 +391,35 @@ commitCodeOutcome s running version role invocation verdict response outcome aud
   sourcePreparation<-maybe (failure 409 "Candidate preparation disappeared") pure (find ((==runIdText preparationId) . D.workloadId) works)
   pin<-decodeValue 409 (D.workField sourcePreparation "preparationPin")
   feedback<-DB.routineOperationsOn db
+  let modelAccepted=verdict==SemanticallyAccepted && D.outcomeStatus outcome==D.Completed
+      proposedOutcome=mergeFields [("reply",get (D.decisionRaw response) "reply"),("evidence",toJSON (D.decisionEvidence response)),("author",toJSON (runOwner running))] (get (D.decisionRaw response) "outcome")
+  contentCommit<-if modelAccepted then Effects.acceptContentOn db (toJSON (D.setWorkField "outcome" proposedOutcome current)) invocation (at proposedOutcome "reply") else pure (Effects.ContentCommitted (toJSON current))
+  (contentWork,contentAccepted)<-case contentCommit of
+   Effects.ContentCommitted value->(,) <$> decodeValue 500 value <*> pure modelAccepted
+   Effects.ContentConflict value->(,) <$> decodeValue 500 value <*> pure False
   let snapshot=D.workField current "routineSnapshot"
       definition=find (\d->get d "id"==get snapshot "id" && get d "owner"==toJSON (runOwner running)) definitions
       applicable=maybe False (\d->not (boolean (get d "deleted")) && get d "contractGeneration"==get snapshot "contractGeneration" && DB.analysisFeedbackIds feedback d (map toJSON works) (analysisSources pin)==analysisFeedback pin) definition
-      accepted=verdict==SemanticallyAccepted && D.outcomeStatus outcome==D.Completed
+      accepted=contentAccepted
       activating=role==CandidateTrial && accepted && get audit "accepted"==Bool True && applicable
-      activationReason=if role==ActiveCode then "Previously activated version; no new activation required" else if not applicable then "Current routine contract or source feedback changed; candidate was not activated" else if not accepted then "Task result was not accepted; candidate was not activated" else if get audit "accepted"/=Bool True then "Activation audit did not approve this candidate" else at audit "reason"
+      activationReason=if role==ActiveCode then "Previously activated version; no new activation required" else if not applicable then "Current routine contract or source feedback changed; candidate was not activated" else if modelAccepted && not contentAccepted then "Source cursor changed; content and candidate activation were not accepted" else if not accepted then "Task result was not accepted; candidate was not activated" else if get audit "accepted"/=Bool True then "Activation audit did not approve this candidate" else at audit "reason"
       activation=obj [("status",str (if role==ActiveCode then "not_required" else if activating then "activated" else "not_activated")),("reference",reference),("run",toJSON (runId running)),("invocation",str invocation),("decidedAt",str decidedAt),("reason",str activationReason)]
-      saved=mergeFields [("reply",get (D.decisionRaw response) "reply"),("evidence",toJSON (D.decisionEvidence response)),("author",toJSON (runOwner running))] (get (D.decisionRaw response) "outcome")
+      saved=if modelAccepted && not contentAccepted then mergeFields [("status",toJSON D.Unresolved),("hostReason",str "Source cursor changed concurrently; model proposal retained without content acceptance")] proposedOutcome else proposedOutcome
       assessment=put "decisionId" (str invocation) (assessmentValue (if accepted then AssessmentAccepted else if verdict==SemanticallyRejected then AssessmentRejected else AssessmentUnresolved) "model_contract_assessment" (D.decisionReason response))
       record=obj [("decisionId",str invocation),("callId",toJSON (runId running)),("node",str (if has version "explanation" then "HybridAssessment" else "CodeAssessment")),("accepted",Bool True),("response",D.decisionRaw response),("assessment",assessment),("evidenceOperation",str invocation)]
-      finished=D.withDecisionRecord record (D.setWorkField "outcome" saved (D.setWorkField "codeExecution" (mergeFields [("status",str "completed"),("activation",activation)] (D.workField current "codeExecution")) current))
+      finished=D.withDecisionRecord record (D.setWorkField "outcome" saved (D.setWorkField "codeExecution" (mergeFields [("status",str "completed"),("activation",activation)] (D.workField contentWork "codeExecution")) contentWork))
       complete=finished {D.workCalls=fmap (\c->c {D.callState=if accepted then D.CallCompleted else D.CallUnresolved,D.callOutput=Just (at saved "reply")}) (D.workCalls finished)}
-  when activating $ forM_ definition $ \d->void (DB.saveRoutineOn db (put "activeCode" (mergeFields [("status",str "active"),("contractGeneration",get snapshot "contractGeneration")] activation) d))
+  when activating $ forM_ definition $ \d->do
+   -- Content acceptance just advanced sourceState in this same transaction.
+   latest<-Effects.definitionOn db (at d "id")
+   void (DB.saveRoutineOn db (put "activeCode" (mergeFields [("status",str "active"),("contractGeneration",get snapshot "contractGeneration")] activation) latest))
   when (role==CandidateTrial) $ do
    let CandidateReference _ preparation _=typedReference
    source<-maybe (failure 409 "Trial preparation disappeared") pure (find ((==runIdText preparation) . D.workloadId) works)
    let prepared=D.workField source "preparation"; claim=get prepared "trial"
    require (get claim "run"==toJSON (runId running) && get claim "reference"==reference) 409 "Candidate trial claim changed"
    DB.putValueOn db DB.Workloads (D.workloadId source) (toJSON (D.setWorkField "preparation" (put "trial" (merge claim activation) prepared) source))
-  DB.putValueOn db DB.Workloads (D.workloadId complete) (toJSON complete)
+  D.saveWorkOn s db complete
 
 markCodeFault :: Service -> Run -> Text -> IO ()
 markCodeFault s running reason = locked s $ do
@@ -486,6 +499,7 @@ onPulse s tick = do
      forM_ (M.lookup (turnId t) activeRuns) $ \run -> writeIORef (runCancel run) True
     let pending=Managed.commands current
     forM_ pending $ \(identity,command) -> void (turnCommand s a identity (at command "action") (Just command))
+     `catch` (\e@(APIError code _) -> if code==409 then pure () else throwIO e)
     publish s a tick
     admit s a tick
     when (pulseFrequency tick==Bph60) $ admit s a tick)

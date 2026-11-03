@@ -14,14 +14,16 @@ node = input[/decision at node (\w+)/, 1]
 configuration = JSON.parse(File.read(File.join(root, 'provider.json')))
 mode = configuration.fetch('evidence_mode', 'normal')
 mode = 'normal' unless node == 'Execution'
+clean = %w[clean_invalid_completed clean_unresolved clean_malformed_final clean_missing_usage].include?(mode)
+mode = mode.delete_prefix('clean_') if clean
 record = {owner: context.fetch('selfId'), node: node, started: Time.now.to_f,
-          pid: Process.pid, agency_run: ENV.fetch('SAPIENS_AGENCY_RUN'), mode: mode}
+          pid: Process.pid, agency_run: ENV.fetch('SAPIENS_AGENCY_RUN'), mode: mode, clean_no_tools: clean}
 receipt = File.join(root, 'calls', SecureRandom.hex(12) + '.json')
 File.write(receipt + '.new', JSON.generate(record))
 File.rename(receipt + '.new', receipt)
 emit = ->(event) { puts JSON.generate(event) }
 emit.call(type: 'thread.started', thread_id: 'fixture-session-shared-across-invocations')
-emit.call(type: 'item.started', item: {id: 'tool-1', type: 'command_execution', command: 'synthetic observation'})
+emit.call(type: 'item.started', item: {id: 'tool-1', type: 'command_execution', command: 'synthetic observation'}) unless clean
 
 if mode == 'flood'
   until File.exist?(File.join(root, 'released'))
@@ -59,7 +61,7 @@ if %w[blocked crash].include?(mode)
   sleep 0.02 until File.exist?(File.join(root, 'released'))
 end
 exit 0 if mode == 'loss'
-emit.call(type: 'item.completed', item: {id: 'tool-1', type: 'command_execution', command: 'synthetic observation', aggregated_output: 'Fixture output', exit_code: 0})
+emit.call(type: 'item.completed', item: {id: 'tool-1', type: 'command_execution', command: 'synthetic observation', aggregated_output: 'Fixture output', exit_code: 0}) unless clean
 
 if mode == 'semantic'
   emit.call(type: 'item.completed', item: {id: 'mcp-1', type: 'mcp_tool_call', server: 'fixture-documents', tool: 'read_document', arguments: {path: 'comparison.txt', api_key: 'private-fixture-field-value'}, result: {content: [{type: 'text', text: 'Document has two sources.'}]}, status: 'completed'})
@@ -97,3 +99,5 @@ unless mode == 'missing_usage'
   emit.call(type: 'turn.completed', usage: usage.merge(input_tokens: 999)) if mode == 'conflicting_usage'
   puts invalid_usage if mode == 'invalid_usage_after'
 end
+
+emit.call(type: 'turn.completed') if clean && mode == 'missing_usage'
