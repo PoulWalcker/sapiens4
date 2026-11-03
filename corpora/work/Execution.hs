@@ -31,6 +31,7 @@ import Workspace
 import qualified Delegation as D
 import qualified Routines as R
 import qualified GeneratedCode as Code
+import qualified Effects
 import qualified Composer
 import qualified Automation
 import Provider
@@ -100,7 +101,9 @@ turnCommand s a identity rawAction external = do
  state <- agentState s a
  turn <- maybe (failure 404 "Unknown active turn") pure (find ((==RunId identity) . turnId) (agentTurns state))
  when (rawAction=="retry") $ do
+  Effects.requireRunClear s (RunId identity)
   require (not (has (turnField turn "origin") "analysis" || has (turnField turn "origin") "preparation")) 409 "Use explicit Routine reconsideration for a new analysis"
+  require (not (boolean (turnField turn "externalBound"))) 409 "External occurrence evidence is retained; start a new authorized occurrence instead of Retry. Unknown deliveries require reconciliation first"
   require (not (boolean (turnField turn "codeBound"))) 409 "Code-run evidence is retained; start a new authorized occurrence instead of Retry"
   D.requireCallAllowed s turn
  work <- D.findWork s (RunId identity)
@@ -206,9 +209,21 @@ launch s a batch tick slot batching = do
 -- Implementation is pinned at admission; the model does not dispatch code runs.
 dispatchOrdinary :: Service -> Run -> Turn -> AgentState -> IO (Text,[Value])
 dispatchOrdinary s running turn snapshot = do
+ Effects.requireRunClear s (turnId turn)
  found<-D.findWork s (turnId turn)
- if maybe False (\(work,call)->has (toJSON work) "codeExecution" || at (D.callField call "executionBinding") "mode"=="script") found
-  then runCode s running turn else D.runDecision s running turn snapshot
+ let profile=maybe False (Effects.profileBound . toJSON . fst) found
+     execute=if maybe False (\(work,call)->has (toJSON work) "codeExecution" || at (D.callField call "executionBinding") "mode"=="script") found
+      then runCode s running turn else do
+       when profile (Effects.beforeContent s running)
+       result<-D.runDecision s running turn snapshot
+       when profile (Effects.deliver s running)
+       pure result
+ if not profile then execute else mask $ \restore -> do
+  result<-try (restore execute)
+  cleanup<-try (Effects.finishOccurrence s running)
+  case result of
+   Left (err::SomeException)->throwIO err
+   Right value->case cleanup of Left (err::SomeException)->throwIO err; Right ()->pure value
 
 data SemanticVerdict = SemanticallyAccepted | SemanticallyRejected | SemanticallyUnknown deriving (Eq,Show)
 instance FromJSON SemanticVerdict where

@@ -28,6 +28,7 @@ import System.Posix.Files (setFileMode)
 import Types
 import qualified Store as DB
 import qualified RoutineCommands as RC
+import qualified Effects
 import qualified Composer
 import qualified Automation
 import Population
@@ -79,6 +80,7 @@ openService path = do
       mapM_ (E.recover s . (`at` "id")) agents
       Composer.recover s
       E.recoverCode s
+      Effects.recover s
       prefs <- DB.singleton s DB.Preferences
       let panel=at prefs "panel"; updated=if panel=="mindmap" then put "panel" (str "notes") prefs else if panel `elem` ["cron","log"] then put "panel" (str "chat") prefs else prefs
       DB.saveSingleton s DB.Preferences (remove ["work_views"] updated)
@@ -168,7 +170,13 @@ savePreferences s d = do
  DB.saveSingleton s DB.Preferences current
  pure (obj [("saved",Bool True),("preferences",current)])
 dispatch :: Service -> Text -> Text -> Maybe Value -> IO (Int,BL.ByteString,Text)
-dispatch s method target body = locked s $ do
+dispatch s method target body
+ | method=="POST", ["api","agents",owner,"routines",routine,"runs",identity,"reconcile-delivery"]<-filter (not . T.null) (T.splitOn "/" (fst (T.breakOn "?" target))) = do
+    result<-Effects.reconcile s owner routine identity (fromMaybe Null body)
+    pure (200,encode result,"application/json; charset=utf-8")
+ | otherwise = dispatchLocked s method target body
+dispatchLocked :: Service -> Text -> Text -> Maybe Value -> IO (Int,BL.ByteString,Text)
+dispatchLocked s method target body = locked s $ do
  let (path,query)=T.breakOn "?" target; parts=filter (not . T.null) (T.splitOn "/" path); write=method `elem` ["POST","PUT"]; d=fromMaybe Null body
  when write $ require (case d of Object _->True; _->False) 400 "Expected a JSON object"
  cfg <- corporaSettings s

@@ -27,6 +27,7 @@ import System.Directory
 import System.FilePath
 import Types
 import qualified Store as DB
+import qualified Effects
 import qualified ManagedState as Managed
 import Population
 import Memo
@@ -82,10 +83,12 @@ frontierCalls work = filter (\call -> not (any ((==Just (callIdentity call)) . c
 -- No files, model calls or nested transactions cross this admission interface.
 admitRoutineOn :: SQL.Connection -> AgentId -> Turn -> Value -> Maybe TaskSpec -> IO ()
 admitRoutineOn db owner turn snapshot accepted = do
- work<-selectRoutineCodeOn db owner (routineWorkload owner turn snapshot accepted) snapshot accepted
+ selected<-selectRoutineCodeOn db owner (routineWorkload owner turn snapshot accepted) snapshot accepted
+ work<-Effects.pinOn db snapshot (toJSON selected) >>= decodeValue 500
  let message=obj [("role",str "user"),("content",str (turnInput turn)),("turn",toJSON (turnId turn)),("time",turnField turn "created"),("origin",turnField turn "origin")]
  SQL.execute db "INSERT INTO workloads(id,value) VALUES (?,?)" (workloadId work,jsonText (toJSON work))
- Managed.enrollOn db (agentIdText owner) (if has (toJSON work) "codeExecution" then withTurnFields (put "codeBound" (Bool True)) turn else turn) message (turnInput turn) []
+ let marked=withTurnFields (\value -> if Effects.profileBound (toJSON work) then put "externalBound" (Bool True) value else value) turn
+ Managed.enrollOn db (agentIdText owner) (if has (toJSON work) "codeExecution" then withTurnFields (put "codeBound" (Bool True)) marked else marked) message (turnInput turn) []
 routineWorkload :: AgentId -> Turn -> Value -> Maybe TaskSpec -> Workload
 routineWorkload owner turn snapshot accepted =
  let identity=runIdText (turnId turn)
@@ -368,8 +371,11 @@ requireCallAllowed s turn = do
 getWork :: Service -> RunId -> IO (Workload,WorkCall)
 getWork s i = findWork s i >>= maybe (failure 409 "Unknown workload call") pure
 saveWork :: Service -> Workload -> IO ()
-saveWork s w = do
- previous <- find ((==workloadId w) . workloadId) <$> readWorks s
+saveWork s w = DB.connection s (\db -> SQL.withTransaction db (saveWorkOn s db w))
+saveWorkOn :: Service -> SQL.Connection -> Workload -> IO ()
+saveWorkOn s db w = do
+ rows<-DB.queryRowsOn db "SELECT value FROM workloads WHERE id=?" ["value"] [SQL.SQLText (workloadId w)]
+ previous<-traverse (DB.decodeStored . (`at` "value") >=> decodeValue 500) (listToMaybe rows)
  let call=NE.last (workCalls w)
      before=NE.last . workCalls <$> previous
      changed=maybe False (\old -> workTracked w && (not (workTracked old) || fmap (\c -> (callState c,callOwner c)) before /= Just (callState call,callOwner call))) previous
@@ -378,8 +384,8 @@ saveWork s w = do
   let state=callState call
       actor=if isJust agency || state==CallCancelled then source else if state==CallQueued then "system" else agentIdText (callOwner call)
       detail=obj [("owner",toJSON (callOwner call)),("task",workField w "task"),("previous",maybe Null (toJSON . callState) before),("call",toJSON (callIdentity call)),("error",callField call "error")]
-  DB.record s (map (agentIdText . callOwner) (NE.toList (workCalls w))) (at (workField w "task") "taskId") ("task."<>T.toLower (wireName state)) detail actor (if state `elem` [CallQueued,CallCancelled] then Nothing else Just "chatInput")
- DB.putValue s DB.Workloads (workloadId w) (toJSON w)
+  DB.recordOn s db (map (agentIdText . callOwner) (NE.toList (workCalls w))) (at (workField w "task") "taskId") ("task."<>T.toLower (wireName state)) detail actor (if state `elem` [CallQueued,CallCancelled] then Nothing else Just "chatInput")
+ DB.putValueOn db DB.Workloads (workloadId w) (toJSON w)
 withCall :: Workload -> WorkCall -> Workload
 withCall w c = w { workCalls = fmap (\x -> if callIdentity x == callIdentity c then c else x) (workCalls w) }
 setAssessment :: Workload -> Value -> Value -> Workload
@@ -428,7 +434,7 @@ acceptedDecision record before after = merge record (obj [("accepted",Bool True)
  where transition b e def = fromMaybe def $ lookup (b,e) [(("Assessing","FitsSpecialization"),"ReadyToWork"),(("Assessing","OutsideSpecialization"),"ChiefTriage"),(("ChiefTriage","SpecialistSelected"),"Assessing"),(("ChiefTriage","NewSpecialistNeeded"),"CreatingSapi"),(("ChiefTriage","RequestUnclear"),"WaitingForAdmin"),(("ChiefTriage","FitsSpecialization"),"ReadyToWork")]
 decide :: Service -> Run -> Turn -> AgentState -> Node -> IORef [Value] -> IO (DecisionResponse,Value)
 decide s run turn state node logs = do
- (rendered,record) <- locked s $ do
+ (rendered,record,responseOnly) <- locked s $ do
   source <- templates s >>= maybe (failure 400 "Unknown decision node") pure . find ((==toJSON node) . (`get` "node"))
   (w,c) <- getWork s (turnId turn)
   DB.requireOccurrence s (workField w "origin")
@@ -439,6 +445,7 @@ decide s run turn state node logs = do
   members <- team s
   extra <- if KM.member "agency_batch" (agentFields state) then ("\n\n" <>) <$> prompt s "agency-chat" else pure ""
   scheduled <- if has (workField w "origin") "routine" && at (workField w "origin") "trigger"/="manual" then ("\n\n" <>) <$> prompt s "scheduled-execution" else pure ""
+  externalInstruction<-if Effects.profileBound (toJSON w) then ("\n\n" <>) <$> prompt s "receipt-feed-content" else pure ""
   pinned <- if node==ReadyToWork && routineSpecPinned w then ("\n\n" <>) <$> prompt s "decision-routine-specification" else pure ""
   routine <- if has (workField w "origin") "routine" then do
    definitions <- DB.values s DB.ScheduledRoutines
@@ -446,8 +453,8 @@ decide s run turn state node logs = do
    else pure Null
   wiki <- prompt s "notes-wiki"
   envelope <- prompt s "decision-envelope"
-  let instruction = at source "content" <> extra <> scheduled <> pinned
-      context = if node==AutomationAnalysis then obj [("selfId",toJSON (runOwner run)),("analysisEvidence",workField w "analysisEvidence")] else obj [("originalIntent",workField w "originalIntent"),("task",taskContext),("routine",routine),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
+  let instruction = at source "content" <> extra <> scheduled <> pinned <> externalInstruction
+      context = if node==AutomationAnalysis then obj [("selfId",toJSON (runOwner run)),("analysisEvidence",workField w "analysisEvidence")] else obj [("externalExecution",workField w "externalExecution"),("originalIntent",workField w "originalIntent"),("task",taskContext),("routine",routine),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
       rendered = render envelope [("node",wireName node),("instruction",instruction),("notes_wiki",if node==AutomationAnalysis then "" else render wiki [("notes_example",T.pack (repositoryRoot s </> "corpora/prompts/examples/jarvis-notes.html"))]),("context",jsonText context),("events",T.intercalate ", " (sort (eventsFor node)))]
   (model,effort) <- modelDefaults
   policy <- executionSettings s (agentIdText (runOwner run))
@@ -458,7 +465,7 @@ decide s run turn state node logs = do
       summary = merge (select ["decisionId","callId","node","promptHash","accepted"] record) (obj [("purpose",str (if node==AutomationAnalysis then "automation_analysis" else "ordinary_execution")),("agent",str (agentIdText (runOwner run))),("promptTemplate",get record "template")])
   saveWork s (setWorkField "decisions" (arr (workItems w "decisions"++[summary])) w)
   writeJSON (archivePath s (agentIdText (runOwner run)) ("decisions/"<>i)) record
-  pure (rendered,record)
+  pure (rendered,record,node==AutomationAnalysis || Effects.profileBound (toJSON w))
  logIndex <- length <$> readIORef logs
  modifyIORef' logs (++[obj [("role",toJSON node),("prompt",str rendered),("session",Null)]])
  let updateLog extra = modifyIORef' logs (\entries -> [if index==logIndex then merge entry extra else entry | (index,entry)<-zip [0::Int ..] entries])
@@ -467,9 +474,14 @@ decide s run turn state node logs = do
   let observe snapshot = locked s $ do
        (current,_) <- getWork s (turnId turn)
        let update entry = if get entry "decisionId"==get record "decisionId" then put "evidence" (put "purpose" (str (if node==AutomationAnalysis then "automation_analysis" else "ordinary_execution")) (toJSON snapshot)) entry else entry
-       DB.putValue s DB.Workloads (workloadId current) (toJSON (setWorkField "decisions" (arr (map update (workItems current "decisions"))) current))
-  raw <- (if node==AutomationAnalysis then invokeAnalysisObserved else invokeObserved) s run rendered observe
+       let observed=Effects.observeEvidence (at record "decisionId") snapshot (toJSON (setWorkField "decisions" (arr (map update (workItems current "decisions"))) current))
+       DB.putValue s DB.Workloads (workloadId current) observed
+       require (get (Effects.external observed) "opaqueEffectUnknown"==Null) 409 "Response-only tool evidence is uncertain; external delivery is blocked"
+  raw <- (if responseOnly then invokeAnalysisObserved else invokeObserved) s run rendered observe
   writeIORef rawResponse (Just raw)
+  when responseOnly $ locked s $ do
+   (current,_)<-getWork s (turnId turn)
+   Effects.requireContentTrace (toJSON current) (at record "decisionId")
   activity <- readIORef (runActivity run)
   updateLog (obj ([("session",get activity "session"),("answer",str raw)]++[("warning",get activity "warning") | has activity "warning"]))
   require (T.length raw <= 100000) 400 "Decision response exceeds 100000 characters"
@@ -564,6 +576,7 @@ runDecision s run turn state = do
               saveWork s (withCall work following)
               accept s owner record (wireName node) (wireName next)
               pure (callOutput following)
+         when (Effects.profileBound (toJSON current)) $ require (at (decisionRaw response) "event" `elem` ["Outcome","TaskPrepared","RequestUnclear"]) 409 "This response-only content profile does not support delegation or tool-capable follow-up"
          case decisionBody response of
           ReportAnalysis analysis -> do
            requireActive s owner
@@ -613,7 +626,26 @@ runDecision s run turn state = do
             Right () -> pure ()
            let saved=mergeFields [("reply",str reply),("evidence",toJSON (decisionEvidence response)),("author",str owner)] (get (decisionRaw response) "outcome")
            let assessment=put "decisionId" (get record "decisionId") (assessmentValue (if outcomeStatus outcome==Completed then AssessmentAccepted else AssessmentUnresolved) "model_contract_assessment" "Model assessment against the pinned criteria; external effects are not independently verified")
-           finish (setAssessment (setWorkField "outcome" saved current) record assessment) (call { callState=case outcomeStatus outcome of Completed -> CallCompleted; Unresolved -> CallUnresolved, callOutput=Just reply }) OutcomeNode
+           let assessed=setAssessment (setWorkField "outcome" saved current) record assessment
+               completedCall=call { callState=case outcomeStatus outcome of Completed -> CallCompleted; Unresolved -> CallUnresolved, callOutput=Just reply }
+           if Effects.profileBound (toJSON current) && outcomeStatus outcome==Completed then do
+            let acceptedRecord=acceptedDecision record (wireName node) "Outcome"
+                following=(setCallFields [("observation",decisionRaw response)] completedCall) {callNode=OutcomeNode}
+                committed=withDecisionRecord acceptedRecord (withCall assessed following)
+            DB.connection s $ \db -> SQL.withTransaction db $ do
+             result<-Effects.acceptContentOn db (toJSON committed) (at record "decisionId") reply
+             acceptedWork<-case result of
+              Effects.ContentCommitted value->decodeValue 500 value
+              Effects.ContentConflict value->do
+               retained<-decodeValue 500 value
+               let reason="Source cursor changed concurrently; model content retained without host acceptance or delivery"
+                   conflictOutcome=put "hostReason" (str reason) (put "status" (toJSON Unresolved) (workField retained "outcome"))
+                   conflictAssessment=put "decisionId" (get record "decisionId") (assessmentValue AssessmentUnresolved "cursor_conflict" reason)
+               pure (withCall (setAssessment (setWorkField "outcome" conflictOutcome retained) record conflictAssessment) following {callState=CallUnresolved})
+             saveWorkOn s db acceptedWork
+            writeJSON (archivePath s owner ("decisions/"<>at record "decisionId")) acceptedRecord
+            pure (Just reply)
+           else finish assessed completedCall OutcomeNode
         maybe (loop (n+1)) pure result
  output <- loop (0::Int) `catch` (\(e::SomeException) -> do
   locked s $ do

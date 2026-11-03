@@ -36,6 +36,8 @@ revision :: Value -> Value
 revision v = get (get v "managed") "revision"
 validateCommand :: Value -> Value -> IO ()
 validateCommand turn command = do
+ when (at command "action"=="retry" && boolean (get turn "externalBound")) $
+  check False "External occurrence evidence is retained; start a new authorized occurrence instead of Retry. Unknown deliveries require reconciliation first"
  when (at command "action"=="retry" && boolean (get turn "codeBound")) $
   check False "Code-run evidence is retained; start a new authorized occurrence instead of Retry"
  when (at command "action"=="retry" && (has (get turn "origin") "analysis" || has (get turn "origin") "preparation")) $

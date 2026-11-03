@@ -19,6 +19,7 @@ import Data.Time (UTCTime, getCurrentTime)
 import Routines (Revision(..), Minutes, RoutineFields(..), RoutineContract(..), Definition(..))
 import qualified Routines as R
 import qualified Delegation as D
+import qualified Effects
 import qualified Composer
 import qualified Automation
 
@@ -30,7 +31,7 @@ data CommandPlan = CreateDefinition RoutineFields | UpdateDefinition Definition 
 
 parseCommand :: Text -> Value -> Parser RoutineCommand
 parseCommand action value = withObject "Routine command" (\o -> do
- unless (all (`elem` ["operation","revision","title","goal","criteria","inputs","run","minutes","reason","analysis","preparation"]) (keys value)) (fail "Unknown Routine command field")
+ unless (all (`elem` ["operation","revision","title","goal","criteria","inputs","run","minutes","reason","analysis","preparation","externalProfile"]) (keys value)) (fail "Unknown Routine command field")
  case action of
   "create" -> Create <$> parseJSON value
   "edit" -> Edit <$> o .: "revision" <*> parseJSON value
@@ -95,7 +96,7 @@ decide time current occurrences request = case request of
   if definitionRevision d/=revision then Left (CommandError 409 "Routine changed; reload before trying again")
    else if definitionDeleted d then Left (CommandError 409 "Routine is deleted") else Right d
  finished w = let frontier=D.frontierCalls w
-  in not (null frontier) && all ((`elem` [D.CallCompleted,D.CallUnresolved,D.CallFailed,D.CallInterrupted,D.CallCancelled]) . D.callState) frontier
+  in not (Effects.pendingTransport (toJSON w)) && not (null frontier) && all ((`elem` [D.CallCompleted,D.CallUnresolved,D.CallFailed,D.CallInterrupted,D.CallCancelled]) . D.callState) frontier
 
 definitions :: Service -> IO [Definition]
 definitions s = filter (not . T.isPrefixOf "group_" . definitionOwner) <$> R.readDefinitions s
@@ -144,6 +145,10 @@ command s owner action identity payload = do
          occurrences=filter (\w->at (D.workField w "origin") "routine"==identity) works
      plan <- either (\(CommandError code message)->failure code message) pure (decide clock current occurrences request_)
      (target,response) <- applyPlan db (AgentId owner) runIdentity time plan
+     when (action `elem` ["create","edit"]) $ do
+      change<-parseValue 400 profileChange payload
+      definition<-Effects.definitionOn db target
+      void (Effects.configureOn db (toJSON <$> current) definition change)
      case plan of
       RecordFeedback _ run -> do
        rows <- DB.queryRowsOn db "SELECT request FROM command_receipts WHERE scope='routine' AND owner=? AND target=? AND code<300 ORDER BY rowid" ["request"] [SQL.SQLText owner,SQL.SQLText identity]
@@ -250,7 +255,7 @@ renderRun :: RunProjection -> [Value] -> Revision -> D.Workload -> IO Value
 renderRun projection operations revision work = do
  gate <- if has (D.workField work "origin") "occurrence" then field 500 (toJSON work) "executionGate" else pure ExecutionOpen
  let call=NE.last (D.workCalls work)
-     status=if gate==ExecutionStopped then "stopped" else case D.callState call of
+     status=if gate==ExecutionStopped then "stopped" else if Effects.pendingTransport (toJSON work) then "running" else case D.callState call of
       D.CallQueued -> "queued"
       D.CallRunning -> "running"
       D.CallCompleted -> "done"
@@ -272,8 +277,12 @@ renderRun projection operations revision work = do
  binding <- D.bindingDetail work call
  let lastDecision=maybe Null (`get` "decisionId") (listToMaybe (reverse (D.workItems work "decisions")))
      lastFeedback=maybe Null (`get` "operation") (listToMaybe (reverse feedback))
-     version=jsonText (arr [str status,lastDecision,lastFeedback,toJSON revision])
+     version=jsonText (arr [str status,lastDecision,lastFeedback,toJSON revision,str (canonicalHash (Effects.summary (toJSON work)))])
+     publicError=case projection of
+      RunDetail -> D.callField call "error"
+      RunSummary | Effects.profileBound (toJSON work) && D.callField call "error"/=Null -> str (if at (get (Effects.external (toJSON work)) "read") "status" `elem` ["failed","observed","conflict"] then "Source could not be read completely; see evidence for details." else "Content run could not complete; see evidence for details.")
+      RunSummary -> D.callField call "error"
      details=case projection of
       RunSummary -> []
-      RunDetail -> [("codeExecution",D.codeProjection (D.workField work "codeExecution")),("executionBinding",binding),("criteriaAssessment",arr criteriaAssessment),("invocations",arr invocations),("observations",observations),("feedback",arr feedback),("rejection",fromMaybe Null (listToMaybe feedback)),("outcome",D.workField work "outcome")]
- pure (obj (details++[("executionStages",D.executionStages (D.workField work "codeExecution")),("assessment",assessment),("originalAssessment",original),("detailVersion",str version),("invocationCount",num (length invocations)),("currentRevision",toJSON revision),("historical",Bool (get (D.workField work "routineSnapshot") "revision"/=toJSON revision)),("id",str (D.workloadId work)),("created",D.workField work "created"),("trigger",get (D.workField work "origin") "trigger"),("snapshot",D.workField work "routineSnapshot"),("status",str status),("result",if gate==ExecutionStopped then Null else get (D.workField work "outcome") "reply"),("message",if gate==ExecutionOpen && D.callState call==D.CallWaiting then toJSON (D.callOutput call) else Null),("error",D.callField call "error"),("currentOwner",toJSON (D.callOwner call))]))
+      RunDetail -> [("externalExecution",D.workField work "externalExecution"),("codeExecution",D.codeProjection (D.workField work "codeExecution")),("executionBinding",binding),("criteriaAssessment",arr criteriaAssessment),("invocations",arr invocations),("observations",observations),("feedback",arr feedback),("rejection",fromMaybe Null (listToMaybe feedback)),("outcome",D.workField work "outcome")]
+ pure (obj (details++[("externalSummary",Effects.summary (toJSON work)),("executionStages",D.executionStages (D.workField work "codeExecution")),("assessment",assessment),("originalAssessment",original),("detailVersion",str version),("invocationCount",num (length invocations)),("currentRevision",toJSON revision),("historical",Bool (get (D.workField work "routineSnapshot") "revision"/=toJSON revision)),("id",str (D.workloadId work)),("created",D.workField work "created"),("trigger",get (D.workField work "origin") "trigger"),("snapshot",D.workField work "routineSnapshot"),("status",str status),("result",if gate==ExecutionStopped then Null else get (D.workField work "outcome") "reply"),("message",if gate==ExecutionOpen && D.callState call==D.CallWaiting then toJSON (D.callOutput call) else Null),("error",publicError),("currentOwner",toJSON (D.callOwner call))]))

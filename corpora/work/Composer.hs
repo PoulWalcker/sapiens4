@@ -67,6 +67,7 @@ consumer :: R.Definition -> D.Workload -> Bool
 consumer definition work = let pin=D.workField work "preparationPin" in at pin "routine"==R.definitionId definition && at pin "owner"==R.definitionOwner definition
 requestOn :: SQL.Connection -> R.Definition -> RunId -> RunId -> Text -> IO Value
 requestOn db definition analysis identity time = do
+ require (get (toJSON definition) "externalProfile"==Null) 409 "Receipt-feed profile preparation requires observed-input integration; script/hybrid preparation is not yet supported for this profile"
  works<-readOn db
  require (not (any D.generatedCleanupPending works)) 503 "Owned container cleanup remains unresolved; restore the runtime and restart the app before another preparation"
  source<-maybe (failure 404 "Unknown Ready analysis") pure (find ((==runIdText analysis) . D.workloadId) works)

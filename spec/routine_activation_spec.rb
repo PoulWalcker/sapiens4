@@ -443,4 +443,25 @@ RSpec.describe 'Authorized routine candidate activation with real execution' do
     expect(routine['activeCode']).to be_nil
     expect(host.request('GET', "/api/agents/#{host.agent('OtherOwner')}/routines/#{@routine}/runs/#{id}").first).to eq(404)
   end
+
+  it 'refuses an external profile without replacing a genuinely checked or active code version' do
+    prepared = completed(prepare('checked-before-profile'))
+    version = prepared.fetch('version')
+    profile = {kind: 'receipt_feed_v1', taskBoundary: 'content_result', executionPolicy: 'response_only',
+      source: {url: 'http://127.0.0.1:9/feed', identity: 'sales-feed', initialCursor: 'c0'},
+      delivery: {url: 'http://127.0.0.1:9/deliveries', receiptUrl: 'http://127.0.0.1:9/receipts', identity: 'daily-inbox'}}
+    fields = {revision: 1, title: 'Sales report', goal: CandidateFixtures::GOAL, criteria: CandidateFixtures::CRITERIA, externalProfile: profile}
+    before = routine
+    expect(host.request('POST', "#{routine_path}/edit", fields.merge(operation: 'profile-over-checked')).first).to eq(409)
+    expect(routine).to eq(before)
+    expect(preparation(prepared.fetch('id')).fetch('version')).to eq(version)
+    trial = run_code('activate-unchanged', observed_input)
+    expect(trial.dig('codeExecution', 'reference')).to eq(version.fetch('reference'))
+    expect(routine.fetch('activeCode')).to include('status' => 'active', 'reference' => version.fetch('reference'))
+    active = routine
+    expect(host.request('POST', "#{routine_path}/edit", fields.merge(operation: 'profile-over-active')).first).to eq(409)
+    expect(routine).to eq(active)
+    expect(preparation(prepared.fetch('id')).fetch('version')).to eq(version)
+  end
+
 end

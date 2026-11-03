@@ -233,6 +233,68 @@ input retains its reason and stops before explanation or activation, without
 quarantining a valid active version. Existing single-script candidates keep their
 prior behavior; fallback and effect reconciliation are separate capabilities.
 
+### Receipt-aware feed and delivery
+
+Routine create/edit HTTP requests can explicitly configure `externalProfile`:
+
+```json
+{
+  "kind": "receipt_feed_v1",
+  "taskBoundary": "content_result",
+  "executionPolicy": "response_only",
+  "source": {"url": "https://source.example/feed", "identity": "sales-feed", "initialCursor": "c0"},
+  "delivery": {"url": "https://inbox.example/deliveries", "receiptUrl": "https://inbox.example/receipts", "identity": "daily-inbox"}
+}
+```
+
+The accepted Task creates content under its unchanged criteria. Delivery is a
+separate operation; Task completion does not prove delivery. The profile forces
+response-only content execution and refuses delegation. It currently cannot be
+combined with checked/active script or hybrid automation; configuration refuses
+that combination without erasing the existing version, and preparation refuses
+an enabled profile. Configuration is currently through HTTP.
+
+The source GET adds an opaque `cursor`. A complete response contains `schema: 1`,
+matching `source` and `cursor`, `nextCursor`, `complete: true`, and `records` with
+`id`/`value`. Identical repeated IDs are deduplicated; conflicting duplicate values
+fail. Previously accepted IDs are omitted from new content. Failed or incomplete
+reads do not advance the cursor. Accepted content, cursor progress and the exact
+unsent delivery reservation are stored atomically. A cursor conflict retains the
+model's proposal but records host acceptance as unresolved and sends nothing.
+An accepted page without new records does not create a delivery.
+
+The host POSTs the accepted content once. Its body binds a host-generated operation
+key, consumer scope, profile hash/revision, contract hash, source observation hash,
+record IDs and content to a canonical SHA256 `requestHash` (computed without the
+hash field itself). A receipt must echo schema, receiver, operationKey, scope,
+profileHash and requestHash, with `status: confirmed` and a nonempty receiptId.
+A timeout, lost acknowledgement or interruption after starting leaves delivery
+unknown. Recovery never repeats the POST. A reservation interrupted before send
+remains explicitly not sent. Empty lookup results and model claims do not prove
+that no external action happened.
+
+Explicit `POST /api/agents/:owner/routines/:routine/runs/:run/reconcile-delivery`
+with `{"operation":"unique-local-id"}` performs only a GET of the pinned receipt
+endpoint with `operationKey`. The first exact confirmed receipt is retained;
+conflicting later receipts cannot replace it. Repeating a completed local operation
+returns its saved response. A pending/interrupted lookup needs a new explicit
+operation for another GET. Reconciliation remains available for historical runs
+after Stop, deletion or profile replacement.
+
+Unknown deliveries or unexpected tool/protocol uncertainty block further attempts
+of the same Routine, including older ordinary Retry with a retained routine snapshot
+and after profile removal. Pre-snapshot legacy routine ownership and tool uncertainty
+are not yet covered by this compatibility guard. Unrelated routines remain available. Profile-bound occurrences cannot generic-Retry;
+a failed read without uncertain effects can be retried as a new authorized run.
+Omitting externalProfile on edit preserves it; explicit null removes configuration
+but preserves history and uncertainty. Profile revisions prevent old authorization
+from becoming valid again after replacement and restoration of identical settings.
+
+Transport uses fixed HTTPS endpoints or exact loopback HTTP, no credentials,
+environment proxies, redirects or automatic retries. URLs cannot contain userinfo,
+query or fragment. Responses are streamed with a 64 KiB bound; run IO shares the
+original deadline and Stop, while explicit receipt lookup has a 20-second bound.
+
 ### Opt-in managed calls
 
 Ordinary chat submissions can explicitly send `"managed": true`. This mode is

@@ -11,10 +11,12 @@ import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
 import Data.Char (isAscii, isAlphaNum, isHexDigit)
-import Data.List (find,sortOn)
+import Data.List (find,sortOn,nub,stripPrefix)
 import Crypto.Hash.SHA256 (hash)
 import qualified Data.ByteString as BS
 import Numeric (showHex)
+import qualified Network.URI as URI
+import Text.Read (readMaybe)
 import Data.Maybe
 import qualified Data.Map.Strict as M
 import Data.Scientific (toBoundedInteger)
@@ -25,6 +27,77 @@ import qualified Data.Vector as V
 
 newtype AgentId = AgentId { agentIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
 newtype RunId = RunId { runIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
+
+-- This profile transports accepted content; it does not redefine Task completion.
+newtype EffectEndpoint = EffectEndpoint { effectURL :: Text } deriving (Eq,Show)
+instance ToJSON EffectEndpoint where toJSON=toJSON . effectURL
+instance FromJSON EffectEndpoint where
+ parseJSON value=do
+  url<-parseJSON value
+  unless (not (T.null url) && T.length url<=2000 && T.strip url==url) (fail "Invalid external endpoint URL")
+  uri<-maybe (fail "Invalid external endpoint URL") pure (URI.parseURI (T.unpack url))
+  authority<-maybe (fail "External endpoint needs an authority") pure (URI.uriAuthority uri)
+  let scheme=URI.uriScheme uri; host=URI.uriRegName authority; port=URI.uriPort authority
+      validPort=null port || case stripPrefix ":" port >>= (readMaybe :: String -> Maybe Int) of Just n->n>0 && n<=65535; Nothing->False
+  unless (null (URI.uriUserInfo authority) && null (URI.uriQuery uri) && null (URI.uriFragment uri) && not (null host) && validPort
+    && (scheme=="https:" || scheme=="http:" && host `elem` ["localhost","127.0.0.1","[::1]"])) (fail "Use a fixed HTTPS endpoint or exact loopback HTTP without credentials, query or fragment")
+  pure (EffectEndpoint url)
+
+data FeedSource = FeedSource { feedURL :: EffectEndpoint, feedIdentity :: Text, feedInitialCursor :: Text } deriving (Eq,Show)
+instance FromJSON FeedSource where
+ parseJSON value=do
+  onlyFields ["url","identity","initialCursor"] value
+  FeedSource <$> parseJSON (get value "url") <*> textFieldP "identity" 128 value <*> cursorP (get value "initialCursor")
+instance ToJSON FeedSource where
+ toJSON source=obj [("url",toJSON (feedURL source)),("identity",str (feedIdentity source)),("initialCursor",str (feedInitialCursor source))]
+data DeliveryTarget = DeliveryTarget { deliveryURL :: EffectEndpoint, receiptURL :: EffectEndpoint, receiverIdentity :: Text } deriving (Eq,Show)
+instance FromJSON DeliveryTarget where
+ parseJSON value=do
+  onlyFields ["url","receiptUrl","identity"] value
+  DeliveryTarget <$> parseJSON (get value "url") <*> parseJSON (get value "receiptUrl") <*> textFieldP "identity" 128 value
+instance ToJSON DeliveryTarget where
+ toJSON target=obj [("url",toJSON (deliveryURL target)),("receiptUrl",toJSON (receiptURL target)),("identity",str (receiverIdentity target))]
+data ExternalProfile = ExternalProfile { externalSource :: FeedSource, externalDelivery :: DeliveryTarget } deriving (Eq,Show)
+instance FromJSON ExternalProfile where
+ parseJSON value=do
+  onlyFields ["kind","taskBoundary","executionPolicy","source","delivery"] value
+  unless (at value "kind"=="receipt_feed_v1" && at value "taskBoundary"=="content_result" && at value "executionPolicy"=="response_only") (fail "Only the explicit response-only content_result receipt feed profile is supported")
+  ExternalProfile <$> parseJSON (get value "source") <*> parseJSON (get value "delivery")
+instance ToJSON ExternalProfile where
+ toJSON profile=obj [("kind",str "receipt_feed_v1"),("taskBoundary",str "content_result"),("executionPolicy",str "response_only"),("source",toJSON (externalSource profile)),("delivery",toJSON (externalDelivery profile))]
+data ProfileChange = PreserveProfile | RemoveProfile | ConfigureProfile ExternalProfile deriving (Eq,Show)
+profileChange :: Value -> Parser ProfileChange
+profileChange value
+ | not (has value "externalProfile") = pure PreserveProfile
+ | get value "externalProfile"==Null = pure RemoveProfile
+ | otherwise = ConfigureProfile <$> parseJSON (get value "externalProfile")
+
+cursorP :: Value -> Parser Text
+cursorP value=do
+ cursor<-parseJSON value
+ unless (T.length cursor<=4000) (fail "Cursor exceeds the supported protocol size")
+ pure cursor
+
+data FeedPage = FeedPage { pageSource :: Text, pageCursor :: Text, pageNext :: Text, pageRecords :: [(Text,Value)] } deriving (Eq,Show)
+instance FromJSON FeedPage where
+ parseJSON value=do
+  onlyFields ["schema","source","cursor","nextCursor","complete","records"] value
+  unless (get value "schema"==num 1 && get value "complete"==Bool True) (fail "Feed page is incomplete or unsupported")
+  rawRecords<-withArray "Feed records" (mapM record . V.toList) (get value "records")
+  let records=nub rawRecords
+  unless (length (nub (map fst records))==length records) (fail "Conflicting values for the same feed record ID")
+  FeedPage <$> textFieldP "source" 128 value <*> cursorP (get value "cursor") <*> cursorP (get value "nextCursor") <*> pure records
+  where record item=do
+         onlyFields ["id","value"] item
+         unless (has item "value") (fail "Feed record value is missing")
+         (,) <$> textFieldP "id" 512 item <*> pure (get item "value")
+
+data DeliveryState = DeliveryPrepared | DeliveryStarted | DeliveryUnknown | DeliveryConfirmed | DeliveryNotSent | DeliveryNotRequired deriving (Eq,Show)
+instance FromJSON DeliveryState where
+ parseJSON value=case text value of
+  "prepared"->pure DeliveryPrepared; "started"->pure DeliveryStarted; "unknown"->pure DeliveryUnknown; "confirmed"->pure DeliveryConfirmed; "not_sent"->pure DeliveryNotSent; "not_required"->pure DeliveryNotRequired; _->fail "Unknown delivery state"
+instance ToJSON DeliveryState where
+ toJSON state=str (case state of DeliveryPrepared->"prepared"; DeliveryStarted->"started"; DeliveryUnknown->"unknown"; DeliveryConfirmed->"confirmed"; DeliveryNotSent->"not_sent"; DeliveryNotRequired->"not_required")
 
 -- Requested configuration is pinned; remote model weights are not versioned here.
 data ModelSettings = ModelSettings { modelSlug :: Text, modelReasoning :: Text } deriving (Eq,Show)
