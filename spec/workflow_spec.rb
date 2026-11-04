@@ -193,7 +193,8 @@ RSpec.describe 'Delegation and completion contracts' do
     it "validates completion through the service: #{behavior}" do
       host.configure(rules: {
         'ReadyToWork' => {response: decision('TaskPrepared', taskType: 'research', specification: {
-          objective: 'Find a joke 😎\n"quoted"', inputs: [], expectedOutputs: ['Report'], completionCriteria: criteria})},
+          objective: 'Find a joke 😎\n"quoted"', inputs: [], expectedOutputs: ['Report'], completionCriteria: criteria,
+          conditionalCriteria: {criteria[1] => 'A joke is found.', criteria[2] => 'No joke is found.'}})},
         'Execution' => {response: decision('Outcome', evidence: evidence, reply: 'Finished', outcome: {
           status: 'Completed', satisfiedCriteria: satisfied, notApplicableCriteria: skipped, artifacts: []})}})
       id = host.submit(chief)
