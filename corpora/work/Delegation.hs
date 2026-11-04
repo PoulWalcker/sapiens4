@@ -985,7 +985,7 @@ workTasks s a full = do
   let lastCall=NE.last (workCalls w)
   binding <- bindingDetail w lastCall
   decisions <- forM (workItems w "decisions") $ \d -> if full then merge d <$> readJSON (archivePath s (at d "agent") ("decisions/"<>at d "decisionId")) empty else pure d
-  pure $ mergeFields [("executionBinding",binding),("execution",obj [("state",toJSON (callState lastCall)),("owner",toJSON (callOwner lastCall)),("currentCall",toJSON (callIdentity lastCall)),("attempt",callField lastCall "attempt")]),("decisions",arr decisions)] (select ["task","workloadId","originalIntent","calls","outcome","standaloneRun","standaloneResult","standaloneHistory"] (toJSON w))
+  pure $ mergeFields [("executionBinding",binding),("execution",obj [("state",toJSON (callState lastCall)),("owner",toJSON (callOwner lastCall)),("currentCall",toJSON (callIdentity lastCall)),("attempt",callField lastCall "attempt")]),("decisions",arr decisions)] (select ["task","workloadId","originalIntent","calls","outcome","standaloneRun","standaloneResult","standaloneHistory","workflowWaits"] (toJSON w))
  pure (obj [("tasks",arr rows)])
 taskList :: Service -> Text -> IO Value
 taskList s a = do

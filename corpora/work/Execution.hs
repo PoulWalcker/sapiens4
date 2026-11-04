@@ -256,7 +256,7 @@ launch s a batch tick slot batching = do
  deadline <- (+1800000000000) <$> getMonotonicTimeNSec
  let run=Run (AgentId a) i slot cancel process activity deadline
  found<-D.findWork s i
- forM_ found $ \(work,call)->when (not (WC.child call) && any ((=="defer") . (`at` "kind") . snd) (pairs (get (get (D.workField work "codeExecution") "workflowDefinition") "nodes")) && not (has (D.workField work "codeExecution") "workflowDeadline")) $ do
+ forM_ found $ \(work,call)->when (not (WC.child call) && any ((`elem` ["defer","awaitResult"]) . (`at` "kind") . snd) (pairs (get (get (D.workField work "codeExecution") "workflowDefinition") "nodes")) && not (has (D.workField work "codeExecution") "workflowDeadline")) $ do
   wall<-getCurrentTime
   D.saveWork s (D.setWorkField "codeExecution" (put "workflowDeadline" (str (timestamp (addUTCTime 1800 wall))) (D.workField work "codeExecution")) work)
  modifyMVar_ (serviceRuns s) (pure . M.insert i run)
@@ -551,6 +551,7 @@ executeWorkflowCalculation s running version input = do
       require (current==version) 409 "Workflow candidate changed"
       D.saveWork s (D.setWorkField "codeExecution" (let code=D.workField work "codeExecution"; trace=get code "workflowRun" `fallback` obj [] in put "workflowRun" (put "nodes" (put node receipt (get trace "nodes" `fallback` obj [])) trace) code) work)
      invoke identity node selected=case at node "kind" of
+      "awaitResult"->WC.defer s running version (obj []) identity node selected
       "defer"->WC.defer s running version (obj []) identity node selected
       "fork"->WC.fork s running version input (obj []) identity node
       "script"->do
@@ -913,7 +914,7 @@ admit s a tick = do
  let candidates=[t | t<-agentTurns state,turnStatus t==Queued,not (boolean (turnField t "batchable"))]
  ready<-filterM (WC.ready s) candidates
  due<-filterM (Automation.providerDue s) ready
- let eligible=mapStateFields (put "turns" (toJSON [t | t<-agentTurns state,t `notElem` candidates || t `elem` due])) state
+ let eligible=state {agentTurns=[t | t<-agentTurns state,t `notElem` candidates || t `elem` due]}
  mapM_ (\(Admission batch slot batching) -> launch s a batch tick slot batching)
   (admission (AgentId a) [(runOwner run,runSlot run) | run <- M.elems runs] eligible tick)
 
