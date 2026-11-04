@@ -296,7 +296,7 @@ dispatch s tick = when (pulseFrequency tick==Bph60) $ do
            snapshot_=toJSON current
            accepted=case definitionContract current of
             LegacyPrompt _ -> Nothing
-            AcceptedContract fields -> Just (D.TaskSpec (fieldGoal fields) [] (fieldCriteria fields) (fieldCriteria fields))
+            AcceptedContract fields -> Just (D.TaskSpec (fieldGoal fields) [] (fieldCriteria fields) (fieldCriteria fields) mempty)
        case group of
         Nothing -> admitPersonalOn db (AgentId agent) turn snapshot_ accepted runtime
         Just _ -> do

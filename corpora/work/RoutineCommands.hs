@@ -205,7 +205,7 @@ applyPlan db owner runIdentity time (OperationId operation) plan = case plan of
       origin=obj [("routine",str (definitionId definition)),("occurrence",str identity),("trigger",toJSON ManualTrigger)]
       spec=case definitionContract definition of
        LegacyPrompt _ -> Nothing
-       AcceptedContract fields -> Just (D.TaskSpec (fieldGoal fields) [inputs | not (T.null inputs)] (fieldCriteria fields) (fieldCriteria fields))
+       AcceptedContract fields -> Just (D.TaskSpec (fieldGoal fields) [inputs | not (T.null inputs)] (fieldCriteria fields) (fieldCriteria fields) mempty)
       turn=newTurn runIdentity Chat (R.definitionGoal definition) time origin False
   D.admitRoutineOn db owner turn snapshot_ spec
   pure (definitionId definition,obj [("routine",str (definitionId definition)),("run",str identity)])

@@ -381,7 +381,7 @@ prepare s running = do
     verdicts<-D.criterionAssessments spec (get assessment "criteria")
     decision<-parseValue 422 (D.parseDecision D.Execution) (obj [("event",str "Outcome"),("reply",str text_),("reason",str "Independent hybrid fixture rubric"),("evidence",arr [str evidence | CriterionAssessment _ _ evidence<-verdicts]),("outcome",D.criteriaOutcome spec verdicts)])
     accepted<-case D.decisionBody decision of
-     D.ReportOutcome _ outcome->either (failure 400 . D.outcomeError) pure (D.validateOutcome decision outcome (NE.toList (D.specCriteria spec))) >> pure (D.outcomeStatus outcome==D.Completed)
+     D.ReportOutcome _ outcome->either (failure 400 . D.outcomeError) pure (D.validateOutcome decision outcome spec) >> pure (D.outcomeStatus outcome==D.Completed)
      _->failure 422 "Hybrid rubric has no criterion outcome"
     update s identity (\p->put "checks" (arr [if get check "inputHash"==get receipt "inputHash" then mergeFields [("explanationOperation",str explainId),("rubricReviewOperation",str reviewId),("rubricAccepted",Bool accepted)] check else check | check<-items p "checks"]) p)
     require accepted 422 "Hybrid explanation failed independent original-criteria rubric"
@@ -553,7 +553,7 @@ chooseStandalone s running operation plan record=do
    (source,call)<-maybe (failure 409 "Original Task disappeared") pure (listToMaybe [(work,current) | work<-works,current<-NE.toList (D.workCalls work),D.callIdentity current==runId running])
    spec<-D.executionContract source call >>= maybe (failure 409 "Composer requires accepted Task criteria") pure
    parent<-D.standalonePin source call spec
-   require (D.workField source "executionGate"/=toJSON ExecutionStopped && D.workField source "outcome"==Null && D.callState call==D.CallRunning && D.callField call "standaloneWait"==Null) 409 "Original Task is not available for continuation"
+   require (D.workField source "executionGate"/=toJSON ExecutionStopped && D.callField call "outcome"==Null && at (D.workField source "outcome") "status"/="Completed" && D.callState call==D.CallRunning && D.callField call "standaloneWait"==Null) 409 "Original Task is not available for continuation"
    let attempts=[entry | entry<-D.workItems source "decisions",at entry "node"=="Execution"]
    require (not (null attempts) && all (Effects.completeActionFree . (`get` "evidence")) attempts && length (items (toJSON turn) "batch_members")<=1) 409 "Original Task has no complete action-free continuation proof"
    consumerPin<-case plan of
@@ -626,7 +626,7 @@ queueStandaloneOn db preparation=do
  source<-findOn db (at pin "workload")
  call<-maybe (failure 409 "Waiting original Call disappeared") pure (find ((==get pin "call") . toJSON . D.callIdentity) (D.workCalls source))
  let waiting=D.callField call "standaloneWait"
- require (get waiting "preparation"==str (D.workloadId preparation) && D.callState call==D.CallQueued && D.workField source "outcome"==Null) 409 "Original Task no longer awaits this preparation"
+ require (get waiting "preparation"==str (D.workloadId preparation) && D.callState call==D.CallQueued && D.callField call "outcome"==Null && at (D.workField source "outcome") "status"/="Completed") 409 "Original Task no longer awaits this preparation"
  if has waiting "child" then pure waiting else do
   identity<-newId
   time<-now
@@ -646,7 +646,7 @@ resumeStandalone s running=locked s $ do
   let waiting=D.callField call "standaloneWait"
   if waiting==Null then pure Nothing else do
    void (D.requireStandalonePinFrom works (get waiting "parent"))
-   require (D.workField source "outcome"==Null) 409 "Original Task outcome is already settled"
+   require (D.callField call "outcome"==Null && at (D.workField source "outcome") "status"/="Completed") 409 "Original Task outcome is already settled"
    let child=find ((==at waiting "child") . D.workloadId) works
        prepared=find ((==at waiting "preparation") . D.workloadId) works
        childCode=maybe Null (`D.workField` "codeExecution") child
@@ -665,9 +665,11 @@ resumeStandalone s running=locked s $ do
     outcome<-decodeValue 409 (remove ["reply","evidence","author"] childOutcome)
     let proof=obj [("child",get waiting "child"),("reference",get waiting "reference"),("assessment",get (get childCode "acceptance") "invocation")]
         response=D.DecisionResponse (D.ReportOutcome (at childOutcome "reply") outcome) "Accepted exact child result against original criteria" [jsonText proof] childOutcome
-    either (failure 400 . D.outcomeError) pure (D.validateOutcome response outcome (NE.toList (D.specCriteria original)))
-    let finished=D.setWorkField "standaloneResult" proof (D.setWorkField "outcome" childOutcome resumed)
-    D.saveWorkOn s db (D.withCall finished clear {D.callProgress=D.FinishedCall (D.Answered (at childOutcome "reply"))})
+    either (failure 400 . D.outcomeError) pure (D.validateOutcome response outcome original)
+    continuation<-RunId <$> newId
+    let completed=clear {D.callProgress=D.FinishedCall (D.Answered (at childOutcome "reply"))}
+        finished=D.setWorkField "standaloneResult" proof (D.scopedResult continuation resumed completed childOutcome)
+    D.saveWorkOn s db finished
     pure (Just (at childOutcome "reply"))
    else do
     let evidence=obj [("workflowResult",waiting),("preparation",maybe Null (select ["status","error","reason","call"] . preparationEvidence) prepared),("outcome",childOutcome),("code",select ["status","error","activation","acceptance"] childCode),("instruction",str "Continue the original Task from retained evidence. Do not repeat completed or uncertain actions.")]

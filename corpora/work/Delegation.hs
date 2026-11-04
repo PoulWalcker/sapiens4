@@ -143,7 +143,7 @@ routineWorkload owner turn snapshot accepted =
      first=maybe base (const (setCallFields [("executionBinding",toJSON (OrdinaryBinding owner RoutineSnapshotSource))] base)) accepted
      base=newCall (turnId turn) owner Nothing (QueuedAt (if isJust accepted then Execution else ReadyToWork)) (turnInput turn)
  in Workload identity True (first :| []) (KM.fromList
-  [("bindingSchema",num 1),("originalIntent",str (turnInput turn)),("task",obj [("taskId",str ("task_"<>identity)),("taskType",str "automated"),("specification",maybe Null toJSON accepted)])
+  [("responsible",toJSON owner),("bindingSchema",num 1),("originalIntent",str (turnInput turn)),("task",obj [("taskId",str ("task_"<>identity)),("taskType",str "automated"),("specification",maybe Null toJSON accepted)])
   ,("origin",turnField turn "origin"),("routineSnapshot",maybe snapshot (\spec -> put "acceptedTask" (toJSON spec) snapshot) accepted),("executionGate",toJSON ExecutionOpen)
   ,("created",turnField turn "created"),("decisions",arr []),("outcome",Null)])
 -- Admission owns selection and the trial claim in its caller's existing SQL
@@ -272,7 +272,7 @@ criteriaOutcome spec verdicts = obj [("status",str (if all accepted verdicts the
  where accepted (CriterionAssessment _ verdict _)=verdict `elem` [CriterionPass,CriterionNotApplicable]
 
 sameSemanticContract :: TaskSpec -> TaskSpec -> Bool
-sameSemanticContract left right = specObjective left==specObjective right && specOutputs left==specOutputs right && specCriteria left==specCriteria right
+sameSemanticContract left right = specObjective left==specObjective right && specOutputs left==specOutputs right && specCriteria left==specCriteria right && specConditions left==specConditions right
 
 resolveCandidate :: Service -> Workload -> WorkCall -> IO (Value,CodeRole)
 resolveCandidate s work call | has (toJSON call) "workflowChild" = do
@@ -334,15 +334,19 @@ generatedCleanupPending work=any ((`elem` ["cleanup_pending","uncertain"]) . (`a
 routineSpecPinned :: Workload -> Bool
 routineSpecPinned work = has (workField work "routineSnapshot") "criteria"
 
-data TaskSpec = TaskSpec { specObjective :: Text, specInputs :: [Text], specOutputs :: NonEmpty Text, specCriteria :: NonEmpty Text } deriving (Eq, Show)
+data TaskSpec = TaskSpec { specObjective :: Text, specInputs :: [Text], specOutputs :: NonEmpty Text, specCriteria :: NonEmpty Text, specConditions :: M.Map Text Text } deriving (Eq, Show)
 instance FromJSON TaskSpec where
  parseJSON value = do
-  onlyFields ["objective","inputs","expectedOutputs","completionCriteria"] value
+  onlyFields ["objective","inputs","expectedOutputs","completionCriteria","conditionalCriteria"] value
   void (textFieldP "objective" 16000 value)
   let nonempty key = stringsP key True (get value key) >>= maybe (fail "Expected at least one item") pure . NE.nonEmpty
-  TaskSpec <$> parseJSON (get value "objective") <*> stringsP "inputs" False (get value "inputs") <*> nonempty "expectedOutputs" <*> nonempty "completionCriteria"
+  criteria <- nonempty "completionCriteria"
+  conditions <- parseJSON (get value "conditionalCriteria" `fallback` empty)
+  unless (all (`elem` NE.toList criteria) (M.keys conditions)) (fail "Conditions must identify exact completion criteria")
+  forM_ (M.elems conditions) $ \condition -> void (textFieldP "condition" 16000 (obj [("condition",str condition)]))
+  TaskSpec <$> parseJSON (get value "objective") <*> stringsP "inputs" False (get value "inputs") <*> nonempty "expectedOutputs" <*> pure criteria <*> pure conditions
 instance ToJSON TaskSpec where
- toJSON spec = obj [("objective",str (specObjective spec)),("inputs",toJSON (specInputs spec)),("expectedOutputs",toJSON (NE.toList (specOutputs spec))),("completionCriteria",toJSON (NE.toList (specCriteria spec)))]
+ toJSON spec = obj [("objective",str (specObjective spec)),("inputs",toJSON (specInputs spec)),("expectedOutputs",toJSON (NE.toList (specOutputs spec))),("completionCriteria",toJSON (NE.toList (specCriteria spec))),("conditionalCriteria",toJSON (specConditions spec))]
 -- Resolve only local durable sources. Mutable future Routine definitions are not
 -- execution contracts, and old installations are not assigned invented versions.
 inheritedWorkflowCall :: Workload -> WorkCall -> Bool
@@ -437,7 +441,10 @@ parseDecision node value = do
   "RequestUnclear" -> variant ["question"] (AskAdmin <$> textAt "question" 4000)
   "SapiSpecified" -> variant ["name","role"] (SpecifySapi <$> nameP value <*> textAt "role" 60)
   "TaskPrepared" -> variant ["taskType","specification"] (PrepareTask <$> textAt "taskType" 60 <*> parseJSON (get value "specification"))
-  "HandoffPrepared" -> variant ["request"] (Handoff <$> textAt "request" 16000)
+  "HandoffPrepared" -> variant ["request","scope","specification"] $ do
+   unless (at value "scope" `elem` ["","whole","part"]) (fail "Handoff scope must be whole or part")
+   when (at value "scope"=="part") (void (parseJSON (get value "specification") :: Parser TaskSpec))
+   Handoff <$> textAt "request" 16000
   "ComposeWorkflow" -> variant ["operation","previous"] (ChooseWorkflow <$> textAt "operation" 128 <*> (ComposeVersion <$> parseJSON (get value "previous")))
   "RunWorkflow" -> variant ["operation","reference"] (ChooseWorkflow <$> textAt "operation" 128 <*> (ExecuteVersion <$> parseJSON (get value "reference")))
   "Outcome" -> variant ["reply","outcome"] (ReportOutcome <$> textAt "reply" 64000 <*> parseJSON (get value "outcome"))
@@ -514,24 +521,26 @@ setAssessment work record assessment = setWorkField "decisions" (arr (map update
 data OutcomeError = InvalidSkippedCriterion | MissingCompletionEvidence deriving (Eq, Show)
 outcomeError :: OutcomeError -> Text
 outcomeError problem = case problem of
- InvalidSkippedCriterion -> "Only an unsatisfied, explicit If criterion can be not applicable"
+ InvalidSkippedCriterion -> "Outcome criteria must belong to the contract; only an unsatisfied declared conditional criterion can be not applicable"
  MissingCompletionEvidence -> "Completed outcome requires evidence for all applicable completion criteria"
-validateOutcome :: DecisionResponse -> Outcome -> [Text] -> Either OutcomeError ()
-validateOutcome response outcome criteria
- | any invalidSkip skipped = Left InvalidSkippedCriterion
- | outcomeStatus outcome == Completed && (null (decisionEvidence response) || any (`notElem` covered) criteria) = Left MissingCompletionEvidence
+validateOutcome :: DecisionResponse -> Outcome -> TaskSpec -> Either OutcomeError ()
+validateOutcome response outcome spec
+ | any (`notElem` criteria) (satisfiedCriteria outcome) || any invalidSkip skipped = Left InvalidSkippedCriterion
+ | not (null covered) && null (decisionEvidence response) = Left MissingCompletionEvidence
+ | outcomeStatus outcome == Completed && any (`notElem` covered) criteria = Left MissingCompletionEvidence
  | otherwise = Right ()
  where
+ criteria = NE.toList (specCriteria spec)
  skipped = M.keys (notApplicable outcome)
  covered = satisfiedCriteria outcome ++ skipped
- invalidSkip criterion = criterion `notElem` criteria || not ("If " `T.isPrefixOf` criterion) || criterion `elem` satisfiedCriteria outcome
+ invalidSkip criterion = criterion `M.notMember` specConditions spec || criterion `elem` satisfiedCriteria outcome
 begin :: Service -> AgentId -> Turn -> IO ()
 begin s a turn = do
  found <- findWork s (turnId turn)
  let routine=has (turnField turn "origin") "routine"
      standalone=get (turnField turn "origin") "standaloneRun"
      first=newCall (turnId turn) a Nothing (RunningAt (if routine || standalone/=Null then ReadyToWork else Assessing)) (turnInput turn)
-     initial=Workload (runIdText (turnId turn)) (routine || standalone/=Null) (first :| []) (KM.fromList [("standaloneRun",standalone),("executionGate",toJSON ExecutionOpen),("bindingSchema",num 1),("originalIntent",str (turnInput turn)),("task",obj [("taskId",str ("task_"<>runIdText (turnId turn))),("taskType",str (if routine then "automated" else "work")),("specification",Null)]),("origin",merge (obj [("agent",toJSON a),("call",toJSON (turnId turn))]) (turnField turn "origin")),("decisions",arr []),("outcome",Null)])
+     initial=Workload (runIdText (turnId turn)) (routine || standalone/=Null) (first :| []) (KM.fromList [("responsible",toJSON a),("standaloneRun",standalone),("executionGate",toJSON ExecutionOpen),("bindingSchema",num 1),("originalIntent",str (turnInput turn)),("task",obj [("taskId",str ("task_"<>runIdText (turnId turn))),("taskType",str (if routine then "automated" else "work")),("specification",Null)]),("origin",merge (obj [("agent",toJSON a),("call",toJSON (turnId turn))]) (turnField turn "origin")),("decisions",arr []),("outcome",Null)])
      (w,c)=fromMaybe (initial,first) found
      running=if isNothing (callOutput c) then c { callProgress=RunningAt (callNode c), callFields=KM.delete "error" (callFields c) } else c
      updated=setCallFields [("attempt",num (fromMaybe 1 (turnAttempt turn)))] running
@@ -567,14 +576,14 @@ decide s run turn state node logs = do
   (w,c) <- getWork s (turnId turn)
   DB.requireOccurrence s (workField w "origin")
   contract <- if node==Execution then executionContract w c else pure Nothing
-  let taskContext=if node==ReadyToWork && workField w "standaloneRun"/=Null then put "specification" (get (workField w "standaloneRun") "contract") (workField w "task") else maybe (workField w "task") (\spec -> put "specification" (toJSON spec) (workField w "task")) contract
+  let taskContext=if node==ReadyToWork && workField w "standaloneRun"/=Null then put "specification" (get (workField w "standaloneRun") "contract") (workField w "task") else workField w "task"
   conv <- conversation s (runOwner run) turn state
   chief <- DB.mainAgent s
   members <- team s
   extra <- if KM.member "agency_batch" (agentFields state) then ("\n\n" <>) <$> prompt s "agency-chat" else pure ""
   scheduled <- if has (workField w "origin") "routine" && at (workField w "origin") "trigger"/="manual" then ("\n\n" <>) <$> prompt s "scheduled-execution" else pure ""
   externalInstruction<-if Effects.profileBound (toJSON w) then ("\n\n" <>) <$> prompt s "receipt-feed-content" else pure ""
-  pinned <- if node==ReadyToWork && routineSpecPinned w then ("\n\n" <>) <$> prompt s "decision-routine-specification" else if node==ReadyToWork && workField w "standaloneRun"/=Null then ("\n\n" <>) <$> prompt s "decision-standalone-specification" else pure ""
+  pinned <- if node==ReadyToWork && routineSpecPinned w && callParent c==Nothing then ("\n\n" <>) <$> prompt s "decision-routine-specification" else if node==ReadyToWork && workField w "standaloneRun"/=Null then ("\n\n" <>) <$> prompt s "decision-standalone-specification" else pure ""
   routine <- if has (workField w "origin") "routine" then do
    definitions <- DB.values s DB.ScheduledRoutines
    pure (obj [("definition",fromMaybe Null (findId (at (workField w "origin") "routine") definitions)),("snapshot",workField w "routineSnapshot")])
@@ -585,7 +594,7 @@ decide s run turn state node logs = do
   works<-readWorks s
   let versions=[mergeFields [("reference",get version "reference"),("source",pin),("contract",get version "contract"),("activated",get (get prepared "trial") "status")] (select ["status","checks"] prepared) | candidate<-works,let pin=workField candidate "standalonePin",get pin "owner"==toJSON (runOwner run),let prepared=workField candidate "preparation",let version=get prepared "version",at prepared "status"=="awaiting_occurrence"]
   let instruction = at source "content" <> extra <> scheduled <> pinned <> externalInstruction
-      context = obj [("availableWorkflows",arr versions),("acceptedInput",feedInput),("externalExecution",workField w "externalExecution"),("originalIntent",workField w "originalIntent"),("task",taskContext),("routine",routine),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
+      context = obj [("executionSpecification",maybe Null toJSON contract),("responsible",workField w "responsible"),("remainingCriteria",workField w "remainingCriteria"),("partialResults",arr [obj [("callId",toJSON (callIdentity local)),("author",toJSON (callOwner local)),("outcome",callField local "outcome")] | local<-NE.toList (workCalls w),callField local "outcome"/=Null]),("preparationScope",str (if at (toJSON c) "afterPreparation"=="Delegation" then "root" else "assignment")),("availableWorkflows",arr versions),("acceptedInput",feedInput),("externalExecution",workField w "externalExecution"),("originalIntent",workField w "originalIntent"),("task",taskContext),("routine",routine),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
       rendered = render envelope [("node",wireName node),("instruction",instruction),("notes_wiki",render wiki [("notes_example",T.pack (repositoryRoot s </> "corpora/prompts/examples/jarvis-notes.html"))]),("context",jsonText context),("events",T.intercalate ", " (sort (eventsFor node)))]
   (model,effort) <- modelDefaults
   policy <- executionSettings s (agentIdText (runOwner run))
@@ -647,7 +656,42 @@ validateTarget s w source target = do
  works <- readWorks s
  require (not (any (\c -> callState c == CallQueued && callOwner c == AgentId target) (concatMap (NE.toList . workCalls) works))) 409 "Recipient already has an accepted call"
  require (length (workCalls w) <= 8) 409 "Routing limit reached; Admin must resolve the request"
- require (target == chief || not (any ((==AgentId target) . callOwner) (workCalls w))) 409 "This specialist already assessed the request; ask Admin to resolve routing"
+ require (target == chief || not (any (\call->callOwner call==AgentId target && callField call "outcome"==Null) (workCalls w))) 409 "This specialist already assessed the request; ask Admin to resolve routing"
+assignmentSpecification :: Workload -> WorkCall -> Value
+assignmentSpecification work call = callField call "specification" `fallback` get (workField work "task") "specification"
+
+acceptedCriteria :: Workload -> [Text]
+acceptedCriteria work = nub [criterion | call<-NE.toList (workCalls work),let result=callField call "outcome",criterion<-map text (items result "satisfiedCriteria") ++ map fst (pairs (get result "notApplicableCriteria"))]
+
+handoffSpecification :: Workload -> WorkCall -> Value -> Validation (Text,TaskSpec)
+handoffSpecification work call response = do
+ original<-validateValue 409 parseJSON (assignmentSpecification work call)
+ let partial=at response "scope"=="part"
+     scope=if partial || at (toJSON call) "scope"=="part" then "part" else "whole"
+ spec<-if partial then validateValue 400 parseJSON (get response "specification") else Right original
+ let criteria=NE.toList (specCriteria spec)
+ check (all (`elem` NE.toList (specCriteria original)) criteria) 400 "Partial assignment must use original criteria"
+ check (all (\criterion->M.lookup criterion (specConditions spec)==M.lookup criterion (specConditions original)) criteria) 400 "Assignment cannot change accepted conditions"
+ check (all (`notElem` acceptedCriteria work) criteria) 409 "Reuse accepted results instead of executing completed criteria again"
+ check (partial || not (has response "specification") || get response "specification"==toJSON original) 400 "Whole handoff preserves its accepted contract"
+ pure (scope,spec)
+
+-- Save the local receipt and the owner's continuation in the same workload write.
+-- The existing dispatcher admits that queued call under the original gate/resources.
+scopedResult :: RunId -> Workload -> WorkCall -> Value -> Workload
+scopedResult continuation work call result =
+ let saved=withCall work (setCallFields [("outcome",result)] call)
+     root=get (workField saved "task") "specification"
+     covered=acceptedCriteria saved
+     remaining=[criterion | criterion<-items root "completionCriteria",text criterion `notElem` covered]
+     progress=setWorkField "remainingCriteria" (arr remaining) saved
+ in if at (toJSON call) "scope"/="part" then setWorkField "outcome" result progress else
+    let owner=AgentId (text (workField work "responsible"))
+        request=text (workField work "originalIntent")
+        next=setCallFields [("specification",root),("scope",str "whole"),("continuation",Bool True),("observation",obj [("partialResult",result),("remainingCriteria",arr remaining)])] (newCall continuation owner (Just (callIdentity call)) (QueuedAt Assessing) request)
+        aggregate=mergeFields [("status",str "Unresolved"),("satisfiedCriteria",arr (nub [criterion | local<-NE.toList (workCalls saved),criterion<-items (callField local "outcome") "satisfiedCriteria"])),("notApplicableCriteria",obj [(criterion,reason) | local<-NE.toList (workCalls saved),(criterion,reason)<-pairs (get (callField local "outcome") "notApplicableCriteria")])] result
+    in (setWorkField "outcome" aggregate progress) {workCalls=workCalls progress <> (next :| [])}
+
 transfer :: Service -> Run -> Text -> Text -> Value -> IO Text
 transfer s run request reason record = do
  (w,c) <- getWork s (runId run)
@@ -656,12 +700,14 @@ transfer s run request reason record = do
  require (not stopped) 409 "Stopped before handoff acceptance"
  let target=text (callField c "target")
  validateTarget s w (agentIdText (runOwner run)) target
+ (scope,spec)<-validated (handoffSpecification w c (get record "response"))
  i <- newId
  chief <- DB.mainAgent s
- let child=setCallFields [("handoffReason",str reason)] (newCall (RunId i) (AgentId target) (Just (callIdentity c)) (QueuedAt (if target==chief then ChiefTriage else Assessing)) request)
+ let child=setCallFields [("handoffReason",str reason),("scope",str scope),("specification",toJSON spec)] (newCall (RunId i) (AgentId target) (Just (callIdentity c)) (QueuedAt (if target==chief then ChiefTriage else Assessing)) request)
      reply="Delegated to "<>target<>"."
      updated=c { callProgress=FinishedCall (HandedOff reply) }
-     accepted=withCall w updated
+     responsible=if scope=="whole" then AgentId target else AgentId (text (workField w "responsible" `fallback` toJSON (callOwner c)))
+     accepted=setWorkField "responsible" (toJSON responsible) (withCall w updated)
  saveWork s accepted { workTracked=True, workCalls=workCalls accepted <> (child :| []) }
  accept s (agentIdText (runOwner run)) record "Delegation" (wireName (callNode child))
  pure reply
@@ -744,7 +790,7 @@ advanceDecision chief response work call = case decisionBody response of
  ChooseWorkflow operation plan -> Right (ComposeWorkflow operation plan)
  where
  finish changed progress = SaveDecision changed (call { callProgress=progress })
- acceptedCriteria = items (get (workField work "task") "specification") "completionCriteria"
+ acceptedCriteria = items (assignmentSpecification work call) "completionCriteria"
 
 decisionFailure :: DecisionError -> IO a
 decisionFailure problem = case problem of
@@ -774,7 +820,8 @@ runDecision s run turn state = do
          chief <- DB.mainAgent s
          let owner=agentIdText (runOwner run)
              finish work updated = do
-              let following=setCallFields [("observation",decisionRaw response)] updated
+              let routed=if callNode updated==Delegation && get (workField work "task") "specification"==Null then (setCallFields [("afterPreparation",str "Delegation")] updated) {callProgress=RunningAt ReadyToWork} else updated
+                  following=setCallFields [("observation",decisionRaw response)] routed
                   next=callNode following
               saveWork s (withCall work following)
               accept s owner record (wireName node) (wireName next)
@@ -804,14 +851,18 @@ runDecision s run turn state = do
             Nothing -> createAgent s (obj [("name",str name),("role",str role),("manager",str owner)])
            finish current ((setCallFields [("target",get created "id"),("creation",obj [("name",str name),("role",str role)]),("creationReceipt",obj [("agent",created),("created",Bool True)])] call) {callProgress=RunningAt Delegation})
           PrepareAcceptedTask taskType spec -> do
-           let previous=get (workField current "task") "specification"
-           when (routineSpecPinned current) $ require (toJSON spec==previous) 409 "Routine goal, inputs and criteria are pinned for this run"
-           require (all (`elem` map str (NE.toList (specCriteria spec))) (items previous "completionCriteria")) 400 "A handoff cannot remove accepted completion criteria"
-           let task=mergeFields [("taskType",str (if has (workField current "origin") "routine" then "automated" else taskType)),("specification",toJSON spec)] (workField current "task")
+           let previous=assignmentSpecification current call
+               root=get (workField current "task") "specification"
+               next=if at (toJSON call) "afterPreparation"=="Delegation" then Delegation else Execution
+           when (routineSpecPinned current && callParent call==Nothing) $ require (toJSON spec==previous) 409 "Routine goal, inputs and criteria are pinned for this run"
+           when (previous/=Null) $ do
+            pinned<-decodeValue 400 previous
+            require (specCriteria spec==specCriteria pinned && specConditions spec==specConditions pinned) 400 "Assignment must preserve every accepted criterion and condition"
+           let task=if root/=Null then workField current "task" else mergeFields [("taskType",str (if has (workField current "origin") "routine" then "automated" else taskType)),("specification",toJSON spec)] (workField current "task")
            require (callField call "executionBinding"==Null) 409 "Execution binding cannot be replaced"
            let binding=OrdinaryBinding (callOwner call) (TaskDecisionSource (at record "decisionId"))
-               following=(setCallFields [("executionBinding",toJSON binding),("observation",decisionRaw response)] call) {callProgress=RunningAt Execution}
-               acceptedRecord=acceptedDecision record "ReadyToWork" "Execution"
+               following=(setCallFields [("executionBinding",toJSON binding),("specification",toJSON spec),("afterPreparation",Null),("observation",decisionRaw response)] call) {callProgress=RunningAt next}
+               acceptedRecord=acceptedDecision record "ReadyToWork" (wireName next)
                committed=withDecisionRecord acceptedRecord (setWorkField "task" task current)
            selected<-if workField current "standaloneRun"==Null then pure (withCall committed following) else do
             let request=workField current "standaloneRun"
@@ -823,9 +874,10 @@ runDecision s run turn state = do
            pure Nothing
           DelegateRequest request -> Just <$> transfer s run request (decisionReason response) record
           AssessReportedOutcome reply outcome -> do
+           when (at (toJSON call) "scope"=="part") $ Effects.requireRunClear s (runId run)
            pinnedContract <- executionContract current call
-           criteria <- maybe (decodeValue 500 (get (get (workField current "task") "specification") "completionCriteria")) (pure . NE.toList . specCriteria) pinnedContract
-           let validation = validateOutcome response outcome criteria
+           spec <- maybe (decodeValue 500 (assignmentSpecification current call)) pure pinnedContract
+           let validation = validateOutcome response outcome spec
            case validation of
             Left _ -> do
              let assessment=put "decisionId" (get record "decisionId") (assessmentValue AssessmentRejected "application_validation" "Outcome did not satisfy the pinned criteria")
@@ -834,8 +886,9 @@ runDecision s run turn state = do
             Right () -> pure ()
            let saved=mergeFields [("reply",str reply),("evidence",toJSON (decisionEvidence response)),("author",str owner)] (get (decisionRaw response) "outcome")
            let assessment=put "decisionId" (get record "decisionId") (assessmentValue (if outcomeStatus outcome==Completed then AssessmentAccepted else AssessmentUnresolved) "model_contract_assessment" "Model assessment against the pinned criteria; external effects are not independently verified")
-           let assessed=setAssessment (setWorkField "outcome" saved current) record assessment
-               completedCall=call { callProgress=FinishedCall (case outcomeStatus outcome of Completed -> Answered reply; Unresolved -> UnresolvedResult reply) }
+           continuation<-RunId <$> newId
+           let completedCall=setCallFields [("outcome",saved)] call { callProgress=FinishedCall (case outcomeStatus outcome of Completed -> Answered reply; Unresolved -> UnresolvedResult reply) }
+               assessed=setAssessment (scopedResult continuation current completedCall saved) record assessment
            if Effects.profileBound (toJSON current) && outcomeStatus outcome==Completed then do
             let acceptedRecord=acceptedDecision record (wireName node) "Outcome"
                 following=setCallFields [("observation",decisionRaw response)] completedCall

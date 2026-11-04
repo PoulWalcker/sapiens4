@@ -644,7 +644,7 @@ assessCodeResult s running version role spec input actual runtime explanation na
   decision<-parseValue 422 (D.parseDecision D.Execution) body
   case D.decisionBody decision of
    D.ReportOutcome _ outcome->do
-    either (failure 400 . D.outcomeError) pure (D.validateOutcome decision outcome (NE.toList (D.specCriteria spec)))
+    either (failure 400 . D.outcomeError) pure (D.validateOutcome decision outcome spec)
     require (case verdict of SemanticallyAccepted->D.outcomeStatus outcome==D.Completed; SemanticallyRejected->D.outcomeStatus outcome==D.Unresolved && not (null (D.decisionEvidence decision)); SemanticallyUnknown->D.outcomeStatus outcome==D.Unresolved) 422 "Semantic verdict contradicts the task outcome"
     pure (verdict,decision,outcome)
    _->failure 422 "Code assessment has no outcome"
