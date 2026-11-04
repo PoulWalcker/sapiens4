@@ -26,7 +26,6 @@ RSpec.describe 'Shared-runtime finite workflow fork and join' do
     host.start
     @owner = host.agent('ParallelOwner')
     rules('Execution' => {response: decision('Outcome', reply: 'Observed sales.', outcome: {status: 'Completed', satisfiedCriteria: CandidateFixtures::CRITERIA, artifacts: []}), usage: USAGE},
-      'AutomationAnalysis' => {response: decision('AutomationAnalyzed', decision: {status: 'Ready', automatablePart: 'Compute sales with optional interpretation.', parameters: [{name: 'csv', description: 'Sales'}]}), usage: USAGE},
       'PreparationFixtures' => {response: {fixtures: workflow_fixtures}, usage: USAGE},
       'PreparationGeneration' => {response: {workflow: graph}, usage: USAGE},
       'PreparationReview' => {response: {accepted: true, reason: 'Composed independent results match both branches.'}, usage: USAGE},
@@ -40,8 +39,6 @@ RSpec.describe 'Shared-runtime finite workflow fork and join' do
   def saved(id = @routine); host.state.fetch('personal_routines').find { |row| row['id'] == id }; end
   def create(operation, title)
     id = host.api('POST', "/api/agents/#{@owner}/routines", operation: operation, title: title, goal: CandidateFixtures::GOAL, criteria: CandidateFixtures::CRITERIA).fetch('routine')
-    run(id, "observe-#{operation}", observed_input)
-    Contract.wait { saved(id)['analysis'] if saved(id).dig('analysis', 'status') == 'Ready' }
     id
   end
   def run(id, operation, input, wait: true)
@@ -50,7 +47,12 @@ RSpec.describe 'Shared-runtime finite workflow fork and join' do
     identity
   end
   def prepare(operation, id = @routine)
-    host.api('POST', "#{route(id)}/prepare", operation: operation, revision: saved(id).fetch('revision'), analysis: saved(id).fetch('analysis').fetch('id')).fetch('preparation')
+    if saved(id).fetch('runs').empty?
+      run(id, "observe-#{operation}", observed_input)
+      Contract.wait(description: 'automatic workflow preparation admission') { saved(id).dig('preparation', 'id') }
+    else
+      host.api('POST', "#{route(id)}/prepare", operation: operation, revision: saved(id).fetch('revision')).fetch('preparation')
+    end
   end
   def prepared(identity, id = @routine, status: 'awaiting_occurrence')
     Contract.wait(timeout: 90, description: "preparation #{status}") do
@@ -161,7 +163,7 @@ RSpec.describe 'Shared-runtime finite workflow fork and join' do
     rules('PreparationReview' => {attempts: [{terminal_failure: 'unexpected status 503 Service Unavailable: controlled post-join refusal'}, {response: accepted, usage: USAGE}]})
     candidate = prepare('last-resource-preparation', other)
     waiting = prepared(candidate, other, status: 'waiting_provider')
-    expect(host.request('POST', "#{route(other)}/prepare", operation: 'competing-preparation', revision: saved(other).fetch('revision'), analysis: saved(other).fetch('analysis').fetch('id')).first).to eq(409)
+    expect(host.request('POST', "#{route(other)}/prepare", operation: 'competing-preparation', revision: saved(other).fetch('revision')).first).to eq(409)
     host.stop
     ceiling = nil
     # Explicit persisted finite-resource fixture, not a thirty-minute burn or grant.
@@ -188,14 +190,24 @@ RSpec.describe 'Shared-runtime finite workflow fork and join' do
     identity = run(@routine, 'visible-join', second_input, wait: false)
     Contract.wait(timeout: 60) { calls.length == 2 }
     @desktop = Desktop.new(host.url)
-    ['Open ParallelOwner', 'Work menu', 'Automation menu', 'Routines', 'Parallel sales'].each { |label| @desktop.click(label) }
-    @desktop.see('Parallel steps')
+    @desktop.click('Open ParallelOwner')
+    @desktop.see('Message ParallelOwner')
+    @desktop.click('Work menu')
+    @desktop.see('Automation menu')
+    @desktop.click('Automation menu')
+    @desktop.see('Routines')
+    @desktop.click('Routines')
+    @desktop.see('Parallel sales')
+    @desktop.click('Parallel sales')
+    @desktop.see('Workflow resource and child steps')
     @desktop.see('Join joined · waiting')
     @desktop.see('Child left · Running')
     @desktop.see('Active time (union):')
     @desktop.see('Provider usage is summed separately')
     host.release('visible-children')
     host.turn(identity, 'done', timeout: 90)
+    @desktop.reload
+    @desktop.click('Parallel sales')
     @desktop.see('Join joined · ready')
     @desktop.see('Child left · Completed')
   end
