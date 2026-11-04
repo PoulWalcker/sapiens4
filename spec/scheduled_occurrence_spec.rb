@@ -289,11 +289,11 @@ RSpec.describe 'Durable interval occurrences', :host do
             'turn' => identity, 'time' => turn['created']}
         end
       when 'waiting_child', 'queued_child', 'missing_running_child'
-        call['state'] = 'Delegated'
         child_state = {'waiting_child' => 'WaitingForAdmin', 'queued_child' => 'Queued', 'missing_running_child' => 'Running'}.fetch(shape)
         successor = call.merge('callId' => child, 'causedBy' => identity,
-          'state' => child_state)
+          'node' => (shape == 'waiting_child' ? 'WaitingForAdmin' : 'ReadyToWork'), 'state' => child_state)
         successor['output'] = 'Which products?' if shape == 'waiting_child'
+        call.merge!('state' => 'Delegated', 'node' => 'Delegation', 'output' => 'Delegated to the saved recipient.')
         work['calls'] << successor
         state.fetch('turns') << turn.merge('id' => child, 'status' => 'done') if shape == 'waiting_child'
         state.fetch('turns') << turn.merge('status' => 'done') if shape == 'missing_running_child'

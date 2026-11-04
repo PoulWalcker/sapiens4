@@ -322,7 +322,7 @@ admitPersonalOn db owner turn snapshot_ accepted runtime = do
        pendingChild call=isJust (D.callParent call) && D.callState call==D.CallQueued
        missingIds=[D.callIdentity call | call<-D.frontierCalls work,D.callState call `elem` [D.CallQueued,D.CallRunning],not (known call),not (pendingChild call)]
    unless (null missingIds) $ do
-    let missing call=if D.callIdentity call `elem` missingIds then (D.setCallFields [("error",str "Existing admission has no runtime evidence; restore its saved execution before retrying")] call) {D.callProgress=D.UnresolvedAt (D.callNode call) (Just "Existing admission has no runtime evidence; restore its saved execution before retrying")} else call
+    let missing call=if D.callIdentity call `elem` missingIds then (D.setCallFields [("error",str "Existing admission has no runtime evidence; restore its saved execution before retrying")] call) {D.callProgress=D.UnresolvedAt (D.callNode call) Nothing} else call
     DB.putValueOn db DB.Workloads identity (toJSON work {D.workCalls=fmap missing (D.workCalls work)})
   Nothing -> case find ((==turnId turn) . turnId) runtime of
    Nothing -> do
