@@ -122,9 +122,10 @@ bumpRevision d = let Revision previous=definitionRevision d; next=Revision (prev
 contractGeneration :: Definition -> ContractGeneration
 contractGeneration d = ContractGeneration (max 1 (int (get (Object (definitionFields d)) "contractGeneration")))
 changeContract :: RoutineContract -> Definition -> Definition
-changeContract contract d = d {definitionContract=contract,definitionFields=KM.insert "contractGeneration" (toJSON next) (definitionFields d)}
+changeContract contract d = d {definitionContract=contract,definitionFields=KM.insert "contractGeneration" (toJSON next) fields}
  where
  current=contractGeneration d
+ fields=if next==current then definitionFields d else KM.delete "acceptedTaskSource" (KM.delete "acceptedTask" (definitionFields d))
  semantic value = case value of
   LegacyPrompt goal -> (goal,Nothing)
   AcceptedContract fields -> (fieldGoal fields,Just (fieldCriteria fields))

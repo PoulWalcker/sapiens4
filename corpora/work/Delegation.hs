@@ -130,13 +130,44 @@ frontierCalls work = filter (\call -> not (any ((==Just (callIdentity call)) . c
 -- The caller owns the transaction that also saves its command or next deadline.
 -- No files, model calls or nested transactions cross this admission interface.
 admitRoutineOn :: SQL.Connection -> AgentId -> Turn -> Value -> Maybe TaskSpec -> IO ()
-admitRoutineOn db owner turn snapshot accepted = do
+admitRoutineOn db owner turn snapshot proposed = do
+ accepted<-canonicalRoutineTask snapshot proposed
  selected<-selectRoutineCodeOn db owner (setWorkField "routineAttemptSchema" (num 1) (routineWorkload owner turn snapshot accepted)) snapshot accepted
  work<-Effects.pinOn db snapshot (toJSON selected) >>= decodeValue 500
  let message=obj [("role",str "user"),("content",str (turnInput turn)),("turn",toJSON (turnId turn)),("time",turnField turn "created"),("origin",turnField turn "origin")]
  SQL.execute db "INSERT INTO workloads(id,value) VALUES (?,?)" (workloadId work,jsonText (toJSON work))
  let marked=withTurnFields (\value -> if Effects.profileBound (toJSON work) then put "externalBound" (Bool True) value else value) turn
  Managed.enrollOn db (agentIdText owner) (if has (toJSON work) "codeExecution" then withTurnFields (put "codeBound" (Bool True)) marked else marked) message (turnInput turn) []
+-- A compiled routine contract is scoped to the unchanged authored definition.
+-- Trigger inputs belong to this occurrence, never to a previous result.
+canonicalRoutineTask :: Value -> Maybe TaskSpec -> IO (Maybe TaskSpec)
+canonicalRoutineTask definition proposed = do
+ let source=get definition "acceptedTaskSource"
+     current=get source "owner"==get definition "owner" && get source "contractGeneration"==get definition "contractGeneration"
+ if get definition "acceptedTask"==Null || not current then pure proposed else do
+  spec<-decodeValue 409 (get definition "acceptedTask")
+  let inputs=at definition "inputs"
+  pure (Just (if T.null (T.strip inputs) then spec else spec {specInputs=[inputs]}))
+
+rememberRoutineTaskOn :: SQL.Connection -> Workload -> WorkCall -> TaskSpec -> Text -> IO ()
+rememberRoutineTaskOn db work call spec decision = do
+ let snapshot=workField work "routineSnapshot"
+     defaultInput=T.null (T.strip (at snapshot "inputs"))
+     eligible=callParent call==Nothing && at (toJSON call) "scope"/="part" && has snapshot "prompt" && not (has snapshot "criteria")
+ when eligible $ do
+  definition<-Effects.definitionOn db (at snapshot "id")
+  require (get definition "owner"==toJSON (callOwner call) && get snapshot "owner"==get definition "owner" && get definition "contractGeneration"==get snapshot "contractGeneration" && get definition "prompt"==get snapshot "prompt" && not (boolean (get definition "deleted"))) 409 "Routine changed before accepting its task contract"
+  require (workField work "executionGate"/=toJSON ExecutionStopped) 409 "Stopped before accepting the routine contract"
+  operations<-DB.routineOperationsOn db
+  require (null (DB.workFeedback operations (toJSON work))) 409 "Rejected source cannot establish a routine contract"
+  Effects.requireDefinitionClearOn db definition
+  prior<-canonicalRoutineTask definition Nothing
+  case prior of
+   Just accepted->require (if defaultInput then accepted==spec else sameSemanticContract accepted spec) 409 "Concurrent routine preparation changed the accepted contract"
+   Nothing->when defaultInput $ do
+    let source=obj [("owner",get definition "owner"),("contractGeneration",get definition "contractGeneration"),("run",str (workloadId work)),("decision",str decision)]
+    void (DB.saveRoutineOn db (mergeFields [("acceptedTask",toJSON spec),("acceptedTaskSource",source)] definition))
+
 routineWorkload :: AgentId -> Turn -> Value -> Maybe TaskSpec -> Workload
 routineWorkload owner turn snapshot accepted =
  let identity=runIdText (turnId turn)
@@ -144,7 +175,7 @@ routineWorkload owner turn snapshot accepted =
      base=newCall (turnId turn) owner Nothing (QueuedAt (if isJust accepted then Execution else ReadyToWork)) (turnInput turn)
  in Workload identity True (first :| []) (KM.fromList
   [("responsible",toJSON owner),("bindingSchema",num 1),("originalIntent",str (turnInput turn)),("task",obj [("taskId",str ("task_"<>identity)),("taskType",str "automated"),("specification",maybe Null toJSON accepted)])
-  ,("origin",turnField turn "origin"),("routineSnapshot",maybe snapshot (\spec -> put "acceptedTask" (toJSON spec) snapshot) accepted),("executionGate",toJSON ExecutionOpen)
+  ,("origin",turnField turn "origin"),("routineSnapshot",maybe (remove ["acceptedTask","acceptedTaskSource"] snapshot) (\spec -> put "acceptedTask" (toJSON spec) snapshot) accepted),("executionGate",toJSON ExecutionOpen)
   ,("created",turnField turn "created"),("decisions",arr []),("outcome",Null)])
 -- Admission owns selection and the trial claim in its caller's existing SQL
 -- transaction. The newest prepared watermark is independent of trial activity.
@@ -332,7 +363,7 @@ generatedCleanupPending :: Workload -> Bool
 generatedCleanupPending work=any ((`elem` ["cleanup_pending","uncertain"]) . (`at` "status") . snd) (pairs (workField work "workflowContainers")) || any (\key->at (workField work key) "status"=="cleanup_pending") ["preparation","codeExecution"]
 
 routineSpecPinned :: Workload -> Bool
-routineSpecPinned work = has (workField work "routineSnapshot") "criteria"
+routineSpecPinned work = has (workField work "routineSnapshot") "criteria" || has (workField work "routineSnapshot") "acceptedTask"
 
 data TaskSpec = TaskSpec { specObjective :: Text, specInputs :: [Text], specOutputs :: NonEmpty Text, specCriteria :: NonEmpty Text, specConditions :: M.Map Text Text } deriving (Eq, Show)
 instance FromJSON TaskSpec where
@@ -387,7 +418,7 @@ executionContract work call = do
   case source of
    RoutineSnapshotSource -> do
     let snapshot=workField work "routineSnapshot"
-    require (callIdentity call==callIdentity (NE.head (workCalls work)) && get snapshot "owner"==toJSON owner && has snapshot "criteria") 409 "Routine contract source does not belong to this call"
+    require (callIdentity call==callIdentity (NE.head (workCalls work)) && get snapshot "owner"==toJSON owner && has snapshot "acceptedTask") 409 "Routine contract source does not belong to this call"
     Just <$> decodeValue 409 (get snapshot "acceptedTask")
    TaskDecisionSource identity -> do
     record <- maybe (failure 409 "Accepted task decision is missing") pure (find ((==identity) . (`at` "decisionId")) (workItems work "decisions"))
@@ -869,7 +900,9 @@ runDecision s run turn state = do
             original<-decodeValue 409 (get request "contract")
             require (sameSemanticContract spec original && acceptedInput spec==get request "input") 409 "Prepared Task changed the original criteria or authorized input"
             DB.connection s (\db->SQL.withTransaction db (bindStandaloneOn db (withCall committed following) following request))
-           saveWork s selected
+           DB.connection s $ \db->SQL.withTransaction db $ do
+            rememberRoutineTaskOn db selected following spec (at record "decisionId")
+            saveWorkOn s db selected
            writeJSON (archivePath s owner ("decisions/"<>at record "decisionId")) acceptedRecord
            pure Nothing
           DelegateRequest request -> Just <$> transfer s run request (decisionReason response) record
