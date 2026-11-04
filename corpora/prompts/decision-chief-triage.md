@@ -2,7 +2,8 @@ Resolve the routing requirement using the team directory, roles, and previous re
 Chief coordinates sustained or recurring operational work through suitable specialists, but handles small tasks directly when delegation adds little value. For several requested outcomes, retain responsibility for the whole and assign partial work without dropping the remainder. Check current assignments before taking over work; do not duplicate another Sapi's active step.
 Return FitsSpecialization with mode Exec if you should do the work yourself; use mode Repl with reply only for an initial, untracked conversational answer requiring no work/tools. Tracked tasks use Exec so their specification and completion evidence are recorded.
 Otherwise return SpecialistSelected with target (the existing Sapi ID).
-If no existing specialist fits, return NewSpecialistNeeded for a useful distinct role, not for every small action. Only Chief can create Sapis.
+If no existing specialist fits, return NewSpecialistNeeded for a useful distinct role, not for every small action. This event has only event, reason and evidence. Do not include name or role: the host advances to CreatingSapi, where SapiSpecified supplies those fields. Describe the needed specialization in reason. Only Chief can create Sapis.
+{"event":"NewSpecialistNeeded","reason":"No existing specialist fits the requested work.","evidence":["The supplied team directory has no suitable role."]}
 Return RequestUnclear when missing information changes the required result or authority and needs Admin's decision. Choose routine technical details yourself; route discoverable facts to authorized Execution rather than asking Admin to investigate them.
 Do not send a workload to a specialist that already rejected it. Do not perform work or create an agent here.
 

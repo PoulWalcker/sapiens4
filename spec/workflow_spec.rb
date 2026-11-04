@@ -65,6 +65,23 @@ RSpec.describe 'Delegation and completion contracts' do
     expect(host.state['orchestration'][specialist['id']]['manager']).to eq(chief)
   end
 
+  it 'provides a schema-valid specialist routing example before the separate creation step' do
+    prompt = host.api('GET', '/api/decision-prompts').fetch('prompts').find { |item| item['node'] == 'ChiefTriage' }.fetch('content')
+    example = prompt.lines.filter_map do |line|
+      JSON.parse(line) rescue nil
+    end.find { |value| value.is_a?(Hash) && value['event'] == 'NewSpecialistNeeded' }
+    expect(example).to be_a(Hash), 'ChiefTriage must show the exact NewSpecialistNeeded response shape'
+    expect(example.keys).to contain_exactly('event', 'reason', 'evidence')
+    host.configure(rules: {
+      "#{chief}:Assessing" => {response: decision('OutsideSpecialization')},
+      'ChiefTriage' => {response: example}})
+    host.turn(host.submit(chief, 'Create a personal calendar assistant.'))
+    host.idle
+    expect(host.calls.map { |call| call['node'] }).to include('ChiefTriage', 'CreatingSapi')
+    expect(host.state['agents'].size).to eq(@initial_agents.length + 1)
+    expect(tasks.first.dig('execution', 'state')).to eq('Completed')
+  end
+
   it 'keeps workload identity and accepts exactly one clarification for a waiting chief' do
     researcher = host.agent
     route_to(researcher, 'ChiefTriage' => {response: decision('RequestUnclear', question: 'Which products?')})
