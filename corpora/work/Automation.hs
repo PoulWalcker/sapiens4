@@ -141,7 +141,7 @@ requestOn db candidate identity time explicit = do
        (DB.analysisFeedbackIds operations (toJSON definition) (map toJSON works) [RunId (D.workloadId source)]) [RunId (D.workloadId source)]
      origin=obj [("analysis",toJSON identity)]
      turn=newTurn identity Chat (R.definitionGoal definition) time origin False
-     call=D.newCall identity (analysisOwner pin) Nothing D.AutomationAnalysis D.CallQueued (R.definitionGoal definition)
+     call=D.newCall identity (analysisOwner pin) Nothing (D.QueuedAt D.AutomationAnalysis) (R.definitionGoal definition)
      work=D.Workload (runIdText identity) False (call :| []) (KM.fromList
        [("origin",origin),("created",str time),("originalIntent",str (R.definitionGoal definition)),("executionGate",toJSON ExecutionOpen)
        ,("analysisPin",toJSON pin),("analysisKey",key),("analysisEvidence",evidence),("analysisExplicit",Bool explicit),("decisions",arr [])])
@@ -156,7 +156,7 @@ stopOn db definition identity = do
  work <- maybe (failure 404 "Unknown Routine analysis") pure (find (\work -> consumer definition work && D.workloadId work==runIdText identity) works)
  require (active work) 409 "Analysis is already finished"
  let stopped=(D.setWorkField "executionGate" (toJSON ExecutionStopped) work)
-       {D.workCalls=fmap (\call -> if D.callState call `elem` [D.CallQueued,D.CallRunning] then call {D.callState=D.CallCancelled} else call) (D.workCalls work)}
+       {D.workCalls=fmap (\call -> if D.callState call `elem` [D.CallQueued,D.CallRunning] then call {D.callProgress=D.CancelledAt (D.callNode call)} else call) (D.workCalls work)}
  DB.putValueOn db DB.Workloads (D.workloadId work) (toJSON stopped)
  pure (obj [("routine",str (R.definitionId definition)),("analysis",toJSON identity),("status",str "stopped")])
 
@@ -530,7 +530,7 @@ deferProvider s running operation due=do
  cancelled<-readIORef (runCancel running)
  allowed<-DB.occurrenceAllowed s (D.workField work "origin")
  require (not cancelled && allowed && D.workField work "executionGate"==toJSON ExecutionOpen) 409 "Provider wait was stopped before publication"
- let queued=(D.setWorkField "providerWait" (obj [("operation",str operation)]) work) {D.workCalls=fmap (\call->if D.callIdentity call==runId running then call {D.callState=D.CallQueued} else call) (D.workCalls work)}
+ let queued=(D.setWorkField "providerWait" (obj [("operation",str operation)]) work) {D.workCalls=fmap (\call->if D.callIdentity call==runId running then call {D.callProgress=D.QueuedAt (D.callNode call)} else call) (D.workCalls work)}
  D.saveWork s queued
  state<-agentState s (agentIdText (runOwner running))
  let changed=mapTurns (\turn->if turnId turn==runId running then (withTurnFields (put "providerWait" (obj [("operation",str operation),("retryAt",str due)]) . remove ["error"]) turn) {turnStatus=Queued} else turn) state
@@ -877,7 +877,7 @@ runDiagnosis s running _ = do
               RepairNeedsAccess->mergeFields [("status",str "waiting_access"),("diagnosis",response),("waitingReason",str recommendation),("phase",str "waiting_independent_confirmation")] latest
               ImplementationDefect->mergeFields [("status",str "diagnosed"),("diagnosis",response),("hypothesis",str hypothesis)] latest
          void (DB.saveRoutineOn db (putRepair consumerDefinition diagnosed))
-         DB.putValueOn db DB.Workloads (D.workloadId current) (toJSON current {D.workCalls=fmap (\call->call {D.callState=D.CallCompleted,D.callOutput=Just diagnosis}) (D.workCalls current)})
+         DB.putValueOn db DB.Workloads (D.workloadId current) (toJSON current {D.workCalls=fmap (\call->call {D.callProgress=D.FinishedCall (D.Answered diagnosis)}) (D.workCalls current)})
        pure (diagnosis,[])
  (_,initial)<-DB.connection s (\db->loadRepairOn db pin)
  let retained=[put "tool" (get op "tool") (get op "result") | op<-items initial "operations",at op "purpose"=="repair_tool",at op "status"=="completed"]
@@ -1059,7 +1059,7 @@ runKitInspection s running _=do
            repaired=if affected then mergeFields [("kind",str "implementation_defect"),("lastFailure",obj [("kitIssue",get inspection "issue"),("reason",str reason),("scope",str "consumer_applicability")]) ] assessed else assessed
            recordDefinition=if affected then put "activeCode" (mergeFields [("status",str "suspect"),("reason",str reason)] (get definition "activeCode")) definition else definition
        void (DB.saveRoutineOn db (putRepair recordDefinition repaired))
-       DB.putValueOn db DB.Workloads (D.workloadId current) (toJSON current {D.workCalls=fmap (\call->call {D.callState=D.CallCompleted,D.callOutput=Just reason}) (D.workCalls current)})
+       DB.putValueOn db DB.Workloads (D.workloadId current) (toJSON current {D.workCalls=fmap (\call->call {D.callProgress=D.FinishedCall (D.Answered reason)}) (D.workCalls current)})
       pure (reason,[])
  execute `catch` (\(problem::SomeException)->case fromException problem :: Maybe Provider.RetryDeferred of Just _->throwIO problem; Nothing->finishUnknown problem)
 
@@ -1080,7 +1080,7 @@ admitKitInspection s definition saved=do
    (current,latest)<-loadRepairOn db pin
    require (at latest "status"=="waiting_kit_inspection" && get (get current "activeCode") "reference"==reference && not (has latest "userStop")) 409 "Kit inspection changed before admission"
    require (not (any ((=="reserved") . (`at` "status")) (items latest "reservations"))) 409 "Existing repair work owns the allowance"
-   let call=D.newCall identity (AgentId (R.definitionOwner definition)) Nothing D.Preparation D.CallQueued "Inspect this consumer's applicability of a shared suspect artifact"
+   let call=D.newCall identity (AgentId (R.definitionOwner definition)) Nothing (D.QueuedAt D.Preparation) "Inspect this consumer's applicability of a shared suspect artifact"
        origin=obj [("kitInspection",toJSON identity)]
        work=D.Workload (runIdText identity) False (call :| []) (KM.fromList [("origin",origin),("repairPin",pin),("repairInvocationPolicy",toJSON KitInspectionResponseOnly),("kitInspection",request),("executionGate",toJSON ExecutionOpen),("created",str time)])
        records=[if get record "id"==get inspection "id" then put "run" (toJSON identity) record else record | record<-items latest "kitInspections"]
@@ -1144,7 +1144,7 @@ advanceRepair s definition saved = do
       (current,latest)<-loadRepairOn db pin
       when (at latest "status"=="waiting_doctor") $ do
        let origin=obj [("repair",toJSON identity)]
-           call=D.newCall identity doctor Nothing D.Preparation D.CallQueued "Diagnose the retained Routine implementation fault"
+           call=D.newCall identity doctor Nothing (D.QueuedAt D.Preparation) "Diagnose the retained Routine implementation fault"
            diagnosisWork=D.Workload (runIdText identity) False (call :| []) (KM.fromList [("origin",origin),("repairPin",pin),("repairInvocationPolicy",toJSON DoctorScopedResponseOnly),("created",str time),("executionGate",toJSON ExecutionOpen)])
        SQL.execute db "INSERT INTO workloads(id,value) VALUES (?,?)" (D.workloadId diagnosisWork,jsonText (toJSON diagnosisWork))
        Managed.enrollOn db (agentIdText doctor) (newTurn identity Chat "Diagnose the retained Routine implementation fault" time origin False) Null "Diagnose the retained Routine implementation fault" []
@@ -1165,7 +1165,7 @@ advanceRepair s definition saved = do
        require (currentProof==proof && at latest "status"=="diagnosed") 409 "Saved audit changed before admission"
        let owner=AgentId (R.definitionOwner definition)
            origin=obj [("repairAudit",toJSON identity)]
-           call=D.newCall identity owner Nothing D.Preparation D.CallQueued "Audit the exact retained original result without re-execution"
+           call=D.newCall identity owner Nothing (D.QueuedAt D.Preparation) "Audit the exact retained original result without re-execution"
            work=D.Workload (runIdText identity) False (call :| []) (KM.fromList [("origin",origin),("repairPin",pin),("savedAudit",proof),("repairInvocationPolicy",toJSON SavedAuditResponseOnly),("created",str time),("executionGate",toJSON ExecutionOpen),("codeExecution",obj [("operations",arr [])])])
            attempt=obj [("number",num (length (items latest "attempts")+1)),("hypothesis",get latest "hypothesis"),("kind",str "saved_result_audit"),("audit",toJSON identity),("status",str "auditing")]
        SQL.execute db "INSERT INTO workloads(id,value) VALUES (?,?)" (D.workloadId work,jsonText (toJSON work))

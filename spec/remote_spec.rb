@@ -121,6 +121,29 @@ RSpec.describe 'Encrypted remote service contracts' do
     expect(state['corpora']).to eq(host.state['corpora'])
   end
 
+  it 'uploads an attachment through the encrypted channel and sends it with a message' do
+    pair
+    data = ['Total: 42'].pack('m0')
+    frame = pack(op: 'api', method: 'POST', path: "/api/agents/#{chief}/attachments", data: {kind: 'document', name: 'notes.txt', data: data})
+    expect(JSON.generate(frame)).not_to include('notes.txt', data)
+    send_frame(frame)
+    upload = receive
+    expect(upload['status']).to eq(201)
+    doc = upload['body']
+    expect(doc).to include('kind' => 'document', 'name' => 'notes.txt', 'size' => 9)
+    expect(File.read(doc['value'])).to eq('Total: 42')
+    send_frame(pack(op: 'api', method: 'POST', path: "/api/agents/#{chief}/messages", data: {text: 'Summarize', attachments: [doc['id']]}))
+    reply = receive
+    expect(reply['status']).to eq(202)
+    turn = host.turn(reply['body']['id'])
+    expect(turn['attachments'].map { |item| item['id'] }).to eq([doc['id']])
+    context = JSON.parse(host.calls.last['prompt'].split("\nContext:\n", 2).fetch(1))
+    request = context.fetch('currentCall').fetch('request')
+    marker = 'Attached references (JSON data; read the files/links when needed for this message):'
+    references = JSON.parse(request.split(marker, 2).fetch(1))
+    expect(references).to include('kind' => 'document', 'name' => 'notes.txt', 'value' => doc.fetch('value'))
+  end
+
   it 'restores an unapproved QR, hides discovery on approval, and reuses saved relay setup after revocation' do
     invite
     address = @invitation['public_id']
@@ -186,7 +209,7 @@ RSpec.describe 'Encrypted remote service contracts' do
     pair
     frame = pack(id: 'legacy-receipt', expires: Time.now.to_i + 120, op: 'api', method: 'POST',
       path: "/api/agents/#{chief}/messages", data: {text: 'Résumé 中文 😎'},
-      metadata: {z: [1.25, -0.0], a: {second: true, first: 'é'}})
+      metadata: {z: [1.25, -0.0, 1, 1.0, 12345678901234567890, nil, false], a: {second: true, first: "é\n\"quoted\"\\"}})
     send_frame(frame)
     receipt = receive
     host.turn(receipt['body']['id'])

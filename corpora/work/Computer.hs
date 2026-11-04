@@ -98,8 +98,12 @@ readComputer binary supplied maximumSize = do
    mapM_ (removeFile . snd) (drop 4 (reverse (sortOn fst dated)))
    writeJSON (cache</>T.unpack ident<.>"json") snapshot
    pure snapshot
+ validated (snapshotPage maximumSize offset snapshot)
+
+snapshotPage :: Int -> Int -> Value -> Validation Value
+snapshotPage maximumSize offset snapshot = do
  let rows=items snapshot "nodes"
- require (offset>=0 && offset<=length rows) 400 "Offset outside snapshot"
+ check (offset>=0 && offset<=length rows) 400 "Offset outside snapshot"
  let base=merge (remove ["nodes"] snapshot) (obj [("nodes",arr []),("offset",num offset),("total",num (length rows)),("next_offset",Null)])
      add acc []=acc
      add acc (row:rest)=let updated=put "nodes" (arr (items acc "nodes"++[row])) acc in

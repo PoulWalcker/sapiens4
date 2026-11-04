@@ -19,7 +19,8 @@ type Object = Ptr ()
 type Window = Ptr ()
 type Wide = Ptr Word16
 type HRESULT = Int32
-type Arena = IORef [(IO Bool, IO ())]
+data ArenaEntry = ArenaEntry { readyToDispose :: IO Bool, disposeEntry :: IO () }
+newtype Arena = Arena (IORef [ArenaEntry])
 type WindowProc = Window -> Word32 -> WordPtr -> IntPtr -> IO IntPtr
 
 foreign import ccall safe "CoInitializeEx" coInitialize :: Ptr () -> Word32 -> IO HRESULT
@@ -120,22 +121,28 @@ query :: Object -> String -> IO Object
 query object guid = withGuid guid $ \idPtr -> alloca $ \out -> call2 object 0 idPtr out >> peek out
 
 newArena :: IO Arena
-newArena = newIORef []
+newArena = Arena <$> newIORef []
 
 retain :: Arena -> IO () -> IO ()
-retain arena dispose = modifyIORef' arena ((pure False, dispose) :)
+retain (Arena entries) dispose = modifyIORef' entries (ArenaEntry (pure False) dispose :)
 
 freeArena :: Arena -> IO ()
-freeArena arena = readIORef arena >>= mapM_ snd
+freeArena (Arena entries) = atomicModifyIORef' entries (\owned -> ([], owned)) >>= disposeAll
+
+disposeAll :: [ArenaEntry] -> IO ()
+disposeAll [] = pure ()
+disposeAll (entry:rest) = disposeEntry entry `finally` disposeAll rest
 
 sweepArena :: Arena -> IO ()
-sweepArena arena = do
+sweepArena (Arena arena) = do
   entries <- atomicModifyIORef' arena (\entries -> ([], entries))
-  alive <- filterM (\(ready, dispose) -> ready >>= \dead -> if dead then dispose >> pure False else pure True) entries
+  alive <- filterM keep entries
   modifyIORef' arena (alive ++)
+  where
+    keep entry = readyToDispose entry >>= \ready -> if ready then disposeEntry entry >> pure False else pure True
 
 callback :: Arena -> String -> FunPtr a -> IO Object
-callback arena guid invoke = do
+callback (Arena arena) guid invoke = do
   count <- newIORef (1 :: Word32)
   object <- mallocBytes (sizeOf (nullPtr :: Ptr ()))
   table <- mallocArray 4
@@ -151,7 +158,7 @@ callback arena guid invoke = do
   pokeArray table [castFunPtr identify, castFunPtr add, castFunPtr dropRef, castFunPtr invoke]
   poke (castPtr object) table
   let dispose = mapM_ freeHaskellFunPtr [castFunPtr identify, castFunPtr add, castFunPtr dropRef, castFunPtr invoke] >> free table >> free object
-  modifyIORef' arena (((== 0) <$> readIORef count, dispose) :)
+  modifyIORef' arena (ArenaEntry ((== 0) <$> readIORef count) dispose :)
   pure object
 
 guardCallback :: IO () -> IO HRESULT

@@ -43,13 +43,18 @@ ensureMemo root name purpose = do
     validate root source
     old <- readText source
     pure (if takeExtension source == ".md" then "notes: " <> jsonText (str old) else old)
-  let about = "who: " <> jsonText (str name) <> "\npurpose: " <> jsonText (str purpose)
-      chunks = foldl (\acc line -> if not (T.null line) && (isAlpha (T.head line) || T.head line == '_') && T.any (== ':') line then acc ++ [line] else case reverse acc of [] -> [line]; x:xs -> reverse xs ++ [x <> "\n" <> line]) [] (T.lines content)
-      values = filter (not . T.null . T.strip) chunks
-      title x = let t = T.takeWhile (\c -> isAlphaNum c || c `elem` ['_','-']) x in if T.isPrefixOf ":" (T.drop (T.length t) x) then t else "remembered"
-      links = T.concat ["<a href=\"#entry-" <> T.pack (show i) <> "\">" <> escape (title x) <> "</a> — saved " <> escape (title x) <> "<br>" | (i,x) <- zip [0::Int ..] values]
-      snippets = T.concat ["<article id=\"entry-" <> T.pack (show i) <> "\"><pre><code class=\"language-yaml\">" <> escape x <> "</code></pre></article>\n" | (i,x) <- zip [0::Int ..] values]
-  writeText p ("<section id=\"about\"><pre><code class=\"language-yaml\">" <> escape about <> "</code></pre></section>\n<section id=\"map\"><nav>" <> links <> "</nav></section>\n<section id=\"content\">" <> snippets <> "</section>\n")
+  writeText p (migratedMemo name purpose content)
+
+migratedMemo :: Text -> Text -> Text -> Text
+migratedMemo name purpose content =
+ ("<section id=\"about\"><pre><code class=\"language-yaml\">" <> escape about <> "</code></pre></section>\n<section id=\"map\"><nav>" <> links <> "</nav></section>\n<section id=\"content\">" <> snippets <> "</section>\n")
+ where
+ about = "who: " <> jsonText (str name) <> "\npurpose: " <> jsonText (str purpose)
+ chunks = foldl (\acc line -> if not (T.null line) && (isAlpha (T.head line) || T.head line == '_') && T.any (== ':') line then acc ++ [line] else case reverse acc of [] -> [line]; x:xs -> reverse xs ++ [x <> "\n" <> line]) [] (T.lines content)
+ values = filter (not . T.null . T.strip) chunks
+ title x = let t = T.takeWhile (\c -> isAlphaNum c || c `elem` ['_','-']) x in if T.isPrefixOf ":" (T.drop (T.length t) x) then t else "remembered"
+ links = T.concat ["<a href=\"#entry-" <> T.pack (show i) <> "\">" <> escape (title x) <> "</a> — saved " <> escape (title x) <> "<br>" | (i,x) <- zip [0::Int ..] values]
+ snippets = T.concat ["<article id=\"entry-" <> T.pack (show i) <> "\"><pre><code class=\"language-yaml\">" <> escape x <> "</code></pre></article>\n" | (i,x) <- zip [0::Int ..] values]
 memoMetadata :: FilePath -> IO Value
 memoMetadata root = work `catch` (\(APIError _ e) -> pure (obj [("path",str (T.pack p)),("error",str e),("revision",str "invalid")]))
  where
@@ -81,20 +86,24 @@ memoContext root = work `catch` (\(APIError _ e) -> pure (obj [("path",str (T.pa
  where
  work = do
   memo <- readMemo root
-  let append capture value sections=case capture of Just name | name `elem` ["about","map"]->M.insertWith (flip (<>)) name value sections; _->sections
-      step (sections,capture,order) tag=case tag of
-       TagOpen name attributes ->
-        let section=T.toLower name=="section"
-            identity=lookup "id" [(T.toLower key,value) | (key,value)<-attributes]
-            next=if section && identity `elem` map Just ["about","map","content"] then identity else capture
-            saved=if section && identity `elem` map Just ["about","map","content"] then maybe sections (\key -> M.insert key "" sections) identity else sections
-        in (append next (renderTags [tag]) saved,next,if section then order++[identity] else order)
-       TagClose name -> (append capture (renderTags [TagClose (T.toLower name)]) sections,if T.toLower name=="section" then Nothing else capture,order)
-       TagText value -> (append capture (escape value) sections,capture,order)
-       _ -> (sections,capture,order)
-      (sections,_,order)=foldl step (M.empty,Nothing,[]) (parseTags (at memo "content") :: [Tag Text])
-  require (order==map Just ["about","map","content"]) 409 "Notes.html requires sections with ids about, map, and content."
-  pure $ obj (("path",get memo "path"):[(key,if T.length value<=12000 then str value else Null) | (key,value)<-M.toList sections,key/="content"])
+  validated (projectMemo memo)
+
+projectMemo :: Value -> Validation Value
+projectMemo memo = do
+ let append capture value sections=case capture of Just name | name `elem` ["about","map"]->M.insertWith (flip (<>)) name value sections; _->sections
+     step (sections,capture,order) tag=case tag of
+      TagOpen name attributes ->
+       let section=T.toLower name=="section"
+           identity=lookup "id" [(T.toLower key,value) | (key,value)<-attributes]
+           next=if section && identity `elem` map Just ["about","map","content"] then identity else capture
+           saved=if section && identity `elem` map Just ["about","map","content"] then maybe sections (\key -> M.insert key "" sections) identity else sections
+       in (append next (renderTags [tag]) saved,next,if section then order++[identity] else order)
+      TagClose name -> (append capture (renderTags [TagClose (T.toLower name)]) sections,if T.toLower name=="section" then Nothing else capture,order)
+      TagText value -> (append capture (escape value) sections,capture,order)
+      _ -> (sections,capture,order)
+     (sections,_,order)=foldl step (M.empty,Nothing,[]) (parseTags (at memo "content") :: [Tag Text])
+ check (order==map Just ["about","map","content"]) 409 "Notes.html requires sections with ids about, map, and content."
+ pure $ obj (("path",get memo "path"):[(key,if T.length value<=12000 then str value else Null) | (key,value)<-M.toList sections,key/="content"])
 memoImage :: FilePath -> Text -> IO (BL.ByteString,Text)
 memoImage root name = do
  p <- canonicalizePath (root </> T.unpack name)

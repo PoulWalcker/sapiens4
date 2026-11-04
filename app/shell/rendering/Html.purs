@@ -1,5 +1,6 @@
 module Sapiens.Html where
 
+import Sapiens.Form as F
 import Prelude
 import Data.Tuple (Tuple)
 import Effect.Aff (Aff)
@@ -103,9 +104,9 @@ empty = text ""
 when :: Boolean -> Html -> Html
 when yes content = if yes then content else empty
 
-field :: String -> String -> String -> String -> Array Prop -> Array Html -> Html
+field :: String -> String -> F.Field -> String -> Array Prop -> Array Html -> Html
 field tag caption key current props children = node "label" []
-  [text caption,node tag ([attr "name" key,label caption,value current,(if tag == "select" then change else input) (Field key)] <> props) children]
+  [text caption,node tag ([attr "name" $ F.name key,label caption,value current,(if tag == "select" then change else input) (Field key)] <> props) children]
 
 choice :: Boolean -> String -> Action -> Html
 choice selected = control [cls $ if selected then "selected" else "",attr "aria-pressed" $ show selected]

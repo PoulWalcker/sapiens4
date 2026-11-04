@@ -238,7 +238,7 @@ applyPlan db owner runIdentity time (OperationId operation) plan = case plan of
   void (DB.saveRoutineOn db (toJSON definition))
   pure (definitionId definition,obj [("routine",str (definitionId definition))])
  stop work = do
-  let cancel call = if D.callState call `elem` [D.CallQueued,D.CallRunning,D.CallWaiting] then call {D.callState=D.CallCancelled,D.callOutput=Nothing} else call
+  let cancel call = if D.callState call `elem` [D.CallQueued,D.CallRunning,D.CallWaiting] then call {D.callProgress=D.CancelledAt (D.callNode call)} else call
       fenced=D.setWorkField "origin" (put "occurrence" (str (D.workloadId work)) (D.workField work "origin")) work
       stopped=(D.setWorkField "executionGate" (toJSON ExecutionStopped) fenced) {D.workCalls=fmap cancel (D.workCalls work)}
   DB.putValueOn db DB.Workloads (D.workloadId work) (toJSON stopped)

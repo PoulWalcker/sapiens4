@@ -202,6 +202,24 @@ sameOrigin left right = and <$> mapM (\property -> (==) <$> textProp left proper
     lp <- obj0 left "port" >>= \o -> long o "integerValue"; rp <- obj0 right "port" >>= \o -> long o "integerValue"
     pure (same && lp == rp)
 
+data GuestNavigation = RejectControlServer | RejectGuestNavigation | OpenGuestWindow | AcceptGuestNavigation deriving (Eq, Show)
+data NavigationFacts = NavigationFacts
+ { navigationScheme :: Text, navigationHost :: Text, navigationPath :: Text
+ , navigationAtControlPort :: Bool, navigationRequestedFile :: Bool
+ , navigationHistory :: Bool, navigationNewWindow :: Bool }
+
+planNavigation :: Set.Set Text -> NavigationFacts -> GuestNavigation
+planNavigation files facts
+ | navigationAtControlPort facts && navigationHost facts `elem` ["127.0.0.1","localhost","::1"] = RejectControlServer
+ | not allowed = RejectGuestNavigation
+ | navigationNewWindow facts = OpenGuestWindow
+ | otherwise = AcceptGuestNavigation
+ where
+ scheme=navigationScheme facts
+ allowed=scheme `elem` ["http","https","about","blob","data"]
+  || (scheme=="file" && (navigationRequestedFile facts || navigationHistory facts))
+  || (scheme=="sapiens-file" && Set.member (navigationPath facts) files)
+
 navigation browser view action completion = do
     item <- lookupView browser view
     case item of
@@ -212,17 +230,18 @@ navigation browser view action completion = do
             port <- obj0 u "port" >>= \p -> long p "integerValue"; basePort <- obj0 (origin browser) "port" >>= \p -> long p "integerValue"
             frame <- obj0 action "targetFrame"; navigationType <- long action "navigationType"
             requestedFile <- maybe (pure False) (\v -> url v >>= \x -> (== "file") <$> textProp x "scheme") (tabRequested tab)
-            if port == basePort && host `elem` ["127.0.0.1","localhost","::1"] then do
-                let denied = tab { tabError = "The Sapiens control server cannot open in a browser tab.", tabAwaiting = False }
-                save browser denied; report browser denied; invokeLong completion 0
-              else if not (scheme `elem` ["http","https","about","blob","data"] || (scheme == "file" && (requestedFile || navigationType == 2)) || (scheme == "sapiens-file" && Set.member path (tabFiles tab))) then invokeLong completion 0
-              else if frame == nullPtr then do
-                when (scheme `elem` ["http","https"]) $ emit browser (object ["owner" .= tabOwner tab,"open" .= address])
-                invokeLong completion 0
-              else do
-                mainFrame <- booleanValue frame "isMainFrame"
-                when (mainFrame && scheme `notElem` ["about","blob","data"]) $ fileAddress address >>= \normal -> save browser tab { tabRequested = Just normal }
-                invokeLong completion 1
+            case planNavigation (tabFiles tab) (NavigationFacts scheme host path (port==basePort) requestedFile (navigationType==2) (frame==nullPtr)) of
+                RejectControlServer -> do
+                    let denied = tab { tabError = "The Sapiens control server cannot open in a browser tab.", tabAwaiting = False }
+                    save browser denied; report browser denied; invokeLong completion 0
+                RejectGuestNavigation -> invokeLong completion 0
+                OpenGuestWindow -> do
+                    when (scheme `elem` ["http","https"]) $ emit browser (object ["owner" .= tabOwner tab,"open" .= address])
+                    invokeLong completion 0
+                AcceptGuestNavigation -> do
+                    mainFrame <- booleanValue frame "isMainFrame"
+                    when (mainFrame && scheme `notElem` ["about","blob","data"]) $ fileAddress address >>= \normal -> save browser tab { tabRequested = Just normal }
+                    invokeLong completion 1
 
 shellNavigation browser action completion = do
     u <- obj0 action "request" >>= \r -> obj0 r "URL"

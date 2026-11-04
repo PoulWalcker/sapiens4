@@ -56,12 +56,27 @@ instance Exception RunFailure
 data Run = Run { runOwner :: AgentId, runId :: RunId, runSlot :: Int, runCancel :: IORef Bool, runProcess :: MVar (Maybe ProcessHandle), runActivity :: IORef Value, runDeadline :: Word64 }
 data Service = Service { serviceRoot :: FilePath, repositoryRoot :: FilePath, serviceGuard :: MVar (), serviceFileLock :: FileLock, serviceStopping :: IORef Bool, serviceWorker :: MVar (Maybe (Async ())), serviceRuns :: MVar (Map RunId Run), serviceLease :: IORef (Maybe (AgentId, RunId)), serviceEndpoint :: IORef Text, servicePulse :: IORef Value, serviceActors :: MVar (Map ThreadId (Text,Maybe Text)), serviceDatabase :: MVar (Maybe Connection) }
 
+-- Pure validation retains the HTTP error contract; adapters choose when to throw.
+type Validation a = Either APIError a
+check :: Bool -> Int -> Text -> Validation ()
+check predicate code message = if predicate then Right () else Left (APIError code message)
+validated :: Validation a -> IO a
+validated = either throwIO pure
+validateValue :: Int -> (Value -> Parser a) -> Value -> Validation a
+validateValue code parser = either (Left . APIError code . T.pack) Right . parseEither parser
+
 decodeValue :: FromJSON a => Int -> Value -> IO a
 decodeValue code = parseValue code parseJSON
 parseValue :: Int -> (Value -> Parser a) -> Value -> IO a
-parseValue code parser = either (failure code . T.pack) pure . parseEither parser
+parseValue code parser = validated . validateValue code parser
 field :: FromJSON a => Int -> Value -> Text -> IO a
 field code value key = decodeValue code (get value key)
+
+turnResult :: Either TurnControlError a -> IO a
+turnResult = either (failure 409 . message) pure
+ where
+ message TurnNotRetryable = "Only failed or interrupted batches can be retried"
+ message TurnAlreadyComplete = "Completed input cannot be cancelled"
 
 failure :: Int -> Text -> IO a
 failure n = throwIO . APIError n

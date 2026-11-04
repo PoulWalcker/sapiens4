@@ -25,10 +25,14 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 
 runDesktop :: Bool -> IO ()
-runDesktop probe = runInBoundThread $ do
-  check =<< coInitialize nullPtr 2
+runDesktop probe = runInBoundThread $
+  -- COM may release callback references while its apartment is shutting down.
+  bracket newArena freeArena $ \memory ->
+    bracket_ (check =<< coInitialize nullPtr 2) coUninitialize (desktopSession memory probe)
+
+desktopSession :: Arena -> Bool -> IO ()
+desktopSession memory probe = do
   void $ setDpiAwareness (-4)
-  memory <- newArena
   args <- getArgs
   host <- prepareHost args
   top <- newIORef 0
@@ -74,20 +78,7 @@ runDesktop probe = runInBoundThread $ do
   proc <- wrapWindowProc $ \hwnd message wparam lparam -> procedure hwnd message wparam lparam `catch` \(e :: SomeException) -> reportException e >> defaultProc hwnd message wparam lparam
   retain memory (freeHaskellFunPtr proc)
   instanceHandle <- moduleHandle nullPtr
-  hwnd <- withWide "Sapiens4HaskellWindow" $ \className -> withWide "Sapiens4" $ \title -> allocaBytes 80 $ \klass -> do
-    fillBytes klass 0 80
-    pokeByteOff klass 0 (80 :: Word32)
-    pokeByteOff klass 4 (3 :: Word32)
-    pokeByteOff klass 8 proc
-    pokeByteOff klass 24 instanceHandle
-    pokeByteOff klass 48 (intPtrToPtr 6 :: Object)
-    pokeByteOff klass 64 className
-    registered <- registerClass klass
-    when (registered == 0) $ ioError $ userError "Cannot register desktop window"
-    screenWidth <- systemMetric 0
-    screenHeight <- systemMetric 1
-    createWindow 0 className title 0x00CF0000 ((screenWidth - 1440) `div` 2) ((screenHeight - 960) `div` 2) 1440 960 nullPtr nullPtr instanceHandle nullPtr
-  when (hwnd == nullPtr) $ ioError $ userError "Cannot create desktop window"
+  hwnd <- createMainWindow instanceHandle proc
   label <- withWide "STATIC" $ \className -> withWide "Starting Sapiens4…" $ \title ->
     createWindow 0 className title 0x50000201 0 0 1440 960 hwnd nullPtr instanceHandle nullPtr
   writeIORef statusRef label
@@ -149,7 +140,7 @@ runDesktop probe = runInBoundThread $ do
           callInt (controller view) 12 0
           when probe $ do
             putStrLn "TITLE: Sapiens4"
-            readIORef (origin host) >>= putStrLn . ("Sapiens4: " ++)
+            readIORef (origin host) >>= mapM_ (putStrLn . ("Sapiens4: " ++) . show)
             void $ forkIO $ probeInput post hwnd top resize
       launch = do
         result <- try $ startHost host
@@ -161,14 +152,36 @@ runDesktop probe = runInBoundThread $ do
   void $ showWindow hwnd 5
   void $ updateWindow hwnd
   void $ foregroundWindow hwnd
-  let pump = allocaBytes 48 $ \message -> do
+  pumpMessages memory `finally` (cancel worker `finally` closeHost host)
+
+createMainWindow :: Object -> FunPtr WindowProc -> IO Window
+createMainWindow instanceHandle procedure = do
+  hwnd <- withWide "Sapiens4HaskellWindow" $ \className -> withWide "Sapiens4" $ \title -> allocaBytes 80 $ \klass -> do
+    fillBytes klass 0 80
+    pokeByteOff klass 0 (80 :: Word32)
+    pokeByteOff klass 4 (3 :: Word32)
+    pokeByteOff klass 8 procedure
+    pokeByteOff klass 24 instanceHandle
+    pokeByteOff klass 48 (intPtrToPtr 6 :: Object)
+    pokeByteOff klass 64 className
+    registered <- registerClass klass
+    when (registered == 0) $ ioError $ userError "Cannot register desktop window"
+    screenWidth <- systemMetric 0
+    screenHeight <- systemMetric 1
+    createWindow 0 className title 0x00CF0000 ((screenWidth - 1440) `div` 2) ((screenHeight - 960) `div` 2) 1440 960 nullPtr nullPtr instanceHandle nullPtr
+  when (hwnd == nullPtr) $ ioError $ userError "Cannot create desktop window"
+  pure hwnd
+
+pumpMessages :: Arena -> IO ()
+pumpMessages memory = allocaBytes 48 $ \message -> do
+  let step = do
         result <- getMessage message nullPtr 0 0
         when (result > 0) $ do
           void $ translateMessage message
           void $ dispatchMessage message
           sweepArena memory
-          pump
-  pump `finally` (cancel worker >> closeHost host >> coUninitialize >> freeArena memory)
+          step
+  step
 
 loadIconFile :: FilePath -> IO Object
 loadIconFile path = withWide path $ \file -> loadImage nullPtr file 1 0 0 0x10
@@ -176,25 +189,31 @@ loadIconFile path = withWide path $ \file -> loadImage nullPtr file 1 0 0 0x10
 setIcon :: Window -> Object -> IO ()
 setIcon hwnd icon = when (icon /= nullPtr) $ mapM_ (\kind -> void $ sendMessage hwnd 0x80 kind (ptrToIntPtr icon)) [0, 1]
 
-applyWindowTheme :: Window -> Object -> Object -> IORef (Maybe (Bool, String, String)) -> Value -> IO ()
-applyWindowTheme hwnd light dark previous message = case field "dark" message of
-  Bool mode -> do
-    let background = palette "captionBackground" (if mode then "#171717" else "#f6f6f6") message
-        foreground = palette "foreground" (if mode then "#ececec" else "#202020") message
-        current = (mode, background, foreground)
+data WindowTheme = WindowTheme { darkMode :: Bool, captionColor :: Int32, textColor :: Int32 } deriving Eq
+
+decodeWindowTheme :: Value -> Maybe WindowTheme
+decodeWindowTheme message = case field "dark" message of
+  Bool mode -> Just $ WindowTheme mode
+    (color $ palette "captionBackground" (if mode then "#171717" else "#f6f6f6") message)
+    (color $ palette "foreground" (if mode then "#ececec" else "#202020") message)
+  _ -> Nothing
+  where
+    color value = case readHex (drop 1 value) of
+      [(rgb, "")] -> (rgb .&. 255) `shiftL` 16 .|. (rgb .&. 0xff00) .|. ((rgb `shiftR` 16) .&. 255)
+      _ -> 0
+
+applyWindowTheme :: Window -> Object -> Object -> IORef (Maybe WindowTheme) -> Value -> IO ()
+applyWindowTheme hwnd light dark previous message = forM_ (decodeWindowTheme message) $ \current -> do
+    let mode = darkMode current
         attribute index value = with value $ \p -> dwmAttribute hwnd index p 4
-        color value = case readHex (drop 1 value) of
-          [(rgb, "")] -> (rgb .&. 255) `shiftL` 16 .|. (rgb .&. 0xff00) .|. ((rgb `shiftR` 16) .&. 255)
-          _ -> 0 :: Int32
     old <- readIORef previous
     when (old /= Just current) $ do
       setIcon hwnd (if mode then dark else light)
       result <- attribute 20 (if mode then 1 else 0)
       when (result < 0) $ void $ attribute 19 (if mode then 1 else 0)
-      void $ attribute 35 (color background)
-      void $ attribute 36 (color foreground)
+      void $ attribute 35 (captionColor current)
+      void $ attribute 36 (textColor current)
       writeIORef previous (Just current)
-  _ -> pure ()
 
 probeInput :: (IO () -> IO ()) -> Window -> IORef Int -> (Window -> IO ()) -> IO ()
 probeInput post hwnd top resize = loop `catch` \(_ :: IOException) -> post (void $ destroyWindow hwnd)

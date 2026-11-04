@@ -5,7 +5,7 @@ module Routines
  , definitionTitle, definitionGoal, definitionCriteria, intervalView, bumpRevision
  , setInterval, setSchedulePaused, storeRoutine, initializeRoutines
  , contractGeneration, changeContract
- , save, setPaused, command, receipt, acknowledge, dispatch
+ , RoutineEdit(..), save, setPaused, command, receipt, acknowledge, dispatch
  ) where
 
 import Control.Monad
@@ -167,29 +167,43 @@ initializeRoutines s = do
  enrolled <- DB.values s DB.ScheduledRoutines
  forM_ enrolled $ \r -> unless (has r "contractGeneration") $
   void (DB.saveRoutine s (put "contractGeneration" (num 1) r))
-save :: Service -> Text -> Value -> Value -> Maybe Text -> Maybe Int -> Maybe Text -> IO Value
-save s owner minutes execution identity previous source = do
- body <- textField (obj [("prompt",execution)]) "prompt" 16000
- interval <- decodeValue 400 minutes
- require (body `notElem` ["PROMPT","TODO"]) 400 "Replace PROMPT with the work to execute"
+data RoutineEdit = AddRoutine (Maybe Text) | EditRoutine Text (Maybe Int)
+data RoutineWrite = NewRoutine (Maybe Text) | ReviseRoutine Value
+data RoutineSelection = RoutineReplay Value | RoutineChange RoutineWrite
+
+routineInput :: Value -> Value -> Validation (Text,Minutes)
+routineInput minutes execution = do
+ body <- validateValue 400 (textFieldP "prompt" 16000) (obj [("prompt",execution)])
+ interval <- validateValue 400 parseJSON minutes
+ check (body `notElem` ["PROMPT","TODO"]) 400 "Replace PROMPT with the work to execute"
+ pure (body,interval)
+selectRoutine :: RoutineEdit -> Value -> Text -> [Value] -> Validation RoutineSelection
+selectRoutine edit minutes body routines = case edit of
+ EditRoutine identity previous -> do
+  existing <- maybe (Left (APIError 404 "Unknown Scheduled Routine in this conversation")) Right (findId identity routines)
+  check (not (boolean (get existing "deleted"))) 409 "Routine is deleted"
+  forM_ previous $ \old -> check (int (get existing "minutes")==old) 409 "Frequency changed; open Edit again for the current routine"
+  pure (RoutineChange (ReviseRoutine existing))
+ AddRoutine source -> case source >>= \call -> find (\r -> get r "sourceCall" == str call && get r "minutes" == minutes && at r "prompt" == body) routines of
+  Just existing -> Right (RoutineReplay existing)
+  Nothing -> Right (RoutineChange (NewRoutine source))
+save :: Service -> Text -> Value -> Value -> RoutineEdit -> IO Value
+save s owner minutes execution edit = do
+ (body,interval) <- validated (routineInput minutes execution)
  if "group_" `T.isPrefixOf` owner then do
   groups <- DB.values s DB.Groups
   g <- maybe (failure 404 "Unknown Group") pure (findId owner groups)
   require (not (boolean (get g "archived"))) 409 "Restore this Group before changing its work"
  else requireActive s owner
  definitions <- filter ((==owner) . definitionOwner) <$> readDefinitions s
- let routines=map toJSON definitions
-     existing=identity >>= (\i -> find ((==i) . definitionId) definitions)
- when (isJust identity) $ require (isJust existing) 404 "Unknown Scheduled Routine in this conversation"
- forM_ existing $ \d -> require (not (definitionDeleted d)) 409 "Routine is deleted"
- case (existing,previous) of
-  (Just r,Just old) -> require (maybe False ((==old) . minuteCount . intervalMinutes) (definitionSchedule r)) 409 "Frequency changed; open Edit again for the current routine"
-  _ -> pure ()
- let prior = if isNothing identity && isJust source then find (\r -> get r "sourceCall" == maybe Null str source && get r "minutes" == minutes && at r "prompt" == body) routines else Nothing
- case prior of
-  Just r -> pure r
-  Nothing -> do
+ selected <- validated (selectRoutine edit minutes body (map toJSON definitions))
+ case selected of
+  RoutineReplay prior -> pure prior
+  RoutineChange change -> do
    t <- getCurrentTime
+   let (existing,source)=case change of
+        NewRoutine selectedSource -> (Nothing,selectedSource)
+        ReviseRoutine prior -> (find ((==at prior "id") . definitionId) definitions,Nothing)
    let initial=fromMaybe (Definition "" owner (Revision 1) (LegacyPrompt body) Nothing False
          (KM.fromList ([("created",str (timestamp t)),("revision",num 1)]++[("sourceCall",str c) | c<-maybeToList source]))) existing
        contract=case definitionContract initial of
@@ -201,7 +215,7 @@ save s owner minutes execution identity previous source = do
           AcceptedContract _ -> definitionFields changed)}
        value=toJSON (if isJust existing then bumpRevision updated else updated)
    r <- DB.saveRoutine s (if isJust existing then value else remove ["id"] value)
-   DB.record s [owner] (at r "id") (if isJust identity then "routine.updated" else "routine.created") r "admin" Nothing
+   DB.record s [owner] (at r "id") (if isJust existing then "routine.updated" else "routine.created") r "admin" Nothing
    pure (put "prompt" (str body) r)
 setPaused :: Service -> Text -> Text -> Bool -> IO Value
 setPaused s owner identity paused = do
@@ -221,8 +235,8 @@ command s owner input attached = case C.interpret attached (T.unpack input) of
  Left error -> failure 400 (T.pack error)
  Right Nothing -> pure Nothing
  Right (Just c) -> Just <$> case c of
-  C.Create interval body -> save s owner (toJSON interval) (str (T.pack body)) Nothing Nothing Nothing
-  C.Edit i old interval body -> save s owner (toJSON interval) (str (T.pack body)) (Just (T.pack i)) (Just (fromIntegral old)) Nothing
+  C.Create interval body -> save s owner (toJSON interval) (str (T.pack body)) (AddRoutine Nothing)
+  C.Edit i old interval body -> save s owner (toJSON interval) (str (T.pack body)) (EditRoutine (T.pack i) (Just (fromIntegral old)))
   C.SetPaused i paused -> setPaused s owner (T.pack i) paused
 receipt :: Value -> Text -> Text
 receipt r input = action <> " @"<>at r "id"<>" ( "<>at r "title"<>" )\nStatus: "<>status<>" · "<>jsonText (get r "runCount")<>"/1000 runs\nFrequency: every "<>jsonText (get r "minutes")<>" minutes\nExecute: "<>text (get r "prompt" `fallback` get r "goal")
@@ -309,7 +323,7 @@ admitPersonalOn db owner turn snapshot_ accepted runtime = do
        pendingChild call=isJust (D.callParent call) && D.callState call==D.CallQueued
        missingIds=[D.callIdentity call | call<-D.frontierCalls work,D.callState call `elem` [D.CallQueued,D.CallRunning],not (known call),not (pendingChild call)]
    unless (null missingIds) $ do
-    let missing call=if D.callIdentity call `elem` missingIds then (D.setCallFields [("error",str "Existing admission has no runtime evidence; restore its saved execution before retrying")] call) {D.callState=D.CallUnresolved} else call
+    let missing call=if D.callIdentity call `elem` missingIds then (D.setCallFields [("error",str "Existing admission has no runtime evidence; restore its saved execution before retrying")] call) {D.callProgress=D.UnresolvedAt (D.callNode call) (Just "Existing admission has no runtime evidence; restore its saved execution before retrying")} else call
     DB.putValueOn db DB.Workloads identity (toJSON work {D.workCalls=fmap missing (D.workCalls work)})
   Nothing -> case find ((==turnId turn) . turnId) runtime of
    Nothing -> do
@@ -318,15 +332,17 @@ admitPersonalOn db owner turn snapshot_ accepted runtime = do
    Just old -> do
     require (not (has (toJSON old) "managed")) 500 "Managed occurrence is missing its Workload"
     let restored=D.setWorkField "bindingSchema" Null (D.routineWorkload owner old snapshot_ Nothing)
+        previous=NE.head (D.workCalls restored)
+        node=D.callNode previous
         state=case turnStatus old of
-         Queued -> D.CallQueued
-         Running -> D.CallInterrupted
-         Interrupted -> D.CallInterrupted
-         Failed -> D.CallFailed
-         Cancelled -> D.CallCancelled
-         _ -> D.CallUnresolved
-        diagnostic=if state==D.CallUnresolved then str "Legacy turn has no accepted task outcome; saved turn evidence is retained" else turnField old "error"
-        call=(D.setCallFields [("error",diagnostic)] (NE.head (D.workCalls restored))) {D.callState=state}
+         Queued -> D.QueuedAt node
+         Running -> D.InterruptedAt node
+         Interrupted -> D.InterruptedAt node
+         Failed -> D.FailedAt node
+         Cancelled -> D.CancelledAt node
+         _ -> D.UnresolvedAt node Nothing
+        diagnostic=if turnStatus old `notElem` [Queued,Running,Interrupted,Failed,Cancelled] then str "Legacy turn has no accepted task outcome; saved turn evidence is retained" else turnField old "error"
+        call=(D.setCallFields [("error",diagnostic)] (NE.head (D.workCalls restored))) {D.callProgress=state}
         recovered=D.setWorkField "legacyTurnEvidence" (toJSON old) restored {D.workCalls=call :| []}
     DB.putValueOn db DB.Workloads identity (toJSON recovered)
 

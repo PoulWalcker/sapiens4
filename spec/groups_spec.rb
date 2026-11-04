@@ -1,3 +1,5 @@
+require 'sqlite3'
+
 RSpec.describe 'Group collaboration contracts' do
   before do
     @lead, @member, @outsider = %w[Lead Researcher Outside].map { |name| host.agent(name) }
@@ -24,6 +26,77 @@ RSpec.describe 'Group collaboration contracts' do
     expect(work['title']).to eq('Initial title')
     updated = host.api('PUT', path + "/tasks/#{work['id']}", {revision: work['revision'], title: '  Edited title  '})
     expect(updated['title']).to eq('  Edited title  ')
+  end
+
+  it 'requires a creation title and applies the established task defaults' do
+    expect(host.request('POST', path + '/tasks', {}).first).to eq(400)
+    expect(group['tasks']).to be_empty
+    created = host.api('POST', path + '/tasks', {title: 'New task', state: 'done', deleted: true, revision: 99}, status: 201)
+    expect(created).to include('title' => 'New task', 'body' => '', 'assignee' => @lead,
+      'state' => 'backlog', 'deleted' => false, 'revision' => 1)
+  end
+
+  it 'requires the latest revision and distinguishes an omitted state from an explicit state' do
+    work = task(state: 'done')
+    expect(host.request('PUT', path + "/tasks/#{work['id']}", {body: 'No revision'}).first).to eq(409)
+    expect(group['tasks']).to eq([work])
+    done = host.api('PUT', path + "/tasks/#{work['id']}", {revision: work['revision'], title: 'Finished objective', state: 'done'})
+    expect(done['state']).to eq('done')
+    revised = host.api('PUT', path + "/tasks/#{work['id']}", {revision: done['revision'], body: 'Changed objective'})
+    expect(revised).to include('state' => 'backlog', 'title' => 'Finished objective', 'body' => 'Changed objective')
+    expect(revised['history'].last).to include('state' => 'done', 'revision' => done['revision'])
+  end
+
+  it 'restores a deleted task only after assigning a current group member' do
+    work = task
+    deleted = host.api('PUT', path + "/tasks/#{work['id']}", {revision: work['revision'], deleted: true})
+    expect(host.request('PUT', path + "/tasks/#{work['id']}", {revision: deleted['revision'], title: 'Edit while deleted'}).first).to eq(409)
+    edit(members: [@lead, @outsider])
+    expect(host.request('PUT', path + "/tasks/#{work['id']}", {revision: deleted['revision'], deleted: false}).first).to eq(409)
+    expect(host.request('PUT', path + "/tasks/#{work['id']}", {revision: deleted['revision'], deleted: false, assignee: @member}).first).to eq(400)
+    restored = host.api('PUT', path + "/tasks/#{work['id']}", {revision: deleted['revision'], deleted: false, assignee: @outsider})
+    expect(restored).to include('deleted' => false, 'state' => 'backlog', 'assignee' => @outsider)
+  end
+
+  it 'preserves saved task extensions through editing, execution and restart' do
+    work = task
+    saved = group
+    saved['tasks'].first['extension'] = {'kept' => ['legacy', 7]}
+    SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+      db.execute('UPDATE groups SET value = ? WHERE id = ?', [JSON.generate(saved), @group['id']])
+    end
+    edited = host.api('PUT', path + "/tasks/#{work['id']}", {revision: work['revision'], body: 'Updated body'})
+    host.api('POST', path + "/tasks/#{work['id']}/run", {revision: edited['revision']}, status: 202)
+    host.idle
+    host.restart
+    completed = group['tasks'].first
+    expect(completed).to include('state' => 'done', 'extension' => {'kept' => ['legacy', 7]})
+    expect(completed['history'].first['extension']).to eq('kept' => ['legacy', 7])
+    expect(completed['results'].first).to include('stale' => false, 'author' => @member)
+  end
+
+  it 'does not start a second execution while a task request is pending' do
+    work = task
+    host.configure(block: true)
+    running = host.api('POST', path + "/tasks/#{work['id']}/run", {revision: work['revision']}, status: 202)
+    expect(host.request('POST', path + "/tasks/#{work['id']}/run", {revision: running['revision']}).first).to eq(409)
+    expect(group['requests'].count { |r| r['task'] == work['id'] }).to eq(1)
+    host.release
+    host.idle
+  end
+
+  it 'returns failed task work to the backlog and persists the failure result once' do
+    work = task
+    host.configure(fail: true)
+    running = host.api('POST', path + "/tasks/#{work['id']}/run", {revision: work['revision']}, status: 202)
+    host.idle
+    saved = group['tasks'].first
+    expect(saved).to include('state' => 'backlog', 'revision' => running['revision'] + 1)
+    expect(saved['results'].size).to eq(1)
+    expect(saved['results'].first).to include('stale' => false, 'text' => nil, 'author' => @member)
+    expect(saved['results'].first['error']).not_to be_empty
+    host.restart
+    expect(group['tasks']).to eq([saved])
   end
 
   it 'introduces the purpose and roster without model calls and persists stable identity after lead transfer' do
@@ -184,4 +257,25 @@ RSpec.describe 'Group collaboration contracts' do
     expect(host.control(@member, 'workspace')['tabs']).to be_empty
     expect(host.control(@member, 'workspace', group: @group['id'])['tabs'].first['url']).to eq('https://example.com/shared')
   end
+  it 'rejects removal of the designated Lead without changing persisted membership' do
+    before = group
+    expect(host.request('PUT', path, {revision: before['revision'], members: [@member, @outsider]}).first).to eq(400)
+    expect(group).to eq(before)
+    host.restart
+    expect(group).to eq(before)
+  end
+
+  it 'persists leadership and membership together while retaining unknown group metadata' do
+    saved = group.merge('extension' => {'keep' => [1, 'two']})
+    SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+      db.execute('UPDATE groups SET value=? WHERE id=?', [JSON.generate(saved), @group['id']])
+    end
+    edit(lead: @outsider, members: [@member, @outsider])
+    updated = group
+    expect(updated).to include('lead' => @outsider, 'members' => [@member, @outsider], 'extension' => saved['extension'])
+    expect(updated['strip_order'].first).to eq(@outsider)
+    host.restart
+    expect(group).to eq(updated)
+  end
+
 end

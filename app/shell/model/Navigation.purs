@@ -1,6 +1,7 @@
 module Sapiens.Navigation where
 
 import Prelude
+import Sapiens.Environment (Environment)
 import Data.Array as A
 import Data.Maybe (fromMaybe)
 import Data.Argonaut.Core (Json)
@@ -149,15 +150,15 @@ readActivity group prefs =
 encodeActivity :: Activity -> Json
 encodeActivity a = D.json {panel: panel a, view: view a, period: periodId $ period a}
 
-ios :: Json -> Boolean
-ios env = D.matches "iPad|iPhone|iPod" (D.s "userAgent" env) || D.s "platform" env == "MacIntel" && D.n "touchPoints" env > 1.0
+ios :: Environment -> Boolean
+ios env = D.matches "iPad|iPhone|iPod" (env.userAgent) || env.platform == "MacIntel" && env.touchPoints > 1.0
 
-limit :: Json -> Int
+limit :: Environment -> Int
 limit env
-  | not (D.b "touch" env) && D.n "width" env > 600.0 = 3
-  | D.s "orientation" env == "portrait-primary" || D.s "orientation" env == "portrait-secondary" = 1
-  | D.s "orientation" env == "landscape-primary" || D.s "orientation" env == "landscape-secondary" = 2
-  | D.n "height" env >= D.n "width" env = 1
+  | not (env.touch) && env.width > 600.0 = 3
+  | env.orientation == "portrait-primary" || env.orientation == "portrait-secondary" = 1
+  | env.orientation == "landscape-primary" || env.orientation == "landscape-secondary" = 2
+  | env.height >= env.width = 1
   | otherwise = 2
 
 visiblePanes :: Int -> Boolean -> Array Pane -> Array Pane

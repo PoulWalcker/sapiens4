@@ -2,7 +2,21 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 -- Pure domain data and codecs shared by the host and native shells.
-module Domain where
+module Domain
+ ( Wire(..), AgentId(..), TaskId(..), RunId(..), parseWire, TurnStatus(..), Flow(..)
+ , ExecutionMode(..), ExecutionSettings(..), CorporaStatus(..), CorporaConfig(..), Frequency(..)
+ , periodMillis, Pulse(..), pulseIdentity, TaskState(..), GroupAccess(..), BrowserAction(..)
+ , BrowserCommand(..), BrowserTransition(..), browserTransition, TurnAction(..), Turn(..)
+ , turnField, withTurnFields, batchLeader, retryTurn, TurnControlError(..), validateTurnAction
+ , recoverTurn, newTurn, AgentState(..), stateJSON, stateField, mapTurns, mapStateFields, select
+ , selectPresent, mergeFields, appendItems, replaceItem, modifyItems, obj, arr, str, num, get
+ , text, int, boolean, list, pairs, keys, has, put, merge, remove, at, items, fallback, empty
+ , jsonText, parseJSONText, textFieldP, stringsP, nameP, onlyFields, Population, populationRoster
+ , populationChief, populationMembers, GroupRoster, MembershipError(..), memberRoster, rosterLead
+ , messageText, AgentProfile(..), rosterMembers, activeStatus, retryableStatus, completedStatus
+
+ , EffectEndpoint(..), FeedSource(..), DeliveryTarget(..), ExternalProfile(..), ProfileChange(..), profileChange, cursorP, FeedPage(..), FeedState(..), feedState, feedSeenIds, FeedContentInterface(..), FeedInputDescriptor(..), feedDescriptor, feedBusinessInput, feedContentText, DeliveryState(..), ModelSettings(..), CriterionKind(..), RubricCriterion(..), CriterionVerdict(..), CriterionAssessment(..), Explanation(..), narrativeText, hybridComposition, candidateExplanation, OrdinarySource(..), CandidateReference(..), StandaloneTaskPin(..), CodeRole(..), ExecutionBinding(..), bindingContract, sourceHash, canonicalHash, ContractGeneration(..), AnalysisPin(..), AnalysisParameter(..), AnalysisDecision(..), RoutineTrigger(..), routineTrigger, ExecutionGate(..), EvidenceUsage(..), EvidenceReceipt(..), EvidencePolicy(..), EvidenceSnapshot(..), AssessmentStatus(..), assessmentValue, SummaryField(..), ToolSummary(..), RepairInvocationPolicy(..)
+ ) where
 
 import Control.Monad
 import Data.Aeson hiding (pairs)
@@ -17,6 +31,8 @@ import qualified Data.ByteString as BS
 import Numeric (showHex)
 import qualified Network.URI as URI
 import Text.Read (readMaybe)
+import Data.List.NonEmpty (NonEmpty(..))
+import qualified Data.List.NonEmpty as NE
 import Data.Maybe
 import qualified Data.Map.Strict as M
 import Data.Scientific (toBoundedInteger)
@@ -26,6 +42,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
 
 newtype AgentId = AgentId { agentIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
+newtype TaskId = TaskId { taskIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
 newtype RunId = RunId { runIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
 
 -- This profile transports accepted content; it does not redefine Task completion.
@@ -351,6 +368,14 @@ instance Wire ExecutionGate where
  wireName ExecutionStopped = "stopped"
 instance FromJSON ExecutionGate where parseJSON = parseWire
 instance ToJSON ExecutionGate where toJSON = str . wireName
+data AgentProfile = AgentProfile
+ { profileId :: AgentId, profileName :: Text, profileRole :: Text
+ , profileColor :: Text, profileFace :: Text, profileCreated :: Text
+ } deriving (Eq, Show)
+instance FromJSON AgentProfile where
+ parseJSON = withObject "Agent profile" $ \o -> AgentProfile <$> o .: "id" <*> o .: "name" <*> o .: "role" <*> o .: "color" <*> o .: "face" <*> o .: "created"
+instance ToJSON AgentProfile where
+ toJSON profile = obj [("id",toJSON (profileId profile)),("name",str (profileName profile)),("role",str (profileRole profile)),("color",str (profileColor profile)),("face",str (profileFace profile)),("created",str (profileCreated profile))]
 
 data TurnStatus = Queued | Running | OutputPending | Done | Failed | Interrupted | Cancelled | Warning deriving (Eq, Ord, Show, Enum, Bounded)
 instance Wire TurnStatus where
@@ -408,6 +433,12 @@ instance FromJSON BrowserCommand where
  parseJSON = withObject "Browser command" $ \o -> BrowserCommand <$> o .: "seq" <*> o .: "action"
 instance ToJSON BrowserCommand where
  toJSON command = object ["seq" .= browserSequence command, "action" .= browserAction command]
+data BrowserTransition = BrowserUnchanged | BrowserExecute BrowserCommand deriving (Eq, Show)
+browserTransition :: Text -> Maybe BrowserCommand -> BrowserTransition
+browserTransition previous command = case command of
+ Just next | browserSequence next/=previous -> BrowserExecute next
+ _ -> BrowserUnchanged
+
 data TurnAction = Retry | Cancel deriving (Eq, Ord, Show, Enum, Bounded)
 instance Wire TurnAction where wireName action = case action of Retry -> "retry"; Cancel -> "cancel"
 instance FromJSON TurnAction where parseJSON = parseWire
@@ -436,6 +467,19 @@ batchLeader :: Turn -> RunId
 batchLeader t = fromMaybe (turnId t) (turnBatchId t)
 retryTurn :: Turn -> Turn
 retryTurn t = (withTurnFields (remove ["error","batch_members","agency_kind","slot","pulseId"]) t) { turnStatus = Queued, turnAttempt=Just (fromMaybe 0 (turnAttempt t)+1), turnBatchId=Nothing }
+data TurnControlError = TurnNotRetryable | TurnAlreadyComplete deriving (Eq, Show)
+validateTurnAction :: TurnAction -> TurnStatus -> Either TurnControlError ()
+validateTurnAction Retry status
+ | retryableStatus status = Right ()
+ | otherwise = Left TurnNotRetryable
+validateTurnAction Cancel status
+ | status `elem` [Done,OutputPending] = Left TurnAlreadyComplete
+ | otherwise = Right ()
+recoverTurn :: Turn -> Turn
+recoverTurn turn
+ | turnStatus turn == Running = (withTurnFields (put "error" (str "Runner stopped before saving a reply; inspect effects before retrying")) turn) { turnStatus=Interrupted }
+ | otherwise = turn
+
 newTurn :: RunId -> Flow -> Text -> Text -> Value -> Bool -> Turn
 newTurn identity flow input created origin batchable = Turn identity flow input Queued (Just 1) Nothing (KM.fromList [("created",str created),("origin",origin),("batchable",Bool batchable)])
 
@@ -517,6 +561,11 @@ jsonText :: Value -> Text
 jsonText = TE.decodeUtf8 . BL.toStrict . encode
 parseJSONText :: Text -> Value
 parseJSONText = fromMaybe Null . decode . BL.fromStrict . TE.encodeUtf8
+
+messageText :: Value -> Either Text Text
+messageText value = case value `fallback` str "" of
+ String content | T.length content <=16000 -> Right (T.strip content)
+ _ -> Left "Message must be text, at most 16000 characters"
 
 textFieldP :: Text -> Int -> Value -> Parser Text
 textFieldP k n v = case get v k of
@@ -600,3 +649,24 @@ instance FromJSON RepairInvocationPolicy where
    "saved_audit_response_only"->pure SavedAuditResponseOnly
    "kit_inspection_response_only"->pure KitInspectionResponseOnly
    _->fail "Unknown repair invocation admission policy"
+data Population = Population AgentId [AgentId] deriving (Eq, Show)
+-- Storage supplies creation/ID order. The first existing agent remains Chief.
+populationRoster :: NonEmpty AgentId -> Population
+populationRoster (leader :| rest) = Population leader rest
+populationChief :: Population -> AgentId
+populationChief (Population leader _) = leader
+populationMembers :: Population -> [AgentId]
+populationMembers (Population leader rest) = leader:rest
+
+data GroupRoster = GroupRoster AgentId (NonEmpty AgentId) deriving (Eq, Show)
+data MembershipError = MemberCount | DuplicateOrMissingLead deriving (Eq, Show)
+memberRoster :: AgentId -> [AgentId] -> Either MembershipError GroupRoster
+memberRoster leader people
+ | length people < 2 || length people > 100 = Left MemberCount
+ | length (nub people) /= length people || leader `notElem` people = Left DuplicateOrMissingLead
+ | Just roster <- NE.nonEmpty people = Right (GroupRoster leader roster)
+ | otherwise = Left MemberCount
+rosterLead :: GroupRoster -> AgentId
+rosterLead (GroupRoster leader _) = leader
+rosterMembers :: GroupRoster -> [AgentId]
+rosterMembers (GroupRoster _ people) = NE.toList people

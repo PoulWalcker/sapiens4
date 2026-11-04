@@ -27,16 +27,40 @@ import System.IO
 import System.Process hiding (shell)
 
 
-data Application = Application { native :: Obj, browser :: Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, config :: Obj, attempts :: IORef Int, child :: IORef (Maybe ProcessHandle), checking :: IORef Bool, manager :: Manager }
+data Application = Application { native :: Obj, browser :: Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, config :: LauncherConfig, attempts :: IORef Int, child :: IORef (Maybe ProcessHandle), checking :: IORef Bool, manager :: Manager }
 
+data LauncherConfig = LauncherConfig
+    { repositoryPath :: Maybe FilePath, launcherExecutable :: Maybe FilePath
+    , dataDirectoryOverride :: Maybe FilePath, searchPathOverride :: Maybe String }
+
+data ServerLaunch = ServerLaunch
+    { launchRoot :: FilePath, launchExecutable :: FilePath, launchData :: FilePath, launchPath :: String }
+
+readLauncherConfig :: Obj -> IO LauncherConfig
+readLauncherConfig dictionary = LauncherConfig <$> value "Repository" <*> value "Executable" <*> value "DataDirectory" <*> value "Path"
+    where
+        value name = do
+            entry <- str name >>= obj1 dictionary "objectForKey:" >>= optionalString
+            pure (entry >>= \text -> if T.null text then Nothing else Just (T.unpack text))
+
+serverLaunch :: LauncherConfig -> Either String ServerLaunch
+serverLaunch settings = do
+    root <- required (repositoryPath settings)
+    executable <- required (launcherExecutable settings)
+    pure (ServerLaunch root executable (fromMaybe (root </> ".sapiens4") (dataDirectoryOverride settings))
+        (fromMaybe "/usr/bin:/bin:/usr/sbin:/sbin" (searchPathOverride settings)))
+    where required = maybe (Left "Repository or Haskell executable was moved. Rebuild the app with environments/macos/build.sh.") Right
+
+post :: Application -> IO () -> IO ()
 post application action = atomicModifyIORef' (pending application) (\actions -> (actions ++ [action],()))
+check :: Application -> IO ()
 check application = do
     busy <- atomicModifyIORef' (checking application) (\old -> (True,old))
     unless busy $ void $ forkIO $ do
         let finish action = post application (writeIORef (checking application) False >> action)
         response <- try $ parseRequest "http://127.0.0.1:4174/api/health" >>= \r -> httpLbs r { responseTimeout = responseTimeoutMicro 2000000 } (manager application)
         case response of
-            Right result -> if statusCode (responseStatus result) == 200 && maybe False (BC.isPrefixOf "Sapiens4") (lookup "Server" (responseHeaders result)) && maybe False ((== String "ok") . field "status") (decode (responseBody result))
+            Right result -> if healthyServer result
                 then finish $ writeIORef (attempts application) 0 >> readIORef (shell (browser application)) >>= \view -> loadURL view "http://127.0.0.1:4174/workspace/"
                 else finish $ alert "Port 4174 is occupied by another service. Stop that service and choose View → Reload."
             Left (_ :: HttpException) -> do
@@ -49,31 +73,38 @@ check application = do
                         if count >= 60 then finish $ writeIORef (child application) Nothing >> alert "The server did not become ready. Choose View → Reload to try again."
                         else threadDelay 1000000 >> finish (check application)
 
-configurationValue application name = str name >>= obj1 (config application) "objectForKey:" >>= string
+healthyServer :: Response L.ByteString -> Bool
+healthyServer response = statusCode (responseStatus response) == 200
+    && maybe False (BC.isPrefixOf "Sapiens4") (lookup "Server" (responseHeaders response))
+    && maybe False ((== String "ok") . field "status") (decode (responseBody response))
+
+startServer :: Application -> IO ()
 startServer application = do
-    root <- T.unpack <$> configurationValue application "Repository"
-    executable <- T.unpack <$> configurationValue application "Executable"
-    dataDirectory <- T.unpack <$> configurationValue application "DataDirectory"
-    configuredPath <- T.unpack <$> configurationValue application "Path"
-    present <- doesFileExist executable
+    launch <- either (ioError . userError) pure (serverLaunch (config application))
+    present <- doesFileExist (launchExecutable launch)
     unless present $ ioError (userError "Repository or Haskell executable was moved. Rebuild the app with environments/macos/build.sh.")
-    let destination = if null dataDirectory then root </> ".sapiens4" else dataDirectory
+    let destination = launchData launch
     createDirectoryIfMissing True destination
-    logFile <- openFile (destination </> "desktop-server.log") AppendMode
     environment <- getEnvironment
-    (_,_,_,process) <- createProcess (proc executable ["--port","4174","--data-dir",destination]) { cwd = Just root, env = Just (("PATH", if null configuredPath then "/usr/bin:/bin:/usr/sbin:/sbin" else configuredPath) : filter ((/= "PATH") . fst) environment), std_in = NoStream, std_out = UseHandle logFile, std_err = UseHandle logFile }
-    hClose logFile
+    (_,_,_,process) <- withFile (destination </> "desktop-server.log") AppendMode $ \logFile ->
+        createProcess (proc (launchExecutable launch) ["--port","4174","--data-dir",destination])
+            { cwd = Just (launchRoot launch), env = Just (("PATH", launchPath launch) : filter ((/= "PATH") . fst) environment)
+            , std_in = NoStream, std_out = UseHandle logFile, std_err = UseHandle logFile }
     writeIORef (child application) (Just process)
 
+alert :: Text -> IO ()
 alert message = do
     panel <- new "NSAlert"
     setText panel "setMessageText:" "Sapiens4 could not open"
     setText panel "setInformativeText:" message
     void (long panel "runModal")
 
+reload :: Application -> IO ()
 reload application = if fixture application then readIORef (shell (browser application)) >>= void . (`obj0` "reload") else writeIORef (attempts application) 0 >> check application
+showWindow :: Application -> IO ()
 showWindow application = do win <- readIORef (windowRef application); void (obj1 win "makeKeyAndOrderFront:" nullPtr); void (obj1 (native application) "activateIgnoringOtherApps:" (int 1))
 
+installMethods :: Application -> IO Obj
 installMethods application = do
     c <- subclass "SapiensHaskellDesktop"
     let b = browser application
@@ -124,16 +155,19 @@ installMethods application = do
     writeIORef (delegate b) target
     pure target
 
+menuItem :: Obj -> Obj -> Text -> String -> Text -> IO ()
 menuItem menu target title action keyEquivalent = do
     titleObject <- str title; actionSelector <- sel action; keyObject <- str keyEquivalent
     item <- allocated "NSMenuItem" >>= \o -> obj3 o "initWithTitle:action:keyEquivalent:" titleObject actionSelector keyObject
     void (obj1 item "setTarget:" target); void (obj1 menu "addItem:" item)
 
+subMenu :: Obj -> Text -> IO Obj
 subMenu root title = do
     item <- new "NSMenuItem"; menu <- allocated "NSMenu" >>= \o -> str title >>= obj1 o "initWithTitle:"
     void (obj1 root "addItem:" item); void (obj1 item "setSubmenu:" menu)
     pure menu
 
+menus :: Application -> Obj -> IO ()
 menus application target = do
     root <- new "NSMenu"
     appMenu <- subMenu root "Sapiens4"
@@ -152,6 +186,7 @@ menus application target = do
         forM_ [("Reload Tab","reloadTab","r"),("Reload App","reloadWorkspace",""),("Zoom In","zoomIn","="),("Zoom Out","zoomOut","-"),("Actual Size","resetZoom","0")] $ \(title,action,key) -> menuItem view target title action key
     void (obj1 (native application) "setMainMenu:" root)
 
+initialize :: Application -> Obj -> Text -> IO ()
 initialize application target address = do
     void (obj1 (native application) "setActivationPolicy:" (int 0))
     void (obj1 (native application) "setDelegate:" target)
@@ -162,8 +197,9 @@ initialize application target address = do
     void (obj2 user "addScriptMessageHandler:name:" target channel)
     view <- allocated "WKWebView" >>= \o -> rectObj o "initWithFrame:configuration:" (0,0,1180,820) configuration
     writeIORef (shell (browser application)) view
-    unless (fixture application) $ do
-        void (obj1 view "setNavigationDelegate:" target); void (obj1 view "setUIDelegate:" target)
+    -- Fixtures keep native navigation off but need the UI delegate for file pickers.
+    void (obj1 view "setUIDelegate:" target)
+    unless (fixture application) $ void (obj1 view "setNavigationDelegate:" target)
     void (obj1 view "setAutoresizingMask:" (int 18))
     container <- allocated "NSView" >>= \o -> rect o "initWithFrame:" (0,0,1180,820)
     void (obj1 container "addSubview:" view)
@@ -193,9 +229,13 @@ initialize application target address = do
         void (obj2 view "loadHTMLString:baseURL:" html nullPtr)
         check application
 
+runApplication :: Bool -> Text -> IO ()
 runApplication isFixture address = do
     loadFrameworks
-    pool <- new "NSAutoreleasePool"
+    withAutoreleasePool (runSession isFixture address)
+
+runSession :: Bool -> Text -> IO ()
+runSession isFixture address = do
     application <- cls "NSApplication" >>= \c -> obj0 c "sharedApplication"
     http <- newManager defaultManagerSettings
     guestScript <- (do r <- parseRequest (T.unpack (T.dropWhileEnd (== '/') address <> "/workspace/guest.js")); response <- httpLbs r { responseTimeout = responseTimeoutMicro 2000000 } http; pure (TE.decodeUtf8With (\_ _ -> Just '\xfffd') (L.toStrict (responseBody response)))) `catch` (\(_ :: HttpException) -> pure "")
@@ -204,9 +244,8 @@ runApplication isFixture address = do
     bundle <- cls "NSBundle" >>= \c -> obj0 c "mainBundle"
     resource <- str "Launcher"; extension <- str "plist"
     path <- obj2 bundle "pathForResource:ofType:" resource extension
-    configuration <- cls "NSDictionary" >>= \c -> obj1 c "dictionaryWithContentsOfFile:" path
+    configuration <- cls "NSDictionary" >>= \c -> obj1 c "dictionaryWithContentsOfFile:" path >>= readLauncherConfig
     let state = Application application b win tasks isFixture configuration tries process busy http
     target <- installMethods state
     initialize state target address
     void (obj0 application "run")
-    void (obj0 pool "drain")

@@ -11,7 +11,7 @@ import Data.Int
 import Data.Maybe
 import Foreign hiding (void)
 import Numeric
-import Domain (BrowserCommand(..), BrowserAction(..))
+import Domain (BrowserCommand(..), BrowserAction(..), BrowserTransition(..), browserTransition)
 import Host
 import Native
 import qualified Navigation as Navigation
@@ -219,11 +219,11 @@ applySpec browser tab spec = do
     value -> case fromJSON value of
       Success parsed -> pure (Just parsed)
       Error reason -> ioError (userError reason)
-  forM_ command $ \instruction -> do
-    let sequenceId = T.unpack (browserSequence instruction)
-    oldSequence <- readIORef (tabSequence tab)
-    when (oldSequence /= sequenceId) $ do
-      writeIORef (tabSequence tab) sequenceId
+  oldSequence <- readIORef (tabSequence tab)
+  case browserTransition (T.pack oldSequence) command of
+    BrowserUnchanged -> pure ()
+    BrowserExecute instruction -> do
+      writeIORef (tabSequence tab) (T.unpack (browserSequence instruction))
       let web = core $ tabView tab
       case browserAction instruction of
         Navigate -> do

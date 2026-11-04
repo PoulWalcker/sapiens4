@@ -60,18 +60,22 @@ startHost root requested managed = do
         Socket.close socket
         pure True
    pure (Host port service bridge stop)
+localRequest :: Int -> Bool -> RequestHeaders -> Validation ()
+localRequest port write headers = do
+ let host = lookup hHost headers
+     originHeader = lookup hOrigin headers
+     allowed = map (TE.encodeUtf8 . (<> ":"<>T.pack (show port))) ["127.0.0.1","localhost"]
+ check (maybe False (`elem` allowed) host) 403 "Loopback host required"
+ check (originHeader==Nothing || originHeader==(("http://" <>) <$> host)) 403 "Same-origin request required"
+ when write (check (lookup "X-Sapiens-Local" headers==Just "1" && fmap (B.takeWhile (/=59)) (lookup hContentType headers)==Just "application/json") 403 "Local JSON request required")
+
 application :: Service -> Bridge -> Maybe Registry -> Int -> Application
 application service bridge registry port req respond = respond =<< respondError (do
  let method = TE.decodeUtf8 (requestMethod req)
      path = TE.decodeUtf8 (rawPathInfo req)
      target = requestTarget req
      write = method `elem` ["POST","PUT"]
-     host = lookup hHost (requestHeaders req)
-     originHeader = lookup hOrigin (requestHeaders req)
-     allowed = map (TE.encodeUtf8 . (<> ":"<>T.pack (show port))) ["127.0.0.1","localhost"]
- require (maybe False (`elem` allowed) host) 403 "Loopback host required"
- require (originHeader==Nothing || originHeader==(("http://" <>) <$> host)) 403 "Same-origin request required"
- when write (require (lookup "X-Sapiens-Local" (requestHeaders req)==Just "1" && fmap (B.takeWhile (/=59)) (lookup hContentType (requestHeaders req))==Just "application/json") 403 "Local JSON request required")
+ validated (localRequest port write (requestHeaders req))
  body <- if write then Just <$> bodyObject (if "/attachments" `T.isSuffixOf` path then 15000000 else 2000000) req else pure Nothing
  let data_ = maybe empty id body
  if "/api/host" `T.isPrefixOf` path && maybe False (const True) registry then do

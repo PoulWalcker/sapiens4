@@ -16,19 +16,21 @@ import Effect.Ref as Ref
 import Foreign.Object as O
 import Libs4.Browser as B
 import Sapiens.Data as D
+import Sapiens.Domain as X
 import Sapiens.Remote as R
 
-type Runtime = { clients :: Ref.Ref (O.Object R.Transport), credentials :: Ref.Ref (O.Object Json), camera :: Ref.Ref (Maybe B.Camera), pendingPair :: Ref.Ref (Maybe R.Transport), pendingPairId :: Ref.Ref String }
-type Registry = { records :: Array Json, localAvailable :: Boolean }
+data Pairing = NoPairing | LocalPairing String | RemotePairing R.Transport
+
+type Runtime = { clients :: Ref.Ref (O.Object R.Transport), credentials :: Ref.Ref (O.Object Json), camera :: Ref.Ref (Maybe B.Camera), pairing :: Ref.Ref Pairing }
+type Registry = { records :: Array X.Corpora, localAvailable :: Boolean }
 
 create :: Effect Runtime
-create = do
+create = ado
   clients <- Ref.new O.empty
   credentials <- Ref.new O.empty
   camera <- Ref.new Nothing
-  pendingPair <- Ref.new Nothing
-  pendingPairId <- Ref.new ""
-  pure {clients,credentials,camera,pendingPair,pendingPairId}
+  pairing <- Ref.new NoPairing
+  in {clients,credentials,camera,pairing}
 
 read :: String -> Effect Json
 read key = D.parse <$> B.storageRead key
@@ -49,36 +51,36 @@ json path method body = do
   unless (D.valid value) $ throwError $ error "Invalid host response"
   pure value
 
-client :: Runtime -> Json -> Aff R.Transport
+client :: Runtime -> X.Corpora -> Aff R.Transport
 client runtime record = do
   existing <- liftEffect $ Ref.read runtime.clients
-  case O.lookup (D.s "key" record) existing of
+  case O.lookup (record.key) existing of
     Just transport -> pure transport
     Nothing -> do
       credentials <- liftEffect $ Ref.read runtime.credentials
-      case O.lookup (D.s "key" record) credentials of
+      case O.lookup (record.key) credentials of
         Nothing -> throwError $ error "Connecting…"
         Just session -> do
           transport <- R.create session
-          liftEffect $ Ref.modify_ (O.insert (D.s "key" record) transport) runtime.clients
+          liftEffect $ Ref.modify_ (O.insert (record.key) transport) runtime.clients
           pure transport
 
-request :: Runtime -> Boolean -> Json -> String -> String -> Json -> Aff Json
+request :: Runtime -> Boolean -> X.Corpora -> String -> String -> Json -> Aff Json
 request runtime remote record path method body = do
-  unless (D.valid record) $ throwError $ error "Connect a corpora first."
+  unless (record.id /= "") $ throwError $ error "Connect a corpora first."
   if remote then client runtime record >>= \transport -> R.api transport method path body
-  else json ("/api/host/corpora/" <> B.encodeURI (D.s "id" record) <> path) method body
+  else json ("/api/host/corpora/" <> B.encodeURI (record.id) <> path) method body
 
 registry :: Runtime -> Boolean -> String -> Aff Registry
 registry runtime remote origin = if remote then do
   saved <- A.filter ((_ == origin) <<< D.s "relay") <$> R.sessions
   liftEffect $ Ref.write (O.fromFoldable $ map (\s -> Tuple (R.sessionKey s) s) saved) runtime.credentials
-  pure {records:map (\s -> D.merge (D.get "corpora" s) $ D.json {key: R.sessionKey s, location: "Remote"}) saved,localAvailable:false}
+  pure {records:map (\s -> (X.corpora $ D.get "corpora" s) {key=R.sessionKey s,location=X.Remote}) saved,localAvailable:false}
   else do
     data_ <- json "/api/host" "GET" D.null
-    pure {records:map (\r -> D.put "key" (D.get "id" r) r) (D.rows "corpora" data_),localAvailable:D.b "local_available" data_}
+    pure {records:map (\r -> (X.corpora r) {key=D.s "id" r}) (D.rows "corpora" data_),localAvailable:D.b "local_available" data_}
 
-authenticate :: Runtime -> Boolean -> Json -> Aff Unit
+authenticate :: Runtime -> Boolean -> X.Corpora -> Aff Unit
 authenticate runtime remote record = when remote $ client runtime record >>= \transport -> void $ R.authenticate transport false
 
 decorate :: String -> Json -> Effect Json
@@ -96,13 +98,13 @@ cache key snapshot = do
   traverse_ B.storageRemove $ A.dropEnd 2 $ A.filter (\k -> S.take 12 k == "s4.snapshot." && k /= "s4.snapshot." <> key) keys
   void $ write ("s4.snapshot." <> key) reduced
 
-lifecycle :: Runtime -> Boolean -> Json -> String -> Aff Json
+lifecycle :: Runtime -> Boolean -> X.Corpora -> String -> Aff Json
 lifecycle runtime remote record action = do
   info <- request runtime remote record "/api/corpora" "GET" D.null
   operation <- liftEffect B.uuid
   now <- liftEffect B.now
   let intent = D.json {action, revision: D.get "revision" info, operation}
-  void $ liftEffect $ write "s4.lifecycle.pending" $ D.merge intent $ D.json {key: D.get "key" record, expiresAt: now + 30000.0}
+  void $ liftEffect $ write "s4.lifecycle.pending" $ D.merge intent $ D.json {key: D.text record.key, expiresAt: now + 30000.0}
   result <- request runtime remote record "/api/corpora/lifecycle" "PUT" intent >>= wait 10
   void $ liftEffect $ write "s4.lifecycle.pending" D.null
   pure result
@@ -112,7 +114,7 @@ lifecycle runtime remote record action = do
     | remaining <= 0 = throwError $ error "Work is still stopping. Try again shortly."
     | otherwise = delay (Milliseconds 500.0) *> (request runtime remote record "/api/corpora" "GET" D.null >>= wait (remaining - 1))
 
-reconcile :: Runtime -> Boolean -> Array Json -> String -> Aff Unit
+reconcile :: Runtime -> Boolean -> Array X.Corpora -> String -> Aff Unit
 reconcile runtime remote records active = do
   pending <- liftEffect $ read "s4.lifecycle.pending"
   when (D.valid pending) do
@@ -123,7 +125,7 @@ reconcile runtime remote records active = do
     when (D.b "stopping" info) $ throwError $ error "Work is still stopping. Try again shortly."
     when (not (D.b "applied" outcome) && now < D.n "expiresAt" pending) $ throwError $ error "The previous switch is still being confirmed. Try again shortly."
     void $ liftEffect $ write "s4.lifecycle.pending" D.null
-    when (D.b "applied" outcome && D.s "action" pending == "activate" && D.s "key" record /= active && D.s "status" info == "active") $ void $ lifecycle runtime remote record "pause"
+    when (D.b "applied" outcome && D.s "action" pending == "activate" && record.key /= active && D.s "status" info == "active") $ void $ lifecycle runtime remote record "pause"
   switching <- liftEffect $ read "s4.switch.pending"
   when (D.s "phase" switching == "activating" && D.s "to" switching /= active) do
     record <- findRecord (D.s "to" switching)
@@ -131,7 +133,7 @@ reconcile runtime remote records active = do
     when (D.s "status" info == "active") $ void $ lifecycle runtime remote record "pause"
   void $ liftEffect $ write "s4.switch.pending" D.null
   where
-  findRecord key = case A.find ((_ == key) <<< D.s "key") records of
+  findRecord key = case A.find ((_ == key) <<< _.key) records of
     Just r -> pure r
     Nothing -> throwError $ error "The previous switch needs its original connection."
 
@@ -140,13 +142,14 @@ cancelPairing runtime = do
   liftEffect do
     Ref.read runtime.camera >>= traverse_ B.cameraStop
     Ref.write Nothing runtime.camera
-    Ref.read runtime.pendingPair >>= traverse_ R.close
-    Ref.write Nothing runtime.pendingPair
-  id <- liftEffect $ Ref.read runtime.pendingPairId
-  liftEffect $ Ref.write "" runtime.pendingPairId
-  when (id /= "") $ void $ try $ json ("/api/host/pair/" <> B.encodeURI id) "POST" D.empty
+  pairing <- liftEffect $ Ref.read runtime.pairing
+  liftEffect $ Ref.write NoPairing runtime.pairing
+  case pairing of
+    NoPairing -> pure unit
+    RemotePairing transport -> liftEffect $ R.close transport
+    LocalPairing id -> void $ try $ json ("/api/host/pair/" <> B.encodeURI id) "POST" D.empty
 
-register :: Runtime -> R.Transport -> Aff Json
+register :: Runtime -> R.Transport -> Aff X.Corpora
 register runtime transport = do
   session <- liftEffect $ Ref.read transport.session
   let key = R.sessionKey session
@@ -155,11 +158,13 @@ register runtime transport = do
     traverse_ R.close $ O.lookup key existing
     Ref.modify_ (O.insert key transport) runtime.clients
     Ref.modify_ (O.insert key session) runtime.credentials
-    Ref.write Nothing runtime.pendingPair
-  pure $ D.merge (D.get "corpora" session) $ D.json {key, location: "Remote"}
+    Ref.write NoPairing runtime.pairing
+  pure $ (X.corpora $ D.get "corpora" session) {key=key,location=X.Remote}
 
 dispose :: Runtime -> Effect Unit
 dispose runtime = do
   Ref.read runtime.clients >>= traverse_ R.close <<< O.values
   Ref.read runtime.camera >>= traverse_ B.cameraStop
-  Ref.read runtime.pendingPair >>= traverse_ R.close
+  Ref.read runtime.pairing >>= case _ of
+    RemotePairing transport -> R.close transport
+    _ -> pure unit

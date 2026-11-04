@@ -325,4 +325,37 @@ RSpec.describe 'Local service contracts' do
     expect(read_run.call(failed)).to eq(rejected)
   end
 
+  it 'keeps the designated Chief after identity edits, creation and restart' do
+    original = chief
+    member = host.agent('Researcher')
+    host.api('PUT', "/api/agents/#{original}", {name: 'Director', role: 'Coordinate work'})
+    host.restart
+    expect(chief).to eq(original)
+    expect(host.api('GET', '/api/corpora')['chief_id']).to eq(original)
+    expect(host.state['orchestration'][member]['manager']).to eq(original)
+    expect(host.request('POST', "/api/agents/#{original}/control", {op: 'manager', manager: member}).first).to eq(400)
+    expect(host.request('POST', "/api/agents/#{original}/control", {op: 'retire_agent', target: original}).first).to eq(400)
+  end
+
+  it 'rejects an invalid batch before executing its valid prefix' do
+    before = host.state['agents']
+    result = host.request('POST', "/api/agents/#{chief}/control", {op: 'batch', operations: [
+      {op: 'create_agent', name: 'Uncreated', role: 'Research'}, {op: 'workspace_focus', unexpected: true}]})
+    expect(result.first).to eq(400)
+    expect(host.state['agents']).to eq(before)
+    expect(host.request('POST', "/api/agents/#{chief}/control", {op: 'batch', operations: [{op: 'batch', operations: [{op: 'status'}]}]}).first).to eq(400)
+  end
+
+  it 'requires active reports to be reassigned before retirement and repairs a retired manager on restore' do
+    manager = host.agent('Manager')
+    report = host.control(chief, 'create_agent', name: 'Reporter', role: 'Research', manager: manager)['agent']['id']
+    expect(host.request('POST', "/api/agents/#{chief}/control", {op: 'retire_agent', target: manager}).first).to eq(409)
+    host.control(chief, 'retire_agent', target: report)
+    host.control(chief, 'retire_agent', target: manager)
+    host.control(chief, 'rehire_agent', target: report)
+    host.restart
+    expect(host.state['orchestration'][report]['manager']).to eq(chief)
+    expect(host.state['agents'].find { |a| a['id'] == manager }['retired']).to eq(true)
+  end
+
 end

@@ -91,16 +91,23 @@ socketCall :: SocketClient -> SocketCommand -> IO Value
 socketCall client command = withMVar (socketGuard client) $ \_ -> do
  n <- atomicModifyIORef' (socketSerial client) (\i -> (i+1,i+1))
  let ident = T.pack (show n)
-     (kind,body) = case command of
-      SendFrame frame -> ("send",obj [("frame",frame)])
-      AckMessage message -> ("ack",obj [("message",message)])
- WS.sendTextData (socketConnection client) (encode (merge (obj [("type",str kind),("id",str ident)]) body))
+ WS.sendTextData (socketConnection client) (encode (socketCommand ident command))
  result <- timeout 10000000 (atomically ((readTQueue (socketResults client)) `orElse` (readTMVar (socketEnded client) >>= throwSTM)))
  case result of
   Nothing -> failure 503 "Relay did not confirm delivery"
-  Just value -> do
-   require (at value "type" == "result" && at value "id" == ident) 400 "Unexpected relay response"
-   require (T.null (at value "error")) 400 (at value "error")
-   pure (get value "result")
+  Just value -> validated (socketResult ident value)
+
+socketCommand :: Text -> SocketCommand -> Value
+socketCommand identity command = merge (obj [("type",str kind),("id",str identity)]) body
+ where
+ (kind,body)=case command of
+  SendFrame frame -> ("send",obj [("frame",frame)])
+  AckMessage message -> ("ack",obj [("message",message)])
+
+socketResult :: Text -> Value -> Validation Value
+socketResult identity value =
+ Types.check (at value "type"=="result" && at value "id"==identity) 400 "Unexpected relay response" *>
+ Types.check (T.null (at value "error")) 400 (at value "error") *> Right (get value "result")
+
 socketReceive :: SocketClient -> IO (Maybe Value)
 socketReceive client = timeout 500000 (atomically (readTBQueue (socketMessages client) `orElse` (readTMVar (socketEnded client) >>= throwSTM)))

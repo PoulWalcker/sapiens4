@@ -1,10 +1,13 @@
 module Sapiens.Remote where
 
 import Prelude
+import Sapiens.Environment (Environment)
+import Sapiens.Platform as Platform
 import Control.Promise (toAffE)
 import Data.Argonaut.Core (Json, toArray)
+import Data.Argonaut.Decode (decodeJson)
 import Data.Array as A
-import Data.Either (Either(..))
+import Data.Either (Either(..), either)
 import Data.Foldable (foldl, traverse_)
 import Data.Int as I
 import Data.Maybe (Maybe(..), fromMaybe, isNothing)
@@ -20,16 +23,19 @@ import Effect.Ref as Ref
 import Foreign.Object as O
 import Libs4.Browser as B
 import Sapiens.Data as D
+import Sapiens.Browser as Browser
+import Sapiens.Domain as X
 
 protocol :: String
 protocol = "sapiens-remote-box-v1"
+
+data LinkState = Disconnected | Connecting | Ready | Blocked String
 
 type Transport =
   { session :: Ref.Ref Json
   , socket :: Ref.Ref (Maybe B.Socket)
   , pending :: Ref.Ref (O.Object (Either Error Json -> Effect Unit))
-  , ready :: Ref.Ref Boolean
-  , blocked :: Ref.Ref String
+  , state :: Ref.Ref LinkState
   , serial :: Ref.Ref Int
   , connection :: Ref.Ref String
   , generation :: Ref.Ref Int
@@ -64,17 +70,21 @@ base64 input = let value = D.replace "_" "/" $ D.replace "-" "+" input in value 
 invalid :: String
 invalid = "Use the QR from the host corpora’s New Pairing."
 
-decode :: String -> Either String Json
-decode raw = decodeValue (S.trim raw)
+type Invitation = X.Invitation
+
+decode :: String -> Either String Invitation
+decode raw = decodeValue (S.trim raw) >>= \value ->
+  either (const $ Left invalid) Right $ decodeJson $
+    if D.valid (D.get "public_id" value) then value else D.put "public_id" (D.text "") value
 
 decodeValue :: String -> Either String Json
 decodeValue value
   | CU.length value > 4096 = Left invalid
   | S.take 1 value == "{" = if D.valid (D.parse value) then Right (D.parse value) else Left invalid
   | D.matches "^https?://" value =
-      let u = B.parseURL "https://invalid.local" value in
-      case decode (S.drop 1 $ D.s "hash" u) of
-        Right parsed | D.s "origin" u == D.s "relay" parsed && D.s "path" u == "/" && D.s "search" u == "" && D.s "username" u == "" && D.s "password" u == "" -> Right parsed
+      let u = Browser.url "https://invalid.local" value in
+      case decodeValue (S.trim $ S.drop 1 $ u.hash) of
+        Right parsed | u.origin == D.s "relay" parsed && u.path == "/" && u.search == "" && u.username == "" && u.password == "" -> Right parsed
         _ -> Left "Invalid pairing link."
   | otherwise =
       let parts = S.split (S.Pattern ".") (D.replace "\\s" "" value)
@@ -85,8 +95,8 @@ decodeValue value
         Right $ D.json {v: protocol, relay, room: part 2, token: part 3, secret: part 4, desktop: base64 $ part 5, expires: expiration, public_id: part 7}
       else Left invalid
 
-invitationLink :: Json -> String
-invitationLink v = D.s "relay" v <> "/#" <> S.joinWith "." (["s4", url64 $ B.base64Encode $ D.s "relay" v, D.s "room" v, D.s "token" v, D.s "secret" v, url64 $ D.s "desktop" v, I.toStringAs (fromMaybe I.decimal (I.radix 36)) (I.floor $ D.n "expires" v)] <> if D.s "public_id" v == "" then [] else [D.s "public_id" v])
+invitationLink :: Invitation -> String
+invitationLink v = v.relay <> "/#" <> S.joinWith "." (["s4", url64 $ B.base64Encode $ v.relay, v.room, v.token, v.secret, url64 $ v.desktop, I.toStringAs (fromMaybe I.decimal (I.radix 36)) (I.floor $ v.expires)] <> if v.public_id == "" then [] else [v.public_id])
 
 confirmation :: Json -> Aff String
 confirmation session = do
@@ -102,10 +112,10 @@ confirmation session = do
       code = CU.fromCharArray (foldl step {value:initial,chars:[]} (A.range 1 8)).chars
   pure $ S.take 4 code <> " · " <> S.drop 4 code
 
-deviceInfo :: Json -> Json
+deviceInfo :: Environment -> Json
 deviceInfo env =
-  let ua = D.s "userAgent" env
-      ipad = D.matches "iPad" ua || (D.matches "Macintosh" ua && D.n "touchPoints" env > 1.0)
+  let ua = env.userAgent
+      ipad = D.matches "iPad" ua || (D.matches "Macintosh" ua && env.touchPoints > 1.0)
       name = if ipad then "iPad" else if D.matches "iPhone" ua then "iPhone" else if D.matches "Android" ua then "Android device" else if D.matches "Windows" ua then "Windows PC" else if D.matches "Macintosh" ua then "Mac" else if D.matches "Linux" ua then "Linux device" else "Remote device"
       versionPattern = "(?:CPU (?:iPhone )?OS|iPhone OS|Android|Windows NT|Mac OS X) ([0-9_.]+)"
       version = if D.matches versionPattern ua then " " <> D.replace "_" "." (D.replace ("^.*?" <> versionPattern <> ".*$") "$1" ua) else ""
@@ -117,7 +127,7 @@ deviceInfo env =
         "Mac" -> "macOS"
         "Linux device" -> "Linux"
         _ -> "Unknown platform"
-  in D.json {name, platform: platform <> version, client: if D.b "installed" env then "Sapiens4 Home Screen app" else "Sapiens4 browser"}
+  in D.json {name, platform: platform <> version, client: if env.installed then "Sapiens4 Home Screen app" else "Sapiens4 browser"}
 
 create :: Json -> Aff Transport
 create source = do
@@ -129,25 +139,36 @@ create source = do
     session <- Ref.new $ D.put "keys" (D.json {publicKey: public, secretKey: secret}) source
     socket <- Ref.new Nothing
     pending <- Ref.new O.empty
-    ready <- Ref.new false
-    blocked <- Ref.new ""
+    state <- Ref.new Disconnected
     serialRef <- Ref.new 0
     connection <- Ref.new ""
     generation <- Ref.new 0
-    pure {session,socket,pending,ready,blocked,serial:serialRef,connection,generation}
+    pure {session,socket,pending,state,serial:serialRef,connection,generation}
 
-invitation :: Json -> Aff Transport
+data InvitationError = InsecureOrigin | ExpiredInvitation
+
+invitationError :: InvitationError -> String
+invitationError = case _ of
+  InsecureOrigin -> "Open Sapiens4 over HTTPS."
+  ExpiredInvitation -> "Invitation expired or belongs to another server. Use the latest QR from your host."
+
+validateInvitation :: Environment -> Number -> Invitation -> Either InvitationError Unit
+validateInvitation env time value
+  | not env.secure = Left InsecureOrigin
+  | value.v /= protocol || value.relay /= env.origin || value.expires <= time || value.expires > time + 259260.0 || not (A.all (D.matches "^[A-Za-z0-9_-]{32,64}$") [value.room,value.token,value.secret]) || B.byteLength value.desktop /= 32 = Left ExpiredInvitation
+  | otherwise = Right unit
+
+invitation :: Invitation -> Aff Transport
 invitation data_ = do
-  env <- liftEffect B.environment
+  env <- liftEffect Platform.environment
   time <- (_ / 1000.0) <$> liftEffect B.now
-  unless (D.b "secure" env) $ throwError $ error "Open Sapiens4 over HTTPS."
-  unless (D.s "v" data_ == protocol && D.s "relay" data_ == D.s "origin" env && D.n "expires" data_ > time && D.n "expires" data_ <= time + 259260.0 && A.all (\key -> D.matches "^[A-Za-z0-9_-]{32,64}$" $ D.s key data_) ["room","token","secret"] && B.byteLength (D.s "desktop" data_) == 32) $ throwError $ error "Invitation expired or belongs to another server. Use the latest QR from your host."
-  when (D.s "public_id" data_ /= "") do
-    result <- toAffE $ B.request ("/api/corpora/" <> B.encodeURI (D.s "public_id" data_)) "GET" "" D.empty
+  either (throwError <<< error <<< invitationError) pure $ validateInvitation env time data_
+  when (data_.public_id /= "") do
+    result <- toAffE $ B.request ("/api/corpora/" <> B.encodeURI (data_.public_id)) "GET" "" D.empty
     let found = D.parse $ D.s "text" result
-    unless (D.n "status" result == 200.0 && D.s "desktop" found == D.s "desktop" data_ && D.n "expires" found > time) $ throwError $ error "Invitation replaced. Use the latest QR from your host."
+    unless (D.n "status" result == 200.0 && D.s "desktop" found == data_.desktop && D.n "expires" found > time) $ throwError $ error "Invitation replaced. Use the latest QR from your host."
   keys <- liftEffect B.keyPair
-  create $ D.put "keys" keys data_
+  create $ D.put "keys" keys $ D.json data_
 
 rejectAll :: Transport -> String -> Effect Unit
 rejectAll client message = do
@@ -182,16 +203,31 @@ consume client item = do
         let result = D.get "result" message
         done $ if D.s "error" result == "" then Right result else Left $ error $ D.s "error" result
 
+data RelayEvent = RelayReady | RelayRejected String | RelayMessages (Array Json) | RelayIgnored
+
+decodeRelayEvent :: String -> Either String RelayEvent
+decodeRelayEvent raw =
+  let value = D.parse raw
+  in if CU.length raw > 22008192 || not (D.valid value) then Left "Invalid relay frame" else case D.s "type" value of
+    "ready" -> Right RelayReady
+    "result" -> Right $ if D.s "error" value == "" then RelayIgnored else RelayRejected (D.s "error" value)
+    "messages" -> case toArray $ D.get "messages" value of
+      Just items | A.length items <= 20 -> Right $ RelayMessages items
+      _ -> Left "Invalid relay messages"
+    _ -> Right RelayIgnored
+
 connect :: Transport -> Aff Unit
 connect client = do
-  blocked <- liftEffect $ Ref.read client.blocked
-  unless (blocked == "") $ throwError $ error blocked
+  state <- liftEffect $ Ref.read client.state
+  case state of
+    Blocked reason -> throwError $ error reason
+    _ -> pure unit
   existing <- liftEffect $ Ref.read client.socket
   when (isNothing existing) do
     session <- liftEffect $ Ref.read client.session
     version <- liftEffect $ Ref.modify (_ + 1) client.generation
     liftEffect do
-      Ref.write false client.ready
+      Ref.write Connecting client.state
       B.uuid >>= flip Ref.write client.connection
     let current action = do
           generation <- Ref.read client.generation
@@ -200,23 +236,23 @@ connect client = do
       (current $ send client $ D.json {type: "auth", room: D.get "room" session, token: D.get "token" session})
       (\raw -> current do
         result <- Exception.try do
-          let value = D.parse raw
-          if CU.length raw > 22008192 || not (D.valid value) then close client else case D.s "type" value of
-            "ready" -> Ref.write true client.ready
-            "result" -> when (D.s "error" value /= "") $ rejectAll client $ D.s "error" value
-            "messages" -> if isNothing (toArray $ D.get "messages" value) || A.length (D.rows "messages" value) > 20 then close client else traverse_ (\item -> do
+          case decodeRelayEvent raw of
+            Left _ -> close client
+            Right RelayReady -> Ref.write Ready client.state
+            Right (RelayRejected reason) -> rejectAll client reason
+            Right (RelayMessages items) -> traverse_ (\item -> do
               consume client item
               id <- serial client
-              send client $ D.json {type: "ack", id, message: D.get "id" item}) (D.rows "messages" value)
-            _ -> pure unit
+              send client $ D.json {type: "ack", id, message: D.get "id" item}) items
+            Right RelayIgnored -> pure unit
         case result of
           Left _ -> close client
           Right _ -> pure unit)
       (\code -> current do
-        Ref.write false client.ready
+        Ref.modify_ disconnect client.state
         Ref.write Nothing client.socket
         let message = if code == 4001 then "Access revoked. Connect this corpora again." else if code == 4002 then "This connection is open in another window." else "This device is unreachable. Try again later."
-        when (code == 4001 || code == 4002) $ Ref.write message client.blocked
+        when (code == 4001 || code == 4002) $ Ref.write (Blocked message) client.state
         when (code == 4001) $ launchAff_ $ clear $ sessionKey session
         rejectAll client message)
     liftEffect $ Ref.write (Just socket) client.socket
@@ -224,15 +260,18 @@ connect client = do
   wait version 1000
   where
   wait version count = do
-    ready <- liftEffect $ Ref.read client.ready
-    blocked <- liftEffect $ Ref.read client.blocked
+    state <- liftEffect $ Ref.read client.state
     current <- liftEffect $ Ref.read client.generation
-    if current /= version then throwError $ error "Connection closed"
-    else if ready then pure unit
-    else if count <= 0 || blocked /= "" then do
-      liftEffect $ close client
-      throwError $ error $ D.fallback "This device is unreachable. Try again later." blocked
-    else delay (Milliseconds 10.0) *> wait version (count - 1)
+    if current /= version then throwError $ error "Connection closed" else case state of
+      Ready -> pure unit
+      Blocked reason -> liftEffect (close client) *> throwError (error reason)
+      _ | count <= 0 -> liftEffect (close client) *> throwError (error "This device is unreachable. Try again later.")
+        | otherwise -> delay (Milliseconds 10.0) *> wait version (count - 1)
+
+disconnect :: LinkState -> LinkState
+disconnect = case _ of
+  Blocked reason -> Blocked reason
+  _ -> Disconnected
 
 request :: Transport -> Int -> Json -> Aff Json
 request client timeout payload = do
@@ -243,7 +282,7 @@ request client timeout payload = do
   id <- liftEffect B.uuid
   nonce <- liftEffect $ B.randomBytes 24
   time <- liftEffect B.now
-  env <- liftEffect B.environment
+  env <- liftEffect Platform.environment
   connection <- liftEffect $ Ref.read client.connection
   let plain = D.encode $ D.merge (D.json {v: protocol, room: D.get "room" session, direction: "phone-to-desktop", corpora_id: D.at ["corpora","id"] session, connection_id: connection, device_info: deviceInfo env, id, expires: (time + I.toNumber timeout) / 1000.0}) payload
   when (B.byteLength (B.base64Encode plain) > 16000000) $ throwError $ error "Request is too large."
@@ -287,6 +326,6 @@ close client = do
   Ref.modify_ (_ + 1) client.generation
   socket <- Ref.read client.socket
   Ref.write Nothing client.socket
-  Ref.write false client.ready
+  Ref.modify_ disconnect client.state
   traverse_ B.socketClose socket
   rejectAll client "Connection closed"

@@ -1,6 +1,11 @@
 module Sapiens.Action where
 
+import Prelude (class Eq)
+
+import Sapiens.Form as F
+import Sapiens.Browser as Browser
 import Data.Argonaut.Core (Json)
+import Sapiens.Domain as X
 import Sapiens.Model (DialogKind, RoutinePage, ScheduleAction)
 import Sapiens.Navigation (Activity, Scope, Pane, Period)
 import Web.Event.Event (Event)
@@ -36,35 +41,35 @@ data Action
   | RoutineRefreshSchedule
   | RoutineDiscardChanges
   | ToggleExpanded String
-  | Clarify Json
+  | Clarify X.Workload
   | Menu String
   | CloseMenu
-  | OpenDialog DialogKind Json
+  | OpenDialog DialogKind F.Context
   | CloseDialog
-  | Field String String
-  | CheckField String String Boolean
+  | Field F.Field String
+  | CheckField String Boolean
   | SubmitDialog
-  | DialogCommand String Json
+  | DialogCommand DialogIntent
   | Copy String String
   | Scroll
   | UserScroll
   | Resize
-  | Global String Json
+  | Global Browser.GlobalEvent
   | GlobalEvent String Event
   | DrainNative
-  | NativeReport Json
+  | NativeReport Browser.NativeReport
   | MentionChoice Int
   | MentionCursor
   | RefreshTheme
   | Theme
   | Persist
   | EnterCorpora String
-  | Lifecycle String
+  | Lifecycle X.LifecycleIntent
   | ShowArchived Boolean
   | Mutate String String Json Success
-  | AttachmentKind String
+  | AttachmentKind X.AttachmentKind
   | RemoveAttachment String
-  | Browser String Json
+  | Browser Browser.Command
   | Address String
   | OpenAddress
   | EditAddress
@@ -84,3 +89,25 @@ data Action
   | NoteAnchor String
 
 data Success = Refresh | CloseAndRefresh String | SavedPrompt String
+
+data DialogIntent
+  = SuggestNames
+  | CreateAgent
+  | MentionGroup X.Entity
+  | ResetRelay
+  | InstallPrompt
+  | DeleteTask
+  | AddRelay
+  | BackRelay
+  | SelectRelay F.Relay
+  | ConfirmRelay
+  | EditRelay String
+  | ArchiveRelay F.Relay
+  | ImportRelay
+  | DoneRelay
+  | AcceptRelay
+  | HostPair HostIntent
+
+data HostIntent = RevokeHost | ReplaceHost | InviteHost | ApproveHost String
+
+derive instance eqHostIntent :: Eq HostIntent

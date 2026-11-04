@@ -27,6 +27,28 @@ RSpec.describe 'Navigating work', :desktop do
     expect(desktop.find('Message ChiefSapi')['value']).to eq('Draft with a saved appearance')
   end
 
+  it 'retains the conversation and unsent draft across a malformed snapshot and recovers' do
+    @host = desktop_host
+    malformed = false
+    proxy = HostProxy.new(host) do |request, response|
+      if malformed && request.path.end_with?('/api/state')
+        [response[0], response[1].merge('agents' => 'invalid agent collection'), response[2]]
+      else
+        response
+      end
+    end
+    start_desktop(proxy.url)
+    desktop.fill('Message ChiefSapi', 'Keep this draft during recovery')
+    malformed = true
+    desktop.see('Invalid snapshot response: agents: expected array')
+    expect(desktop.find('Message ChiefSapi')['value']).to eq('Keep this draft during recovery')
+    malformed = false
+    desktop.see('Active')
+    expect(desktop.find('Message ChiefSapi')['value']).to eq('Keep this draft during recovery')
+  ensure
+    proxy&.close
+  end
+
   it 'lets a person send a message and read the reply' do
     start_desktop
     desktop.fill('Message ChiefSapi', 'Hello from the workspace')

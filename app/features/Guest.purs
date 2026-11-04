@@ -1,21 +1,28 @@
 module Sapiens.Guest where
 
 import Prelude
+import Sapiens.Platform as Platform
 import Data.Argonaut.Core (Json)
 import Data.Array as A
 import Effect (Effect)
 import Libs4.Browser as B
 import Sapiens.Data as D
+import Sapiens.Environment (Environment)
+import Sapiens.Browser as Browser
 
 applyTheme :: Json -> Effect Json
 applyTheme settings = do
-  env <- B.environment
-  let managed = D.s "href" env == "about:blank" || A.elem (D.s "contentType" env) ["text/plain","application/json","application/xml","text/xml"]
-      dark = if D.valid $ D.get "dark" settings then D.b "dark" settings else D.b "dark" env
-      background = D.fallback (if dark then "#000" else "#fff") $ D.s "background" settings
-      foreground = D.fallback (if dark then "#eee" else "#171717") $ D.s "foreground" settings
-  when managed $ B.styleSheet "sapiens-document-theme" $ "html,body{background:" <> background <> ";color:" <> foreground <> ";color-scheme:" <> (if dark then "dark" else "light") <> "}pre{white-space:pre-wrap;overflow-wrap:anywhere}"
+  env <- Platform.environment
+  let theme = Browser.themeSettings env.dark settings
+      managed = managedDocument env
+  when managed $ B.styleSheet "sapiens-document-theme" $ style theme
   pure $ D.bool managed
+
+managedDocument :: Environment -> Boolean
+managedDocument env = env.href == "about:blank" || A.elem env.contentType ["text/plain","application/json","application/xml","text/xml"]
+
+style :: Browser.ThemeSettings -> String
+style theme = "html,body{background:" <> theme.background <> ";color:" <> theme.foreground <> ";color-scheme:" <> (if theme.dark then "dark" else "light") <> "}pre{white-space:pre-wrap;overflow-wrap:anywhere}"
 
 main :: Effect Unit
 main = do

@@ -154,18 +154,26 @@ snapshotUnlocked s = do
  let groupTurns=M.fromList [(at request "id",at g "id") | g<-groups,request<-items g "requests"]
      projected=[maybe t (\gid->put "group" (str gid) t) (M.lookup (at t "id") groupTurns) | t<-turns]
  pure $ obj [("agents",arr agentRows),("turns",arr projected),("preferences",prefs),("corpora",corpora),("groups",arr groups),("routines",arr routines),("standalone_workflows",standalone),("personal_routines",get personal "definitions"),("routine_errors",get personal "errors"),("creation_template",str (T.strip creation)),("computer",obj [("owner",owner),("built",Bool built),("platform",str (if os=="mingw32" then "win32" else T.pack os))]),("pulses",arr pulses),("events",events),("pulse",pulse),("provider",str "codex"),("activity",obj [(agentIdText (runOwner r),v) | (r,v)<-activity]),("run_activity",obj [(runIdText (runId r),v) | (r,v)<-activity]),("main_agent_id",str chief),("workloads",arr (D.workSummaries works)),("attachment_drafts",obj drafts),("orchestration",obj orchestration)]
+validatePreferenceShape :: Value -> Validation ()
+validatePreferenceShape d = do
+ check (all (`elem` ["selected","panel","scope","groupView","panes","drafts","attachment_drafts"]) (keys d)) 400 "Unknown preference field"
+ forM_ ["panes","drafts","attachment_drafts"] $ \k -> when (has d k) $ check (case get d k of Object _->True; _->False) 400 (k<>" must be an object")
+
+validatePreferences :: [Value] -> [Value] -> Value -> Validation ()
+validatePreferences rows groups d = do
+ when (has d "selected") $ check (get d "selected" `elem` map (`get` "id") (rows++groups)) 400 "Unknown selected Sapi"
+ when (get d "groupView"/=Null) $ check (get d "groupView" `elem` map (`get` "id") groups) 400 "Unknown Group view"
+ check (get d "panel" `fallback` str "chat" `elem` map str ["chat","tasks","notes","work","updates"]) 400 "Unknown panel"
+ check (get d "scope" `fallback` str "all" `elem` map str ["all","sapis","groups"]) 400 "Unknown view"
+ forM_ (pairs (get d "panes")) $ \(k,v) -> check (k `elem` ["sidebar","chat","workspace"] && (case v of Bool _->True; _->False)) 400 "Invalid panel visibility"
+ forM_ (pairs (get d "drafts")) $ \(_,v) -> check (case v of String t->T.length t<=16000; _->False) 400 "Invalid draft"
+
 savePreferences :: Service -> Value -> IO Value
 savePreferences s d = do
- require (all (`elem` ["selected","panel","scope","groupView","panes","drafts","attachment_drafts"]) (keys d)) 400 "Unknown preference field"
- forM_ ["panes","drafts","attachment_drafts"] $ \k -> when (has d k) $ require (case get d k of Object _->True; _->False) 400 (k<>" must be an object")
+ validated (validatePreferenceShape d)
  rows <- DB.agents s
  groups <- DB.values s DB.Groups
- when (has d "selected") $ require (get d "selected" `elem` map (`get` "id") (rows++groups)) 400 "Unknown selected Sapi"
- when (get d "groupView"/=Null) $ require (get d "groupView" `elem` map (`get` "id") groups) 400 "Unknown Group view"
- require (get d "panel" `fallback` str "chat" `elem` map str ["chat","tasks","notes","work","updates"]) 400 "Unknown panel"
- require (get d "scope" `fallback` str "all" `elem` map str ["all","sapis","groups"]) 400 "Unknown view"
- forM_ (pairs (get d "panes")) $ \(k,v) -> require (k `elem` ["sidebar","chat","workspace"] && (case v of Bool _->True; _->False)) 400 "Invalid panel visibility"
- forM_ (pairs (get d "drafts")) $ \(_,v) -> require (case v of String t->T.length t<=16000; _->False) 400 "Invalid draft"
+ validated (validatePreferences rows groups d)
  forM_ (pairs (get d "attachment_drafts")) $ \(a,ids) -> void (resolveAttachments s a ids False)
  prefs <- DB.singleton s DB.Preferences
  let current=merge prefs d

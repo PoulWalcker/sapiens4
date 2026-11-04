@@ -28,6 +28,21 @@ RSpec.describe 'Workspace and memory contracts' do
     expect(host.control(owner, 'workspace')['tabs'].size).to eq(1)
   end
 
+  it 'rejects invalid edits atomically and selects the last remaining tab on close' do
+    owner = chief
+    first = host.control(owner, 'workspace_open', url: 'https://example.com')['workspace']['tabs'].first
+    second = host.control(owner, 'workspace_open', url: 'about:blank')['workspace']['tabs'].last
+    before = host.control(owner, 'workspace')
+    expect(host.request('POST', "/api/agents/#{owner}/control", {op: 'workspace_zoom', id: second['id'], factor: 0.1}).first).to eq(400)
+    expect(host.request('POST', "/api/agents/#{owner}/control", {op: 'workspace_open', id: 'absent', url: 'https://example.org'}).first).to eq(404)
+    expect(host.control(owner, 'workspace')).to eq(before)
+    host.control(owner, 'workspace_close', id: second['id'])
+    expect(host.control(owner, 'workspace')['active_tab']).to eq(first['id'])
+    host.control(owner, 'workspace_close', id: first['id'])
+    host.restart
+    expect(host.control(owner, 'workspace')).to include('active_tab' => nil, 'tabs' => [])
+  end
+
   it 'accepts current browser observations but ignores stale navigation and closed tabs' do
     owner = chief
     tab = host.control(owner, 'workspace_open', url: 'https://example.com')['workspace']['tabs'].first

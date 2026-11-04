@@ -83,9 +83,9 @@ fork s running version input context nodeId node=do
     require (D.workField work "executionGate"==toJSON ExecutionOpen && not (has (toJSON work) "workflowHalt")) 409 "Workflow stopped before fork publication"
     let children=zip (map text (items node "children")) identities
         cohort=obj [("parent",toJSON (runId running)),("fork",str nodeId),("join",get node "join"),("children",arr (map (str . snd) children)),("requestHash",str (canonicalHash request)),("status",str "waiting")]
-        makeCall (entry,identity)=D.setCallFields [("executionBinding",D.callField parent "executionBinding"),("workflowChild",mergeFields [("entry",str entry),("join",get node "join"),("cohort",str key),("parent",toJSON (runId running)),("version",version),("input",input),("root",str (D.workloadId work))] context)] (D.newCall (RunId identity) (runOwner running) (Just (runId running)) D.Execution D.CallQueued "Run the pinned workflow child region")
+        makeCall (entry,identity)=D.setCallFields [("executionBinding",D.callField parent "executionBinding"),("workflowChild",mergeFields [("entry",str entry),("join",get node "join"),("cohort",str key),("parent",toJSON (runId running)),("version",version),("input",input),("root",str (D.workloadId work))] context)] (D.newCall (RunId identity) (runOwner running) (Just (runId running)) (D.QueuedAt D.Execution) "Run the pinned workflow child region")
         following=map makeCall children
-        updated=D.setWorkField "workflowCohorts" (put key cohort cohorts) work {D.workCalls=fmap (\call->if D.callIdentity call==runId running then D.setCallFields [("workflowWait",str key)] (call {D.callState=D.CallQueued}) else call) (D.workCalls work) <> NE.fromList following}
+        updated=D.setWorkField "workflowCohorts" (put key cohort cohorts) work {D.workCalls=fmap (\call->if D.callIdentity call==runId running then D.setCallFields [("workflowWait",str key)] (call {D.callProgress=D.QueuedAt (D.callNode call)}) else call) (D.workCalls work) <> NE.fromList following}
     DB.putValueOn db DB.Workloads (D.workloadId work) (toJSON updated)
     Managed.transitionOn db (runIdText (runId running)) (put "workflowWait" (str key) . put "status" (str "queued"))
     forM_ following $ \call->do
@@ -169,7 +169,7 @@ defer s running version context nodeId node selected=do
         waiting=put "status" (str "waiting") record
         nodeReceipt=mergeFields [("status",str "waiting"),("wait",str key)] receipt
         changed=publish context nodeId nodeReceipt (D.setWorkField "workflowBudget" idle (D.setWorkField "workflowWaits" (put key waiting waits) work))
-        queued=changed {D.workCalls=fmap (\call->if D.callIdentity call==runId running then D.setCallFields [("workflowWait",str key)] (call {D.callState=D.CallQueued}) else call) (D.workCalls changed)}
+        queued=changed {D.workCalls=fmap (\call->if D.callIdentity call==runId running then D.setCallFields [("workflowWait",str key)] (call {D.callProgress=D.QueuedAt (D.callNode call)}) else call) (D.workCalls changed)}
     DB.putValueOn db DB.Workloads (D.workloadId work) (toJSON queued)
     Managed.transitionOn db (runIdText (runId running)) (put "workflowWait" (str key) . put "status" (str "queued"))
     pure (Left key)
@@ -313,7 +313,7 @@ quiesce :: Service -> Run -> IO ()
 quiesce s running=do
  (original,_)<-D.getWork s (runId running)
  let pending=any (\call->child call && D.callState call/=D.CallCompleted) (D.workCalls original)
- when pending $ change s (runId running) $ \current->D.setWorkField "workflowHalt" (str "Parent finalization prevents descendant admission") current {D.workCalls=fmap (\call->if child call && D.callState call==D.CallQueued then call {D.callState=D.CallCancelled} else call) (D.workCalls current)}
+ when pending $ change s (runId running) $ \current->D.setWorkField "workflowHalt" (str "Parent finalization prevents descendant admission") current {D.workCalls=fmap (\call->if child call && D.callState call==D.CallQueued then call {D.callProgress=D.CancelledAt (D.callNode call)} else call) (D.workCalls current)}
  let waitForExit count=do
       (work,_)<-D.getWork s (runId running)
       let identities=[D.callIdentity call | call<-NE.toList (D.workCalls work),child call]
@@ -332,7 +332,7 @@ stop s identity=do
   DB.connection s $ \db->SQL.withTransaction db $ do
    let waits=obj [(key,if at value "status"=="waiting" then mergeFields [("status",str "cancelled"),("reason",str "Stopped before wake")] value else value) | (key,value)<-pairs (D.workField work "workflowWaits")]
        changed=D.setWorkField "workflowWaits" waits (D.setWorkField "workflowHalt" (str "Stopped by Admin") (D.setWorkField "executionGate" (toJSON ExecutionStopped) work))
-       stopped=changed {D.workCalls=fmap (\call->if D.callState call==D.CallQueued then call {D.callState=D.CallCancelled} else call) (D.workCalls changed)}
+       stopped=changed {D.workCalls=fmap (\call->if D.callState call==D.CallQueued then call {D.callProgress=D.CancelledAt (D.callNode call)} else call) (D.workCalls changed)}
    DB.putValueOn db DB.Workloads (D.workloadId work) (toJSON stopped)
    forM_ [call | call<-NE.toList (D.workCalls stopped),child call,D.callState call==D.CallCancelled] $ \call->
     Managed.transitionOn db (runIdText (D.callIdentity call)) (put "status" (str "cancelled"))

@@ -1,5 +1,7 @@
 module Sapiens.Routines (view) where
 
+import Sapiens.Form as F
+import Sapiens.Domain as X
 import Prelude
 import Data.Argonaut.Core (Json, stringify)
 import Data.Array as A
@@ -46,12 +48,12 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
   if M.isGroup (M.selected m) then [V.textNode "h1" [] "Routines",V.p "routine-muted" "Personal routines belong to an individual Sapi."] else content <> scheduleFeedback
   where
   state = M.routineView m
-  saved = A.filter (\r -> D.s "owner" r == m.selected) $ D.rows "personal_routines" m.snapshot
-  old = A.filter (\r -> D.s "owner" r == m.selected && not (A.any (\s -> D.s "id" s == D.s "id" r) saved)) $ D.rows "routines" m.snapshot
+  saved = A.filter (\r -> D.s "owner" r == m.selected) $ D.rows "personal_routines" m.snapshot.automation
+  old = A.filter (\r -> D.s "owner" r == m.selected && not (A.any (\s -> D.s "id" s == D.s "id" r) saved)) $ D.rows "routines" m.snapshot.automation
   routines = map Managed saved <> map Legacy old
   find id = A.find ((id == _) <<< D.s "id" <<< record) routines
   link caption page = V.button "routine-link" caption $ RoutineNavigate page
-  errors = map (\op -> V.p "routine-problem" $ D.s "error" $ D.get "response" op) $ A.filter (\op -> D.s "owner" op == m.selected) $ D.rows "routine_errors" m.snapshot
+  errors = map (\op -> V.p "routine-problem" $ D.s "error" $ D.get "response" op) $ A.filter (\op -> D.s "owner" op == m.selected) $ D.rows "routine_errors" m.snapshot.automation
   badge value = V.span [V.cls "routine-status"] value
   interval routine = D.s "trigger" (record routine) == "interval" || not (managed routine)
   whenText routine = frequency <> next
@@ -61,14 +63,14 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     frequency = if interval routine then "Every " <> show minutes <> (if minutes == 1 then " minute" else " minutes") else "On request"
     next = if D.b "deleted" r then " · No future runs" else if not (interval routine) then "" else if D.b "paused" r then " · Schedule paused" else " · Next: " <> formatDate (D.s "nextDue" r)
   formatDate value = if value == "" then "Time unavailable" else B.formatDate "en-GB" (D.json {day:"numeric",month:"short",hour:"2-digit",minute:"2-digit",second:"2-digit"}) value
-  timestamp run = D.fallback (D.s "created" $ fromMaybe D.empty $ A.find (\t -> D.s "id" t == D.s "id" run) $ D.rows "turns" m.snapshot) $ D.s "created" run
+  timestamp run = D.fallback (D.s "created" $ fromMaybe D.empty $ A.find (\t -> D.s "id" t == D.s "id" run) $ D.rows "turns" m.snapshot.automation) $ D.s "created" run
   triggerLabel run = case D.s "trigger" run of
     "manual" -> "Manual run"
     "interval" -> "Scheduled run"
     _ -> "Trigger not recorded"
   runs routine = case routine of
     Managed r -> D.rows "runs" r
-    Legacy r -> map legacyRun $ A.filter (\w -> D.str (D.at ["origin","routine"] w) == D.s "id" r) $ D.rows "workloads" m.snapshot
+    Legacy r -> map legacyRun $ A.filter (\w -> D.str (D.at ["origin","routine"] w) == D.s "id" r) $ D.rows "workloads" m.snapshot.automation
   legacyRun work = D.json {id:D.get "id" work,status:case D.s "state" work of
     "Completed" -> "done"
     "Queued" -> "queued"
@@ -87,7 +89,7 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
   menu routine = V.node "details" [V.cls "routine-menu"]
     [V.node "summary" [V.label $ "Manage " <> title routine] [V.text "⋯"]
     ,V.div "" $ if D.b "deleted" $ record routine then [] else case routine of
-      Managed r -> [link "Settings" $ M.RoutineSettings (D.s "id" r)] <> scheduleControl routine <> [V.button "routine-link" "Delete…" $ OpenDialog M.RoutineDelete r]
+      Managed r -> [link "Settings" $ M.RoutineSettings (D.s "id" r)] <> scheduleControl routine <> [V.button "routine-link" "Delete…" $ OpenDialog M.RoutineDelete $ F.RoutineRecord r]
       Legacy r -> [V.button "routine-link" "Edit through chat" $ PrepareDraft ("Edit @" <> D.s "id" r <> " ( " <> D.s "title" r <> " )\nEdit Frequency (prev every " <> show (D.int $ D.get "minutes" r) <> " minutes): new every XXX minutes\nEdit Execution Prompt as: " <> D.s "prompt" r) "XXX",V.button "routine-link" (if D.b "paused" r then "Resume schedule through chat" else "Pause schedule through chat") $ PrepareDraft ((if D.b "paused" r then "Resume Scheduled Routine" else "Pause Scheduled Routine") <> "\n@" <> D.s "id" r) ""]]
   scheduleControl routine = if not (managed routine && interval routine) then [] else
     [V.control [V.cls "routine-link",V.disabled $ case state.scheduleRequest of
@@ -103,7 +105,7 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
       [V.p "" $ "Schedule request: " <> D.s "title" request.record,V.p "" $ if request.busy then "Waiting for confirmation…" else request.error] <>
       if request.busy then [] else [V.button "button" "Retry unchanged" RoutineRetrySchedule,V.button "routine-link" "Refresh current schedule" RoutineRefreshSchedule]]
   runButton routine = case routine of
-    Managed r -> V.button "button" "Run now" $ OpenDialog M.RoutineRun r
+    Managed r -> V.button "button" "Run now" $ OpenDialog M.RoutineRun $ F.RoutineRecord r
     Legacy r -> V.button "button" "Run through chat" $ PrepareDraft ("@" <> D.s "id" r <> "\nRun it now.") ""
   heading routine history single =
     [link (if single then "← History" else "← All routines") (if single then M.RoutineHistory id else M.RoutineList false)
@@ -136,8 +138,8 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     (if current == "Decline" then [V.p "" $ D.s "reconsiderCondition" analysis] else []) <>
     [V.when (D.s "id" analysis /= "") $ V.node "details" [] [V.node "summary" [] [V.text "Analysis usage"],V.p "routine-muted" $ if D.b "conflict" usage then "Purpose: automation analysis · Usage unknown: provider reports conflict." else "Purpose: automation analysis · Input tokens: " <> known "inputTokens" usage <> " · Output tokens: " <> known "outputTokens" usage,V.p "routine-muted" $ "Duration (ms): " <> known "durationMs" analysis <> " · Price: Unknown"]] <>
     (if D.b "deleted" r then [] else if A.elem current ["queued","running"] then
-      [V.button "routine-link" "Stop analysis…" $ OpenDialog M.RoutineStopAnalysis $ D.put "analysis" (D.get "id" analysis) r]
-     else if A.null (runs routine) then [] else [V.button "routine-link" "Reconsider automation…" $ OpenDialog M.RoutineAnalyze r])
+      [V.button "routine-link" "Stop analysis…" $ OpenDialog M.RoutineStopAnalysis $ F.RoutineRecord $ D.put "analysis" (D.get "id" analysis) r]
+     else if A.null (runs routine) then [] else [V.button "routine-link" "Reconsider automation…" $ OpenDialog M.RoutineAnalyze $ F.RoutineRecord r])
     where
     r = record routine
     analysis = D.get "analysis" r
@@ -200,7 +202,7 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
       "tool_work" -> "Doctor is performing a scoped tool operation."
       "waiting_independent_confirmation" -> "Waiting for file access or independent confirmation."
       _ -> "Doctor diagnoses saved evidence."
-    ,V.when (A.elem (D.s "status" repair) ["waiting_access","waiting_doctor"]) $ V.button "routine-link" "Doctor file access…" $ OpenDialog M.DoctorAccess $ record routine
+    ,V.when (A.elem (D.s "status" repair) ["waiting_access","waiting_doctor"]) $ V.button "routine-link" "Doctor file access…" $ OpenDialog M.DoctorAccess $ F.RoutineRecord $ record routine
     ,V.node "details" [] ([V.node "summary" [] [V.text "Doctor access and actions"]] <> map (\resource -> V.p "routine-muted" $ D.s "access" resource <> " · " <> D.s "path" resource) (D.rows "resources" $ D.get "access" repair) <> map (\op -> V.p "routine-muted" $ D.s "tool" op <> " · " <> D.s "status" op <> " · " <> D.s "error" op) (A.filter (\op -> D.s "purpose" op == "repair_tool") $ D.rows "operations" repair))
     ,providerWaitPanel $ D.get "providerWait" repair
     ,V.p "" $ "Repair: " <> D.s "status" repair
@@ -211,9 +213,9 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     ,V.p "routine-muted" $ "Attempts: " <> show (A.length $ D.rows "attempts" repair) <> " · Measured active time (ms): " <> show (D.int $ D.get "measuredMilliseconds" repair) <> " · Reserved (ms): " <> show (D.int $ D.get "reservedMilliseconds" repair) <> " / " <> show (D.n "limitMilliseconds" repair)
     ,V.p "routine-muted" $ "Remaining active repair time (ms): " <> show (D.n "remainingMilliseconds" repair)
     ,V.when (D.s "status" repair == "exhausted") $ V.div "routine-actions"
-      [V.control [V.cls "routine-link",V.disabled $ not $ D.b "canGrant" repair] "Continue repair…" $ OpenDialog M.RepairGrant $ record routine
+      [V.control [V.cls "routine-link",V.disabled $ not $ D.b "canGrant" repair] "Continue repair…" $ OpenDialog M.RepairGrant $ F.RoutineRecord $ record routine
       ,V.p "routine-muted" $ D.s "grantBlocker" repair]
-    ,V.when (not $ A.elem (D.s "status" repair) ["recovered","stale","stopped"]) $ V.button "routine-link" "Stop repair…" $ OpenDialog M.RepairStop $ record routine
+    ,V.when (not $ A.elem (D.s "status" repair) ["recovered","stale","stopped"]) $ V.button "routine-link" "Stop repair…" $ OpenDialog M.RepairStop $ F.RoutineRecord $ record routine
     ,V.node "details" [] ([V.node "summary" [] [V.text "Repair continuation grants"]] <> map (\grant -> V.p "routine-muted" $ "Added " <> show (D.n "additionalMilliseconds" grant / 60000.0) <> " active minutes · " <> D.s "reason" grant <> " · " <> formatDate (D.s "created" grant)) (D.rows "grants" repair))
     ,V.p "routine-muted" $ "Current candidate: " <> D.fallback "None" (D.s "candidate" repair)
     ,V.p "" $ D.s "terminalReason" repair
@@ -225,7 +227,7 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
   result routine run =
     [V.p "routine-muted" $ status (D.s "status" run) <> " · " <> formatDate (timestamp run) <> " · " <> triggerLabel run
     ,V.when (managed routine) $ V.p "routine-muted" $ "Assessment: " <> D.s "status" (D.get "assessment" run) <> if D.b "historical" run then " · Historical revision" else ""
-    ,V.p "routine-muted" $ "Responsible Sapi: " <> D.s "name" (M.agent m $ D.s "currentOwner" run)
+    ,V.p "routine-muted" $ "Responsible Sapi: " <> (M.agent m $ D.s "currentOwner" run).name
     ,V.when (D.s "message" run /= "") $ V.p "routine-notice" $ D.s "message" run
     ,V.when (D.s "result" run /= "") $ V.div "routine-result" $ T.paragraphs m $ D.s "result" run
     ,V.when (D.s "error" run /= "") $ V.p "routine-problem" $ D.s "error" run
@@ -239,8 +241,8 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     ,parallelPanel run
     ,stagePanel run
     ,V.when (managed routine) $ evidencePanel routine run
-    ,V.when (managed routine && not (active run)) $ V.button "routine-link" "Reject result…" $ OpenDialog M.RoutineReject $ D.put "revision" (D.at ["snapshot","revision"] run) $ D.put "run" (D.get "id" run) (record routine)
-    ,V.div "routine-actions" $ reply run <> if managed routine && active run then [V.button "button" "Stop this run…" $ OpenDialog M.RoutineStop $ D.put "run" (D.get "id" run) (record routine)] else []]
+    ,V.when (managed routine && not (active run)) $ V.button "routine-link" "Reject result…" $ OpenDialog M.RoutineReject $ F.RoutineRecord $ D.put "revision" (D.at ["snapshot","revision"] run) $ D.put "run" (D.get "id" run) (record routine)
+    ,V.div "routine-actions" $ reply run <> if managed routine && active run then [V.button "button" "Stop this run…" $ OpenDialog M.RoutineStop $ F.RoutineRecord $ D.put "run" (D.get "id" run) (record routine)] else []]
   externalPanel routine run = V.when (D.valid external) $ V.div "routine-notice" $
     [V.textNode "h3" [] "Content and delivery"
     ,V.p "" $ "Content · " <> if D.s "status" (D.get "contentAcceptance" external) == "accepted" then "Accepted" else if active run then "Pending" else "Unresolved"
@@ -301,8 +303,8 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     "waiting" -> "Waiting"
     "skipped" -> "Skipped"
     _ -> "Not started"
-  reply run = case A.find (\w -> D.s "id" w == D.s "id" run && D.s "state" w == "WaitingForAdmin") $ D.rows "workloads" m.snapshot of
-    Just work -> [V.button "button" ("Reply to " <> D.s "name" (M.agent m $ D.s "owner" work)) $ Clarify work]
+  reply run = case A.find (\w -> D.s "id" w == D.s "id" run && D.s "state" w == "WaitingForAdmin") $ D.rows "workloads" m.snapshot.automation of
+    Just work -> [V.button "button" ("Reply to " <> (M.agent m $ D.s "owner" work).name) $ Clarify $ X.workload work]
     Nothing -> []
   evidencePanel routine run = V.div "routine-evidence" $
     [V.button "routine-link" "Evidence and usage" $ RoutineEvidence (D.s "id" $ record routine) (D.s "id" run)] <>

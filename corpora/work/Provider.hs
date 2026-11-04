@@ -217,6 +217,24 @@ operationUsage operation=own++concatMap operationUsage [get operation "correctio
  where own=case items operation "attempts" of
         []->[operation]
         attempts->[mergeFields [("id",str (at operation "id"<>":"<>T.pack (show (int (get attempt "number"))))),("operation",get operation "id"),("attempt",get attempt "number"),("status",get attempt "status"),("evidence",get attempt "evidence"),("usageUnknown",get attempt "usageUnknown")] operation | attempt<-attempts]
+data ProviderState = ProviderState
+ { providerTools :: M.Map Text Text, providerMessage :: Maybe Text }
+
+providerStep :: Double -> ProviderEvent -> ProviderState -> Value -> Validation (ProviderState,Value)
+providerStep time event state activity = case event of
+ ProviderFailed _ -> Left (APIError 500 "Codex turn failed; provider details omitted")
+ _ -> Right (updated,mergeFields [("updated",toJSON time),("phase",str (if M.null tools then "Waiting for model" else "Running tool")),("tool",str (fromMaybe "" (listToMaybe (M.elems tools))))] reported)
+ where
+ updated=case event of
+  ToolStarted key label | T.length key<=256 && M.size (providerTools state)<256 -> state { providerTools=M.insert key label (providerTools state) }
+  ToolCompleted key _ -> state { providerTools=M.delete key (providerTools state) }
+  AgentMessage message -> state { providerMessage=Just message }
+  _ -> state
+ tools=providerTools updated
+ reported=case event of
+  SessionStarted session -> put "session" (str session) activity
+  ToolCompleted _ label -> put "last_action" (str label) activity
+  _ -> activity
 
 modelDefaults :: IO (Text,Text)
 modelDefaults = (,) <$> (maybe "gpt-6-sol" T.pack <$> lookupEnv "SAPIENS_CODEX_MODEL") <*> (maybe "high" T.pack <$> lookupEnv "SAPIENS_CODEX_REASONING_EFFORT")
@@ -423,8 +441,7 @@ invokeWithSettingsFor maintenance s run policy settings pinned input observe = w
    _ -> failure 500 "Provider process did not expose its configured pipes"
   modifyMVar_ (runProcess run) (const (pure (Just ph)))
   mapM_ (`hSetBinaryMode` True) [hin,hout,herr]
-  tools <- newIORef M.empty
-  final <- newIORef Nothing
+  stream <- newIORef (ProviderState M.empty Nothing)
   timedOut <- newIORef False
   terminalFailure <- newIORef Nothing
   let secrets=[T.pack value | (key,value)<-environment,sensitiveKey (T.pack key),length value>=4]
@@ -440,16 +457,15 @@ invokeWithSettingsFor maintenance s run policy settings pinned input observe = w
            Error _ -> failure 500 "Provider event schema was invalid; payload omitted"
            Success value -> pure value
           case event of
-           SessionStarted session -> modifyIORef' (runActivity run) (put "session" (str session))
-           ToolStarted key label -> modifyIORef' tools (\current -> if T.length key<=256 && M.size current<256 then M.insert key label current else current)
-           ToolCompleted key label -> modifyIORef' tools (M.delete key) >> modifyIORef' (runActivity run) (put "last_action" (str label))
-           AgentMessage message -> writeIORef final (Just message)
            ProviderFailed value | maintenance -> writeIORef terminalFailure (Just (failureClass (at (get value "error") "message")))
-           ProviderFailed _ -> failure 500 "Codex turn failed; provider details omitted"
-           OtherEvent -> when (not maintenance && at rawEvent "type"=="error") (failure 500 "Codex reported an error; provider details omitted")
-          current <- readIORef tools
-          updated <- realToFrac . (*1000) <$> getPOSIXTime :: IO Double
-          modifyIORef' (runActivity run) (mergeFields [("updated",toJSON updated),("phase",str (if M.null current then "Waiting for model" else "Running tool")),("tool",str (fromMaybe "" (listToMaybe (M.elems current))))])
+           OtherEvent | not maintenance && at rawEvent "type"=="error" -> failure 500 "Codex reported an error; provider details omitted"
+           _ -> do
+            state <- readIORef stream
+            activity <- readIORef (runActivity run)
+            time <- realToFrac . (*1000) <$> getPOSIXTime :: IO Double
+            (updated,reported) <- validated (providerStep time event state activity)
+            writeIORef stream updated
+            writeIORef (runActivity run) reported
   withAsync ((BS.hPut hin (TE.encodeUtf8 input) `catch` (\(_::IOException) -> pure ())) `finally` hClose hin) $ \writer ->
    withAsync (drainBounded herr (\_ _ -> pure ())) $ \stderrReader ->
     withAsync (do
@@ -480,7 +496,7 @@ invokeWithSettingsFor maintenance s run policy settings pinned input observe = w
      require (exit == ExitSuccess) 500 "codex exec failed; provider stdout and stderr omitted"
      oversized <- captureOversized <$> readIORef capture
      require (not oversized) 500 "Provider event exceeded the 2 MiB transport limit; result is unresolved"
-     readIORef final >>= maybe (failure 500 "Codex completed without an agent message.") pure
+     (providerMessage <$> readIORef stream) >>= maybe (failure 500 "Codex completed without an agent message.") pure
  elapsed <- getMonotonicTimeNSec
  modifyIORef' capture (mapSnapshot (\e -> e {evidenceFinished=True,evidenceDuration=Just (fromIntegral (elapsed-before)/1000000)}))
  saved <- try persist :: IO (Either SomeException ())

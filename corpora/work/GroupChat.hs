@@ -26,8 +26,10 @@ import GroupModel
 import GroupWork
 
 mentions :: Service -> Value -> Text -> IO [Text]
-mentions s group content = do
- rows <- DB.agents s
+mentions s group content = DB.agents s >>= validated . mentionedMembers group content
+
+mentionedMembers :: Value -> Text -> [Value] -> Validation [Text]
+mentionedMembers group content rows = do
  let members = filter ((`elem` items group "members") . (`get` "id")) rows
      word c = isAlphaNum c || c == '_'
      mentioned name = any (\(before,remaining) ->
@@ -35,7 +37,7 @@ mentions s group content = do
        let after = T.drop (T.length name + 1) remaining
        in T.null after || not (word (T.head after) || T.head after `elem` (":#+|()&$^-" :: String) || (T.head after == '.' && T.length after > 1 && word (T.index after 1)))) (T.breakOnAll ("@" <> name) content)
  found <- filterM (\row -> if mentioned (at row "name") then do
-   require (length (filter ((== at row "name") . (`at` "name")) members) == 1) 400 "Ambiguous mention; address the member by target ID"
+   check (length (filter ((== at row "name") . (`at` "name")) members) == 1) 400 "Ambiguous mention; address the member by target ID"
    pure True
   else pure False) members
  pure (map (`at` "id") found)
@@ -53,8 +55,7 @@ submitGroup :: Service -> Text -> Value -> Text -> IO Value
 submitGroup s gid input actor = do
  group <- getGroup s gid True; authorizeGroup s group actor Member
  require (all (`elem` ["text","target","attachments"]) (keys input)) 400 "Group messages accept text and optional target"
- let raw = get input "text" `fallback` str ""; content = T.strip (text raw)
- require (case raw of String t -> T.length t <= 16000; _ -> False) 400 "Message must be text, at most 16000 characters"
+ content <- either (failure 400) pure (messageText (get input "text"))
  attachments <- Workspace.resolveAttachments s gid (get input "attachments" `fallback` arr []) True
  require (not (T.null content) || not (null attachments)) 400 "Write a message or attach a file"
  routine <- if actor == "admin" then Routine.command s gid content (not (null attachments)) else pure Nothing
@@ -92,8 +93,7 @@ dispatchGroups s = do
   state <- agentState s target
   runs <- Map.elems <$> readMVar (serviceRuns s)
   workloads <- DB.values s DB.Workloads
-  let busy = any ((== AgentId target) . runOwner) runs || any ((`elem` [Queued,Running]) . turnStatus) (agentTurns state) || any (\c -> at c "addressedTo" == target && at c "state" == "Queued") (concatMap (`items` "calls") workloads)
-  unless (busy || isJust (findId (at request "id") projected)) $ do
+  when (requestReady (AgentId target) (requestId typed) (map runOwner runs) state workloads projected) $ do
    entry <- maybe (failure 409 "Group request message is missing") pure (findId (at request "message") (items group "messages"))
    suffix <- Workspace.attachmentPrompt s (items entry "attachments")
    t <- now
@@ -102,6 +102,13 @@ dispatchGroups s = do
        turn = toJSON (newTurn (requestId typed) Chat content t origin (has origin "routine"))
    modifyState s target $ \current -> append "turns" turn current
    DB.project s target
+
+requestReady :: AgentId -> RunId -> [AgentId] -> AgentState -> [Value] -> [Value] -> Bool
+requestReady target identity running state workloads projected =
+ target `notElem` running &&
+ not (any ((`elem` [Queued,Running]) . turnStatus) (agentTurns state)) &&
+ not (any (\call -> at call "addressedTo" == agentIdText target && at call "state" == "Queued") (concatMap (`items` "calls") workloads)) &&
+ isNothing (findId (runIdText identity) projected)
 
 runGroup :: Service -> Run -> Turn -> IO (Text,[Value])
 runGroup s run turn = do
@@ -137,6 +144,42 @@ runGroup s run turn = do
   Left (error :: SomeException) -> throwIO (RunFailure (case fromException error of Just (APIError _ reason) -> reason; Nothing -> T.pack (displayException error)) [record])
  where takeLast count values = drop (length values-count) values
 
+data GroupSettlement
+ = KeepGroup Value
+ | SettleArchived Value Value
+ | SettleMemo Value Value Value
+ | SettleMessage Value Value Value
+settlementPlan :: [Value] -> Value -> GroupRequest -> Validation GroupSettlement
+settlementPlan projected group initial = case findId (at request "id") projected of
+ Nothing
+  | requestStatus initial == Cancelled && not (requestSettled initial) -> Right (SettleArchived group request)
+  | otherwise -> Right (KeepGroup group)
+ Just turn -> do
+  status <- validateValue 500 parseJSON (get turn "status")
+  let current = toJSON initial { requestStatus=status }
+      changed = replace "requests" current group
+      settled = merge current (obj ([("settled",Bool True)] ++ [("error",get turn "error") | get turn "error" /= Null]))
+      base = replace "requests" settled changed
+  pure $ if activeStatus status || requestSettled initial then KeepGroup changed
+   else if boolean (get request "memo") then SettleMemo base request turn
+   else SettleMessage base request turn
+ where request = fromMaybe (toJSON initial) (findId (runIdText (requestId initial)) (items group "requests"))
+
+forwardingTargets :: Value -> Value -> [Text] -> Validation [Text]
+forwardingTargets group request mentioned
+ | routine && not (null targets) = do
+    task <- maybe (Left (APIError 404 "Unknown Group task")) Right (findId (at request "task") (items group "tasks"))
+    pure (if not (boolean (get task "deleted")) && get task "revision" == get request "task_revision" then take 1 targets else [])
+ | otherwise = Right targets
+ where
+ routine = has (get request "origin") "routine"
+ called = [at r "target" | r <- items group "requests",get r "root" == get request "root"]
+ targets = filter (`notElem` called) mentioned
+
+memoReady :: Value -> Value -> Bool
+memoReady group entry = boolean (get entry "memo_pending") && not (null related) && all (boolean . (`get` "settled")) related
+ where related = filter ((==get entry "id") . (`get` "root")) (items group "requests")
+
 reconcileGroups :: Service -> IO ()
 reconcileGroups s = DB.values s DB.Groups >>= mapM_ reconcile
  where
@@ -149,46 +192,36 @@ reconcileGroups s = DB.values s DB.Groups >>= mapM_ reconcile
    t <- now
    storeGroup s (merge withMemos (obj [("revision",num (int (get withMemos "revision")+1)),("updated",str t)]))
  settle projected group initial = do
-  let request = fromMaybe (toJSON initial) (findId (runIdText (requestId initial)) (items group "requests"))
-  case findId (at request "id") projected of
-   Nothing -> if requestStatus initial == Cancelled && not (requestSettled initial) then do
-     (changed,_) <- settleTask group request (obj [("status",str "cancelled"),("error",str "Group archived")])
-     pure (replace "requests" (put "settled" (Bool True) request) changed)
-    else pure group
-   Just turn -> do
-    status <- field 500 turn "status"
-    let current = toJSON initial { requestStatus=status }
-        changed = replace "requests" current group
-    if activeStatus status || requestSettled initial then pure changed else do
-     let settled = merge current (obj ([("settled",Bool True)] ++ [("error",get turn "error") | get turn "error" /= Null]))
-         base = replace "requests" settled changed
-     if boolean (get request "memo") then do
-      event <- eventRecord (at request "target") ("memo " <> at turn "status") (get request "id")
-      pure (append "events" event base)
-     else do
-      let routine = has (get request "origin") "routine"
-          called = [at r "target" | r <- items group "requests",get r "root" == get request "root"]
-      mentioned <- if get request "target" == get group "lead" && not (boolean (get group "archived")) && not (T.null (at turn "output")) then mentions s group (at turn "output") `catch` (\(_::APIError) -> pure []) else pure []
-      let targets = filter (`notElem` called) mentioned
-      valid <- if routine && not (null targets) then do task <- findTask group (at request "task"); pure (not (boolean (get task "deleted")) && get task "revision" == get request "task_revision") else pure True
-      let recipients = if valid then if routine then take 1 targets else targets else []
-      (finished,stale) <- if routine && not (null recipients) then pure (base,Nothing) else settleTask base request turn
-      output <- if get turn "output" == Null then pure finished else do
-       initialMessage <- message (at request "target") (at turn "output")
-       let entry = merge initialMessage (obj [("turn",get request "id"),("stale",Bool (fromMaybe False stale))])
-       foldM (\g target -> do
-         initialCall <- newRequest entry target (at request "root")
-         if routine then do
-          task <- findTask g (at request "task")
-          let revised = merge task (obj [("assignee",str target),("revision",num (int (get task "revision")+1))])
-              call = merge initialCall (obj [("origin",get request "origin"),("task",get task "id"),("task_revision",get revised "revision")])
-          pure (append "requests" call (replace "tasks" revised g))
-         else pure (append "requests" initialCall g)) (append "messages" entry finished) recipients
-      event <- eventRecord (at request "target") (if fromMaybe False stale then "result needs review" else "call " <> at turn "status") (get request "id")
-      pure (append "events" event output)
- addMemo group entry = if not (boolean (get entry "memo_pending")) then pure group else do
-  let related = filter ((== get entry "id") . (`get` "root")) (items group "requests")
-  if null related || any (not . boolean . (`get` "settled")) related then pure group else do
+  plan <- validated (settlementPlan projected group initial)
+  case plan of
+   KeepGroup changed -> pure changed
+   SettleArchived base request -> do
+    (changed,_) <- settleTask base request (obj [("status",str "cancelled"),("error",str "Group archived")])
+    pure (replace "requests" (put "settled" (Bool True) request) changed)
+   SettleMemo base request turn -> do
+    event <- eventRecord (at request "target") ("memo " <> at turn "status") (get request "id")
+    pure (append "events" event base)
+   SettleMessage base request turn -> do
+    let routine = has (get request "origin") "routine"
+    mentioned <- if get request "target" == get group "lead" && not (boolean (get group "archived")) && not (T.null (at turn "output")) then mentions s group (at turn "output") `catch` (\(_::APIError) -> pure []) else pure []
+    recipients <- validated (forwardingTargets group request mentioned)
+    (finished,stale) <- if routine && not (null recipients) then pure (base,TaskForwarded) else settleTask base request turn
+    output <- if get turn "output" == Null then pure finished else do
+     initialMessage <- message (at request "target") (at turn "output")
+     let entry = merge initialMessage (obj [("turn",get request "id"),("stale",Bool (stale == StaleResultRecorded))])
+     foldM (\g target -> do
+       initialCall <- newRequest entry target (at request "root")
+       if routine then do
+        task <- findTask g (at request "task")
+        let revised = merge task (obj [("assignee",str target),("revision",num (int (get task "revision")+1))])
+            call = merge initialCall (obj [("origin",get request "origin"),("task",get task "id"),("task_revision",get revised "revision")])
+        pure (append "requests" call (replace "tasks" revised g))
+       else pure (append "requests" initialCall g)) (append "messages" entry finished) recipients
+    event <- eventRecord (at request "target") (if stale == StaleResultRecorded then "result needs review" else "call " <> at turn "status") (get request "id")
+    pure (append "events" event output)
+ addMemo group entry
+  | not (memoReady group entry) = pure group
+  | otherwise = do
    initial <- newRequest entry (at group "lead") ""
    let request = merge initial (obj [("memo",Bool True),("origin",obj [("group",get group "id"),("author",str "system"),("memo",Bool True)])])
    pure (append "requests" request (replace "messages" (put "memo_pending" (Bool False) entry) group))
@@ -210,13 +243,13 @@ actionGroup s gid rid action = do
    if action == "retry" then do
     require (get request "target" `elem` items group "members") 409 "The recipient is no longer a Group member"
     require (not (has request "task")) 409 "Start the current task revision from Work instead"
-    require (retryableStatus status) 409 "Only failed or interrupted batches can be retried"
+    turnResult (validateTurnAction Retry status)
     modifyTurns s owner (\t -> if turnId t == RunId rid then retryTurn t else t)
     let updated = replace "requests" (merge (remove ["error"] request) (obj [("settled",Bool False),("status",str "queued")])) group
         messages = [if get m "id" == get request "root" && at m "author" == "admin" && not (boolean (get request "memo")) then put "memo_pending" (Bool True) m else m | m <- items updated "messages"]
     void (saveGroup s (put "messages" (arr messages) updated) "admin" "call retried" (str rid))
    else if action == "cancel" then do
-    require (status `notElem` [Done,OutputPending]) 409 "Completed input cannot be cancelled"
+    turnResult (validateTurnAction Cancel status)
     runs <- readMVar (serviceRuns s)
     case Map.lookup (RunId rid) runs of
      Just run -> writeIORef (runCancel run) True

@@ -50,23 +50,29 @@ expandHome p = pure p
 fileURL :: FilePath -> Text
 fileURL p = "file://" <> T.pack (escapeURIString (\c -> isUnreserved c || c `elem` ("/:" :: String)) path)
  where path = if os=="mingw32" then (if take 1 (drop 1 p)==":" then "/" else "") ++ map (\c -> if c=='\\' then '/' else c) p else p
+data Destination = LocalFile FilePath | WebLocation Text Text deriving (Eq, Show)
+parseDestination :: Value -> Validation Destination
+parseDestination d = do
+ check (has d "path" /= has d "url") 400 "Supply a file path or a URL"
+ t <- validateValue 400 (textFieldP "value" 8192) (obj [("value",get d "path" `fallback` get d "url")])
+ let uri=parseURI (T.unpack t)
+ if has d "path" || maybe False ((=="file:") . uriScheme) uri then do
+  when (not (has d "path")) $ check (maybe False (\u -> maybe True ((`elem` ["","localhost"]) . uriRegName) (uriAuthority u)) uri) 400 "Use an HTTP(S) URL or a local file path"
+  let decoded=unEscapeString (maybe "" uriPath uri)
+      local=case decoded of '/':drive:':':rest | os=="mingw32" && isAlpha drive -> drive:':':rest; _->decoded
+  Right (LocalFile (if has d "path" then T.unpack t else local))
+ else if t=="about:blank" then Right (WebLocation t "New tab") else
+  check (httpURL t) 400 "Use an HTTP(S) URL or a local file path" *>
+   Right (WebLocation t (T.pack (maybe "" (maybe "" uriRegName . uriAuthority) uri)))
+
 destination :: Service -> Text -> Value -> Bool -> IO Value
-destination s a d checkFile = do
- require (has d "path" /= has d "url") 400 "Supply a file path or a URL"
- let value = get d "path" `fallback` get d "url"
- t <- textField (obj [("value",value)]) "value" 8192
- let uri = parseURI (T.unpack t)
- if has d "path" || maybe False ((== "file:") . uriScheme) uri then do
-  when (not (has d "path")) $ require (maybe False (\u -> maybe True ((`elem` ["","localhost"]) . uriRegName) (uriAuthority u)) uri) 400 "Use an HTTP(S) URL or a local file path"
-  let decoded = unEscapeString (maybe "" uriPath uri)
-      local = case decoded of '/':drive:':':rest | os=="mingw32" && isAlpha drive -> drive:':':rest; _ -> decoded
-  p <- expandHome (if has d "path" then T.unpack t else local)
+destination s a d checkFile = validated (parseDestination d) >>= \location -> case location of
+ WebLocation address title -> pure (obj [("url",str address),("title",str title)])
+ LocalFile local -> do
+  p <- expandHome local
   full <- canonicalizePath (if isAbsolute p then p else workspaceRoot s a </> p)
   when checkFile $ doesFileExist full >>= \ok -> require ok 404 "File not found"
-  pure $ obj [("url",str (fileURL full)),("path",str (T.pack full)),("title",str (T.pack (takeFileName full)))]
- else if t == "about:blank" then pure (obj [("url",str t),("title",str "New tab")]) else do
-  require (httpURL t) 400 "Use an HTTP(S) URL or a local file path"
-  pure $ obj [("url",str t),("title",str (T.pack (maybe "" (maybe "" uriRegName . uriAuthority) uri)))]
+  pure (obj [("url",str (fileURL full)),("path",str (T.pack full)),("title",str (T.pack (takeFileName full)))])
 workspace :: Service -> Text -> IO Value
 workspace s a = do
  p <- DB.singleton s DB.Preferences
@@ -74,42 +80,74 @@ workspace s a = do
  pure $ obj [("active_tab",get w "activeTab"),("tabs",get w "tabs" `fallback` arr []),("bookmarks",get w "bookmarks" `fallback` arr [])]
 persistWorkspace :: Service -> Text -> Value -> Value -> IO ()
 persistWorkspace s a w prefs = DB.saveSingleton s DB.Preferences $ merge prefs (obj [("workspaces",put a w (get prefs "workspaces")),("workspace_revision",num (int (get prefs "workspace_revision")+1)),("browser_version",num 1)])
+data WorkspaceEdit
+ = OpenTab Value Text (Maybe Value) | UnbookmarkTab | CloseTab | FocusTab | ZoomTab Value Value
+ | BookmarkTab Text Value | ControlTab BrowserAction Value
+
+workspaceEdit :: Value -> Text -> Value -> Validation WorkspaceEdit
+workspaceEdit tab action input = case action of
+ "close" -> Right CloseTab
+ "focus" -> Right FocusTab
+ "zoom" -> let factor=get input "factor" in
+  check (case factor of Number n -> n>=0.25 && n<=5; _->False) 400 "Zoom factor must be between 0.25 and 5" *> Right (ZoomTab factor tab)
+ "reload" -> Right (ControlTab Reload tab)
+ "back" -> Right (ControlTab Back tab)
+ "forward" -> Right (ControlTab Forward tab)
+ _ -> Left (APIError 400 "Unknown browser action")
+
+editWorkspace :: Text -> Text -> WorkspaceEdit -> Value -> Value
+editWorkspace sequence identity edit w = case edit of
+ OpenTab dest newIdentity found ->
+  let tab=merge (remove ["path"] (fromMaybe (obj [("id",str newIdentity),("zoom",num 1)]) found)) $ merge dest (obj [("error",str ""),("loading",Bool True),("can_back",Bool False),("can_forward",Bool False),("command",command Navigate)])
+  in merge w (obj [("activeTab",str newIdentity),("tabs",arr (if isJust found then map (\t -> if at t "id"==newIdentity then tab else t) tabs else tabs++[tab]))])
+ UnbookmarkTab -> put "bookmarks" (arr (filter ((/=identity) . (`at` "id")) (items w "bookmarks"))) w
+ CloseTab -> let rest=filter ((/=identity) . (`at` "id")) tabs in merge w (obj [("tabs",arr rest),("activeTab",if at w "activeTab"==identity then maybe Null (get `flip` "id") (listToMaybe (reverse rest)) else get w "activeTab")])
+ FocusTab -> put "activeTab" (str identity) w
+ ZoomTab factor tab -> update (put "zoom" factor tab)
+ BookmarkTab bookmarkId tab ->
+  let bookmarks=items w "bookmarks"
+      existing=find (\b -> get b "url"==get tab "url") bookmarks
+      saved=put "tab_id" (str identity) $ fromMaybe (obj (("id",str bookmarkId):[(k,get tab k) | k<-["url","title","path"],has tab k])) existing
+  in put "bookmarks" (arr (if isJust existing then map (\b -> if get b "url"==get tab "url" then saved else b) bookmarks else bookmarks++[saved])) w
+ ControlTab instruction tab -> update (put "command" (command instruction) tab)
+ where
+ tabs=items w "tabs"
+ command instruction=toJSON (BrowserCommand sequence instruction)
+ update value=put "tabs" (arr [if at t "id"==identity then value else t | t<-tabs]) w
+
 workspaceControl :: Service -> Text -> Text -> Value -> IO Value
 workspaceControl s a action d = do
  prefs <- DB.singleton s DB.Preferences
- let w = get (get prefs "workspaces") a `fallback` obj [("tabs",arr []),("bookmarks",arr [])]
-     tabs = items w "tabs"
-     tid = text (get d "id" `fallback` get w "activeTab")
-     found = if action=="open" && not (has d "id") then Nothing else findId tid tabs
- seqId <- newId
- let command act = toJSON (BrowserCommand seqId act)
- w' <- if action == "open" then do
-  dest <- destination s a d True
-  when (has d "id") (require (isJust found) 404 "Unknown browser tab")
-  i <- maybe (("tab-" <>) <$> newId) (pure . (`at` "id")) found
-  let tab = merge (remove ["path"] (fromMaybe (obj [("id",str i),("zoom",num 1)]) found)) $ merge dest (obj [("error",str ""),("loading",Bool True),("can_back",Bool False),("can_forward",Bool False),("command",command Navigate)])
-  pure $ merge w (obj [("activeTab",str i),("tabs",arr (if isJust found then map (\t -> if at t "id" == i then tab else t) tabs else tabs++[tab]))])
- else if action == "unbookmark" then pure (put "bookmarks" (arr (filter ((/= tid) . (`at` "id")) (items w "bookmarks"))) w) else do
-  tab <- maybe (failure 404 "Unknown browser tab") pure found
-  let update t = put "tabs" (arr (map (\x -> if at x "id" == tid then t else x) tabs)) w
-  case action of
-   "close" -> let rest = filter ((/=tid) . (`at` "id")) tabs in pure $ merge w (obj [("tabs",arr rest),("activeTab",if at w "activeTab" == tid then maybe Null (get `flip` "id") (listToMaybe (reverse rest)) else get w "activeTab")])
-   "focus" -> pure (put "activeTab" (str tid) w)
-   "zoom" -> do
-    let factor = get d "factor"
-    require (case factor of Number n -> n >= 0.25 && n <= 5; _ -> False) 400 "Zoom factor must be between 0.25 and 5"
-    pure (update (put "zoom" factor tab))
-   "bookmark" -> do
-    i <- newId
-    let bookmarks = items w "bookmarks"; existing = find (\b -> get b "url" == get tab "url") bookmarks
-        saved = put "tab_id" (str tid) $ fromMaybe (obj (("id",str i):[(k,get tab k) | k <- ["url","title","path"],has tab k])) existing
-    pure $ put "bookmarks" (arr (if isJust existing then map (\b -> if get b "url" == get tab "url" then saved else b) bookmarks else bookmarks ++ [saved])) w
-   _ | action `elem` ["reload","back","forward"] -> do
-    instruction <- decodeValue 400 (str action)
-    pure (update (put "command" (command instruction) tab))
-   _ -> failure 400 "Unknown browser action"
- persistWorkspace s a w' prefs
+ let w=get (get prefs "workspaces") a `fallback` obj [("tabs",arr []),("bookmarks",arr [])]
+     tid=text (get d "id" `fallback` get w "activeTab")
+     found=if action=="open" && not (has d "id") then Nothing else findId tid (items w "tabs")
+ sequence <- newId
+ edit <- case action of
+  "open" -> do
+   dest <- destination s a d True
+   when (has d "id") (require (isJust found) 404 "Unknown browser tab")
+   identity <- maybe (("tab-" <>) <$> newId) (pure . (`at` "id")) found
+   pure (OpenTab dest identity found)
+  "unbookmark" -> pure UnbookmarkTab
+  _ -> do
+   tab <- maybe (failure 404 "Unknown browser tab") pure found
+   if action=="bookmark" then (\identity -> BookmarkTab identity tab) <$> newId else validated (workspaceEdit tab action d)
+ persistWorkspace s a (editWorkspace sequence tid edit w) prefs
  workspace s a
+data BrowserObservation = BrowserObservation
+ { observedTitle :: Text, observedError :: Text, observedBack :: Bool
+ , observedForward :: Bool, observedLoading :: Bool
+ }
+-- Native clients historically omit fields; keep their established defaults here.
+browserObservation :: Value -> BrowserObservation
+browserObservation input = BrowserObservation (at input "title") (T.take 1000 (at input "error"))
+ (boolean (get input "can_back")) (boolean (get input "can_forward")) (boolean (get input "loading"))
+observeTab :: BrowserObservation -> Value -> Value -> Value
+observeTab observation destination tab = merge (remove ["path"] tab) $ merge destination $ obj
+ ([("can_back",Bool (observedBack observation)),("can_forward",Bool (observedForward observation))
+ ,("loading",Bool (observedLoading observation)),("error",str (observedError observation))]
+ ++ [("title",str (T.take 500 (observedTitle observation))) | not (T.null (T.strip (observedTitle observation)))])
+
 workspaceObserved :: Service -> Text -> Value -> IO Value
 workspaceObserved s a d = do
  prefs <- DB.singleton s DB.Preferences
@@ -117,8 +155,7 @@ workspaceObserved s a d = do
  case findId (at d "id") tabs of
   Just tab | get d "seq" == get (get tab "command") "seq" -> do
    dest <- destination s a (obj [("url",get d "url")]) False
-   let title = at d "title"; value = merge dest (obj ([(k,Bool (boolean (get d k))) | k <- ["can_back","can_forward","loading"]] ++ [("error",str (T.take 1000 (at d "error")))] ++ [("title",str (T.take 500 title)) | not (T.null (T.strip title))]))
-       updated = merge (remove ["path"] tab) value
+   let updated = observeTab (browserObservation d) dest tab
    when (updated /= tab) $ persistWorkspace s a (put "tabs" (arr [if get t "id" == get tab "id" then updated else t | t <- tabs]) w) prefs
    pure (obj [("saved",Bool True)])
   _ -> pure (obj [("saved",Bool False)])
@@ -159,12 +196,16 @@ createAttachment s a d = do
    pure $ merge base (obj [("name",str (T.pack (takeFileName full))),("value",str (T.pack full))])
  DB.saveAttachment s row
  pure row
+attachmentIds :: Value -> Validation [Text]
+attachmentIds ids =
+ check (case ids of Array _ -> length xs<=8 && all (\v -> case v of String _->True; _->False) xs && length (nub xs)==length xs; _->False) 400 "Attach up to 8 distinct items" *> Right (map text xs)
+ where xs=list ids
+
 resolveAttachments :: Service -> Text -> Value -> Bool -> IO [Value]
 resolveAttachments s a ids checkFiles = do
- let xs = list ids
- require (case ids of Array _ -> length xs <= 8 && all (\v -> case v of String _ -> True; _ -> False) xs && length (nub xs) == length xs; _ -> False) 400 "Attach up to 8 distinct items"
+ identities <- validated (attachmentIds ids)
  rows <- DB.attachments s a
- result <- forM xs $ \i -> maybe (failure 400 "Unknown attachment for this Sapi") pure (findId (text i) rows)
+ result <- validated (traverse (\i -> maybe (Left (APIError 400 "Unknown attachment for this Sapi")) Right (findId i rows)) identities)
  when checkFiles $ forM_ result $ \row -> when (at row "kind" /= "link") $ doesFileExist (T.unpack (at row "value")) >>= \ok -> require ok 400 ("Attached file is no longer available: " <> at row "name")
  pure result
 attachmentPrompt :: Service -> [Value] -> IO Text

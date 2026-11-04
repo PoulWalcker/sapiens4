@@ -90,7 +90,7 @@ requestOn db definition analysis identity time = do
  sourceInput<-if get (toJSON definition) "externalProfile"==Null then pure Null else Effects.preparationInput (toJSON definition) (toJSON original)
  let origin=obj [("preparation",toJSON identity)]
      preparation=obj [("expectedBinding",Kit.bindingPin (toJSON definition)),("deferEnabled",Bool True),("parallelEnabled",Bool True),("workflowEnabled",Bool True),("kitEnabled",Bool True),("feedProfile",get (toJSON definition) "externalProfile"),("sourceInput",sourceInput),("status",str "queued"),("analysis",toJSON analysis),("contract",toJSON contract),("sourceEvidence",D.workField source "analysisEvidence"),("parameters",get (D.workField source "analysisDecision") "parameters"),("operations",arr []),("checks",arr [])]
-     call=D.newCall identity (analysisOwner pin) Nothing D.Preparation D.CallQueued (R.definitionGoal definition)
+     call=D.newCall identity (analysisOwner pin) Nothing (D.QueuedAt D.Preparation) (R.definitionGoal definition)
      work=D.Workload (runIdText identity) False (call :| []) (KM.fromList [("origin",origin),("created",str time),("originalIntent",str (R.definitionGoal definition)),("executionGate",toJSON ExecutionOpen),("preparationPin",toJSON pin),("preparation",preparation)])
      turn=newTurn identity Chat (R.definitionGoal definition) time origin False
  SQL.execute db "INSERT INTO workloads(id,value) VALUES (?,?)" (D.workloadId work,jsonText (toJSON work))
@@ -128,7 +128,7 @@ phaseChecked s running value validate = locked s $ do
  checkGate s running
  work<-load s (runIdText (runId running))
  let changed=D.setWorkField "preparation" (put "status" (str (phaseName value)) (D.workField work "preparation")) work
-     promoted=if value==AwaitingOccurrence then changed {D.workCalls=fmap (\call->call {D.callState=D.CallCompleted,D.callOutput=Just "Candidate awaits an authorized occurrence"}) (D.workCalls changed)} else changed
+     promoted=if value==AwaitingOccurrence then changed {D.workCalls=fmap (\call->call {D.callProgress=D.FinishedCall (D.Answered "Candidate awaits an authorized occurrence")}) (D.workCalls changed)} else changed
  DB.connection s $ \db->SQL.withTransaction db $ do
   DB.putValueOn db DB.Workloads (D.workloadId promoted) (toJSON promoted)
   when (value==AwaitingOccurrence && D.workField promoted "standalonePin"/=Null) (void (queueStandaloneOn db promoted))
@@ -336,7 +336,7 @@ prepare s running = do
    verdicts<-D.criterionAssessments spec (get assessment "criteria")
    decision<-parseValue 422 (D.parseDecision D.Execution) (obj [("event",str "Outcome"),("reply",str text_),("reason",str "Independent hybrid fixture rubric"),("evidence",arr [str evidence | CriterionAssessment _ _ evidence<-verdicts]),("outcome",D.criteriaOutcome spec verdicts)])
    accepted<-case D.decisionBody decision of
-    D.ReportOutcome _ outcome->D.validateOutcome decision outcome (NE.toList (D.specCriteria spec)) >> pure (D.outcomeStatus outcome==D.Completed)
+    D.ReportOutcome _ outcome->either (failure 400 . D.outcomeError) pure (D.validateOutcome decision outcome (NE.toList (D.specCriteria spec))) >> pure (D.outcomeStatus outcome==D.Completed)
     _->failure 422 "Hybrid rubric has no criterion outcome"
    update s identity (\p->put "checks" (arr [if get check "inputHash"==get receipt "inputHash" then mergeFields [("explanationOperation",str explainId),("rubricReviewOperation",str reviewId),("rubricAccepted",Bool accepted)] check else check | check<-items p "checks"]) p)
    require accepted 422 "Hybrid explanation failed independent original-criteria rubric"
@@ -396,7 +396,7 @@ runWorkflowChild s running turn=do
  locked s $ do
   WC.allowed s running
   (work,current)<-D.getWork s (runId running)
-  D.saveWork s (D.withCall work (current {D.callState=D.CallCompleted,D.callOutput=Just "Completed pinned fixture region; canonical outputs retained in the parent trace"}))
+  D.saveWork s (D.withCall work (current {D.callProgress=D.FinishedCall (D.Answered "Completed pinned fixture region; canonical outputs retained in the parent trace")}))
  pure ("Pinned workflow child region completed",[])
 
 resolveVersion :: Service -> Run -> Value -> IO Value
@@ -471,7 +471,7 @@ repairOn db definition failedReference casePin context identity time = do
  let origin=obj [("preparation",toJSON identity)]
      prepared=mergeFields [("expectedBinding",Kit.bindingPin (toJSON definition)),("deferEnabled",Bool True),("parallelEnabled",Bool True),("workflowEnabled",Bool True),("kitEnabled",Bool True),("status",str "queued"),("repairContext",context),("operations",arr []),("checks",arr [])]
        (select ["analysis","contract","sourceEvidence","parameters","feedProfile","sourceInput"] original)
-     call=D.newCall identity (AgentId (R.definitionOwner definition)) Nothing D.Preparation D.CallQueued (R.definitionGoal definition)
+     call=D.newCall identity (AgentId (R.definitionOwner definition)) Nothing (D.QueuedAt D.Preparation) (R.definitionGoal definition)
      work=D.Workload (runIdText identity) False (call :| []) (KM.fromList
        [("origin",origin),("created",str time),("originalIntent",str (R.definitionGoal definition)),("executionGate",toJSON ExecutionOpen)
        ,("repairPin",casePin),("repairInvocationPolicy",toJSON RepairPreparationResponseOnly),("preparationPin",pin),("preparation",prepared)])
@@ -523,7 +523,7 @@ chooseStandalone s running operation plan record=do
       D.ComposeVersion _->do
        let origin=obj [("preparation",toJSON identity),("standalonePreparation",Bool True)]
            prepared=obj [("status",str "queued"),("contract",toJSON spec),("sourceEvidence",obj [("source",obj [("id",str (D.workloadId source)),("inputs",D.acceptedInput spec)])]),("workflowEnabled",Bool True),("parallelEnabled",Bool True),("deferEnabled",Bool True),("operations",arr []),("checks",arr [])]
-           preparation=D.Workload (runIdText identity) False (D.newCall identity (runOwner running) Nothing D.Preparation D.CallQueued (D.specObjective spec) :| []) (KM.fromList [("origin",origin),("executionGate",toJSON ExecutionOpen),("standalonePin",consumerPin),("standaloneParent",selected),("preparation",prepared),("created",str time)])
+           preparation=D.Workload (runIdText identity) False (D.newCall identity (runOwner running) Nothing (D.QueuedAt D.Preparation) (D.specObjective spec) :| []) (KM.fromList [("origin",origin),("executionGate",toJSON ExecutionOpen),("standalonePin",consumerPin),("standaloneParent",selected),("preparation",prepared),("created",str time)])
        SQL.execute db "INSERT INTO workloads(id,value) VALUES (?,?)" (D.workloadId preparation,jsonText (toJSON preparation))
        Managed.enrollOn db (agentIdText (runOwner running)) (newTurn identity Chat (D.specObjective spec) time origin False) Null (D.specObjective spec) []
        pure (put "preparation" (toJSON identity) selected)
@@ -532,7 +532,7 @@ chooseStandalone s running operation plan record=do
     _->failure 409 "Duplicate workflow operation receipts"
    Managed.adoptOn db (agentIdText (runOwner running)) turn [message | message<-items (stateJSON state) "chat",get message "turn"==toJSON (runId running)]
    let accepted=D.acceptedDecision record "Execution" "WaitingForWorkflow"
-       parked=D.withCall (D.withDecisionRecord accepted source) (D.setCallFields [("standaloneWait",wait)] call {D.callState=D.CallQueued})
+       parked=D.withCall (D.withDecisionRecord accepted source) (D.setCallFields [("standaloneWait",wait)] call {D.callProgress=D.QueuedAt (D.callNode call)})
    DB.putValueOn db DB.Workloads (D.workloadId source) (toJSON parked)
    Managed.transitionOn db (runIdText (runId running)) (put "status" (str "queued") . put "codeBound" (Bool True) . put "standaloneWait" (Bool True))
  DB.project s (agentIdText (runOwner running))
@@ -612,13 +612,13 @@ resumeStandalone s running=locked s $ do
     outcome<-decodeValue 409 (remove ["reply","evidence","author"] childOutcome)
     let proof=obj [("child",get waiting "child"),("reference",get waiting "reference"),("assessment",get (get childCode "acceptance") "invocation")]
         response=D.DecisionResponse (D.ReportOutcome (at childOutcome "reply") outcome) "Accepted exact child result against original criteria" [jsonText proof] childOutcome
-    D.validateOutcome response outcome (NE.toList (D.specCriteria original))
+    either (failure 400 . D.outcomeError) pure (D.validateOutcome response outcome (NE.toList (D.specCriteria original)))
     let finished=D.setWorkField "standaloneResult" proof (D.setWorkField "outcome" childOutcome resumed)
-    D.saveWorkOn s db (D.withCall finished clear {D.callState=D.CallCompleted,D.callNode=D.OutcomeNode,D.callOutput=Just (at childOutcome "reply")})
+    D.saveWorkOn s db (D.withCall finished clear {D.callProgress=D.FinishedCall (D.Answered (at childOutcome "reply"))})
     pure (Just (at childOutcome "reply"))
    else do
     let evidence=obj [("workflowResult",waiting),("preparation",maybe Null (select ["status","error","call"] . preparationEvidence) prepared),("outcome",childOutcome),("code",select ["status","error","activation","acceptance"] childCode),("instruction",str "Continue the original Task from retained evidence. Do not repeat completed or uncertain actions.")]
-    D.saveWorkOn s db (D.withCall resumed (D.setCallFields [("observation",evidence)] clear {D.callState=D.CallRunning,D.callNode=D.Execution}))
+    D.saveWorkOn s db (D.withCall resumed (D.setCallFields [("observation",evidence)] clear {D.callProgress=D.RunningAt D.Execution}))
     Managed.transitionOn db (runIdText (runId running)) (remove ["standaloneWait"])
     pure Nothing
 

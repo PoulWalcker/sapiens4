@@ -1,5 +1,7 @@
 module Sapiens.RoutineEffects (handle) where
 
+import Sapiens.Form as F
+import Sapiens.Domain as X
 import Prelude
 import Data.Array as A
 import Data.Either (Either(..))
@@ -40,7 +42,7 @@ handle runtime dispatch = case _ of
     let view = M.routineView m
     case view.evidence of
       Just evidence | not evidence.busy && evidence.error == "" -> do
-        let routine = A.find ((evidence.routine == _) <<< D.s "id") $ D.rows "personal_routines" m.snapshot
+        let routine = A.find ((evidence.routine == _) <<< D.s "id") $ D.rows "personal_routines" m.snapshot.automation
             run = routine >>= A.find ((evidence.run == _) <<< D.s "id") <<< D.rows "runs"
             showing = case view.page of
               M.RoutineOccurrence rid runId -> rid == evidence.routine && runId == evidence.run
@@ -53,7 +55,7 @@ handle runtime dispatch = case _ of
     let view = M.routineView m
     if maybeDirty view.editor && page /= view.page then do
       H.modify_ $ M.modifyRoutineView (M.routineKey m) _ {pending=Just page}
-      dispatch $ OpenDialog M.RoutineDiscard D.empty
+      dispatch $ OpenDialog M.RoutineDiscard $ F.RoutineRecord D.empty
     else navigate page
   RoutineDiscardChanges -> do
     m <- H.get
@@ -131,7 +133,7 @@ handle runtime dispatch = case _ of
   fetchEvidence m routine run = do
     let key = M.routineKey m
         request = m.sequence + 1
-        selected = A.find ((routine == _) <<< D.s "id") $ D.rows "personal_routines" m.snapshot
+        selected = A.find ((routine == _) <<< D.s "id") $ D.rows "personal_routines" m.snapshot.automation
         summary = selected >>= A.find ((run == _) <<< D.s "id") <<< D.rows "runs"
         version = fromMaybe "" $ D.s "detailVersion" <$> summary
         path = "/api/agents/" <> B.encodeURI m.selected <> "/routines/" <> B.encodeURI routine <> "/runs/" <> B.encodeURI run
@@ -167,7 +169,7 @@ handle runtime dispatch = case _ of
 
   prepareEditor m page id scheduling = do
     operation <- liftEffect B.uuid
-    let record = D.put "owner" (D.text m.selected) $ fromMaybe D.empty $ A.find (\r -> D.s "id" r == id && D.s "owner" r == m.selected) $ D.rows "personal_routines" m.snapshot
+    let record = D.put "owner" (D.text m.selected) $ fromMaybe D.empty $ A.find (\r -> D.s "id" r == id && D.s "owner" r == m.selected) $ D.rows "personal_routines" m.snapshot.automation
         fields = if scheduling then D.json {minutes:show $ if D.n "minutes" record > 0.0 then D.int $ D.get "minutes" record else 60} else D.json {title:D.s "title" record,goal:D.s "goal" record,criteria:S.joinWith "\n" $ D.strings $ D.get "criteria" record}
         editor = {record,fields,operation,error:"",busy:false,dirty:false,identity:m.sequence+1}
     H.modify_ \current -> M.modifyRoutineView (M.routineKey m) (_ {page=page,editor=Just editor,pending=Nothing,evidence=Nothing}) current {sequence=m.sequence+1,menu=Nothing}

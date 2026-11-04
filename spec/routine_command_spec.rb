@@ -36,4 +36,12 @@ RSpec.describe 'Routine command executable' do
     expect(interpret('Add New Scheduled Routine: broken', true)).to eq('error' => 'Put the execution instructions in the routine prompt')
     expect(interpret('Ordinary attachment message', true)).to be_nil
   end
+
+  it 'rejects invalid invocation before reading a routine' do
+    binary = File.join(Contract::ROOT, '.build/domain', Gem.win_platform? ? 'sapiens-domain.exe' : 'sapiens-domain')
+    output, error, code = Contract.capture(binary, 'routine', '2', input: 'Discuss a routine')
+    expect(code).to eq(1)
+    expect(output).to be_empty
+    expect(error).to include('Usage: sapiens-domain routine 0|1')
+  end
 end
