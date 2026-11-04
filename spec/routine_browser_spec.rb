@@ -91,8 +91,8 @@ RSpec.describe 'Routine list, results and settings in the native app', :desktop 
     routine = host.api('POST', "/api/agents/#{owner}/routines", operation: 'evidence-create', title: 'Evidence example', goal: 'Compare the products.', criteria: ['Return a sourced comparison.']).fetch('routine')
     run = host.api('POST', "/api/agents/#{owner}/routines/#{routine}/run", operation: 'evidence-run', revision: 1).fetch('run')
     host.turn(run)
-    Contract.wait(description: 'background analysis preflight settles before read-only observations') do
-      routine_snapshot(routine).dig('analysis', 'status') == 'blocked'
+    Contract.wait(description: 'background preparation preflight settles before read-only observations') do
+      routine_snapshot(routine).dig('preparationNotice', 'status') == 'blocked'
     end
     before = host.state.fetch('personal_routines').find { |row| row['id'] == routine }
     calls = host.calls.length
