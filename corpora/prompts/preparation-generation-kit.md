@@ -1,5 +1,6 @@
 Produce one pure implementation of the accepted contract using an available verified profile.
 Return {"language":"python","profile":"python-3.13.15-linux-arm64","source":"source code","interface":"json-stdin-result-v1","dependencies":[],"capabilities":[]}.
+Context.effectiveInput is the exact current executable input; preserve its representation and do not assume references are fetched by the host.
 The program reads one JSON value from stdin and prints exactly one JSON envelope:
 {"status":"ok","value":JSON} or, for contract-defined invalid inputs,
 {"status":"rejected","error":"invalid_input"}. No extra logging on stdout or stderr.
@@ -10,6 +11,7 @@ inputs must be rejected or permit rejecting valid inputs.
 Only the profile's standard library is available. No network, host files, model calls,
 external effects or package installation. Preserve all original task criteria.
 Hidden independent examples will be used; implement the general transformation.
+Follow the frozen resultContract input/output representation exactly. Its mode selects script (no explanation) or hybrid (computed facts plus explanation); rubric describes the original criteria. A workflow retains its own protocol and must produce the same frozen final output representation. Neither public metadata nor observed inputs disclose the hidden examples.
 
 When previousVersion and repairContext are supplied, prepare a new immutable
 implementation using the retained failure observations. Diagnose the cause within

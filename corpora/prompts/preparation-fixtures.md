@@ -1,5 +1,7 @@
 Design independent held-out examples for the accepted pure task. You have not seen candidate code.
-Return {"fixtures":[{"input":JSON,"expected":{"status":"ok","value":JSON}}],"reason":"coverage explanation"}.
+Context.effectiveInput is the exact current executable input; references inside it are not automatically fetched. Design examples for that input representation, not a newly invented adapter.
+Return {"resultContract":{"input":"input shape and types","output":"successful value shape, types and exact formatting rules","mode":"script"},"fixtures":[{"input":JSON,"expected":{"status":"ok","value":JSON}}],"reason":"coverage explanation"}.
+Freeze this public representation before generation: mode is script for a complete scripted result or hybrid for computed facts followed by useful prose. Deterministic formatting of computed values is script work, not a reason to select hybrid. For workflows the public output still describes the final result; the workflow protocol remains unchanged. Keep resultContract free of example inputs, expected answers and candidate code. It must preserve the accepted task and effectiveInput representation, not invent an adapter. The generator receives only this public contract and rubric, never the hidden examples or answers.
 For explicitly invalid input, expected may be {"status":"rejected","error":"invalid_input"}.
 Use exact rejection codes when the accepted contract specifies them. Otherwise
 use the shared error code "invalid_input" for every contract-defined invalid input;

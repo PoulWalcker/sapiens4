@@ -25,10 +25,12 @@ RSpec.describe 'Canonical contract for a Sapi-created routine' do
       completionCriteria: criteria, conditionalCriteria: {@conditional => 'Input is malformed.'}}
     outcome = {status: 'Completed', satisfiedCriteria: CandidateFixtures::CRITERIA,
       notApplicableCriteria: {@conditional => 'This occurrence supplies valid input.'}, artifacts: []}
+    result_contract = {input: 'Object with csv string and ISO start/end date strings.',
+      output: 'ok.value object: start/end strings, row_count integer, by_category_minor object of integer sums, total_minor integer; rejected.error string.', mode: 'script'}
     rules = {
       'ReadyToWork' => {response: decision('TaskPrepared', taskType: 'work', specification: contract)},
       'Execution' => {response: decision('Outcome', reply: 'Observed total 5000.', outcome: outcome)},
-      'PreparationFixtures' => {response: {fixtures: independent_fixtures}},
+      'PreparationFixtures' => {response: {resultContract: result_contract, fixtures: independent_fixtures}},
       'PreparationGeneration' => {response: {language: 'python', profile: 'python-3.13.15-linux-arm64', source: candidate_source,
         interface: 'json-stdin-result-v1', dependencies: [], capabilities: []}},
       'PreparationReview' => {response: {accepted: true, reason: 'Independent examples match the complete contract.'}},
@@ -46,6 +48,14 @@ RSpec.describe 'Canonical contract for a Sapi-created routine' do
     host.turn(first)
     prepared = await_candidate
     expect(prepared.fetch('contract')).to eq(JSON.parse(JSON.generate(contract)))
+    %w[PreparationFixtures PreparationGeneration].each do |node|
+      context = JSON.parse(calls(node).fetch(0).fetch('prompt').split("\nContext:\n", 2).fetch(1))
+      expect(context.fetch('effectiveInput')).to eq(JSON.parse(JSON.generate(observed_input)))
+    end
+    generation_context = JSON.parse(calls('PreparationGeneration').fetch(0).fetch('prompt').split("\nContext:\n", 2).fetch(1))
+    expect(generation_context.fetch('resultContract')).to eq(JSON.parse(JSON.generate(result_contract)))
+    expect(generation_context.keys).not_to include('fixtures', 'examples', 'expected')
+    expect(JSON.generate(generation_context)).not_to include(CandidateFixtures::HELDOUT.to_json[1...-1])
     expect(calls('ReadyToWork').length).to eq(1)
     candidate = prepared.fetch('version').fetch('reference')
     host.restart

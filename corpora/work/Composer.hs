@@ -53,6 +53,13 @@ instance FromJSON Fixture where
 instance ToJSON Fixture where
  toJSON (Fixture input expected stubs)=obj ([("input",input),("expected",expected)]++[("modelStubs",stubs) | stubs/=Null])
 
+resultContractP :: Value -> Parser Value
+resultContractP value = do
+ onlyFields ["input","output","mode"] value
+ forM_ ["input","output"] $ \key->void (textFieldP key 8000 value)
+ unless (at value "mode" `elem` ["script","hybrid"]) (fail "Result contract requires script or hybrid mode")
+ pure value
+
 data Candidate = Candidate Text deriving (Eq,Show)
 instance FromJSON Candidate where
  parseJSON value | has value "workflow" = do
@@ -260,8 +267,10 @@ prepare s running = do
  let saved=D.workField work "preparation"
  require (at saved "status" `elem` ["queued","waiting_provider","waiting_children"]) 409 "Preparation already started; request a new explicit attempt"
  spec<-decodeValue 422 (get saved "contract")
+ let effectiveInput=if get saved "sourceInput"/=Null then get (get saved "sourceInput") "input" else D.acceptedInput spec
+     context=put "effectiveInput" effectiveInput saved
  phase s running Fixtures
- oracle<-if has saved "fixtures" then pure (obj [("fixtures",get saved "sourceCases"),("contentInterface",get saved "contentInterface"),("rubric",get saved "rubric")]) else ask s running "PreparationFixtures" "fixture_design" (put "criteria" (D.criterionContext spec) (mergeFields (pairs (selectPresent ["workflowEnabled","parallelEnabled","deferEnabled"] saved)) (select ["contract","sourceEvidence","parameters","feedProfile","sourceInput","repairContext"] saved)))
+ oracle<-if has saved "fixtures" then pure (obj [("fixtures",get saved "sourceCases"),("contentInterface",get saved "contentInterface"),("resultContract",get saved "resultContract"),("rubric",get saved "rubric")]) else ask s running "PreparationFixtures" "fixture_design" (put "criteria" (D.criterionContext spec) (mergeFields (pairs (selectPresent ["workflowEnabled","parallelEnabled","deferEnabled"] saved)) (select ["contract","effectiveInput","sourceEvidence","parameters","feedProfile","sourceInput","repairContext"] context)))
  if at oracle "status" `elem` ["insufficient_evidence","unsuitable"] then do
   locked s $ do
    checkGate s running
@@ -269,8 +278,10 @@ prepare s running = do
    let completed=D.setWorkField "preparation" (mergeFields [("status",get oracle "status"),("reason",get oracle "reason")] (D.workField latest "preparation")) latest
    D.saveWork s (completed {D.workCalls=fmap (\call->call {D.callProgress=D.FinishedCall (D.Answered (at oracle "reason"))}) (D.workCalls completed)})
  else do
+  resultContract<-if get oracle "resultContract"==Null then pure Null else parseValue 422 resultContractP (get oracle "resultContract")
   rawFixtures<-field 422 oracle "fixtures" :: IO [Fixture]
   feedMode<-if get saved "feedProfile"==Null then pure Nothing else Just <$> field 422 oracle "contentInterface"
+  when (resultContract/=Null) $ forM_ feedMode $ \content->require ((content==HybridText)==(at resultContract "mode"=="hybrid")) 422 "Result contract contradicts the frozen feed interface"
   typedFixtures<-forM rawFixtures $ \(Fixture input expected stubs)->case feedMode of
    Nothing->pure (Fixture input expected stubs)
    Just content->do
@@ -279,13 +290,11 @@ prepare s running = do
     when (content==ScriptText && at expected "status"=="ok") (void (parseValue 422 feedContentText (get expected "value")))
     pure (Fixture normalized expected stubs)
   let fixtures=map toJSON typedFixtures
-      observedInputs=get (get (get saved "sourceEvidence") "source") "inputs"
-      observedJSON=if get saved "sourceInput"/=Null then get (get saved "sourceInput") "input" else case observedInputs of String input->parseJSONText input; _->observedInputs
-  when (has saved "fixtures") (require (get saved "fixtures"==arr fixtures) 409 "Retained fixture design changed")
-  require (not (null fixtures) && any (\fixture->get fixture "input"/=observedJSON) fixtures) 422 "Preparation requires independent examples on new inputs"
+  when (has saved "fixtures") (require (get saved "fixtures"==arr fixtures && get saved "resultContract"==resultContract) 409 "Retained fixture design changed")
+  require (not (null fixtures) && any (\fixture->get fixture "input"/=effectiveInput) fixtures) 422 "Preparation requires independent examples on new inputs"
   when (get oracle "rubric"/=Null) (void (D.candidateRubric spec (get oracle "rubric")))
-  when (feedMode==Just HybridText) (void (D.candidateRubric spec (get oracle "rubric")))
-  update s identity (mergeFields [("fixtures",arr fixtures),("sourceCases",toJSON rawFixtures),("contentInterface",maybe Null toJSON feedMode),("rubric",get oracle "rubric")])
+  when (feedMode==Just HybridText || at resultContract "mode"=="hybrid") (void (D.candidateRubric spec (get oracle "rubric")))
+  update s identity (mergeFields [("resultContract",resultContract),("fixtures",arr fixtures),("sourceCases",toJSON rawFixtures),("contentInterface",maybe Null toJSON feedMode),("rubric",get oracle "rubric")])
   profile<-environment s running
   phase s running Generation
   let target=mergeFields [("contentInterface",maybe Null toJSON feedMode),("rubric",get oracle "rubric")] saved
@@ -294,7 +303,7 @@ prepare s running = do
    selected<-Kit.catalog (agentIdText (runOwner running)) target works
    update s identity (put "kitCatalog" selected)
    pure selected
-  produced<-if has (get saved "version") "workflow" then pure (select ["workflow"] (get saved "version")) else if has saved "version" then pure (mergeFields [("profile",get (get (get saved "version") "runtime") "profile"),("explanation",select ["instruction"] (get (get saved "version") "explanation"))] (select ["source","language","interface","dependencies","capabilities"] (get saved "version"))) else ask s running "PreparationGeneration" "candidate_generation" (mergeFields ([("availableProfiles",arr [Code.profileJSON profile]),("interface",str "json-stdin-result-v1"),("contentInterface",maybe Null toJSON feedMode)]++[("availableKit",catalog_) | catalog_/=Null]) (mergeFields (pairs (selectPresent ["workflowEnabled","parallelEnabled","deferEnabled"] saved)) (select ["contract","sourceEvidence","parameters","feedProfile","sourceInput","repairContext","previousVersion"] saved)))
+  produced<-if has (get saved "version") "workflow" then pure (select ["workflow"] (get saved "version")) else if has saved "version" then pure (mergeFields [("profile",get (get (get saved "version") "runtime") "profile"),("explanation",select ["instruction"] (get (get saved "version") "explanation"))] (select ["source","language","interface","dependencies","capabilities"] (get saved "version"))) else ask s running "PreparationGeneration" "candidate_generation" (mergeFields ([("resultContract",resultContract),("rubric",get oracle "rubric"),("availableProfiles",arr [Code.profileJSON profile]),("interface",str "json-stdin-result-v1"),("contentInterface",maybe Null toJSON feedMode)]++[("availableKit",catalog_) | catalog_/=Null]) (mergeFields (pairs (selectPresent ["workflowEnabled","parallelEnabled","deferEnabled"] saved)) (select ["contract","effectiveInput","sourceEvidence","parameters","feedProfile","sourceInput","repairContext","previousVersion"] context)))
   (candidate,kitFields)<-if has saved "version" then pure (produced,pairs (selectPresent ["kitArtifact"] (get saved "version"))) else if not (has produced "reuse") then pure (produced,[]) else do
    checkGate s running
    require (any (\entry->get entry "reference"==get produced "reuse" && get entry "compatible"==Bool True) (items catalog_ "entries")) 409 "Selected Kit artifact is not an applicable entry in this preparation's catalog"
@@ -305,6 +314,7 @@ prepare s running = do
    pure (candidate,[("kitArtifact",artifact)])
   let selectedCandidate=if get (get saved "version") "explanation"==Null && has saved "version" then remove ["explanation"] candidate else candidate
   Candidate source<-decodeValue 422 selectedCandidate
+  when (resultContract/=Null && not (has selectedCandidate "workflow")) $ require ((at resultContract "mode"=="hybrid")==has selectedCandidate "explanation") 422 "Generated implementation differs from the frozen result mode"
   when (has candidate "workflow") (require (isNothing feedMode) 422 "Prepared workflow feed composition is not supported")
   forM_ feedMode $ \content->require ((content==HybridText)==has selectedCandidate "explanation") 422 "Generated implementation differs from the frozen feed content interface"
   hybridFields<-if has saved "version" then pure (pairs (selectPresent ["composition","structureHash","rubric","explanation"] (get saved "version"))) else if not (has candidate "explanation") then pure [] else do
@@ -390,7 +400,7 @@ prepare s running = do
   when (has version "explanation") $ require (any (\check->get check "rubricAccepted"==Bool True && has check "explanationOperation") (items (D.workField current "preparation") "checks")) 422 "Hybrid preparation requires an actual successful explanation and independent rubric check"
   phase s running Review
   let prepared=D.workField current "preparation"
-  review<-ask s running "PreparationReview" "candidate_review" (select ["contract","version","fixtures","checks"] prepared)
+  review<-ask s running "PreparationReview" "candidate_review" (select ["contract","resultContract","rubric","version","fixtures","checks"] prepared)
   update s identity (put "review" review)
   require (get review "accepted"==Bool True && not (T.null (T.strip (at review "reason")))) 422 "Independent candidate review did not accept the preparation"
   phaseChecked s running AwaitingOccurrence (void (resolveVersion s running reference))
