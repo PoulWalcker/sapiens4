@@ -23,17 +23,16 @@ RSpec.describe 'Owner-personal immutable Kit reuse' do
   before do
     repo = ENV.fetch('SAPIENS_TEST_REPOSITORY', Contract::ROOT)
     @host = Host.new(start: false, repo: repo, command: [File.join(repo, '.build/bin/sapiens4')], environment: {'SAPIENS_GENERATED_DOCKER' => @docker, 'SAPIENS_GENERATED_SOCKET' => @socket})
-    host.configure(version: 'codex-cli 0.162.1')
+    host.configure(version: 'codex-cli 0.162.1', model_catalog: [{slug: 'gpt-6-sol', shell_type: 'unified_exec', apply_patch_tool_type: 'freeform', experimental_supported_tools: [], tool_mode: 'direct', supports_search_tool: false, supported_reasoning_levels: [{effort: 'high', description: 'high'}]}])
     host.start
     @owner = host.agent('KitOwner')
     rules('Execution' => {response: decision('Outcome', reply: 'Observed sales under the original criteria.', outcome: {status: 'Completed', satisfiedCriteria: CandidateFixtures::CRITERIA, artifacts: []}), usage: USAGE},
-      'AutomationAnalysis' => {response: decision('AutomationAnalyzed', decision: {status: 'Ready', automatablePart: 'Compute supplied sales.', parameters: [{name: 'csv', description: 'Sales rows'}]}), usage: USAGE},
       'PreparationFixtures' => {response: {fixtures: independent_fixtures, reason: 'Independent held-out values and invalid inputs.'}, usage: USAGE},
       'PreparationGeneration' => {response: {language: 'python', profile: 'python-3.13.15-linux-arm64', source: candidate_source, interface: 'json-stdin-result-v1', dependencies: [], capabilities: []}, usage: USAGE},
       'PreparationReview' => {response: {accepted: true, reason: 'Actual independent fixture results match.'}, usage: USAGE},
       'CodeAssessment' => {response: {verdict: 'accepted', reply: 'Actual sales satisfy the original task.', reason: 'The actual result agrees with the criteria.', evidence: ['Actual isolated calculation.'], acceptance: {status: 'Completed', satisfiedCriteria: CandidateFixtures::CRITERIA, artifacts: []}, activationAudit: {accepted: true, reason: 'Own independent fixtures and this authorized occurrence support the exact version.'}}, usage: USAGE})
     @first = create_routine('first', 'Original sales')
-    observe(@owner, @first, observed_input.merge(private_marker: SECRET))
+    observe_on_prepare(@owner, @first, observed_input.merge(private_marker: SECRET))
     @first_preparation = prepare(@owner, @first, 'prepare-first')
     @source = await_preparation(@owner, @first, @first_preparation)
     @first_trial = run_routine(@owner, @first, 'activate-first', observed_input.merge(private_marker: SECRET))
@@ -54,12 +53,17 @@ RSpec.describe 'Owner-personal immutable Kit reuse' do
     host.turn(identity)
     identity
   end
-  def observe(owner, id, input)
-    run_routine(owner, id, "observe-#{id}", input)
-    Contract.wait { row = routine(id)['analysis']; row if row && row['status'] == 'Ready' }
+  def observe_on_prepare(owner, id, input)
+    (@observations ||= {})[id] = [owner, input]
   end
   def prepare(owner, id, operation)
-    host.api('POST', "#{path(owner, id)}/prepare", operation: operation, revision: routine(id).fetch('revision'), analysis: routine(id).fetch('analysis').fetch('id')).fetch('preparation')
+    if (observation = (@observations ||= {}).delete(id))
+      observed_owner, input = observation
+      run_routine(observed_owner, id, "observe-#{id}", input)
+      Contract.wait(description: 'automatic preparation admission') { routine(id).dig('preparation', 'id') }
+    else
+      host.api('POST', "#{path(owner, id)}/prepare", operation: operation, revision: routine(id).fetch('revision')).fetch('preparation')
+    end
   end
   def preparation(owner, id, identity); host.api('GET', "#{path(owner, id)}/preparations/#{identity}"); end
   def await_preparation(owner, id, identity, status = 'awaiting_occurrence')
@@ -78,7 +82,7 @@ RSpec.describe 'Owner-personal immutable Kit reuse' do
   end
   def second_consumer(operation = 'second')
     id = create_routine(operation, 'Reused sales')
-    observe(@owner, id, second_input)
+    observe_on_prepare(@owner, id, second_input)
     select_reuse
     [id, prepare(@owner, id, "prepare-#{operation}")]
   end
@@ -131,7 +135,7 @@ RSpec.describe 'Owner-personal immutable Kit reuse' do
   it 'refuses outside scope, a disappearing source, altered local bytes and known-bad aliases before execution' do
     outsider = host.agent('OtherKitOwner')
     other = create_routine('other-owner', 'Other owner sales', outsider)
-    observe(outsider, other, second_input)
+    observe_on_prepare(outsider, other, second_input)
     expect(routine(other).dig('kit', 'entries')).to be_empty
     select_reuse
     invalid = prepare(outsider, other, 'cross-owner-selection')
@@ -139,7 +143,7 @@ RSpec.describe 'Owner-personal immutable Kit reuse' do
     expect(refused.fetch('checks')).to be_empty
     expect(refused.fetch('error')).to include('not an applicable entry')
     target = create_routine('target', 'Reused sales')
-    observe(@owner, target, second_input)
+    observe_on_prepare(@owner, target, second_input)
     select_reuse(block: true, gate: 'kit-selection')
     pending = prepare(@owner, target, 'selection-source-loss')
     Contract.wait { provider_calls('PreparationGeneration').last if provider_calls('PreparationGeneration').length == 3 }
@@ -168,12 +172,16 @@ RSpec.describe 'Owner-personal immutable Kit reuse' do
     expect(catalog.fetch('entries')).to all(include('compatible' => false))
     expect(catalog.fetch('entries').map { |row| row['reason'] }.join).to include('Known faulty artifact')
     # The second checked wrapper cannot launder the same bytes as a new source.
+    alias_target = create_routine('alias-target', 'Known-bad alias consumer')
+    observe_on_prepare(@owner, alias_target, second_input)
     select_reuse(attached.dig('version', 'reference'))
-    alias_id = prepare(@owner, target, 'known-bad-alias')
-    alias_refusal = await_preparation(@owner, target, alias_id, 'failed')
+    alias_id = prepare(@owner, alias_target, 'known-bad-alias')
+    alias_refusal = await_preparation(@owner, alias_target, alias_id, 'failed')
     expect(alias_refusal.fetch('checks')).to be_empty
     expect(alias_refusal.fetch('error')).to include('not an applicable entry')
-    expect(routine(@first).fetch('activeCode')).to eq(@first_binding)
+    retained = routine(@first).fetch('activeCode')
+    expect(retained.reject { |key, _| %w[status reason].include?(key) }).to eq(@first_binding.reject { |key, _| %w[status reason].include?(key) })
+    expect(retained.fetch('status')).to eq('kit_pending')
   end
 
   it 'shows personal catalog requirements, selected provenance and a new-reuse refusal in the native UI', :desktop do
