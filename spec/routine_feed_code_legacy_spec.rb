@@ -4,8 +4,15 @@ require 'yaml'
 require_relative 'support/effect_peer'
 
 RSpec.describe 'Ordinary Routine uncertainty and legacy admission evidence' do
-  before do
-    @host = Host.new(start: false)
+  before do |example|
+    repo = Contract::ROOT
+    if example.metadata[:mutable_runtime]
+      @runtime_root = Dir.mktmpdir('sapiens-recovery-update-')
+      FileUtils.cp_r(File.join(repo, 'corpora'), @runtime_root)
+      %w[app build submodules .build].each { |name| File.symlink(File.join(repo, name), File.join(@runtime_root, name)) }
+      repo = @runtime_root
+    end
+    @host = Host.new(start: false, repo: repo)
     provider = File.join(__dir__, 'support/feed_code_legacy_provider.rb')
     if Gem.win_platform?
       host.environment['SAPIENS_CONTRACT_PROVIDER'] = provider
@@ -42,6 +49,7 @@ RSpec.describe 'Ordinary Routine uncertainty and legacy admission evidence' do
     ensure
       @peer&.close
       @host&.close
+      FileUtils.remove_entry(@runtime_root) if @runtime_root && File.directory?(@runtime_root)
     end
   end
 
@@ -151,6 +159,124 @@ RSpec.describe 'Ordinary Routine uncertainty and legacy admission evidence' do
     expect(host.control(@owner, 'routine_inspect', id: @routine).fetch('blockers')).to eq(inspection.fetch('blockers'))
     expect(host.request('POST', "#{path}/run", operation: 'inspect-does-not-clear', revision: 1).first).to eq(409)
     expect(@peer.deliveries.length).to eq(1)
+  end
+
+  it 'lets the owner reconcile a retained read through independent review without replay or clearing its history' do
+    host.configure(feed_legacy_mode: 'read_rejected')
+    failed = submit('read-before-recovery')
+    expect(settled(failed).fetch('assessment')).to include('status' => 'Rejected')
+    unknown = detail(failed).fetch('routineEffectUnknown')
+    other = host.agent('AnotherOwner')
+    expect(host.request('POST', "/api/agents/#{other}/control", op: 'routine_recover', id: @routine).first).to eq(404)
+    version = detail(failed).fetch('detailVersion')
+    recovery = host.control(@owner, 'routine_recover', id: @routine).fetch('recovery')
+    host.turn(recovery.fetch('run'))
+    expect(host.control(@owner, 'routine_inspect', id: @routine).fetch('blockers')).to be_empty
+    expect(detail(failed).fetch('routineEffectUnknown')).to eq(unknown)
+    expect(detail(failed).fetch('assessment')).to include('status' => 'Rejected')
+    expect(detail(failed).fetch('detailVersion')).not_to eq(version)
+    reviews = host.calls.select { |call| call['node'] == 'RoutineEffectReview' }
+    expect(reviews.length).to eq(1)
+    expect(reviews.first.fetch('arguments')).to include('--sandbox', 'read-only')
+    expect(reviews.first.fetch('agency_run')).to be_nil
+    expect(host.calls.count { |call| call['node'] == 'Execution' }).to eq(1)
+    host.restart
+    expect(host.control(@owner, 'routine_recover', id: @routine).fetch('recovery').fetch('run')).to eq(recovery.fetch('run'))
+    expect(host.calls.count { |call| call['node'] == 'RoutineEffectReview' }).to eq(1)
+    host.configure(feed_legacy_mode: 'clean')
+    fresh = submit('fresh-after-independent-proof')
+    host.turn(fresh)
+    expect(@peer.deliveries).to be_empty
+  end
+
+  it 'retains incomplete effects and stopped reviews without replay or another review allowance' do
+    host.configure(feed_legacy_mode: 'tool_loss')
+    delivered = submit('incomplete-real-write')
+    settled(delivered)
+    calls = host.calls.length
+    expect(host.request('POST', "/api/agents/#{@owner}/control", op: 'routine_recover', id: @routine).first).to eq(409)
+    expect(host.calls.length).to eq(calls)
+    expect(@peer.deliveries.length).to eq(1)
+    host.configure(feed_legacy_mode: 'read_rejected', block_effect_review: true)
+    @routine = host.api('POST', "/api/agents/#{@owner}/routines", @fields.merge(operation: 'stopped-review')).fetch('routine')
+    failed = submit('read-before-stop')
+    settled(failed)
+    review = host.control(@owner, 'routine_recover', id: @routine).fetch('recovery').fetch('run')
+    Contract.wait { host.calls.any? { |call| call['node'] == 'RoutineEffectReview' } }
+    host.api('POST', "/api/agents/#{@owner}/turns/#{review}/cancel")
+    host.release('review-released')
+    host.turn(review, 'interrupted')
+    expect(host.control(@owner, 'routine_inspect', id: @routine).fetch('blockers')).not_to be_empty
+    expect(host.control(@owner, 'routine_recover', id: @routine).fetch('recovery').fetch('run')).to eq(review)
+    expect(host.request('POST', "/api/agents/#{@owner}/turns/#{review}/retry", {}).first).to eq(409)
+    host.restart
+    expect(host.control(@owner, 'routine_inspect', id: @routine).fetch('blockers')).not_to be_empty
+    expect(host.calls.count { |call| call['node'] == 'RoutineEffectReview' }).to eq(1)
+    expect(@peer.deliveries.length).to eq(1)
+  end
+
+  it 'keeps a reviewed mutation blocked and reuses its negative review after schedule changes and restart' do
+    host.configure(feed_legacy_mode: 'tool_write_rejected', review_read_only: false)
+    failed = submit('complete-real-write')
+    settled(failed)
+    recovery = host.control(@owner, 'routine_recover', id: @routine).fetch('recovery').fetch('run')
+    host.turn(recovery)
+    expect(host.control(@owner, 'routine_inspect', id: @routine).dig('recovery', 'result', 'status')).to eq('blocked')
+    expect(host.request('POST', "#{path}/run", operation: 'no-repeat-after-review', revision: 1).first).to eq(409)
+    host.api('POST', "#{path}/schedule", operation: 'frequency-is-not-new-evidence', revision: 1, minutes: 5)
+    host.restart
+    expect(host.control(@owner, 'routine_recover', id: @routine).fetch('recovery').fetch('run')).to eq(recovery)
+    expect(host.calls.count { |call| call['node'] == 'RoutineEffectReview' }).to eq(1)
+    expect(@peer.deliveries.length).to eq(1)
+  end
+
+  it 'reconciles multiple retained historical failures in one review with distinct action identities' do
+    host.configure(feed_legacy_mode: 'read_rejected')
+    first = submit('first-retained-read')
+    settled(first)
+    original = @routine
+    @routine = host.api('POST', "/api/agents/#{@owner}/routines", @fields.merge(operation: 'second-retained-source')).fetch('routine')
+    second = submit('second-retained-read')
+    settled(second)
+    host.stop
+    # Model an older retained history with two failed occurrences of one consumer.
+    mutate_saved_work(second) do |work|
+      work.fetch('origin')['routine'] = original
+      work.fetch('routineSnapshot')['id'] = original
+    end
+    @routine = original
+    host.start
+    expect(host.control(@owner, 'routine_inspect', id: @routine).fetch('blockers').length).to eq(2)
+    recovery = host.control(@owner, 'routine_recover', id: @routine).fetch('recovery').fetch('run')
+    host.turn(recovery)
+    expect(host.control(@owner, 'routine_inspect', id: @routine).fetch('blockers')).to be_empty
+    expect(detail(first).fetch('routineEffectsReconciled')).to be(true)
+    expect(detail(second).fetch('routineEffectsReconciled')).to be(true)
+    expect(host.calls.count { |call| call['node'] == 'RoutineEffectReview' }).to eq(1)
+    expect(@peer.deliveries).to be_empty
+  end
+
+  it 'resumes the same never-admitted review with its unused allowance after provider configuration is fixed', :mutable_runtime do
+    host.configure(feed_legacy_mode: 'read_rejected')
+    failed = submit('read-before-configuration-refusal')
+    settled(failed)
+    host.configure(unsupported_review_version: true)
+    review = host.control(@owner, 'routine_recover', id: @routine).fetch('recovery').fetch('run')
+    host.turn(review, 'failed')
+    expect(host.calls.none? { |call| call['node'] == 'RoutineEffectReview' }).to be(true)
+    expect(host.control(@owner, 'routine_inspect', id: @routine).dig('recovery', 'error')).to include('verified Codex CLI')
+    expect(host.control(@owner, 'routine_inspect', id: @routine).dig('recovery', 'canResume')).to be(true)
+    File.open(File.join(@runtime_root, 'corpora/prompts/preparation-envelope.md'), 'a') { |file| file.write("\nRetain the exact JSON response.\n") }
+    host.configure(unsupported_review_version: false)
+    expect(host.control(@owner, 'routine_recover', id: @routine).fetch('recovery').fetch('run')).to eq(review)
+    host.turn(review)
+    expect(host.control(@owner, 'routine_inspect', id: @routine).fetch('blockers')).to be_empty
+    expect(host.calls.count { |call| call['node'] == 'RoutineEffectReview' }).to eq(1)
+    expect(host.control(@owner, 'routine_inspect', id: @routine).dig('recovery', 'canResume')).to be(false)
+    host.restart
+    expect(host.control(@owner, 'routine_recover', id: @routine).fetch('recovery').fetch('run')).to eq(review)
+    expect(host.calls.count { |call| call['node'] == 'RoutineEffectReview' }).to eq(1)
+    expect(@peer.deliveries).to be_empty
   end
 
   it 'isolates a blocked scheduled routine from other schedules and ordinary messages', :slow do

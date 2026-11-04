@@ -29,3 +29,26 @@ phase and command receipt are committed together. Repeating identical contents w
 same operation id returns that receipt; conflicting contents fail. `stop-repair` accepts
 `operation`, `revision`, `case` and `reason` for the case-wide Stop. Model host-control
 has no grant command. These commands use the existing trusted local Admin boundary.
+
+An owner can inspect an ordinary Routine with `routine_inspect(id)` and request
+`routine_recover(id)` when retained unknown actions block its restoration. Recovery
+queues one independent response-only review through the existing call runtime,
+with a 90-second provider deadline. The tool receipt is not proof of recovery.
+Inspection exposes the review's saved result. Repeated requests for identical
+source evidence and review policy reuse that call, including negative or stopped
+reviews; changing frequency does not provide another allowance.
+An independently recorded configuration refusal before provider process creation
+can resume the same call and operation after compatibility is verified. Prior
+attempts remain, and only unused active review time remains available. This does
+not apply to Stop, negative reviews or uncertain admission after process creation.
+
+Only complete retained requests and terminal tool outcomes can be reviewed.
+Missing, shortened or redacted action details and interrupted tails remain
+blocked. A positive review must cover every observed action as a task-authorized
+read. The host binds it to the exact original work and checks that evidence,
+ownership, contract and Stop authority have not changed before accepting it.
+It retains the original uncertainty marker and failed result, adding independent
+proof for future authorized admissions. It never replays the old occurrence or
+publishes its result. Registered external effects and generated-code repairs
+retain their existing receipt and repair paths. Recovery is confirmed to the
+user only after a new authorized report actually arrives.

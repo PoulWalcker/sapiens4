@@ -78,6 +78,8 @@ instance Show ProviderFailure where
 instance Exception ProviderFailure
 data RetryDeferred = RetryDeferred Text Text deriving (Show)
 instance Exception RetryDeferred
+data ProviderConfigurationFailure = ProviderConfigurationFailure Text deriving (Show)
+instance Exception ProviderConfigurationFailure
 
 failureClass :: Text -> FailureClass
 failureClass message
@@ -141,6 +143,11 @@ invokeRetained s running saved save = do
    Right raw->update (obj [("status",str "completed"),("rawResponse",str raw),("attempts",arr (attempts "completed"))]) >> pure raw
    Left problem | isJust (fromException problem :: Maybe SomeAsyncException) || isJust (fromException problem :: Maybe AsyncCancelled)->do
     update (obj [("status",str "interrupted"),("reason",str "Provider process interrupted; admission and spend may be unknown"),("attempts",arr (attempts "interrupted"))])
+    throwIO problem
+   Left problem | Just (ProviderConfigurationFailure reason)<-fromException problem->do
+    let unused=max 0 (floor (realToFrac (diffUTCTime deadline finished)*1000::Double) :: Int)
+        prior=[if get entry "number"==num number then mergeFields [("status",str "not_admitted"),("finished",str (timestamp finished)),("usageUnknown",Bool False),("admission",obj [("schema",num 1),("status",str "not_started"),("authority",str "response-only-configuration"),("requestHash",get saved "promptHash"),("reason",str reason)])] entry else entry | entry<-items value "attempts"]
+    update (obj [("status",str "configuration_blocked"),("unusedMilliseconds",num unused),("attempts",arr prior),("error",str reason)])
     throwIO problem
    Left problem->do
     stopped<-readIORef (runCancel running)
@@ -238,7 +245,12 @@ providerStep time event state activity = case event of
 modelDefaults :: IO (Text,Text)
 modelDefaults = (,) <$> (maybe "gpt-6-sol" T.pack <$> lookupEnv "SAPIENS_CODEX_MODEL") <*> (maybe "high" T.pack <$> lookupEnv "SAPIENS_CODEX_REASONING_EFFORT")
 codexBinary :: IO (Maybe FilePath)
-codexBinary = do
+codexBinary = codexBinaryFor Nothing
+
+-- Ordinary work prefers the newest installed CLI. Response-only execution must
+-- select a compatible candidate before applying its stricter verified policy.
+codexBinaryFor :: Maybe Text -> IO (Maybe FilePath)
+codexBinaryFor expected = do
  override <- lookupEnv "SAPIENS_CODEX_BINARY"
  case override of
   Just p | not (null p) -> findExecutable p
@@ -269,7 +281,7 @@ codexBinary = do
      Left errorValue | Just (_ :: AsyncCancelled) <- fromException errorValue -> throwIO errorValue
      _ -> pure ()
     let version = case result of
-         Right (Just (ExitSuccess,out,_)) -> let (_,_,_,numbers) = out =~ ("codex-cli[[:space:]]+([0-9]+)\\.([0-9]+)\\.([0-9]+)" :: String) :: (String,String,String,[String]) in mapMaybe readMaybe numbers
+         Right (Just (ExitSuccess,out,_)) | maybe True (==T.strip (T.pack out)) expected -> let (_,_,_,numbers) = out =~ ("codex-cli[[:space:]]+([0-9]+)\\.([0-9]+)\\.([0-9]+)" :: String) :: (String,String,String,[String]) in mapMaybe readMaybe numbers
          _ -> [] :: [Int]
     pure (version,p)
    pure (snd <$> listToMaybe (reverse (sortOn id (filter (not . null . fst) versions))))
@@ -319,8 +331,11 @@ analysisCatalog = do
  (model,effort)<-modelDefaults
  analysisCatalogFor Nothing (ModelSettings model effort)
 analysisCatalogFor :: Maybe Run -> ModelSettings -> IO Value
-analysisCatalogFor activeRun selectedSettings = do
- binary <- codexBinary >>= maybe (failure 503 "Codex CLI is unavailable for analysis") pure
+analysisCatalogFor activeRun selectedSettings = snd <$> analysisProviderFor activeRun selectedSettings
+
+analysisProviderFor :: Maybe Run -> ModelSettings -> IO (FilePath,Value)
+analysisProviderFor activeRun selectedSettings = do
+ binary <- codexBinaryFor (Just "codex-cli 0.162.1") >>= maybe (failure 503 "Verified Codex CLI is unavailable for analysis") pure
  started <- getMonotonicTimeNSec
  let configurationDeadline=started+10000000000
      guardRun = do
@@ -344,7 +359,7 @@ analysisCatalogFor activeRun selectedSettings = do
  let model=modelSlug selectedSettings
  selected <- maybe (failure 503 "Configured model has no verified response-only catalog entry") pure
   (listToMaybe [entry | entry<-items (parseJSONText catalog) "models",at entry "slug"==model])
- pure (mergeFields [("shell_type",str "disabled"),("apply_patch_tool_type",Null),("experimental_supported_tools",arr []),("tool_mode",str "direct"),("supports_search_tool",Bool False),("include_skills_usage_instructions",Bool False),("include_plugin_usage_instructions",Bool False),("include_apps_usage_instructions",Bool False)] selected)
+ pure (binary,mergeFields [("shell_type",str "disabled"),("apply_patch_tool_type",Null),("experimental_supported_tools",arr []),("tool_mode",str "direct"),("supports_search_tool",Bool False),("include_skills_usage_instructions",Bool False),("include_plugin_usage_instructions",Bool False),("include_apps_usage_instructions",Bool False)] selected)
 
 explanationTemplates :: Service -> Explanation -> IO (Text,Text)
 explanationTemplates s selected = do
@@ -369,15 +384,16 @@ verifiedResponseSettings s running = do
 verifyReasoning :: ModelSettings -> Value -> IO ()
 verifyReasoning settings catalog = require (modelReasoning settings `elem` map (`at` "effort") (items catalog "supported_reasoning_levels")) 503 "Pinned reasoning effort is unavailable in the verified model catalog"
 
-withInvocationPolicy :: Service -> Run -> InvocationPolicy -> ModelSettings -> Bool -> (FilePath -> [String] -> IO Text) -> IO Text
+withInvocationPolicy :: Service -> Run -> InvocationPolicy -> ModelSettings -> Bool -> (FilePath -> FilePath -> [String] -> IO Text) -> IO Text
 withInvocationPolicy s run policy settings pinned action = do
  let settingsArgs=["-c","model_reasoning_effort="++T.unpack (jsonText (str (modelReasoning settings))),"-c","model="++T.unpack (jsonText (str (modelSlug settings)))]
  case policy of
   OrdinaryInvocation -> do
+   binary<-codexBinary >>= maybe (failure 503 "Codex CLI was not found") pure
    let directory=workspaceRoot s (agentIdText (runOwner run))
-   action directory (["exec"]++settingsArgs++["--skip-git-repo-check","--json","--dangerously-bypass-approvals-and-sandbox","--cd",directory,"--color","never","-"])
+   action binary directory (["exec"]++settingsArgs++["--skip-git-repo-check","--json","--dangerously-bypass-approvals-and-sandbox","--cd",directory,"--color","never","-"])
   EvidenceAnalysisResponseOnly -> do
-   catalog <- analysisCatalogFor (Just run) settings
+   (binary,catalog) <- analysisProviderFor (Just run) settings `catch` (\problem@(APIError code reason)->if code==503 then throwIO (ProviderConfigurationFailure reason) else throwIO problem)
    when pinned (verifyReasoning settings catalog)
    temporary <- getTemporaryDirectory
    identity <- newId
@@ -388,7 +404,7 @@ withInvocationPolicy s run policy settings pinned action = do
     let disabled=["shell_tool","shell_snapshot","apps","plugins","multi_agent","computer_use","browser_use","browser_use_external","view_image","image_generation","code_mode_host","hooks","memories","goals","sleep_tool","skill_mcp_dependency_install","tool_suggest","enable_request_compression"]
         config=[("model_catalog_json",str (T.pack catalogPath)),("approval_policy",str "never"),("web_search",str "disabled"),("project_doc_max_bytes",num 0),("mcp_servers",empty)]++[("features."<>feature,Bool False) | feature<-disabled]
         options=concat [["-c",T.unpack key++"="++T.unpack (jsonText value)] | (key,value)<-config]
-    action folder (["exec","--ignore-user-config","--ignore-rules","--strict-config","--ephemeral","--skip-git-repo-check","--json","--sandbox","read-only","--cd",folder,"--color","never"]++settingsArgs++options++["-"])
+    action binary folder (["exec","--ignore-user-config","--ignore-rules","--strict-config","--ephemeral","--skip-git-repo-check","--json","--sandbox","read-only","--cd",folder,"--color","never"]++settingsArgs++options++["-"])
 
 invokeAnalysisObserved :: Service -> Run -> Text -> (EvidenceSnapshot -> IO ()) -> IO Text
 invokeAnalysisObserved s run input observe = invokeModelWithPolicy s run EvidenceAnalysisResponseOnly input observe
@@ -410,12 +426,11 @@ invokeWithSettings :: Service -> Run -> InvocationPolicy -> ModelSettings -> Boo
 invokeWithSettings s run policy settings pinned input observe = invokeWithSettingsFor False s run policy settings pinned input observe
 
 invokeWithSettingsFor :: Bool -> Service -> Run -> InvocationPolicy -> ModelSettings -> Bool -> Text -> (EvidenceSnapshot -> IO ()) -> IO Text
-invokeWithSettingsFor maintenance s run policy settings pinned input observe = withInvocationPolicy s run policy settings pinned $ \workdir args -> do
+invokeWithSettingsFor maintenance s run policy settings pinned input observe = withInvocationPolicy s run policy settings pinned $ \binary workdir args -> do
  cancelled <- readIORef (runCancel run)
  require (not cancelled) 409 "Stopped by Admin"
  before <- getMonotonicTimeNSec
  require (before < runDeadline run) 504 "Call time limit exhausted between decision nodes"
- binary <- codexBinary >>= maybe (failure 503 "Codex CLI was not found. Install Codex and run codex login.") pure
  let model=modelSlug settings
  environment <- getEnvironment
  started <- realToFrac . (*1000) <$> getPOSIXTime :: IO Double

@@ -5,7 +5,8 @@ require 'net/http'
 # Controlled external provider boundary with an actual independent peer effect.
 root = ENV.fetch('SAPIENS_CONTRACT_ENV')
 if ARGV.include?('--version')
-  puts 'codex-cli 0.162.1'
+  settings = JSON.parse(File.read(File.join(root, 'provider.json')))
+  puts(settings['unsupported_review_version'] ? 'codex-cli 0.999.0' : 'codex-cli 0.162.1')
   exit
 end
 if ARGV.take(3) == %w[debug models --bundled]
@@ -16,19 +17,36 @@ $stdout.sync = true
 text = STDIN.read
 context = JSON.parse(text.split("\nContext:\n", 2).last)
 node = text[/decision at node (\w+)/, 1]
-owner = context.fetch('selfId')
+owner = context['selfId'] || context.fetch('owner')
 config = JSON.parse(File.read(File.join(root, 'provider.json')))
 mode = config.fetch('feed_legacy_mode', 'clean')
 target = config['delegate_target']
 path = File.join(root, 'calls', SecureRandom.hex(12) + '.json')
-File.write(path + '.new', JSON.generate(owner: owner, node: node, mode: mode, pid: Process.pid, agency_run: ENV.fetch('SAPIENS_AGENCY_RUN')))
+File.write(path + '.new', JSON.generate(owner: owner, node: node, mode: mode, pid: Process.pid, agency_run: ENV['SAPIENS_AGENCY_RUN']))
 File.rename(path + '.new', path)
+if node == 'RoutineEffectReview'
+  File.write(path, JSON.generate(owner: owner, node: node, mode: mode, pid: Process.pid,
+    agency_run: ENV['SAPIENS_AGENCY_RUN'], arguments: ARGV))
+  sleep 0.02 until File.exist?(File.join(root, 'review-released')) if config['block_effect_review']
+  ids = context.fetch('sources').flat_map { |source| source.fetch('actions').map { |action| action.fetch('id') } }
+  verdict = {readOnly: config.fetch('review_read_only', true), reviewedActions: ids,
+    reason: 'Independently inspected the exact retained requests and terminal results.'}
+  emit = ->(value) { puts JSON.generate(value) }
+  emit.call(type: 'thread.started', thread_id: 'controlled-effect-review')
+  emit.call(type: 'item.completed', item: {id: 'review-final', type: 'agent_message', text: JSON.generate(verdict)})
+  emit.call(type: 'turn.completed', usage: {input_tokens: 37, cached_input_tokens: 0, output_tokens: 13})
+  exit
+end
 if mode == 'admitted_block' && node == 'Execution'
   sleep 0.02 until File.exist?(File.join(root, 'released'))
 end
 emit = ->(value) { puts JSON.generate(value) }
 emit.call(type: 'thread.started', thread_id: 'controlled-ordinary-routine')
-if mode == 'tool_loss' && node == 'Execution' && (!target || owner == target)
+if mode == 'read_rejected' && node == 'Execution'
+  emit.call(type: 'item.started', item: {id: 'measurement', type: 'command_execution', command: 'printf "retained measurement: 42\\n"'})
+  emit.call(type: 'item.completed', item: {id: 'measurement', type: 'command_execution', command: 'printf "retained measurement: 42\\n"', exit_code: 0, status: 'completed', aggregated_output: 'retained measurement: 42'})
+end
+if %w[tool_loss tool_write_rejected].include?(mode) && node == 'Execution' && (!target || owner == target)
   emit.call(type: 'item.started', item: {id: 'actual-peer-post', type: 'command_execution', command: 'POST an isolated receipt peer once'})
   uri = URI(config.fetch('effect_url'))
   client = Net::HTTP.new(uri.host, uri.port, nil)
@@ -43,7 +61,7 @@ if mode == 'tool_loss' && node == 'Execution' && (!target || owner == target)
     # The independent peer, not this statement, proves the actual committed write.
   end
   emit.call(type: 'item.completed', item: {id: 'actual-peer-post', type: 'command_execution', exit_code: 0, aggregated_output: 'Transport acknowledgement was not retained.'})
-  exit 1
+  exit 1 if mode == 'tool_loss'
 end
 specification = context.fetch('task').fetch('specification') || config['ordinary_specification']
 response = case node
@@ -51,7 +69,7 @@ when 'Execution'
   if target && owner != target
     {event: 'OutsideSpecialization'}
   else
-    {event: 'Outcome', reply: 'Done.', outcome: {status: 'Completed', satisfiedCriteria: mode == 'clean_rejected' ? [] : specification.fetch('completionCriteria'), artifacts: []}}
+    {event: 'Outcome', reply: 'Done.', outcome: {status: 'Completed', satisfiedCriteria: %w[clean_rejected read_rejected tool_write_rejected].include?(mode) ? [] : specification.fetch('completionCriteria'), artifacts: []}}
   end
 when 'ChiefTriage' then {event: 'SpecialistSelected', target: target}
 when 'Delegation' then {event: 'HandoffPrepared', request: specification.fetch('objective')}

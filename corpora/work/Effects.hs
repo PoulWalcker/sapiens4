@@ -5,7 +5,7 @@ module Effects
  ( configureOn, definitionOn, pinOn, profileBound, external
  , beforeContent, ContentCommit(..), acceptContentOn, deliver, finishOccurrence
  , completeEvidence, completeActionFree, positiveAnomaly, observedInput, preparationInput, fixtureInput, requireCandidateInput, requireCurrentInput
- , auditPublication, requireDefinitionClearOn, requireRunClear, routineBlockersOn, prepareRoutineAttempt, admitRoutineAttempt, sealRoutineAttempt, requireContentTrace, observeEvidence, recover, reconcile, summary, pendingTransport
+ , auditPublication, requireDefinitionClearOn, requireRunClear, routineBlockersOn, routineRecoveryCandidatesOn, routineReviewContext, routineReviewAccepted, prepareRoutineAttempt, admitRoutineAttempt, sealRoutineAttempt, requireContentTrace, observeEvidence, recover, reconcile, summary, pendingTransport
  ) where
 
 import Control.Concurrent (threadDelay)
@@ -160,6 +160,7 @@ invocationAdmission = parseEither $ \value -> if value==Null then pure LegacyAdm
 
 routineRisk :: Bool -> Value -> RoutineRisk
 routineRisk startup work
+ | not (null (items work "routineEffectReviews")) && routineReviewAccepted work = RoutineClear
  | get work "routineEffectUnknown"/=Null = RoutineUnknown (at (get work "routineEffectUnknown") "decisionId") (at (get work "routineEffectUnknown") "reason")
  | verifiedRepairActivity = RoutineClear
  | otherwise = fromMaybe (if failedWork && null entries && get work "routineAttemptSchema"/=num 1 then RoutineUnverified else RoutineClear) (listToMaybe unknowns `mplus` listToMaybe unverified)
@@ -219,6 +220,76 @@ routineBlockersOn db owner identity=do
  pure $ mapMaybe (\work -> case routineRisk False work of
   RoutineUnknown decision reason -> Just (obj [("run",get work "workloadId"),("decision",str decision),("reason",str reason)])
   _ -> (\reason -> obj [("run",get work "workloadId"),("reason",str reason)]) <$> uncertainty work) works
+
+-- A review supplements immutable failed history; it never erases its marker or
+-- accepts the failed business result. Every retained invocation must be covered.
+routineReviewContext :: Value -> Either String Value
+routineReviewContext work = parseEither checked work
+ where
+ checked value=do
+  when (profileBound value || has value "codeExecution" || has value "repairPin") (fail "Use the existing registered-effect or generated-code recovery path")
+  unless (not (null (items value "calls")) && all ((`elem` ["Completed","Failed","Unresolved","Interrupted","Cancelled"]) . (`at` "state")) (items value "calls")) (fail "Original work is not terminal")
+  let records=concat [nested (at entry "decisionId") entry | entry<-items value "decisions"]
+  unless (not (null records)) (fail "No retained invocation evidence")
+  unless (at (get value "routineEffectUnknown") "decisionId" `elem` map fst records) (fail "The exact uncertain invocation is not retained")
+  sources<-forM records $ \(identity,entry)->do
+   let evidence=get entry "evidence"; completeness=get evidence "completeness"
+   unless (get evidence "finished"==Bool True && get evidence "processExit"/=Null
+     && all ((==Bool True) . get completeness) ["finalSeen","turnEndSeen","streamEndSeen"]
+     && all ((==num 0) . get completeness) ["pendingTools","malformedEvents","unknownEvents","droppedEvents","outOfOrderEvents","droppedBytes","omittedFields","redactedFields","truncatedFields"]
+     && get completeness "tailUnknown"/=Bool True) (fail "Invocation evidence is incomplete; a missing or interrupted tail cannot authorize recovery")
+   let events=items evidence "events"
+       tools=[event | event<-events,get event "summary"/=Null]
+       identities=nub (map (`get` "item") tools)
+   actions<-forM identities $ \item->do
+    let observed=filter ((==item) . (`get` "item")) tools
+        started=filter (T.isPrefixOf "item.started:" . (`at` "kind")) observed
+        completed=filter (T.isPrefixOf "item.completed:" . (`at` "kind")) observed
+    unless (item/=Null && length started==1 && length completed==1) (fail "Tool lifecycle is incomplete or ambiguous")
+    let finished=head completed; kind=at finished "kind"
+    unless (kind `elem` ["item.completed:command_execution","item.completed:mcp_tool_call"]
+      && (if kind=="item.completed:command_execution" then get finished "exitCode"/=Null else at finished "status"=="completed")) (fail "Tool outcome is not independently reviewable")
+    forM_ observed $ \event->do
+     let fields=items (get event "summary") "fields"
+     unless (not (null fields) && all (\field->all ((==Bool False) . get field) ["omitted","redacted","truncated"]) fields) (fail "Tool request or result fields are omitted, redacted or truncated")
+    pure (obj [("id",str (at work "workloadId"<>"/"<>identity<>"/"<>jsonText item)),("events",arr observed)])
+   pure (obj [("decision",str identity),("evidence",evidence),("actions",arr actions)])
+  pure (obj [("run",get value "workloadId"),("sourceHash",str (canonicalHash (remove ["routineEffectReviews"] value))),("contract",get value "task"),("snapshot",get value "routineSnapshot"),("sources",arr sources)])
+ nested identity entry=(if has entry "evidence" || at (get entry "routineAttempt") "state"=="admitted" then [(identity,entry)] else [])
+  ++concat [nested (identity<>"/attempt/"<>T.pack (show n)) attempt | (n,attempt)<-zip [1::Int ..] (items entry "attempts")]
+  ++[result | get entry "correction"/=Null,result<-nested (identity<>"/correction") (get entry "correction")]
+
+routineReviewAccepted :: Value -> Bool
+routineReviewAccepted work=case routineReviewContext work of
+ Left _->False
+ Right context->any (valid context) (items work "routineEffectReviews")
+ where
+ valid context proof=
+  let operation=get proof "operation"; verdict=parseJSONText (at operation "rawResponse")
+      actions=concatMap (`items` "actions") (items context "sources")
+      ids=map (`get` "id") actions
+      coverage=items proof "coverage"
+      local=[entry | entry<-coverage,get entry "run"==get context "run",get entry "sourceHash"==get context "sourceHash",items entry "actions"==ids]
+      allIds=concatMap (`items` "actions") coverage
+      attempts=items operation "attempts"
+      admitted=filter ((/="not_admitted") . (`at` "status")) attempts
+      noAdmission attempt=
+       let admission=get attempt "admission"; versionFailure="Automation analysis requires verified Codex CLI 0.162.1"
+       in at attempt "status"/="not_admitted" || (get attempt "evidence"==Null && get admission "schema"==num 1 && at admission "status"=="not_started"
+        && get admission "requestHash"==get operation "promptHash"
+        && (at admission "authority"=="response-only-configuration" || at admission "authority"=="host-version-gate" && at admission "gateHash"==sourceHash versionFailure && at admission "reason"==versionFailure))
+  in at proof "authority"=="independent-review" && get proof "sourceHash"==get context "sourceHash"
+   && length local==1 && length (nub allIds)==length allIds
+   && at operation "status"=="completed" && at operation "policy"=="response_only"
+   && at operation "promptHash"==sourceHash (at operation "request")
+   && all noAdmission attempts && length admitted==1 && completeActionFree (get (head admitted) "evidence")
+   && get verdict "readOnly"==Bool True && length (items verdict "reviewedActions")==length allIds
+   && all (`elem` items verdict "reviewedActions") allIds
+
+routineRecoveryCandidatesOn :: SQL.Connection -> Text -> Text -> IO [Value]
+routineRecoveryCandidatesOn db owner identity=do
+ works<-routineWorksOn db (RoutineConsumer owner identity)
+ pure [work | work<-works,case routineRisk False work of RoutineUnknown _ _->True; _->False]
 
 requireClearOn :: SQL.Connection -> RoutineConsumer -> Maybe Text -> IO ()
 requireClearOn db owner@(RoutineConsumer _ identity) except=do

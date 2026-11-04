@@ -19,6 +19,7 @@ import Workspace
 import Memo
 import qualified Routines as R
 import qualified RoutineCommands as RC
+import qualified Automation
 import qualified Schedule
 import Data.Time (getCurrentTime)
 import qualified Delegation as D
@@ -47,7 +48,7 @@ prepare s a = do
  let context= obj [("currentSapi",str a),("chief",get facts "main_agent_id"),("groups",get facts "groups"),("team",get facts "team"),("workspace",obj [("path",str (T.pack (workspaceRoot s a)))])]
  writeText (agentRoot s a </> "manifests/corpora-state.md") (jsonText context)
 data WorkspaceOperation = OpenWorkspace | ZoomWorkspace | CloseWorkspace | FocusWorkspace | ReloadWorkspace | BackWorkspace | ForwardWorkspace | BookmarkWorkspace | UnbookmarkWorkspace deriving (Eq, Show)
-data Operation = ReadCorpora | UpdateCorpora | Batch | ReadStatus | Delegate | ReadRoutines | InspectRoutine | PreviewSchedule | CreateRoutine | UpdateRoutine | PauseRoutine | ResumeRoutine | CreateAgent | RetireAgent | RehireAgent | AcquireComputer | ChangeManager | ReadWorkspace | GroupCommand G.GroupOperation | WorkspaceCommand WorkspaceOperation deriving (Eq, Show)
+data Operation = ReadCorpora | UpdateCorpora | Batch | ReadStatus | Delegate | ReadRoutines | InspectRoutine | RecoverRoutine | PreviewSchedule | CreateRoutine | UpdateRoutine | PauseRoutine | ResumeRoutine | CreateAgent | RetireAgent | RehireAgent | AcquireComputer | ChangeManager | ReadWorkspace | GroupCommand G.GroupOperation | WorkspaceCommand WorkspaceOperation deriving (Eq, Show)
 operationSchema :: [(Text,Operation,[Text])]
 operationSchema =
  [ ("corpora_get", ReadCorpora, [])
@@ -57,6 +58,7 @@ operationSchema =
  , ("delegate", Delegate, ["decision"])
  , ("routines", ReadRoutines, [])
  , ("routine_inspect", InspectRoutine, ["id"])
+ , ("routine_recover", RecoverRoutine, ["id"])
  , ("routine_create", CreateRoutine, ["minutes","schedule","prompt"])
  , ("routine_update", UpdateRoutine, ["id","minutes","schedule","prompt"])
  , ("routine_schedule_preview", PreviewSchedule, ["minutes","schedule","trigger","after"])
@@ -169,6 +171,7 @@ control s a payload = do
    pure (obj [("owner",str a)])
   ReadRoutines -> obj . (:[]) . ("routines",) . arr . filter ((==a) . (`at` "owner")) <$> DB.values s DB.ScheduledRoutines
   InspectRoutine -> textField d "id" 80 >>= RC.inspect s a
+  RecoverRoutine -> textField d "id" 80 >>= Automation.requestRecovery s a
   PreviewSchedule -> getCurrentTime >>= \clock -> Schedule.preview clock (remove ["op"] d)
   CreateRoutine -> receipt . obj . (:[]) . ("routine",) <$> R.save s a (if has d "schedule" then remove ["op","id","prompt"] d else get d "minutes") (get d "prompt") (R.AddRoutine current)
   UpdateRoutine -> do i<-textField d "id" 80; receipt . obj . (:[]) . ("routine",) <$> R.save s a (if has d "schedule" then remove ["op","id","prompt"] d else get d "minutes") (get d "prompt") (R.EditRoutine i Nothing)

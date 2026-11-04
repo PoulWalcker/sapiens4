@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module Automation (dispatch, requestOn, preflight, recordRepairFaultOn, withRepairBudget, dispatchRepairs, recoverRepairs, repairProjection, recordAuditFailure, savedAuditSourceOn, providerDue, deferProvider, cancelProviderWait, grantRepairOn, stopRepairOn, runKitInspection) where
+module Automation (dispatch, requestOn, preflight, recordRepairFaultOn, withRepairBudget, dispatchRepairs, recoverRepairs, repairProjection, recordAuditFailure, savedAuditSourceOn, providerDue, deferProvider, cancelProviderWait, grantRepairOn, stopRepairOn, runKitInspection, requestRecovery, runRecovery, configurationBlocked) where
 
 import Control.Concurrent (readMVar)
 import qualified Data.Map.Strict as M
@@ -30,9 +30,167 @@ import qualified Provider
 import Population (requireActive)
 import qualified Composer
 import GHC.Clock
+import Data.Time.Clock (getCurrentTime,addUTCTime,diffUTCTime)
 
 preflight :: IO ()
 preflight = void Provider.analysisCatalog
+
+-- Owner recovery uses the ordinary durable call runtime. The requesting tool
+-- returns before any independent model is started; no nested provider process.
+requestRecovery :: Service -> Text -> Text -> IO Value
+requestRecovery s owner identity = do
+ instruction<-prompt s "routine-effect-review"
+ prior<-D.readWorks s
+ let canResume=any (\work->at (D.workField work "routineRecovery") "owner"==owner && at (D.workField work "routineRecovery") "routine"==identity && configurationBlocked work) prior
+ when canResume (void Provider.analysisCatalog)
+ time<-now
+ run<-RunId <$> newId
+ DB.connection s $ \db->SQL.withTransaction db $ do
+  definition<-Effects.definitionOn db identity
+  require (at definition "owner"==owner) 404 "Unknown personal Routine"
+  require (not (boolean (get definition "deleted"))) 409 "Routine is deleted"
+  sources<-Effects.routineRecoveryCandidatesOn db owner identity
+  works<-readWorksOn db
+  let previous=[work | work<-works,at (D.workField work "routineRecovery") "routine"==identity,at (D.workField work "routineRecovery") "owner"==owner]
+      receipt work=obj [("recovery",obj [("run",str (D.workloadId work)),("status",str (T.toLower (wireName (D.callState (NE.last (D.workCalls work)))))),("result",D.workField work "recoveryResult"),("canResume",Bool (configurationBlocked work)),("error",D.callField (NE.last (D.workCalls work)) "error")])]
+  if null sources then case listToMaybe (reverse previous) of
+   Just work->pure (receipt work)
+   Nothing->do
+    blockers<-Effects.routineBlockersOn db owner identity
+    pure (obj [("recovery",obj [("status",str (if null blockers then "clear" else "blocked")),("blockers",arr blockers)])])
+  else do
+   contexts<-traverse (either (failure 409 . T.pack) pure . Effects.routineReviewContext) sources
+   let key=canonicalHash (obj [("owner",str owner),("routine",str identity),("sources",arr contexts),("policy",str (sourceHash instruction))])
+   case find ((==key) . (`at` "key") . (`D.workField` "routineRecovery")) previous of
+    Just work->receipt <$> (if canResume then resumeUnadmittedRecoveryOn db work else pure work)
+    Nothing->do
+     let request=obj [("owner",str owner),("routine",str identity),("contractGeneration",get definition "contractGeneration"),("key",str key),("policyHash",str (sourceHash instruction)),("contexts",arr contexts)]
+         origin=obj [("routineRecovery",toJSON run)]
+         input="Review retained Routine actions without replaying them"
+         call=D.newCall run (AgentId owner) Nothing (D.QueuedAt D.Preparation) input
+         work=D.Workload (runIdText run) False (call :| []) (KM.fromList [("origin",origin),("routineRecovery",request),("executionGate",toJSON ExecutionOpen),("created",str time)])
+     require (BL.length (encode request)<=262144) 413 "Retained recovery evidence exceeds the bounded review context"
+     DB.putValueOn db DB.Workloads (D.workloadId work) (toJSON work)
+     Managed.enrollOn db owner (newTurn run Chat input time origin False) Null input []
+     pure (receipt work)
+
+-- A pre-exec configuration refusal has not spent the model review allowance.
+-- Resume its original call and retained operation, never a negative/unknown
+-- admitted review or a stopped call. Waiting wall time is not active execution.
+resumeUnadmittedRecoveryOn :: SQL.Connection -> D.Workload -> IO D.Workload
+resumeUnadmittedRecoveryOn db work = do
+ let operation=D.workField work "recoveryOperation"
+     attempts=items operation "attempts"
+     failed=all ((==D.CallFailed) . D.callState) (D.workCalls work)
+     versionFailure="Automation analysis requires verified Codex CLI 0.162.1"
+     -- This exact host error was emitted only by the pre-callback version gate
+     -- in the first owner-review release, before capture or process creation.
+     oldGate=failed && at operation "status"=="unknown" && length attempts==1
+       && all ((==str versionFailure) . (`D.callField` "error")) (D.workCalls work)
+       && at operation "node"=="RoutineEffectReview" && at operation "purpose"=="routine_effect_review"
+       && at operation "policy"=="response_only" && at operation "promptHash"==sourceHash (at operation "request")
+       && get operation "rawResponse"==Null && get operation "evidence"==Null
+       && all (\attempt->at attempt "status"=="failed" && get attempt "evidence"==Null) attempts
+     known=configurationBlocked work
+ if not (failed && known && D.workField work "executionGate"==toJSON ExecutionOpen) then pure work else do
+  rows<-DB.queryRowsOn db "SELECT value FROM managed_turns WHERE id=?" ["value"] [SQL.SQLText (D.workloadId work)]
+  turn<-maybe (failure 409 "Recovery authority disappeared") (DB.decodeStored . (`at` "value")) (listToMaybe rows)
+  require (not (any ((=="cancel") . (`at` "action")) (items (get turn "managed") "commands"))) 409 "Stopped recovery cannot resume"
+  let legacyUnused=case (parseTime (at operation "deadline"),listToMaybe attempts >>= parseTime . (`at` "finished")) of
+       (Just deadline,Just finished)->max 0 (floor (realToFrac (diffUTCTime deadline finished)*1000::Double) :: Int)
+       _->0
+      unused=if oldGate then legacyUnused else int (get operation "unusedMilliseconds")
+      retained=if oldGate then [mergeFields [("status",str "not_admitted"),("usageUnknown",Bool False),("admission",obj [("schema",num 1),("status",str "not_started"),("authority",str "host-version-gate"),("gateHash",str (sourceHash versionFailure)),("requestHash",get operation "promptHash"),("reason",str versionFailure)])] attempt | attempt<-attempts] else attempts
+  require (unused>0 && unused<=90000 && all (\attempt->at attempt "status"=="not_admitted" && at (get attempt "admission") "status"=="not_started" && get attempt "evidence"==Null) retained) 409 "No proven unused review allowance remains"
+  clock<-getCurrentTime
+  let resumed=mergeFields [("status",str "ready"),("attempts",arr retained),("unusedMilliseconds",num unused),("deadline",str (timestamp (addUTCTime (fromIntegral unused/1000) clock)))] operation
+      queued=(D.setWorkField "recoveryOperation" resumed work) {D.workCalls=fmap (\call->call {D.callProgress=D.QueuedAt D.Preparation,D.callFields=KM.delete "error" (D.callFields call)}) (D.workCalls work)}
+  DB.putValueOn db DB.Workloads (D.workloadId queued) (toJSON queued)
+  Managed.transitionOn db (D.workloadId queued) (put "status" (str "queued") . remove ["error","managed_result"])
+  pure queued
+
+configurationBlocked :: D.Workload -> Bool
+configurationBlocked work =
+ let operation=D.workField work "recoveryOperation"; attempts=items operation "attempts"
+     oldGate=at operation "status"=="unknown" && length attempts==1
+       && all ((==str "Automation analysis requires verified Codex CLI 0.162.1") . (`D.callField` "error")) (D.workCalls work)
+       && at operation "node"=="RoutineEffectReview" && at operation "purpose"=="routine_effect_review"
+       && at operation "policy"=="response_only" && at operation "promptHash"==sourceHash (at operation "request")
+       && get operation "rawResponse"==Null && get operation "evidence"==Null
+       && all (\attempt->at attempt "status"=="failed" && get attempt "evidence"==Null) attempts
+ in all ((==D.CallFailed) . D.callState) (D.workCalls work)
+   && D.workField work "executionGate"==toJSON ExecutionOpen
+   && (at operation "status"=="configuration_blocked" || oldGate
+    || at operation "status"=="ready" && not (null attempts) && all (\attempt->at attempt "status"=="not_admitted" && get attempt "evidence"==Null && at (get attempt "admission") "status"=="not_started") attempts)
+
+runRecovery :: Service -> Run -> Turn -> IO (Text,[Value])
+runRecovery s running turn = do
+ locked s (D.begin s (runOwner running) turn)
+ (work,_)<-D.getWork s (runId running)
+ let request=D.workField work "routineRecovery"
+     owner=agentIdText (runOwner running)
+     identity=at request "routine"
+     checkOn db = do
+      current<-loadRecovery db
+      definition<-Effects.definitionOn db identity
+      require (at definition "owner"==owner && not (boolean (get definition "deleted"))
+        && get definition "contractGeneration"==get request "contractGeneration") 409 "Routine owner or contract changed during recovery"
+      require (D.workField current "executionGate"==toJSON ExecutionOpen && all ((`elem` [D.CallQueued,D.CallRunning]) . D.callState) (D.workCalls current)) 409 "Recovery was stopped"
+      candidates<-Effects.routineRecoveryCandidatesOn db owner identity
+      require (map (`get` "workloadId") candidates==map (`get` "run") (items request "contexts")) 409 "The Routine's unresolved source set changed during recovery"
+      sources<-forM (items request "contexts") $ \context->do
+       rows<-DB.queryRowsOn db "SELECT value FROM workloads WHERE id=?" ["value"] [SQL.SQLText (at context "run")]
+       value<-maybe (failure 409 "Recovery source disappeared") (DB.decodeStored . (`at` "value")) (listToMaybe rows)
+       actual<-either (failure 409 . T.pack) pure (Effects.routineReviewContext value)
+       require (actual==context) 409 "Retained invocation evidence changed during recovery"
+       pure value
+      pure (current,sources)
+     loadRecovery db=do
+      works<-readWorksOn db
+      maybe (failure 409 "Recovery call disappeared") pure (find ((==runIdText (runId running)) . D.workloadId) works)
+     guard=do
+      requireActive s owner
+      cancelled<-readIORef (runCancel running)
+      require (not cancelled) 409 "Recovery stopped by Admin"
+      DB.requireOccurrence s (D.workField work "origin")
+      void (DB.connection s checkOn)
+     save operation=locked s $ DB.connection s $ \db->do
+      current<-loadRecovery db
+      DB.putValueOn db DB.Workloads (D.workloadId current) (toJSON (D.setWorkField "recoveryOperation" operation current))
+ instruction<-prompt s "routine-effect-review"
+ require (sourceHash instruction==at request "policyHash") 409 "Recovery review policy changed"
+ envelope<-prompt s "preparation-envelope"
+ let context=obj [("owner",str owner),("routine",str identity),("sources",arr [source | selected<-items request "contexts",source<-items selected "sources"]),("runs",get request "contexts")]
+     savedOperation=D.workField work "recoveryOperation"
+     rendered=if savedOperation/=Null then at savedOperation "request" else render envelope [("node","RoutineEffectReview"),("instruction",instruction),("context",jsonText context)]
+ clock<-getMonotonicTimeNSec
+ let capped=running {runDeadline=min (runDeadline running) (clock+90000000000)}
+ guard
+ operation<-Provider.operationFor s capped "RoutineEffectReview" "routine_effect_review" (at request "key") rendered Nothing [value | let value=D.workField work "recoveryOperation",value/=Null]
+ -- This is one bounded review, never an automatic repair/replay loop.
+ raw<-Provider.invokeRetained s capped operation save `catch` (\(_::Provider.RetryDeferred)->failure 409 "Recovery review provider unavailable; its original operation is retained")
+ let verdict=parseJSONText raw
+ void (parseValue 422 (onlyFields ["readOnly","reviewedActions","reason"]) verdict)
+ readOnly<-field 422 verdict "readOnly" :: IO Bool
+ reason<-parseValue 422 (textFieldP "reason" 8000) verdict
+ let ids=[get action "id" | source<-items context "sources",action<-items source "actions"]
+ require (length (items verdict "reviewedActions")==length ids && all (`elem` items verdict "reviewedActions") ids) 422 "Recovery review must account for every retained action"
+ guard
+ locked s $ do
+  guard
+  DB.connection s $ \db->SQL.withTransaction db $ do
+   (current,sources)<-checkOn db
+   let retained=D.workField current "recoveryOperation"
+       coverage=[obj [("run",get selected "run"),("sourceHash",get selected "sourceHash"),("actions",arr [get action "id" | source<-items selected "sources",action<-items source "actions"])] | selected<-items request "contexts"]
+       proof=obj [("authority",str "independent-review"),("reviewRun",toJSON (runId running)),("policyHash",get request "policyHash"),("operation",retained),("coverage",arr coverage)]
+       supplemented=[put "routineEffectReviews" (arr (items source "routineEffectReviews"++[put "sourceHash" (get selected "sourceHash") proof])) source | (source,selected)<-zip sources (items request "contexts")]
+   when readOnly $ do
+    require (all Effects.routineReviewAccepted supplemented) 409 "Independent recovery proof is incomplete"
+    forM_ supplemented $ \source->DB.putValueOn db DB.Workloads (at source "workloadId") source
+   let result=obj [("status",str (if readOnly then "reconciled" else "blocked")),("reason",str reason),("originalRuns",arr (map (`get` "workloadId") sources)),("replayed",Bool False)]
+       finished=(D.setWorkField "recoveryResult" result current) {D.workCalls=fmap (\call->call {D.callProgress=D.FinishedCall (D.Answered reason)}) (D.workCalls current)}
+   DB.putValueOn db DB.Workloads (D.workloadId current) (toJSON finished)
+ pure ((if readOnly then "Retained actions were independently verified as reads. Future authorized Routine runs may continue; the old failed result was not replayed or accepted. " else "Recovery remains blocked. ")<>reason,[])
 
 consumer :: R.Definition -> D.Workload -> Bool
 consumer definition work = at (D.workField work "preparationPin") "routine"==R.definitionId definition

@@ -268,10 +268,11 @@ inspect s owner identity = do
  operations <- readOperations s
  let business=[w|w<-related,get (D.workField w "origin") "routine"==str identity,not (has (D.workField w "origin") "group")]
      latest=listToMaybe (reverse (sortOn ((`at` "created") . toJSON) business))
- lastRun <- forM latest $ \work -> select ["id","created","status","assessment","outcome","executionBinding","routineEffectUnknown","error"] <$> renderRun RunDetail operations (definitionRevision definition) work
+ lastRun <- forM latest $ \work -> select ["id","created","status","assessment","outcome","executionBinding","routineEffectUnknown","routineEffectsReconciled","error"] <$> renderRun RunDetail operations (definitionRevision definition) work
  let routine=merge (selectPresent ["id","owner","revision","title","minutes","schedule","trigger","paused","nextDue","runCount","deleted","contractGeneration"] (toJSON definition))
        (obj [("goal",str (R.definitionGoal definition)),("criteria",maybe Null toJSON (R.definitionCriteria definition))])
- pure (obj [("routine",routine),("latestRun",fromMaybe Null lastRun),("blockers",arr blockers)])
+ let recoveries=[obj [("run",str (D.workloadId w)),("result",D.workField w "recoveryResult"),("canResume",Bool (Automation.configurationBlocked w)),("error",D.callField (NE.last (D.workCalls w)) "error"),("status",toJSON (D.callState (NE.last (D.workCalls w))))] | w<-works,at (D.workField w "routineRecovery") "routine"==identity,at (D.workField w "routineRecovery") "owner"==owner]
+ pure (obj [("routine",routine),("latestRun",fromMaybe Null lastRun),("blockers",arr blockers),("recovery",fromMaybe Null (listToMaybe (reverse recoveries)))])
 
 detail :: Service -> Text -> Text -> Text -> IO Value
 detail s owner identity run = do
@@ -318,12 +319,13 @@ renderRun projection operations revision work = do
      code=D.workField work "codeExecution"
      attempts=pairs (get code "fallbacks")
      fallbackSummary=if null attempts then Null else obj [("status",str (if boolean (get code "completedViaFallback") then "completed" else if any (\(_,attempt)->at attempt "status"=="reserved") attempts then "running" else "unresolved")),("attempts",num (length attempts)),("faultyImplementation",Bool (not (null (items code "faults"))))]
-     version=jsonText (arr [fallbackSummary,str status,lastDecision,lastFeedback,toJSON revision,str (canonicalHash (Effects.summary (toJSON work)))])
+     reconciled=Effects.routineReviewAccepted (toJSON work)
+     version=jsonText (arr [fallbackSummary,str status,lastDecision,lastFeedback,toJSON revision,str (canonicalHash (Effects.summary (toJSON work))),Bool reconciled])
      publicError=case projection of
       RunDetail -> D.callField call "error"
       RunSummary | Effects.profileBound (toJSON work) && D.callField call "error"/=Null -> str (if at (get (Effects.external (toJSON work)) "read") "status" `elem` ["failed","observed","conflict"] then "Source could not be read completely; see evidence for details." else "Content run could not complete; see evidence for details.")
       RunSummary -> D.callField call "error"
      details=case projection of
       RunSummary -> []
-      RunDetail -> [("routineEffectUnknown",D.workField work "routineEffectUnknown"),("routineIdentityError",D.workField work "routineIdentityError"),("externalExecution",D.workField work "externalExecution"),("codeExecution",D.codeProjection (D.workField work "codeExecution")),("executionBinding",binding),("criteriaAssessment",arr criteriaAssessment),("invocations",arr invocations),("observations",observations),("feedback",arr feedback),("rejection",fromMaybe Null (listToMaybe feedback)),("outcome",D.workField work "outcome")]
+      RunDetail -> [("routineEffectsReconciled",Bool reconciled),("routineEffectUnknown",D.workField work "routineEffectUnknown"),("routineIdentityError",D.workField work "routineIdentityError"),("externalExecution",D.workField work "externalExecution"),("codeExecution",D.codeProjection (D.workField work "codeExecution")),("executionBinding",binding),("criteriaAssessment",arr criteriaAssessment),("invocations",arr invocations),("observations",observations),("feedback",arr feedback),("rejection",fromMaybe Null (listToMaybe feedback)),("outcome",D.workField work "outcome")]
  pure (obj (details++[("workflowWaits",arr [mergeFields [("id",str key)] (select ["node","call","due","source","sourcePin","progress","next","status","reason","resumedAt","reference"] record) | (key,record)<-pairs (D.workField work "workflowWaits")]),("workflowParallel",workflowParallel work),("fallbackSummary",fallbackSummary),("externalSummary",Effects.summary (toJSON work)),("executionStages",D.executionStages (D.workField work "codeExecution")),("assessment",assessment),("originalAssessment",original),("detailVersion",str version),("invocationCount",num (length invocations)),("currentRevision",toJSON revision),("historical",Bool (get (D.workField work "routineSnapshot") "revision"/=toJSON revision)),("id",str (D.workloadId work)),("created",D.workField work "created"),("trigger",get (D.workField work "origin") "trigger"),("snapshot",D.workField work "routineSnapshot"),("status",str status),("result",if gate==ExecutionStopped then Null else get (D.workField work "outcome") "reply"),("message",if gate==ExecutionOpen && D.callState call==D.CallWaiting then toJSON (D.callOutput call) else Null),("error",publicError),("currentOwner",toJSON (D.callOwner call))]))
