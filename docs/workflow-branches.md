@@ -70,3 +70,15 @@ progress, successor and wait status. Independent preparation fixtures validate w
 inputs using explicitly simulated timing; authorized occurrences perform real waits
 before activation. Waiting for declared child results uses the fork/join contract above;
 external Task or Workflow result references are unavailable.
+
+For an accepted ordinary personal Task, its Sapi may choose prepared execution
+before business actions. Preparation checks a separate immutable candidate under
+one shared 30-minute active preparation allowance for that source Task and all its
+versions. A new request ID does not refill it. The original Task waits while an
+internally authorized child verifies the exact candidate against its original
+criteria and input; only an accepted actual result can settle the original Task.
+A new version requires its own checks and actual verification. Failed or interrupted
+preparation returns retained evidence to the Sapi without replaying old providers.
+Task details show preparation, version, checks, verification, result and Stop.
+No user Compose or Run action is required. Multi-input batches and prior business
+or unknown tool activity retain ordinary execution instead of changing execution.

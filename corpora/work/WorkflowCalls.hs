@@ -8,7 +8,7 @@ import Control.Monad
 import Data.Aeson hiding (pairs)
 import qualified Database.SQLite.Simple as SQL
 import Data.IORef
-import Data.Time.Clock (getCurrentTime,diffUTCTime,addUTCTime)
+import Data.Time.Clock (getCurrentTime,diffUTCTime)
 import Data.List (find)
 import qualified Data.List.NonEmpty as NE
 import Data.Maybe
@@ -100,16 +100,40 @@ fork s running version input context nodeId node=do
 ready :: Service -> Turn -> IO Bool
 ready s turn=do
  found<-D.findWork s (turnId turn)
- case found of
-  Nothing->pure True
-  Just (work,call)->
-   if (child call || turnField turn "workflowWait"/=Null) && (at (D.workField work "workflowBudget") "status"/="reserved" || has (toJSON work) "workflowHalt") then pure False else case turnField turn "workflowWait" of
-    Null->pure True
-    key | has (D.workField work "workflowWaits") (text key)->timeReady s work call (text key)
-    key->do
-     let required=items (get (D.workField work "workflowCohorts") (text key)) "children"
-         calls=[candidate | candidate<-NE.toList (D.workCalls work),toJSON (D.callIdentity candidate) `elem` required]
-     pure (not (null calls) && all ((`notElem` [D.CallQueued,D.CallRunning,D.CallDelegated]) . D.callState) calls)
+ let business=get (turnField turn "origin") "standaloneRun"
+     preparation=maybe Null ((`D.workField` "standaloneParent") . fst) found
+     request=business `fallback` preparation
+ released<-if request==Null then pure True else standaloneReleased s request (maybe (runIdText (turnId turn)) (D.workloadId . fst) found) (business/=Null)
+ if not released then pure False else case found of
+   Nothing->pure True
+   Just (_,call) | D.callField call "standaloneWait"/=Null->do
+    works<-D.readWorks s
+    let waiting=D.callField call "standaloneWait"
+        terminal current=all ((`elem` [D.CallCompleted,D.CallFailed,D.CallInterrupted,D.CallCancelled,D.CallUnresolved]) . D.callState) (D.workCalls current)
+    if has waiting "child" then case find ((==at waiting "child") . D.workloadId) works of
+     Just current->pure (terminal current)
+     Nothing->do
+      turns<-DB.turns s
+      pure (any (\value->at value "id"==at waiting "child" && at value "status" `elem` ["failed","interrupted","cancelled"]) turns)
+    else pure (any (\current->D.workloadId current==at waiting "preparation" && (terminal current || at (D.workField current "preparation") "status" `elem` ["failed","stopped","stale","interrupted","declined"])) works)
+   Just (work,call)->
+    if (child call || turnField turn "workflowWait"/=Null) && (at (D.workField work "workflowBudget") "status"/="reserved" || has (toJSON work) "workflowHalt") then pure False else case turnField turn "workflowWait" of
+     Null->pure True
+     key | has (D.workField work "workflowWaits") (text key)->timeReady s work call (text key)
+     key->do
+      let required=items (get (D.workField work "workflowCohorts") (text key)) "children"
+          calls=[candidate | candidate<-NE.toList (D.workCalls work),toJSON (D.callIdentity candidate) `elem` required]
+      pure (not (null calls) && all ((`notElem` [D.CallQueued,D.CallRunning,D.CallDelegated]) . D.callState) calls)
+
+standaloneReleased :: Service -> Value -> Text -> Bool -> IO Bool
+standaloneReleased s request identity business=do
+ works<-D.readWorks s
+ runs<-readMVar (serviceRuns s)
+ let pin=get request "parent"
+     sources=[call | work<-works,D.workloadId work==at pin "workload",call<-NE.toList (D.workCalls work),toJSON (D.callIdentity call)==get pin "call"]
+ pure $ case sources of
+  [call]->let waiting=D.callField call "standaloneWait" in D.callState call==D.CallQueued && get waiting "operation"==get request "operation" && at waiting (if business then "child" else "preparation")==identity && M.notMember (D.callIdentity call) runs
+  _->False
 
 defer :: Service -> Run -> Value -> Value -> Text -> Value -> Value -> IO Value
 defer s running version context nodeId node selected=do
@@ -192,19 +216,25 @@ validateOn db work version context=do
  rows<-DB.queryRowsOn db "SELECT value FROM workloads WHERE id=?" ["value"] [SQL.SQLText (at reference "preparation")]
  source<-case rows of [row]->DB.decodeStored (at row "value"); _->failure 409 "Pinned workflow preparation disappeared"
  require (get (get source "preparation") "version"==version && at reference "digest"==canonicalHash (remove ["reference"] version)) 409 "Pinned workflow version changed before fork admission"
- definitions<-DB.queryRowsOn db "SELECT value FROM scheduled_routines ORDER BY sequence" ["value"] [] >>= mapM (DB.decodeStored . (`at` "value"))
- let pin=D.workField work "preparationPin" `fallback` D.workField work "routineSnapshot"
-     routine=get pin "routine" `fallback` get pin "id"
- definition<-maybe (failure 409 "Workflow consumer disappeared") pure (find (\value->get value "id"==routine && get value "owner"==get reference "owner") definitions)
- require (not (boolean (get definition "deleted")) && get definition "contractGeneration"==get version "contractGeneration") 409 "Workflow consumer changed before child admission"
- Effects.requireDefinitionClearOn db definition
+ if get source "standalonePin"/=Null then do
+  works<-DB.queryRowsOn db "SELECT value FROM workloads ORDER BY rowid" ["value"] [] >>= traverse (DB.decodeStored . (`at` "value") >=> decodeValue 500)
+  void (D.requireStandalonePinFrom works (get source "standalonePin"))
+  forM_ [D.workField work "standaloneRun",D.workField work "standaloneParent"] $ \request->when (request/=Null) (void (D.requireStandalonePinFrom works (get request "parent")))
+  require (at source "executionGate"/="stopped") 409 "Standalone preparation stopped before child admission"
+ else do
+  definitions<-DB.queryRowsOn db "SELECT value FROM scheduled_routines ORDER BY sequence" ["value"] [] >>= mapM (DB.decodeStored . (`at` "value"))
+  let pin=D.workField work "preparationPin" `fallback` D.workField work "routineSnapshot"
+      routine=get pin "routine" `fallback` get pin "id"
+  definition<-maybe (failure 409 "Workflow consumer disappeared") pure (find (\value->get value "id"==routine && get value "owner"==get reference "owner") definitions)
+  require (not (boolean (get definition "deleted")) && get definition "contractGeneration"==get version "contractGeneration") 409 "Workflow consumer changed before child admission"
+  Effects.requireDefinitionClearOn db definition
+  when (has (toJSON work) "repairPin") $ do
+   let repair=D.workField work "repairPin"
+   saved<-maybe (failure 409 "Workflow repair case disappeared") pure (find ((==get repair "case") . (`get` "id")) (items definition "repairCases"))
+   require (not (has saved "userStop") && at saved "status" `elem` ["repairing","verifying","awaiting_verification","diagnosing","diagnosed","waiting_doctor"] && any (\receipt->at receipt "operation"==D.workloadId work && at receipt "status"=="reserved") (items saved "reservations")) 409 "Shared repair reservation is no longer active"
  when (get context "fixture"==Null) $ do
   let prepared=get source "preparation"
   require (at prepared "status"=="awaiting_occurrence" && get (get prepared "review") "accepted"==Bool True && not (null (items prepared "checks")) && all ((==Bool True) . (`get` "matched")) (items prepared "checks")) 409 "Workflow no longer has its own checked acceptance"
- when (has (toJSON work) "repairPin") $ do
-  let repair=D.workField work "repairPin"
-  saved<-maybe (failure 409 "Workflow repair case disappeared") pure (find ((==get repair "case") . (`get` "id")) (items definition "repairCases"))
-  require (not (has saved "userStop") && at saved "status" `elem` ["repairing","verifying","awaiting_verification","diagnosing","diagnosed","waiting_doctor"] && any (\receipt->at receipt "operation"==D.workloadId work && at receipt "status"=="reserved") (items saved "reservations")) 409 "Shared repair reservation is no longer active"
 
 yielding :: Service -> Run -> IO ()
 yielding s running=DB.project s (agentIdText (runOwner running))

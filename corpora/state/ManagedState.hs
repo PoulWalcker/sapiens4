@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveDataTypeable #-}
-module ManagedState (Conflict(..), load, enroll, enrollOn, transitionOn, save, acknowledge, restore, commands) where
+module ManagedState (Conflict(..), load, enroll, enrollOn, adoptOn, transitionOn, save, acknowledge, restore, commands) where
 
 import Control.Exception
 import Control.Monad
@@ -82,6 +82,23 @@ enrollOn db owner turn message input attachments = do
      metadata=obj [("version",num 1),("revision",num 1),("pin",selectPresent ["input","flow"] value),("attempts_started",num 0),("receipts",arr []),("commands",arr []),("messages",arr [message | message/=Null]) ]
  execute db "INSERT INTO message_inputs(job,text,attachments) VALUES (?,?,?)" (runIdText (turnId turn),input,encodeText (arr attachments))
  execute db "INSERT INTO managed_turns(id,agent,value,projection,pending) VALUES (?,?,?,NULL,1)" (runIdText (turnId turn),owner,encodeText (put "managed" metadata value))
+
+-- Adopt only an exact, still-running legacy projection selected at a safe boundary.
+adoptOn :: Connection -> Text -> Turn -> [Value] -> IO ()
+adoptOn db owner turn messages=do
+ let old=toJSON turn; identity=runIdText (turnId turn)
+ check (turnStatus turn==Running && not (boolean (get old "cancel_requested"))) "Only the current running input can enter a durable continuation"
+ rows<-query db "SELECT value FROM managed_turns WHERE id=?" (Only identity) :: IO [Only Text]
+ case rows of
+  []->do
+   check (not (has old "managed")) "Managed source lost its canonical row"
+   let metadata=obj [("version",num 1),("revision",num 1),("pin",selectPresent ["input","flow"] old),("attempts_started",num 1),("receipts",arr []),("commands",arr []),("messages",arr messages)]
+       value=put "managed" metadata (put "batchable" (Bool False) old)
+   execute db "INSERT INTO managed_turns(id,agent,value,projection,pending) VALUES (?,?,?,?,1)" (identity,owner,encodeText value,encodeText old)
+  [Only raw]->do
+   canonical<-either (throwIO . userError) pure (eitherDecodeStrict (TE.encodeUtf8 raw))
+   check (base old==canonical) "Managed source projection changed before continuation admission"
+  _->check False "Duplicate canonical continuation source"
 
 -- Canonical facts, command consumption and the projection intent commit together.
 -- Internal queue transitions share the transaction that creates a child cohort.

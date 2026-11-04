@@ -434,16 +434,21 @@ withPreparationBudget :: Service -> Run -> (Run -> IO a) -> IO a
 withPreparationBudget s running action=mask $ \restore->do
  started<-getMonotonicTimeNSec
  let identity=runId running
+     authority=do
+      (own,_)<-D.getWork s identity
+      let source=at (D.workField own "standalonePin") "workload"
+      if T.null source then pure own else fst <$> D.getWork s (RunId source)
      change transform=locked s $ do
-      (work,_)<-D.getWork s identity
+      work<-authority
       let budget=D.workField work "maintenanceBudget" `fallback` obj [("limitMilliseconds",num 1800000),("spentMilliseconds",num 0),("reservations",arr [])]
       D.saveWork s (D.setWorkField "maintenanceBudget" (transform budget) work)
  allowance<-locked s $ do
-  (work,_)<-D.getWork s identity
+  work<-authority
   let budget=D.workField work "maintenanceBudget" `fallback` obj [("limitMilliseconds",num 1800000),("spentMilliseconds",num 0),("reservations",arr [])]
       remaining=int (get budget "limitMilliseconds")-int (get budget "spentMilliseconds")
+  (own,_)<-D.getWork s identity
   case find ((=="reserved") . (`at` "status")) (items budget "reservations") of
-   Just receipt | at (D.workField work "workflowBudget") "status"=="reserved"->pure (int (get receipt "milliseconds"))
+   Just receipt | at receipt "operation"==runIdText identity && at (D.workField own "workflowBudget") "status"=="reserved"->pure (int (get receipt "milliseconds"))
    _->do
     require (remaining>0 && not (any ((=="reserved") . (`at` "status")) (items budget "reservations"))) 409 "Original preparation active allowance is exhausted or uncertain"
     let reservation=obj [("operation",toJSON identity),("status",str "reserved"),("milliseconds",num remaining)]

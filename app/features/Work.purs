@@ -32,7 +32,8 @@ taskRow m task = disclosure m ("task:" <> m.selected <> ":" <> D.s "id" task) ("
   [V.div "task-body-heading" [V.span [] (if routine then "Execution prompt" else "Task body"),V.span [V.cls "task-format"] (if routine then "" else "YAML"),V.control [V.cls "task-copy",V.label $ "Copy " <> if routine then "execution prompt" else "task YAML"] "Copy" (Copy (D.s "body" task) (if routine then "Execution prompt copied." else "Task YAML copied."))]
   ,V.textNode "pre" [V.cls "task-body-yaml",V.label $ if routine then "Execution prompt" else "Task body YAML"] (D.s "body" task)
   ,V.when (D.s "result" task /= "") $ V.div "task-result" $ [V.textNode "h3" [V.cls "task-result-heading"] "Result"] <> T.paragraphs m (D.s "result" task)
-  ,V.when (D.s "error" task /= "") $ V.p "task-error" $ D.s "error" task]
+  ,V.when (D.s "error" task /= "") $ V.p "task-error" $ D.s "error" task
+  ,standalonePanel m task]
   where
   state = D.s "state" task
   tone = if state == "Completed" then "complete" else if A.elem state ["Failed","Interrupted","Unresolved","WaitingForAdmin"] then "attention" else if A.elem state ["Running","Queued"] then "active" else "neutral"
@@ -40,6 +41,24 @@ taskRow m task = disclosure m ("task:" <> m.selected <> ":" <> D.s "id" task) ("
   route = (if D.s "sender" task == D.s "owner" task then "" else name (D.s "sender" task) <> " → ") <> name (D.s "owner" task)
   routine = D.b "routine" task
   control caption glyph action = V.textNode "button" [V.attr "type" "button",V.cls "task-copy task-routine-action",V.label caption,V.on "click" \e -> Link e action] (glyph)
+
+standalonePanel :: M.Model -> Json -> V.Html
+standalonePanel m task = V.when (not $ A.null versions) $ V.div "routine-notice"
+  ([V.textNode "h3" [] "Prepared execution"] <> map version versions <>
+   [V.when active $ V.button "button" "Stop this task" $ Mutate ("/api/agents/" <> m.selected <> "/turns/" <> sourceCall <> "/cancel") "POST" D.empty Refresh])
+  where
+  versions = A.filter (\v -> D.s "workload" (D.get "parent" v) == D.s "id" task || D.s "workload" (D.get "source" v) == D.s "id" task || A.any (\r -> D.s "workload" (D.get "parent" r) == D.s "id" task) (D.rows "requests" v)) $ D.rows "standalone_workflows" m.snapshot
+  active = A.elem (D.s "state" task) ["Running", "Queued", "WaitingForAdmin"]
+  requested = fromMaybe D.null $ A.find (\r -> D.s "workload" (D.get "parent" r) == D.s "id" task) $ A.concatMap (D.rows "requests") versions
+  sourceCall = D.fallback (D.s "call" $ D.get "parent" $ fromMaybe D.null $ A.find (\v -> D.s "workload" (D.get "parent" v) == D.s "id" task) versions) (D.s "call" $ D.get "parent" requested)
+  version v = V.div "routine-version"
+    [V.p "" $ "Preparation: " <> D.s "status" v
+    ,V.p "routine-muted" $ "Version: " <> D.s "digest" (D.get "reference" v)
+    ,V.p "" $ "Checks: " <> show (A.length $ A.filter (D.b "matched") $ D.rows "checks" v) <> "/" <> show (A.length $ D.rows "checks" v)
+    ,V.p "" $ "Verification: " <> D.fallback "Not yet run" (D.s "status" $ D.get "trial" v)
+    ,V.p "routine-muted" $ "Preparation time: " <> show (D.int $ D.at ["maintenanceBudget","spentMilliseconds"] v) <> "/" <> show (D.int $ D.at ["maintenanceBudget","limitMilliseconds"] v) <> " ms; waiting uses no active time."
+    ,V.when (D.s "error" v /= "") $ V.p "task-error" $ D.s "error" v
+    ,V.div "" $ map (\r -> V.p "" $ "Result: " <> D.s "status" (D.get "outcome" r) <> " · " <> D.s "reply" (D.get "outcome" r)) $ D.rows "runs" v]
 
 groupCalls :: M.Model -> Json -> Array Json
 groupCalls m group = map row $ A.reverse $ A.filter (not <<< D.valid <<< D.get "task") $ D.rows "requests" group

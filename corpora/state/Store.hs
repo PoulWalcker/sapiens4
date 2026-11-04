@@ -180,6 +180,7 @@ occurrenceAllowed s origin
  | has origin "kitInspection" = kitInspectionAllowed s (get origin "kitInspection")
  | has origin "repairAudit" = repairAllowed s (get origin "repairAudit")
  | has origin "repair" = repairAllowed s (get origin "repair")
+ | has origin "standaloneRun" = standaloneRunAllowed s (get origin "standaloneRun")
  | has origin "preparation" = preparationAllowed s (get origin "preparation")
  | has origin "analysis" = analysisAllowed s (get origin "analysis")
  | not (has origin "occurrence") = pure True
@@ -233,7 +234,40 @@ analysisFeedbackIds :: [Value] -> Value -> [Value] -> [RunId] -> [Text]
 analysisFeedbackIds operations definition works sources =
  [at feedback "operation" | work<-works,sameRoutineContract definition work || get work "workloadId" `elem` map toJSON sources,feedback<-take 1 (workFeedback operations work)]
 preparationAllowed :: Service -> Value -> IO Bool
-preparationAllowed s = pinnedMaintenanceAllowed s "preparationPin"
+preparationAllowed s identity = do
+ rows<-queryRows s "SELECT value FROM workloads WHERE id=?" ["value"] [SQLText (text identity)]
+ case rows of
+  [row]->do
+   work<-decodeStored (at row "value")
+   if has work "standalonePin" then connection s $ \db->do
+    allowed<-standalonePinAllowedOn db (get work "standalonePin")
+    parent<-standalonePinAllowedOn db (get (get work "standaloneParent") "parent")
+    pure (allowed && parent && at work "executionGate"/="stopped")
+    else pinnedMaintenanceAllowed s "preparationPin" identity
+  _->pure False
+
+standalonePinAllowedOn :: Connection -> Value -> IO Bool
+standalonePinAllowedOn db raw=do
+ StandaloneTaskPin owner workload identity decision digest<-decodeValue 409 raw
+ rows<-queryRowsOn db "SELECT value FROM workloads WHERE id=?" ["value"] [SQLText workload]
+ case rows of
+  [row]->do
+   work<-decodeStored (at row "value")
+   pure $ at work "executionGate"/="stopped" && any (\call->get call "callId"==toJSON identity && get call "addressedTo"==toJSON owner && at call "state" `notElem` ["Cancelled","Interrupted","Failed"]
+     && get (get (get call "executionBinding") "source") "decisionId"==str decision) (items work "calls")
+    && any (\record->at record "decisionId"==decision && get record "callId"==toJSON identity && get record "agent"==toJSON owner && boolean (get record "accepted") && at (get record "response") "event"=="TaskPrepared" && canonicalHash (get (get record "response") "specification")==digest) (items work "decisions")
+  _->pure False
+
+standaloneRunAllowed :: Service -> Value -> IO Bool
+standaloneRunAllowed s request=connection s $ \db->do
+ parent<-standalonePinAllowedOn db (get request "parent")
+ candidate<-standalonePinAllowedOn db (get request "consumer")
+ rows<-queryRowsOn db "SELECT value FROM workloads WHERE id=?" ["value"] [SQLText (at (get request "reference") "preparation")]
+ case rows of
+  [row]->do
+   prepared<-decodeStored (at row "value")
+   pure (parent && candidate && at prepared "executionGate"/="stopped" && get prepared "standalonePin"==get request "consumer" && get (get (get prepared "preparation") "version") "reference"==get request "reference")
+  _->pure False
 
 analysisAllowed :: Service -> Value -> IO Bool
 analysisAllowed s = pinnedMaintenanceAllowed s "analysisPin"

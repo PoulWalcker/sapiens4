@@ -33,7 +33,7 @@ validateLocal version=forM_ [get version "kitArtifact" | has version "kitArtifac
 resolvePreparation :: AgentId -> Value -> CandidateReference -> IO Value
 resolvePreparation owner source reference@(CandidateReference refOwner preparation digest)=do
  let version=get (get source "preparation") "version"
- require (refOwner==owner && at source "workloadId"==runIdText preparation && get (get source "preparationPin") "owner"==toJSON owner) 409 "Candidate reference belongs to another preparation or owner"
+ require (refOwner==owner && at source "workloadId"==runIdText preparation && get (get source "standalonePin" `fallback` get source "preparationPin") "owner"==toJSON owner) 409 "Candidate reference belongs to another preparation or owner"
  require (get version "reference"==toJSON reference && canonicalHash (remove ["reference"] version)==digest && (if has version "workflow" then Workflow.contentHash (get version "workflow") else sourceHash (at version "source"))==at version "sourceHash") 409 "Pinned candidate content or reference changed"
  when (has version "workflow") (either (failure 409) pure (Workflow.validate (get version "workflow")))
  void (either (failure 409 . T.pack) pure (parseEither candidateExplanation version))

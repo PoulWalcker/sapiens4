@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module Composer (repairOn, requestOn, stopOn, detail, projection, run, runWorkflowChild, recover ) where
+module Composer (repairOn, requestOn, stopOn, detail, projection, run, runWorkflowChild, recover, chooseStandalone, resumeStandalone, standaloneSnapshot ) where
 
 import Control.Exception
 import Control.Monad
@@ -129,7 +129,9 @@ phaseChecked s running value validate = locked s $ do
  work<-load s (runIdText (runId running))
  let changed=D.setWorkField "preparation" (put "status" (str (phaseName value)) (D.workField work "preparation")) work
      promoted=if value==AwaitingOccurrence then changed {D.workCalls=fmap (\call->call {D.callState=D.CallCompleted,D.callOutput=Just "Candidate awaits an authorized occurrence"}) (D.workCalls changed)} else changed
- D.saveWork s promoted
+ DB.connection s $ \db->SQL.withTransaction db $ do
+  DB.putValueOn db DB.Workloads (D.workloadId promoted) (toJSON promoted)
+  when (value==AwaitingOccurrence && D.workField promoted "standalonePin"/=Null) (void (queueStandaloneOn db promoted))
 
 ask :: Service -> Run -> Text -> Text -> Value -> IO Value
 ask s running node purpose context = snd <$> askConfigured s running node purpose context Nothing
@@ -277,7 +279,7 @@ prepare s running = do
    profile<-decodeValue 422 (get saved "feedProfile")
    revision<-field 422 (get saved "sourceInput") "externalProfileRevision"
    pure [("inputBinding",toJSON (feedDescriptor profile revision content))]
- let content=mergeFields (pairs (selectPresent ["expectedBinding"] saved)++kitFields++feedFields++hybridFields++workflowFields++ (if has candidate "workflow" then [("interface",str "json-stdin-result-v1"),("language",str "workflow"),("dependencies",arr []),("capabilities",arr [])] else [])++[("runtime",Code.profileJSON profile),("contract",get saved "contract"),("contractGeneration",get (D.workField work "preparationPin") "contractGeneration"),("sourceHash",str (if has candidate "workflow" then Workflow.contentHash (get candidate "workflow") else sourceHash source))]) (if has candidate "workflow" then select ["workflow"] candidate else select ["source","language","interface","dependencies","capabilities"] candidate)
+ let content=mergeFields (pairs (selectPresent ["expectedBinding"] saved)++[("standalonePin",D.workField work "standalonePin") | D.workField work "standalonePin"/=Null]++kitFields++feedFields++hybridFields++workflowFields++ (if has candidate "workflow" then [("interface",str "json-stdin-result-v1"),("language",str "workflow"),("dependencies",arr []),("capabilities",arr [])] else [])++[("runtime",Code.profileJSON profile),("contract",get saved "contract"),("contractGeneration",get (D.workField work "preparationPin") "contractGeneration"),("sourceHash",str (if has candidate "workflow" then Workflow.contentHash (get candidate "workflow") else sourceHash source))]) (if has candidate "workflow" then select ["workflow"] candidate else select ["source","language","interface","dependencies","capabilities"] candidate)
      reference=obj [("owner",toJSON (runOwner running)),("preparation",str identity),("digest",str (canonicalHash content))]
      version=put "reference" reference content
  when (has saved "version") (require (version==get saved "version") 409 "Retained candidate identity or stage inputs changed")
@@ -408,9 +410,11 @@ recover s = do
  works<-D.readWorks s
  forM_ works $ \work->when (has (toJSON work) "preparation") $ do
   let identity=D.workloadId work; prepared=D.workField work "preparation"; container=get prepared "container"
-  let budget=D.workField work "maintenanceBudget"
-  when (not (WC.safeIdle work) && any ((=="reserved") . (`at` "status")) (items budget "reservations")) $
-   D.saveWork s (D.setWorkField "maintenanceBudget" (mergeFields [("usageUnknown",Bool True),("reservations",arr [if at receipt "status"=="reserved" then put "status" (str "uncertain") receipt else receipt | receipt<-items budget "reservations"])] budget) work)
+  authority<-if D.workField work "standalonePin"==Null then pure work else load s (at (D.workField work "standalonePin") "workload")
+  let budget=D.workField authority "maintenanceBudget"
+      own receipt=at receipt "status"=="reserved" && (D.workField work "standalonePin"==Null || at receipt "operation"==identity)
+  when (not (WC.safeIdle work) && any own (items budget "reservations")) $
+   D.saveWork s (D.setWorkField "maintenanceBudget" (mergeFields [("usageUnknown",Bool True),("reservations",arr [if own receipt then put "status" (str "uncertain") receipt else receipt | receipt<-items budget "reservations"])] budget) authority)
 
   when (has container "name" && at container "status"/="removed") $ do
    result<-try (Code.reconcile container) :: IO (Either APIError ())
@@ -436,10 +440,18 @@ projection :: Service -> R.Definition -> [D.Workload] -> IO Value
 projection s definition works = maybe (pure Null) (fmap project . renderDetail s) (listToMaybe (reverse (filter (consumer definition) works)))
  where
  project detail_ = mergeFields [("timerFixturesSimulated",Bool (any ((=="defer") . (`at` "kind") . snd) (pairs (get (get (get detail_ "version") "workflow") "nodes")))),("expectedBinding",get (get detail_ "version") "expectedBinding"),("kitArtifact",get (get detail_ "version") "kitArtifact"),("reference",get (get detail_ "version") "reference"),("applicable",Bool (get detail_ "contractGeneration"==toJSON (R.contractGeneration definition)))] (select ["id","status","analysis","owner","routine","contractGeneration","error","trial","providerWait","maintenanceBudget","contentInterface","rubric"] detail_)
+preparationEvidence :: D.Workload -> Value
+preparationEvidence work=
+ let prepared=D.workField work "preparation"
+     root=NE.head (D.workCalls work)
+     terminal=case D.callState root of D.CallFailed->"failed"; D.CallInterrupted->"interrupted"; D.CallCancelled->"stopped"; _->""
+     status=if at prepared "status"=="queued" && terminal/="" then terminal else at prepared "status"
+ in mergeFields [("status",str status),("error",get prepared "error" `fallback` D.callField root "error"),("call",select ["state","error"] (toJSON root))] prepared
+
 renderDetail :: Service -> D.Workload -> IO Value
 renderDetail s work = do
  allowed<-DB.occurrenceAllowed s (D.workField work "origin")
- let prepared=D.workField work "preparation"
+ let prepared=preparationEvidence work
      stopped=at (toJSON work) "executionGate"=="stopped"
      status=if at prepared "status"=="cleanup_pending" then "cleanup_pending" else if stopped then "stopped" else if not allowed then "stale" else at prepared "status"
  pure (mergeFields [("id",str (D.workloadId work)),("status",str status),("providerWait",Provider.waitProjection (items prepared "operations")),("maintenanceBudget",D.workField work "maintenanceBudget")] (merge (select ["owner","routine","contractGeneration"] (D.workField work "preparationPin")) prepared))
@@ -466,3 +478,158 @@ repairOn db definition failedReference casePin context identity time = do
  SQL.execute db "INSERT INTO workloads(id,value) VALUES (?,?)" (D.workloadId work,jsonText (toJSON work))
  Managed.enrollOn db (R.definitionOwner definition) (newTurn identity Chat (R.definitionGoal definition) time origin False) Null (R.definitionGoal definition) []
  pure (toJSON identity)
+
+findOn :: SQL.Connection -> Text -> IO D.Workload
+findOn db identity=readOn db >>= maybe (failure 409 "Standalone work disappeared") pure . find ((==identity) . D.workloadId)
+
+-- The decision has ended its provider invocation; publication and parking share
+-- one transaction, so a crash cannot turn an unrecorded intention into work.
+chooseStandalone :: Service -> Run -> Text -> D.WorkflowPlan -> Value -> IO ()
+chooseStandalone s running operation plan record=do
+ time<-now
+ locked s $ do
+  requireActive s (agentIdText (runOwner running))
+  cancelled<-readIORef (runCancel running)
+  require (not cancelled) 409 "Original Task stopped before continuation admission"
+  state<-agentState s (agentIdText (runOwner running))
+  turn<-maybe (failure 409 "Original input disappeared") pure (find ((==runId running) . turnId) (agentTurns state))
+  DB.connection s $ \db->SQL.withTransaction db $ do
+   works<-readOn db
+   (source,call)<-maybe (failure 409 "Original Task disappeared") pure (listToMaybe [(work,current) | work<-works,current<-NE.toList (D.workCalls work),D.callIdentity current==runId running])
+   spec<-D.executionContract source call >>= maybe (failure 409 "Composer requires accepted Task criteria") pure
+   parent<-D.standalonePin source call spec
+   require (D.workField source "executionGate"/=toJSON ExecutionStopped && D.workField source "outcome"==Null && D.callState call==D.CallRunning && D.callField call "standaloneWait"==Null) 409 "Original Task is not available for continuation"
+   let attempts=[entry | entry<-D.workItems source "decisions",at entry "node"=="Execution"]
+   require (not (null attempts) && all (Effects.completeActionFree . (`get` "evidence")) attempts && length (items (toJSON turn) "batch_members")<=1) 409 "Original Task has no complete action-free continuation proof"
+   consumerPin<-case plan of
+    D.ComposeVersion Nothing->pure (toJSON parent)
+    D.ComposeVersion (Just previous)->lineage works spec previous
+    D.ExecuteVersion reference->lineage works spec reference
+   let reference=case plan of D.ComposeVersion _->Null; D.ExecuteVersion selected->toJSON selected
+       prior=case plan of D.ComposeVersion previous->toJSON previous; D.ExecuteVersion _->Null
+       request=obj [("parent",toJSON parent),("consumer",consumerPin),("input",D.acceptedInput spec),("contract",toJSON spec),("reference",reference),("previous",prior)]
+       key=canonicalHash (obj [("workload",str (D.workloadId source)),("call",toJSON (runId running)),("operation",str operation)])
+   receipts<-DB.queryRowsOn db "SELECT request,response FROM command_receipts WHERE scope='workflow' AND owner=? AND id=?" ["request","response"] [SQL.SQLText (agentIdText (runOwner running)),SQL.SQLText key]
+   wait<-case receipts of
+    [saved]->do
+     original<-DB.decodeStored (at saved "request")
+     require (original==request) 409 "Workflow operation belongs to another version, input or contract"
+     DB.decodeStored (at saved "response")
+    []->do
+     identity<-RunId <$> newId
+     let selected=put "operation" (str key) request
+     result<-case plan of
+      D.ExecuteVersion _->queueRunOn db source selected (runIdText identity) time
+      D.ComposeVersion _->do
+       let origin=obj [("preparation",toJSON identity),("standalonePreparation",Bool True)]
+           prepared=obj [("status",str "queued"),("contract",toJSON spec),("sourceEvidence",obj [("source",obj [("id",str (D.workloadId source)),("inputs",D.acceptedInput spec)])]),("workflowEnabled",Bool True),("parallelEnabled",Bool True),("deferEnabled",Bool True),("operations",arr []),("checks",arr [])]
+           preparation=D.Workload (runIdText identity) False (D.newCall identity (runOwner running) Nothing D.Preparation D.CallQueued (D.specObjective spec) :| []) (KM.fromList [("origin",origin),("executionGate",toJSON ExecutionOpen),("standalonePin",consumerPin),("standaloneParent",selected),("preparation",prepared),("created",str time)])
+       SQL.execute db "INSERT INTO workloads(id,value) VALUES (?,?)" (D.workloadId preparation,jsonText (toJSON preparation))
+       Managed.enrollOn db (agentIdText (runOwner running)) (newTurn identity Chat (D.specObjective spec) time origin False) Null (D.specObjective spec) []
+       pure (put "preparation" (toJSON identity) selected)
+     SQL.execute db "INSERT INTO command_receipts(scope,owner,id,target,request,code,response,created) VALUES ('workflow',?,?,?,?,200,?,?)" (agentIdText (runOwner running),key,D.workloadId source,jsonText request,jsonText result,time)
+     pure result
+    _->failure 409 "Duplicate workflow operation receipts"
+   Managed.adoptOn db (agentIdText (runOwner running)) turn [message | message<-items (stateJSON state) "chat",get message "turn"==toJSON (runId running)]
+   let accepted=D.acceptedDecision record "Execution" "WaitingForWorkflow"
+       parked=D.withCall (D.withDecisionRecord accepted source) (D.setCallFields [("standaloneWait",wait)] call {D.callState=D.CallQueued})
+   DB.putValueOn db DB.Workloads (D.workloadId source) (toJSON parked)
+   Managed.transitionOn db (runIdText (runId running)) (put "status" (str "queued") . put "codeBound" (Bool True) . put "standaloneWait" (Bool True))
+ DB.project s (agentIdText (runOwner running))
+ throwIO (Workflow.Yield operation)
+ where
+ lineage works spec reference@(CandidateReference owner preparation _)=do
+  require (owner==runOwner running) 403 "Workflow version belongs to another owner"
+  void (D.resolveCandidateFrom works owner Null spec reference)
+  prior<-maybe (failure 409 "Previous candidate disappeared") pure (find ((==runIdText preparation) . D.workloadId) works)
+  require (D.workField prior "standalonePin"/=Null) 409 "Select a standalone version"
+  pure (D.workField prior "standalonePin")
+
+queueRunOn :: SQL.Connection -> D.Workload -> Value -> Text -> Text -> IO Value
+queueRunOn db _source request identity time=do
+ works<-readOn db
+ forM_ ["parent","consumer"] $ \key->void (D.requireStandalonePinFrom works (get request key))
+ reference<-decodeValue 409 (get request "reference")
+ spec<-decodeValue 409 (get request "contract")
+ void (D.resolveCandidateFrom works (AgentId (at (get request "parent") "owner")) Null spec reference)
+ let CandidateReference owner preparation _=reference
+ candidate<-findOn db (runIdText preparation)
+ let prepared=D.workField candidate "preparation"; trial=get prepared "trial"
+     active=at trial "status"=="activated"
+ require (active || trial==Null || get trial "run"==str identity) 409 "This version's first authorized trial is already claimed or finished"
+ let role=if active then ActiveCode else CandidateTrial
+     selected=mergeFields [("child",str identity),("role",toJSON role),("reference",toJSON reference)] request
+     origin=obj [("standaloneRun",selected)]
+     turn=newTurn (RunId identity) Chat (D.specObjective spec) time origin False
+ unless active $ DB.putValueOn db DB.Workloads (D.workloadId candidate) (toJSON (D.setWorkField "preparation" (put "trial" (obj [("run",str identity),("reference",toJSON reference),("status",str "claimed")]) prepared) candidate))
+ Managed.enrollOn db (agentIdText owner) turn Null (D.specObjective spec) []
+ -- The normal TaskPrepared decision creates this business Workload at admission.
+ pure selected
+
+queueStandaloneOn :: SQL.Connection -> D.Workload -> IO Value
+queueStandaloneOn db preparation=do
+ let request=D.workField preparation "standaloneParent"
+     pin=get request "parent"
+ source<-findOn db (at pin "workload")
+ call<-maybe (failure 409 "Waiting original Call disappeared") pure (find ((==get pin "call") . toJSON . D.callIdentity) (D.workCalls source))
+ let waiting=D.callField call "standaloneWait"
+ require (get waiting "preparation"==str (D.workloadId preparation) && D.callState call==D.CallQueued && D.workField source "outcome"==Null) 409 "Original Task no longer awaits this preparation"
+ if has waiting "child" then pure waiting else do
+  identity<-newId
+  time<-now
+  selected<-queueRunOn db source (put "reference" (get (get (D.workField preparation "preparation") "version") "reference") waiting) identity time
+  DB.putValueOn db DB.Workloads (D.workloadId source) (toJSON (D.withCall source (D.setCallFields [("standaloneWait",selected)] call)))
+  pure selected
+
+resumeStandalone :: Service -> Run -> IO (Maybe Text)
+resumeStandalone s running=locked s $ do
+ requireActive s (agentIdText (runOwner running))
+ cancelled<-readIORef (runCancel running)
+ require (not cancelled) 409 "Original Task stopped before child settlement"
+ DB.connection s $ \db->SQL.withTransaction db $ do
+  works<-readOn db
+  source<-maybe (failure 409 "Original Task disappeared") pure (find (any ((==runId running) . D.callIdentity) . D.workCalls) works)
+  call<-maybe (failure 409 "Original Call disappeared") pure (find ((==runId running) . D.callIdentity) (D.workCalls source))
+  let waiting=D.callField call "standaloneWait"
+  if waiting==Null then pure Nothing else do
+   void (D.requireStandalonePinFrom works (get waiting "parent"))
+   require (D.workField source "outcome"==Null) 409 "Original Task outcome is already settled"
+   let child=find ((==at waiting "child") . D.workloadId) works
+       prepared=find ((==at waiting "preparation") . D.workloadId) works
+       childCode=maybe Null (`D.workField` "codeExecution") child
+       childOutcome=maybe Null (`D.workField` "outcome") child
+       successful=at childOutcome "status"=="Completed" && at (get childCode "acceptance") "verdict"=="accepted" && (at (get childCode "activation") "status"=="activated" || at childCode "role"=="active" && at (get childCode "standaloneActivation") "status"=="activated")
+       history=D.workItems source "standaloneHistory"++[waiting]
+       resumed=D.setWorkField "standaloneHistory" (arr history) source
+       clear=D.setCallFields [("standaloneWait",Null)] call
+   if successful then do
+    result<-maybe (failure 409 "Accepted child disappeared") pure child
+    let childCall=NE.head (D.workCalls result)
+    original<-D.executionContract source call >>= maybe (failure 409 "Original accepted criteria disappeared") pure
+    actual<-D.executionContract result childCall >>= maybe (failure 409 "Child criteria disappeared") pure
+    require (D.sameSemanticContract original actual && D.acceptedInput actual==get waiting "input" && D.workField result "standaloneRun"==waiting && get childCode "reference"==get waiting "reference") 409 "Child proof no longer matches the original Task or exact run"
+    void (D.resolveCandidateFrom works (runOwner running) Null actual =<< decodeValue 409 (get waiting "reference"))
+    outcome<-decodeValue 409 (remove ["reply","evidence","author"] childOutcome)
+    let proof=obj [("child",get waiting "child"),("reference",get waiting "reference"),("assessment",get (get childCode "acceptance") "invocation")]
+        response=D.DecisionResponse (D.ReportOutcome (at childOutcome "reply") outcome) "Accepted exact child result against original criteria" [jsonText proof] childOutcome
+    D.validateOutcome response outcome (NE.toList (D.specCriteria original))
+    let finished=D.setWorkField "standaloneResult" proof (D.setWorkField "outcome" childOutcome resumed)
+    D.saveWorkOn s db (D.withCall finished clear {D.callState=D.CallCompleted,D.callNode=D.OutcomeNode,D.callOutput=Just (at childOutcome "reply")})
+    pure (Just (at childOutcome "reply"))
+   else do
+    let evidence=obj [("workflowResult",waiting),("preparation",maybe Null (select ["status","error","call"] . preparationEvidence) prepared),("outcome",childOutcome),("code",select ["status","error","activation","acceptance"] childCode),("instruction",str "Continue the original Task from retained evidence. Do not repeat completed or uncertain actions.")]
+    D.saveWorkOn s db (D.withCall resumed (D.setCallFields [("observation",evidence)] clear {D.callState=D.CallRunning,D.callNode=D.Execution}))
+    Managed.transitionOn db (runIdText (runId running)) (remove ["standaloneWait"])
+    pure Nothing
+
+standaloneSnapshot :: Service -> Text -> IO Value
+standaloneSnapshot s owner=do
+ works<-D.readWorks s
+ rows<-forM [work | work<-works,D.workField work "standalonePin"/=Null,T.null owner || at (D.workField work "standalonePin") "owner"==owner] $ \work->do
+  detail_<-renderDetail s work
+  let prepared=D.workField work "preparation"
+      reference=get (get prepared "version") "reference"
+      runs=[obj [("id",str (D.workloadId childWork)),("parent",get (D.workField childWork "standaloneRun") "parent"),("outcome",D.workField childWork "outcome"),("execution",select ["status","activation","acceptance","error"] (D.workField childWork "codeExecution"))] | childWork<-works,get (D.workField childWork "standaloneRun") "reference"==reference,reference/=Null]
+      requests=[request | parentWork<-works,request<-D.workItems parentWork "standaloneHistory"++[D.callField call "standaloneWait" | call<-NE.toList (D.workCalls parentWork)],get request "reference"==reference,reference/=Null]
+  pure (mergeFields [("requests",arr requests),("id",str (D.workloadId work)),("source",D.workField work "standalonePin"),("parent",get (D.workField work "standaloneParent") "parent"),("reference",reference),("runs",arr runs),("maintenanceBudget",maybe Null (`D.workField` "maintenanceBudget") (find ((==at (D.workField work "standalonePin") "workload") . D.workloadId) works))] (select ["status","checks","review","trial","error"] detail_))
+ pure (arr rows)

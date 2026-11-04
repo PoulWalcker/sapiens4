@@ -129,6 +129,7 @@ snapshotUnlocked s = do
  groups <- G.snapshotGroups s
  routines <- map R.intervalView <$> R.readRoutines s
  personal <- RC.snapshot s
+ standalone <- Composer.standaloneSnapshot s ""
  creation <- prompt s "creation-request"
  agentRows <- forM rows $ \row -> put "retired" . Bool <$> retired s (at row "id") <*> pure row
  owner <- maybe Null (toJSON . fst) <$> readIORef (serviceLease s)
@@ -152,7 +153,7 @@ snapshotUnlocked s = do
   pure (run,merge value (obj [("turn",str (runIdText (runId run))),("stopping",Bool stopping),("agencyKind",str "chatInput"),("slot",num (runSlot run))]))
  let groupTurns=M.fromList [(at request "id",at g "id") | g<-groups,request<-items g "requests"]
      projected=[maybe t (\gid->put "group" (str gid) t) (M.lookup (at t "id") groupTurns) | t<-turns]
- pure $ obj [("agents",arr agentRows),("turns",arr projected),("preferences",prefs),("corpora",corpora),("groups",arr groups),("routines",arr routines),("personal_routines",get personal "definitions"),("routine_errors",get personal "errors"),("creation_template",str (T.strip creation)),("computer",obj [("owner",owner),("built",Bool built),("platform",str (if os=="mingw32" then "win32" else T.pack os))]),("pulses",arr pulses),("events",events),("pulse",pulse),("provider",str "codex"),("activity",obj [(agentIdText (runOwner r),v) | (r,v)<-activity]),("run_activity",obj [(runIdText (runId r),v) | (r,v)<-activity]),("main_agent_id",str chief),("workloads",arr (D.workSummaries works)),("attachment_drafts",obj drafts),("orchestration",obj orchestration)]
+ pure $ obj [("agents",arr agentRows),("turns",arr projected),("preferences",prefs),("corpora",corpora),("groups",arr groups),("routines",arr routines),("standalone_workflows",standalone),("personal_routines",get personal "definitions"),("routine_errors",get personal "errors"),("creation_template",str (T.strip creation)),("computer",obj [("owner",owner),("built",Bool built),("platform",str (if os=="mingw32" then "win32" else T.pack os))]),("pulses",arr pulses),("events",events),("pulse",pulse),("provider",str "codex"),("activity",obj [(agentIdText (runOwner r),v) | (r,v)<-activity]),("run_activity",obj [(runIdText (runId r),v) | (r,v)<-activity]),("main_agent_id",str chief),("workloads",arr (D.workSummaries works)),("attachment_drafts",obj drafts),("orchestration",obj orchestration)]
 savePreferences :: Service -> Value -> IO Value
 savePreferences s d = do
  require (all (`elem` ["selected","panel","scope","groupView","panes","drafts","attachment_drafts"]) (keys d)) 400 "Unknown preference field"
@@ -214,6 +215,7 @@ dispatchLocked s method target body = locked s $ do
   ("POST",["api","groups",gid,"calls",rid,action]) -> json 200 (GC.actionGroup s gid rid action)
   ("POST",["api","agents"]) -> json 201 $ do row<-createAgent s d; Mgt.prepare s (at row "id"); pure row
   ("PUT",["api","agents",a]) -> json 200 (updateAgent s a d)
+  ("GET",["api","agents",a,"workflows"]) -> json 200 (Composer.standaloneSnapshot s a)
   ("GET",["api","agents",a,"routines",rid,"runs",run]) -> json 200 (RC.detail s a rid run)
   ("GET",["api","agents",a,"routines",rid,"preparations",preparation]) -> json 200 (Composer.detail s a rid preparation)
   ("GET",["api","agents",a,"routines",rid,"analysis",analysis]) -> json 200 (Automation.detail s a rid analysis)

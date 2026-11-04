@@ -225,6 +225,17 @@ instance FromJSON CandidateReference where
   pure (CandidateReference owner preparation digest)
 instance ToJSON CandidateReference where
  toJSON (CandidateReference owner preparation digest)=obj [("owner",toJSON owner),("preparation",toJSON preparation),("digest",str digest)]
+-- Immutable provenance for an accepted ordinary Task, independent of Routine.
+data StandaloneTaskPin = StandaloneTaskPin AgentId Text RunId Text Text deriving (Eq,Show)
+instance FromJSON StandaloneTaskPin where
+ parseJSON value = do
+  onlyFields ["owner","workload","call","decision","contractHash"] value
+  digest<-textFieldP "contractHash" 64 value
+  unless (T.length digest==64 && T.all isHexDigit digest) (fail "Invalid standalone Task contract identity")
+  StandaloneTaskPin <$> parseJSON (get value "owner") <*> textFieldP "workload" 128 value <*> parseJSON (get value "call") <*> textFieldP "decision" 128 value <*> pure digest
+instance ToJSON StandaloneTaskPin where
+ toJSON (StandaloneTaskPin owner workload call decision digest)=obj [("owner",toJSON owner),("workload",str workload),("call",toJSON call),("decision",str decision),("contractHash",str digest)]
+
 data CodeRole = CandidateTrial | ActiveCode deriving (Eq,Show)
 instance ToJSON CodeRole where
  toJSON value=str (case value of CandidateTrial->"trial"; ActiveCode->"active")

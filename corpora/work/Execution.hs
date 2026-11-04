@@ -175,7 +175,7 @@ finish s run turn outcome = do
      updated=mapTurns update state
      result | isJust failureText = updated
             | buffered = mapStateFields (appendItems "output_buffer" [obj [("turn",str i),("members",toJSON ids),("content",str output),("origin",origin)]]) updated
-            | has origin "group" || has origin "analysis" || has origin "preparation" = updated
+            | has origin "group" || has origin "analysis" || has origin "preparation" || has origin "standaloneRun" = updated
             | otherwise = mapStateFields (put "last_output" (str output) . appendItems "chat" [obj [("role",str "agent"),("content",str output),("turn",str i),("time",str time),("origin",origin)]]) updated
  let receipt=obj [("status",str (if isJust failureText then if stop then "interrupted" else "failed" else "done")),("output",str output),("error",maybe Null str failureText),("recorded_at",str time)]
      recorded=mapTurns (\t -> if turnId t `elem` ids && has (toJSON t) "managed" then withTurnFields (put "managed_result" receipt) t else t) result
@@ -226,8 +226,13 @@ dispatchOrdinary s running turn snapshot = do
  let profile=maybe False (Effects.profileBound . toJSON . fst) found
      execute=do
       when profile (Effects.beforeContent s running)
-      result<-if maybe False (\(work,call)->has (toJSON work) "codeExecution" || at (D.callField call "executionBinding") "mode"=="script") found
-       then runCode s running turn else D.runDecision s running turn snapshot
+      resumed<-if maybe False ((/=Null) . (`D.callField` "standaloneWait") . snd) found then Composer.resumeStandalone s running else pure Nothing
+      result<-case resumed of
+       Just reply->pure (reply,[])
+       Nothing->if maybe False (\(work,call)->has (toJSON work) "codeExecution" || at (D.callField call "executionBinding") "mode"=="script") found
+        then runCode s running turn else D.runDecision s running turn snapshot `catches`
+         [Handler (\D.PreparedCodeReady->Automation.withRepairBudget s running (\capped->runCode s capped turn))
+         ,Handler (\(D.WorkflowSelected operation plan record)->Composer.chooseStandalone s running operation plan record >> failure 500 "Workflow continuation did not yield")]
       when profile (Effects.deliver s running)
       pure result
  if not profile then execute else mask $ \restore -> do
@@ -305,9 +310,9 @@ instance Exception KitPending
 requireKitBody :: Service -> Run -> Value -> IO ()
 requireKitBody s running version=do
  (work,_)<-D.getWork s (runId running)
- definition<-DB.connection s (\db->Effects.definitionOn db (at (D.workField work "routineSnapshot") "id"))
+ definition<-if has version "standalonePin" then pure Null else DB.connection s (\db->Effects.definitionOn db (at (D.workField work "routineSnapshot") "id"))
  works<-D.readWorks s
- unless (Kit.executionAllowed definition version (map toJSON works)) (throwIO (KitPending "Shared Kit bytes await this consumer's own applicability inspection"))
+ unless (has version "standalonePin" || Kit.executionAllowed definition version (map toJSON works)) (throwIO (KitPending "Shared Kit bytes await this consumer's own applicability inspection"))
 
 executeCode s originalRun = do
  codeGuard s originalRun
@@ -737,7 +742,8 @@ commitCodeOutcomeFor s running selected version role invocation verdict response
   definitions<-DB.queryRowsOn db "SELECT value FROM scheduled_routines ORDER BY sequence" ["value"] [] >>= traverse (DB.decodeStored . (`at` "value"))
   let CandidateReference _ preparationId _=typedReference
   sourcePreparation<-maybe (failure 409 "Candidate preparation disappeared") pure (find ((==runIdText preparationId) . D.workloadId) works)
-  pin<-decodeValue 409 (D.workField sourcePreparation "preparationPin")
+  pin<-if D.workField sourcePreparation "standalonePin"/=Null then pure Nothing else Just <$> decodeValue 409 (D.workField sourcePreparation "preparationPin")
+  standaloneAllowed<-if D.workField sourcePreparation "standalonePin"==Null then pure False else DB.standalonePinAllowedOn db (D.workField sourcePreparation "standalonePin")
   feedback<-DB.routineOperationsOn db
   let modelAccepted=verdict==SemanticallyAccepted && D.outcomeStatus outcome==D.Completed
       proposedOutcome=mergeFields [("reply",get (D.decisionRaw response) "reply"),("evidence",toJSON (D.decisionEvidence response)),("author",toJSON (runOwner running))] (get (D.decisionRaw response) "outcome")
@@ -747,7 +753,9 @@ commitCodeOutcomeFor s running selected version role invocation verdict response
    Effects.ContentConflict value->(,) <$> decodeValue 500 value <*> pure False
   let snapshot=D.workField current "routineSnapshot"
       definition=find (\d->get d "id"==get snapshot "id" && get d "owner"==toJSON (runOwner running)) definitions
-      applicable=maybe False (\d->not (boolean (get d "deleted")) && get d "contractGeneration"==get snapshot "contractGeneration" && DB.analysisFeedbackIds feedback d (map toJSON works) (analysisSources pin)==analysisFeedback pin && Kit.executionAllowed d version (map toJSON works) && (not (has version "expectedBinding") || Kit.bindingCurrent d (get version "expectedBinding"))) definition
+      applicable=standaloneAllowed || maybe False (\d->case pin of
+       Nothing->False
+       Just routinePin->not (boolean (get d "deleted")) && get d "contractGeneration"==get snapshot "contractGeneration" && DB.analysisFeedbackIds feedback d (map toJSON works) (analysisSources routinePin)==analysisFeedback routinePin && Kit.executionAllowed d version (map toJSON works) && (not (has version "expectedBinding") || Kit.bindingCurrent d (get version "expectedBinding"))) definition
       accepted=contentAccepted
       fallbackUsed=not (null (pairs (get (D.workField current "codeExecution") "fallbacks")))
       activating=not fallbackUsed && role==CandidateTrial && accepted && get audit "accepted"==Bool True && applicable
@@ -840,8 +848,8 @@ publish s a tick = forM_ [1,2] $ \slot -> do
    let sequence=int (get document "output_sequence")+1
        origin=get item "origin"
        updated=mapTurns (\t -> if turnId t `elem` ids then (withTurnFields (mergeFields [("output_at",str time),("output_order",num sequence)]) t) { turnStatus = Done } else t) state
-       messages=if has origin "group" || any (\m -> get m "turn"==get item "turn" && at m "role"=="agent") (items document "chat") then items document "chat" else items document "chat"++[obj [("role",str "agent"),("content",get item "content"),("turn",get item "turn"),("time",str time),("origin",origin)]]
-   saveState s a $ mapStateFields (mergeFields ([("output_buffer",arr (filter (/=item) (items document "output_buffer"))),("output_sequence",num sequence),("chat",arr messages)] ++ [("last_output",get item "content") | not (has origin "group")])) updated
+       messages=if has origin "group" || has origin "standaloneRun" || any (\m -> get m "turn"==get item "turn" && at m "role"=="agent") (items document "chat") then items document "chat" else items document "chat"++[obj [("role",str "agent"),("content",get item "content"),("turn",get item "turn"),("time",str time),("origin",origin)]]
+   saveState s a $ mapStateFields (mergeFields ([("output_buffer",arr (filter (/=item) (items document "output_buffer"))),("output_sequence",num sequence),("chat",arr messages)] ++ [("last_output",get item "content") | not (has origin "group" || has origin "standaloneRun")])) updated
    DB.pulseCall s tick a "chatOutput" slot [at origin "group" | has origin "group"]
    DB.project s a
    trimConversation s a
@@ -857,8 +865,9 @@ admit s a tick = do
      legacyCandidates=[t | t<-agentTurns state,turnStatus t==Queued,not (boolean (turnField t "batchable"))]
  ready<-filterM (WC.ready s) legacyCandidates
  legacy<-filterM (Automation.providerDue s) ready
- let children=filter (\turn->has (turnField turn "origin") "workflowChild") legacy
-     roots=filter (not . (\turn->has (turnField turn "origin") "workflowChild")) legacy
+ let continuation turn=any (has (turnField turn "origin")) ["workflowChild","standaloneRun","standalonePreparation"]
+     children=filter continuation legacy
+     roots=filter (not . continuation) legacy
  when (AgentId a `elem` owners || length owners<4) $ case (roots,available,NE.nonEmpty queued) of
   _ | first:_<-children, slot:_<-available, all ((/=0) . runSlot) mine, not scheduled -> launch s a (first :| []) tick slot False
   (first:_,_,_) | null mine && not scheduled -> launch s a (first :| []) tick 0 False
