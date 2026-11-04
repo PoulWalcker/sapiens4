@@ -78,12 +78,10 @@ RSpec.describe 'Domain validation through saved installation fixtures', :host do
 
   {
     'completed without output' => {output: nil},
-    'unresolved without output' => {state: 'Unresolved', output: nil},
-    'waiting without a question' => {state: 'WaitingForAdmin', node: 'WaitingForAdmin', output: nil},
     'delegated without a reply' => {state: 'Delegated', node: 'Delegation', output: nil},
     'queued with output' => {state: 'Queued', node: 'Assessing'},
     'running with output' => {state: 'Running', node: 'Execution'},
-    'completed at the wrong node' => {node: 'Execution'},
+    'completed at the wrong node' => {node: 'ChiefTriage'},
     'waiting at the wrong node' => {state: 'WaitingForAdmin'}
   }.each do |behavior, fields|
     it "reports an inconsistent saved call: #{behavior}" do
@@ -99,6 +97,9 @@ RSpec.describe 'Domain validation through saved installation fixtures', :host do
   {
     'completed' => {state: 'Completed', node: 'Outcome'},
     'unresolved' => {state: 'Unresolved', node: 'Outcome'},
+    'unresolved without output' => {state: 'Unresolved', node: 'Outcome', output: nil},
+    'waiting without output' => {state: 'WaitingForAdmin', node: 'WaitingForAdmin', output: nil},
+    'completed at a retained execution node' => {state: 'Completed', node: 'Execution'},
     'delegated' => {state: 'Delegated', node: 'Delegation'},
     'waiting' => {state: 'WaitingForAdmin', node: 'WaitingForAdmin'},
     'queued' => {state: 'Queued', node: 'Assessing', output: nil},
