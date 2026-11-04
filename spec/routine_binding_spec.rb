@@ -228,14 +228,14 @@ RSpec.describe 'Pinned ordinary execution contracts' do
     expect(host.state.fetch('personal_routines').map { |item| item['id'] }).to include(@routine)
   end
 
-  it 'retains the original caller binding while a delegated child accepts richer criteria' do
+  it 'retains separate caller and recipient bindings through an unchanged accepted assignment' do
     child = host.agent('BindingSpecialist')
-    enriched = {objective: 'Compare the products with a source check.', inputs: ['Additional source'], expectedOutputs: ['Comparison with checked source'], completionCriteria: ['Return a sourced comparison.', 'Check source freshness.']}
+    accepted = {objective: 'Compare the products.', inputs: [], expectedOutputs: ['A comparison'], completionCriteria: ['Return a sourced comparison.'], conditionalCriteria: {}}
     host.configure(mode: 'Exec', rules: {
       "#{@owner}:Execution" => {response: decision('OutsideSpecialization')},
       'ChiefTriage' => {response: decision('SpecialistSelected', target: child)},
-      "#{child}:ReadyToWork" => {response: decision('TaskPrepared', taskType: 'research', specification: enriched)},
-      "#{child}:Execution" => {response: decision('Outcome', reply: 'Checked comparison', outcome: {status: 'Completed', satisfiedCriteria: enriched[:completionCriteria], artifacts: []})}
+      "#{child}:ReadyToWork" => {response: decision('TaskPrepared', taskType: 'research', specification: accepted)},
+      "#{child}:Execution" => {response: decision('Outcome', reply: 'Checked comparison', outcome: {status: 'Completed', satisfiedCriteria: accepted[:completionCriteria], artifacts: []})}
     })
     run = host.submit(@owner)
     host.idle
@@ -246,11 +246,36 @@ RSpec.describe 'Pinned ordinary execution contracts' do
     expect(original.fetch('executionBinding').fetch('owner')).to eq(@owner)
     expect(recipient.fetch('executionBinding').fetch('owner')).to eq(child)
     expect(recipient.dig('executionBinding', 'source', 'decisionId')).not_to eq(original.dig('executionBinding', 'source', 'decisionId'))
-    expect(work.dig('executionBinding', 'contract', 'completionCriteria')).to eq(enriched[:completionCriteria])
+    expect(work.dig('executionBinding', 'contract', 'completionCriteria')).to eq(accepted[:completionCriteria])
     parent_execution = executions.find { |call| call['owner'] == @owner }
     child_execution = executions.find { |call| call['owner'] == child }
     expect(parent_execution.fetch('prompt')).not_to include('Check source freshness.')
-    expect(child_execution.fetch('prompt')).to include('Check source freshness.')
+    expect(context(child_execution).fetch('executionSpecification')).to eq(JSON.parse(JSON.generate(accepted)))
+    host.restart
+    expect(tasks.find { |row| row['workloadId'] == run }).to eq(work)
+  end
+
+  it 'refuses a child adding criteria while retaining the original caller binding' do
+    child = host.agent('BindingSpecialist')
+    expanded = {objective: 'Compare the products with a source check.', inputs: ['Additional source'],
+      expectedOutputs: ['Comparison with checked source'], completionCriteria: ['Return a sourced comparison.', 'Check source freshness.'], conditionalCriteria: {}}
+    host.configure(mode: 'Exec', rules: {
+      "#{@owner}:Execution" => {response: decision('OutsideSpecialization')},
+      'ChiefTriage' => {response: decision('SpecialistSelected', target: child)},
+      "#{child}:ReadyToWork" => {response: decision('TaskPrepared', taskType: 'research', specification: expanded)}
+    })
+    run = host.submit(@owner)
+    host.idle
+    work = tasks.find { |row| row['workloadId'] == run }
+    expect(work['outcome']).to be_nil
+    expect(executions.none? { |call| call['owner'] == child }).to be(true)
+    original = work.fetch('calls').find { |call| call['addressedTo'] == @owner }
+    recipient = work.fetch('calls').find { |call| call['addressedTo'] == child }
+    expect(original.dig('executionBinding', 'owner')).to eq(@owner)
+    expect(original.dig('specification', 'completionCriteria')).to eq(['Return a sourced comparison.'])
+    expect(recipient.fetch('state')).to eq('Failed')
+    failure = host.state.fetch('turns').find { |turn| turn['id'] == recipient.fetch('callId') }
+    expect(failure.fetch('error')).to include('Assignment must preserve every accepted criterion and condition')
     host.restart
     expect(tasks.find { |row| row['workloadId'] == run }).to eq(work)
   end
