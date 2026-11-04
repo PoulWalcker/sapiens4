@@ -103,6 +103,7 @@ migrateAgentState version v =
 setManifests :: Service -> Value -> IO ()
 setManifests s row = do
  let a = at row "id"; root = agentRoot s a </> "manifests"
+ prepareHostControl s a
  identity <- prompt s "identity"
  writeText (root </> "identity.md") (render identity [(k,at row k) | k <- ["name","role","face"]])
  binary <- blindly s
@@ -111,6 +112,15 @@ setManifests s row = do
  writeText (root </> "computer-use.md") (render computer [("launcher",shellCommand executable <> " computer"),("binary",shellCommand binary)])
  config <- corporaSettings s
  writeText (root </> "corpora-scope.md") (corporaScope config)
+prepareHostControl :: Service -> Text -> IO ()
+prepareHostControl s a = do
+ endpoint <- readIORef (serviceEndpoint s)
+ unless (T.null endpoint) $ do
+  let path=workspaceRoot s a </> "host-control.json"
+  writeJSON path (obj [("url",str (endpoint<>"/api/agents/"<>a<>"/control"))])
+  executable <- getExecutablePath
+  template <- prompt s "host-control"
+  writeText (agentRoot s a </> "manifests/host-control.md") (render template [("command",shellCommand executable <> " control " <> shellQuote path)])
 blindly :: Service -> IO FilePath
 blindly s = fromMaybe (repositoryRoot s </> if os == "mingw32" then "submodules/blindly4/.build/windows/blindly4.exe" else "submodules/blindly4/.build/release/blindly4") <$> lookupEnv "SAPIENS_BLINDLY_BINARY"
 shellQuote :: FilePath -> Text

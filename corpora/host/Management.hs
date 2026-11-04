@@ -11,7 +11,6 @@ import qualified Data.Map.Strict as M
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
-import System.Environment
 import System.FilePath
 import Types
 import qualified Store as DB
@@ -38,13 +37,7 @@ status s a = do
  pure $ obj [("self_id",str a),("main_agent_id",str chief),("team",arr members),("retired_team",arr retiredMembers),("groups",arr groups),("workspace",ws),("notes",notes)]
 prepare :: Service -> Text -> IO ()
 prepare s a = do
- endpoint <- readIORef (serviceEndpoint s)
- unless (T.null endpoint) $ do
-  let path=workspaceRoot s a </> "host-control.json"
-  writeJSON path (obj [("url",str (endpoint<>"/api/agents/"<>a<>"/control"))])
-  executable <- getExecutablePath
-  template <- prompt s "host-control"
-  writeText (agentRoot s a </> "manifests/host-control.md") (render template [("command",shellCommand executable <> " control " <> shellQuote path)])
+ prepareHostControl s a
  facts <- status s a
  notes <- memoContext (workspaceRoot s a)
  writeText (agentRoot s a </> "manifests/host-facts.md") (jsonText (put "notes" notes facts))
