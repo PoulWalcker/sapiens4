@@ -39,6 +39,8 @@ consumer definition work = at (D.workField work "preparationPin") "routine"==R.d
  && get (D.workField work "preparationPin") "owner"==str (R.definitionOwner definition)
 currentPreparation :: R.Definition -> D.Workload -> Bool
 currentPreparation definition work = consumer definition work && get (D.workField work "preparationPin") "contractGeneration"==toJSON (R.contractGeneration definition)
+latestUnsuitable :: [D.Workload] -> Bool
+latestUnsuitable preparations = maybe False ((=="unsuitable") . (`at` "status") . (`D.workField` "preparation")) (listToMaybe (reverse preparations))
 ordinary :: R.Definition -> D.Workload -> Bool
 ordinary definition work = at (D.workField work "origin") "routine"==R.definitionId definition
  && D.callOwner (NE.head (D.workCalls work))==AgentId (R.definitionOwner definition)
@@ -119,7 +121,9 @@ requestOn db candidate identity time explicit = do
  require (not (any (\work->D.workField work "preparationKey"==key && at (D.workField work "preparation") "status"=="awaiting_occurrence") preparations)) 409 "Current checked candidate already awaits an authorized run"
  require (not (R.definitionDeleted definition)) 409 "Routine is deleted"
  require (not (any active (filter (consumer definition) works))) 409 "Preparation is already active"
- unless explicit $ require (not (any ((==key) . (`D.workField` "preparationKey")) preparations)) 409 "These observations already have a preparation"
+ unless explicit $ do
+  require (not (latestUnsuitable preparations)) 409 "Current contract was unsuitable for preparation; change the contract or explicitly reconsider preparation"
+  require (not (any ((==key) . (`D.workField` "preparationKey")) preparations)) 409 "These observations already have a preparation"
  source<-maybe (failure 409 "Preparation needs a saved accepted ordinary result under current instructions") pure (listToMaybe (reverse positives))
  evidence<-either (failure 413) pure (selectEvidence definition operations works source (listToMaybe (reverse preparations)))
  let pin=AnalysisPin (AgentId (R.definitionOwner definition)) (R.definitionId definition) (R.contractGeneration definition)
@@ -145,7 +149,7 @@ dispatch s = do
       ready=any (\work->at (D.workField work "preparation") "status"=="awaiting_occurrence" && D.workField work "preparationKey"==key) preparations
       observations=any (\work->currentOrdinary definition work && positive operations work) works
       notice=get (toJSON definition) "preparationNotice"
-  when (observations && not healthy && not already && not ready && not (any active (filter (consumer definition) works)) && get notice "key"/=key) $ do
+  when (observations && not (latestUnsuitable preparations) && not healthy && not already && not ready && not (any active (filter (consumer definition) works)) && get notice "key"/=key) $ do
    result<-try $ do
     requireActive s (R.definitionOwner definition)
     preflight

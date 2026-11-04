@@ -77,6 +77,25 @@ RSpec.describe 'Unified owner preparation changed behavior' do
     expect(calls('PreparationGeneration')).to be_empty
   end
 
+  it 'retains an unsuitable verdict across new ordinary results but allows explicit reconsideration' do
+    rules('PreparationFixtures' => {response: {status: 'unsuitable', reason: 'This contract requires live browser observation.'}})
+    host.turn(run('first-observation'))
+    first = preparation('unsuitable')
+    host.turn(run('second-observation'))
+    pulse = host.state.dig('pulse', 'numbers', 'bpm60')
+    Contract.wait { host.state.dig('pulse', 'numbers', 'bpm60') > pulse + 2 }
+    expect(calls('Execution').length).to eq(2)
+    expect(calls('PreparationFixtures').length).to eq(1)
+    expect(routine.dig('preparation', 'id')).to eq(first['id'])
+    second_id = host.api('POST', "#{path}/prepare", operation: 'explicit-reconsider-unsuitable', revision: routine['revision']).fetch('preparation')
+    Contract.wait { routine.dig('preparation', 'id') == second_id && routine.dig('preparation', 'status') == 'unsuitable' }
+    expect(second_id).not_to eq(first['id'])
+    expect(routine.dig('preparation', 'maintenanceBudget', 'limitMilliseconds')).to eq(first.dig('maintenanceBudget', 'limitMilliseconds'))
+    expect(routine.dig('preparation', 'maintenanceBudget', 'spentMilliseconds')).to be >= first.dig('maintenanceBudget', 'spentMilliseconds')
+    expect(calls('PreparationFixtures').length).to eq(2)
+    expect(calls('PreparationGeneration')).to be_empty
+  end
+
   it 'reassesses the retained exact result without regeneration or another business execution' do
     host.turn(run('observe'))
     first = preparation('awaiting_occurrence')
