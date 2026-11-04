@@ -75,7 +75,11 @@ RSpec.describe 'Personal routine lifecycle', :host do
     first = host.request('POST', path, request)
     expect(first.first).to eq(400)
     host.restart
-    expect(host.request('POST', path, request)).to eq(first)
+    replayed = host.request('POST', path, request)
+    expect(replayed.first(2)).to eq(first.first(2))
+    [first, replayed].each do |response|
+      expect(response.last).to include('cache-control' => ['no-store'], 'x-content-type-options' => ['nosniff'], 'x-frame-options' => ['DENY'])
+    end
     expect(host.state['routine_errors']).to include(include('id' => 'invalid-create', 'owner' => @owner))
     expect(host.state['personal_routines']).to be_empty
   end
@@ -237,11 +241,14 @@ RSpec.describe 'Personal routine lifecycle', :host do
     occurrence(id, run, 'done')
     prompt = host.calls.find { |call| call['owner'] == worker && call['node'] == 'Execution' }.fetch('prompt')
     preparation = host.calls.find { |call| call['owner'] == worker && call['node'] == 'ReadyToWork' }.fetch('prompt')
-    expect(preparation).to include('copy that entire specification unchanged')
+    preparation_context = JSON.parse(preparation.split("\nContext:\n", 2).last)
     context = JSON.parse(prompt.split("\nContext:\n", 2).last)
-    expect(context.fetch('task').fetch('specification')).to eq(
+    expected = {
       'objective' => fields[:goal], 'inputs' => ['Dataset A'],
-      'expectedOutputs' => fields[:criteria], 'completionCriteria' => fields[:criteria])
+      'expectedOutputs' => fields[:criteria], 'completionCriteria' => fields[:criteria], 'conditionalCriteria' => {}}
+    expect(preparation_context.dig('currentCall', 'specification')).to eq(expected)
+    expect(context.dig('task', 'specification')).to eq(expected)
+    expect(context.fetch('executionSpecification')).to eq(expected)
     expect(definition(id)['goal']).to eq('A different future goal.')
   end
 
