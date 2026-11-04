@@ -24,14 +24,11 @@ RSpec.describe 'Bounded maintenance provider continuation' do
   before do
     repo = ENV.fetch('SAPIENS_TEST_REPOSITORY', Contract::ROOT)
     @host = Host.new(start: false, repo: repo, command: [File.join(repo, '.build/bin/sapiens4')], environment: {'SAPIENS_GENERATED_DOCKER' => @docker, 'SAPIENS_GENERATED_SOCKET' => @socket})
-    host.configure(version: 'codex-cli 0.162.1')
+    host.configure(version: 'codex-cli 0.162.1', mode: 'Exec', model_catalog: [{slug: 'gpt-6-sol', shell_type: 'unified_exec', apply_patch_tool_type: 'freeform', experimental_supported_tools: [], tool_mode: 'direct', supports_search_tool: false, supported_reasoning_levels: [{effort: 'high', description: 'high'}]}])
     host.start
     @owner = host.agent('ContinuationOwner')
     create_routine('continuation')
-    rules('Execution' => {response: decision('Outcome', reply: 'Observed total5000.', outcome: {status: 'Completed', satisfiedCriteria: CandidateFixtures::CRITERIA, artifacts: []}), usage: USAGE},
-      'AutomationAnalysis' => {response: decision('AutomationAnalyzed', decision: {status: 'Ready', automatablePart: 'Compute supplied sales.', parameters: [{name: 'csv', description: 'Sales rows'}]}), usage: USAGE})
-    host.turn(submit('observe'))
-    @analysis = Contract.wait { routine['analysis'] if routine.dig('analysis', 'status') == 'Ready' }
+    rules('Execution' => {response: decision('Outcome', reply: 'Observed total5000.', outcome: {status: 'Completed', satisfiedCriteria: CandidateFixtures::CRITERIA, artifacts: []}), usage: USAGE})
     preparation_rules(candidate_source)
   end
   after { @desktop&.close; @host&.close }
@@ -52,7 +49,12 @@ RSpec.describe 'Bounded maintenance provider continuation' do
       'PreparationReview' => {response: {accepted: true, reason: 'Independent actual fixture results match.'}, usage: USAGE})
   end
   def prepare(operation)
-    host.api('POST', "#{path}/prepare", operation: operation, revision: routine.fetch('revision'), analysis: @analysis.fetch('id')).fetch('preparation')
+    unless @business
+      @business = submit('observe')
+      host.turn(@business)
+      return Contract.wait(description: 'automatic preparation admission') { routine.dig('preparation', 'id') }
+    end
+    host.api('POST', "#{path}/prepare", operation: operation, revision: routine.fetch('revision')).fetch('preparation')
   end
   def preparation(identity); host.api('GET', "#{path}/preparations/#{identity}"); end
   def await_preparation(identity, status = 'awaiting_occurrence')
@@ -86,6 +88,24 @@ RSpec.describe 'Bounded maintenance provider continuation' do
       db.execute('UPDATE workloads SET value=? WHERE id=?', [JSON.generate(value), identity])
     end
     host.start
+  end
+
+  it 'fences a new preparation during the durable provider-wait checkpoint before runtime requeue' do
+    rules('PreparationFixtures' => {terminal_failure: TEMPORARY})
+    identity = prepare('deferred-source')
+    await_wait(identity)
+    # Retain the durable wait while modeling the checkpoint before runtime requeue.
+    SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+      work = JSON.parse(db.get_first_value('SELECT value FROM workloads WHERE id=?', identity))
+      work.fetch('calls').last['state'] = 'Failed'
+      db.execute('UPDATE workloads SET value=? WHERE id=?', [JSON.generate(work), identity])
+    end
+    count = calls('PreparationFixtures').length
+    code, response = host.request('POST', "#{path}/prepare", operation: 'competing-deferred-preparation', revision: routine.fetch('revision'))
+    expect(code).to eq(409)
+    expect(response.fetch('error')).to eq('Preparation is already active')
+    expect(routine.dig('preparation', 'id')).to eq(identity)
+    expect(calls('PreparationFixtures').length).to eq(count)
   end
 
   it 'resumes only the retained review after restart, keeps checks and allowance, and receipts one shape correction' do
@@ -153,8 +173,11 @@ RSpec.describe 'Bounded maintenance provider continuation' do
     host.turn(stopped, 'cancelled')
     expect(preparation(stopped).dig('providerWait', 'status')).to eq('cancelled')
     expect(calls('PreparationFixtures').length).to eq(count)
+    expect(host.request('POST', "#{path}/prepare", operation: 'must-not-revive-stopped-lineage', revision: routine.fetch('revision')).first).to eq(409)
+  end
+
+  it 'rejects semantic promotion without a grounded original approval' do
     # No malformed unknown verdict is sent to a correction provider for approval.
-    preparation_rules(candidate_source)
     rules('PreparationReview' => {response: {}, usage: USAGE}, 'PreparationReviewCorrection' => {response: {accepted: true, reason: 'Invented approval.'}, usage: USAGE})
     ambiguous = prepare('ambiguous-review')
     await_preparation(ambiguous, 'failed')

@@ -214,6 +214,9 @@ positive operations work = terminal work && at (DB.workAssessment operations (to
  && at (D.workField work "outcome") "status"=="Completed"
 active :: D.Workload -> Bool
 active work = any ((`elem` [D.CallQueued,D.CallRunning,D.CallWaiting]) . D.callState) (D.frontierCalls work)
+ || (at (D.workField work "preparation") "status" `elem` ["waiting_provider","waiting_children"]
+     && D.workField work "executionGate"/=toJSON ExecutionStopped
+     && not (any ((==D.CallCancelled) . D.callState) (D.frontierCalls work)))
 
 evidenceKey :: R.Definition -> [Value] -> [D.Workload] -> Value
 evidenceKey definition operations works = obj
