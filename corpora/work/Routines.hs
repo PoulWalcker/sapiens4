@@ -9,6 +9,7 @@ module Routines
  ) where
 
 import Control.Monad
+import Control.Exception (catch)
 import qualified Command as C
 import Data.Aeson hiding (pairs)
 import Data.Aeson.Types (Parser)
@@ -267,7 +268,7 @@ dispatch :: Service -> Pulse -> IO ()
 dispatch s tick = when (pulseFrequency tick==Bph60) $ do
  time <- getCurrentTime
  routines <- readRoutines s
- forM_ routines $ \candidate -> forM_ (definitionSchedule candidate) $ \schedule ->
+ forM_ routines $ \candidate -> (forM_ (definitionSchedule candidate) $ \schedule ->
   when (not (definitionDeleted candidate) && not (intervalPaused schedule) && (intervalCount schedule>=1000 || intervalDue schedule<=time)) $ do
    let owner=definitionOwner candidate
    groups <- DB.values s DB.Groups
@@ -307,7 +308,8 @@ dispatch s tick = when (pulseFrequency tick==Bph60) $ do
        let next=advanceSchedule time interval
        void (DB.saveRoutineOn db (toJSON current {definitionSchedule=Just next}))
        DB.recordOn s db [owner] (definitionId current) "routine.triggered" (obj [("turn",str identity),("runCount",num (intervalCount next)),("nextDue",str (timestamp (intervalDue next)))]) "system" Nothing
-       when (intervalPaused next) $ DB.recordOn s db [owner] (definitionId current) "routine.paused" (obj [("reason",str "run limit"),("runCount",num (intervalCount next))]) "system" Nothing
+       when (intervalPaused next) $ DB.recordOn s db [owner] (definitionId current) "routine.paused" (obj [("reason",str "run limit"),("runCount",num (intervalCount next))]) "system" Nothing)
+  `catch` reportDispatchFailure ("Scheduled Routine enqueue failed: " <> definitionId candidate)
  where unique=foldr (\x xs -> if x `elem` xs then xs else x:xs) []
 
 admitPersonalOn :: SQL.Connection -> AgentId -> Turn -> Value -> Maybe D.TaskSpec -> [Turn] -> IO ()

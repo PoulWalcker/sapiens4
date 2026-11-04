@@ -45,7 +45,7 @@ if mode == 'tool_loss' && node == 'Execution' && (!target || owner == target)
   emit.call(type: 'item.completed', item: {id: 'actual-peer-post', type: 'command_execution', exit_code: 0, aggregated_output: 'Transport acknowledgement was not retained.'})
   exit 1
 end
-specification = context.fetch('task').fetch('specification')
+specification = context.fetch('task').fetch('specification') || config['ordinary_specification']
 response = case node
 when 'Execution'
   if target && owner != target

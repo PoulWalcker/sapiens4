@@ -149,11 +149,15 @@ RSpec.describe 'Durable interval occurrences', :host do
     expect(definition(id)).to include('paused' => true, 'runCount' => 1)
   end
 
-  it 'rolls back admission when advancing the deadline fails', :slow do
+  it 'isolates admission and output publication failures without stopping Pulse or duplicating work', :slow do
     id = create_routine
     command(id, 'schedule', 'schedule-routine', 1, minutes: 60)
+    sibling = host.control(chief, 'routine_create', minutes: 60, prompt: 'Return a sourced comparison.').fetch('routine').fetch('id')
     saved = overdue(id)
     database do |db|
+      value = JSON.parse(db.get_first_value('SELECT value FROM scheduled_routines WHERE sequence=?', sibling.split('_').last.to_i))
+      value['nextDue'] = saved.fetch('nextDue')
+      db.execute('UPDATE scheduled_routines SET value=? WHERE sequence=?', [JSON.generate(value), sibling.split('_').last.to_i])
       db.execute("CREATE TRIGGER reject_deadline BEFORE UPDATE ON scheduled_routines WHEN NEW.sequence=#{id.split('_').last.to_i} BEGIN SELECT RAISE(ABORT, 'fixture deadline failure'); END")
     end
     host.start
@@ -161,10 +165,38 @@ RSpec.describe 'Durable interval occurrences', :host do
       host.state.dig('pulse', 'numbers', 'bph60').to_i >= 1
     end
     expect(definition(id)).to include('nextDue' => saved['nextDue'], 'runCount' => 0, 'runs' => [])
-    expect(host.state['turns']).to be_empty
-    expect(host.calls).to be_empty
+    expect(host.state.fetch('routines').find { |routine| routine['id'] == sibling }.fetch('runCount')).to eq(1)
+    expect(host.state['turns'].none? { |turn| turn.dig('origin', 'routine') == id }).to eq(true)
+    database do |db|
+      db.execute("CREATE TRIGGER reject_output_event BEFORE INSERT ON activity_events WHEN NEW.event='pulse.dispatched' AND NEW.agency='chatOutput' BEGIN SELECT RAISE(ABORT, 'fixture output event failure'); END")
+    end
+    ordinary = host.submit(chief)
+    host.turn(ordinary)
+    Contract.wait(description: 'outer Pulse catch records a bounded diagnostic') do
+      host.process.stderr.include?('System Pulse dispatch failed: synchronous failure')
+    end
+    pulse = host.state.dig('pulse', 'numbers', 'bpm120')
+    Contract.wait(description: 'Pulse continues after a publication exception') do
+      host.state.dig('pulse', 'numbers', 'bpm120') > pulse
+    end
+    expect(host.state.fetch('turns').count { |turn| turn['id'] == ordinary }).to eq(1)
+    chat = JSON.parse(File.read(File.join(host.root, 'agentpy/agents', chief, 'state.json'))).fetch('chat')
+    expect(chat.count { |message| message['turn'] == ordinary && message['role'] == 'agent' }).to eq(1)
+    expect(host.process.stderr).to include('Scheduled Routine enqueue failed: ' + id)
+    database do |db|
+      db.execute('DROP TRIGGER reject_deadline')
+      db.execute('DROP TRIGGER reject_output_event')
+    end
+    host.restart
+    expect(host.state.fetch('routines').find { |routine| routine['id'] == sibling }.fetch('runCount')).to eq(1)
+    expect(host.state.fetch('turns').count { |turn| turn['id'] == ordinary }).to eq(1)
   ensure
-    database { |db| db.execute('DROP TRIGGER IF EXISTS reject_deadline') } if @host
+    if @host
+      database do |db|
+        db.execute('DROP TRIGGER IF EXISTS reject_deadline')
+        db.execute('DROP TRIGGER IF EXISTS reject_output_event')
+      end
+    end
   end
 
   it 'recovers committed queued work when its file projection was unavailable', :slow, unless: Gem.win_platform? do

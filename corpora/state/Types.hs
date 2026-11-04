@@ -50,6 +50,16 @@ import qualified System.Posix.Unistd as Posix
 data APIError = APIError Int Text deriving (Show, Typeable)
 instance Exception APIError
 
+-- Dispatch failures must not turn Stop into a retry or expose provider payloads.
+reportDispatchFailure :: Text -> SomeException -> IO ()
+reportDispatchFailure context problem
+ | isJust (fromException problem :: Maybe SomeAsyncException) || isJust (fromException problem :: Maybe AsyncCancelled) = throwIO problem
+ | otherwise = hPutStrLn stderr (T.unpack (T.take 256 context) <> ": " <> category)
+     `catch` (\(_::IOException) -> pure ())
+ where category = case fromException problem of
+        Just (APIError code _) -> "API " <> show code
+        Nothing -> "synchronous failure"
+
 data RunFailure = RunFailure Text [Value] deriving (Show,Typeable)
 instance Exception RunFailure
 

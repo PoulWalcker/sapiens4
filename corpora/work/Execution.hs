@@ -1003,7 +1003,7 @@ startExecution s = modifyMVar_ (serviceWorker s) $ \existing -> case existing of
   let step = do
        stopped <- readIORef (serviceStopping s)
        unless stopped $ do
-        locked s $ do
+        (locked s $ do
          config <- corporaSettings s
          pulse <- readIORef (servicePulse s)
          let active=corporaStatus config==Active
@@ -1019,7 +1019,8 @@ startExecution s = modifyMVar_ (serviceWorker s) $ \existing -> case existing of
            let number=int (get (get current "numbers") key)+elapsed; numbers=put key (num number) (get current "numbers"); identity=at current "id"
            writeIORef (servicePulse s) (put "numbers" numbers current)
            DB.saveSingleton s DB.SystemPulse (obj [("pulse",str identity),("numbers",numbers)])
-           onPulse s (Pulse identity frequency number)
+           onPulse s (Pulse identity frequency number))
+         `catch` reportDispatchFailure "System Pulse dispatch failed"
         threadDelay 50000
         step
   step

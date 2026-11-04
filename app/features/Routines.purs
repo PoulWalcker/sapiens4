@@ -289,6 +289,9 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
       _ -> []
   evidenceDetail run = V.div "routine-evidence-detail" $
     [V.textNode "h3" [] "Evidence and usage"
+    ,V.when (D.valid $ D.get "routineEffectUnknown" run) $ V.div "routine-problem"
+      [V.p "" "Further runs are blocked because a previous action has an unknown outcome."
+      ,V.p "" $ D.s "reason" $ D.get "routineEffectUnknown" run]
     ,V.p "routine-muted" $ D.s "reason" $ D.get "assessment" run
     ,V.p "routine-muted" $ "Original assessment: " <> D.s "status" (D.get "originalAssessment" run)
     ,V.p "routine-muted" "Model statements and provider receipts do not independently verify external effects. Summaries may omit or shorten content; recognized credentials are removed."

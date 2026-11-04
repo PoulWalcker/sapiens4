@@ -1,4 +1,5 @@
 require 'sqlite3'
+require 'time'
 require 'yaml'
 require_relative 'support/effect_peer'
 
@@ -121,6 +122,47 @@ RSpec.describe 'Ordinary Routine uncertainty and legacy admission evidence' do
     expect(@peer.deliveries).to be_empty
     expect(host.calls.count { |call| call['node'] == 'Execution' }).to eq(1)
 
+  end
+
+  it 'isolates a blocked scheduled routine from other schedules and ordinary messages', :slow do
+    host.configure(feed_legacy_mode: 'tool_loss')
+    failed = submit('uncertain-before-schedule')
+    settled(failed)
+    expect(@peer.deliveries.length).to eq(1)
+    expect(host.request('POST', "#{path}/run", operation: 'blocked-repeat', revision: 1).first).to eq(409)
+    unknown = detail(failed).fetch('routineEffectUnknown')
+    expect(unknown.fetch('reason')).to include('independent absence proof')
+    host.api('POST', "#{path}/schedule", operation: 'schedule-blocked', revision: 1, minutes: 1)
+    sibling = host.api('POST', "/api/agents/#{@owner}/routines", @fields.merge(operation: 'healthy-sibling')).fetch('routine')
+    host.api('POST', "/api/agents/#{@owner}/routines/#{sibling}/schedule", operation: 'schedule-sibling', revision: 1, minutes: 1)
+    host.configure(feed_legacy_mode: 'clean')
+    host.stop
+    blocked_due = (Time.now.utc - 600).iso8601(6).sub('Z', '+00:00')
+    SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+      db.execute('SELECT sequence,value FROM scheduled_routines').each do |sequence, value|
+        definition = JSON.parse(value)
+        definition['nextDue'] = blocked_due
+        db.execute('UPDATE scheduled_routines SET value=? WHERE sequence=?', [JSON.generate(definition), sequence])
+      end
+    end
+    host.start
+    before = host.state.dig('pulse', 'numbers', 'bph60')
+    Contract.wait(timeout: 70, description: 'real minute pulse attempts both scheduled routines') do
+      host.state.dig('pulse', 'numbers', 'bph60') > before
+    end
+    definitions = host.state.fetch('routines').to_h { |routine| [routine['id'], routine] }
+    expect(definitions.fetch(sibling).fetch('runCount')).to eq(1)
+    expect(definitions.fetch(@routine)).to include('runCount' => 0, 'nextDue' => blocked_due)
+    expect(detail(failed).fetch('routineEffectUnknown')).to eq(unknown)
+    host.configure(ordinary_specification: {objective: 'Return a brief comparison.', inputs: [],
+      expectedOutputs: ['A comparison'], completionCriteria: ['Return a brief comparison.']})
+    ordinary = host.submit(@owner, 'Return a brief comparison.')
+    host.turn(ordinary)
+    expect(@peer.deliveries.length).to eq(1)
+    host.restart
+    expect(detail(failed).fetch('routineEffectUnknown')).to eq(unknown)
+    expect(host.request('POST', "#{path}/run", operation: 'blocked-after-restart', revision: 2).first).to eq(409)
+    expect(host.state.fetch('routines').find { |routine| routine['id'] == sibling }.fetch('runCount')).to eq(1)
   end
 
   it 'allows explicit criteria-failure Retry only with a complete clean no-tool invocation' do
