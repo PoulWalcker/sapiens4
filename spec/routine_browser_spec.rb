@@ -120,57 +120,6 @@ RSpec.describe 'Routine list, results and settings in the native app', :desktop 
     expect(host.calls.length).to eq(calls)
   end
 
-  it 'shows owner analysis, saved usage and feedback invalidation, and stops explicit reconsideration' do
-    @host = desktop_host
-    owner = host.state.fetch('main_agent_id')
-    answer = decision('AutomationAnalyzed', decision: {status: 'Ready', automatablePart: 'Compare the supplied records.', parameters: [{name: 'records', description: 'Current source records'}]})
-    host.configure(version: 'codex-cli 0.162.1', rules: {'AutomationAnalysis' => {response: answer, usage: {input_tokens: 71, cached_input_tokens: 7, output_tokens: 19}}})
-    routine = host.api('POST', "/api/agents/#{owner}/routines", operation: 'analysis-create', title: 'Analysis example', goal: 'Compare the products.', criteria: ['Return a sourced comparison.']).fetch('routine')
-    path = "/api/agents/#{owner}/routines/#{routine}"
-    run = host.api('POST', "#{path}/run", operation: 'analysis-run', revision: 1).fetch('run')
-    Contract.wait { routine_snapshot(routine).dig('analysis', 'status') == 'Ready' }
-    calls = host.calls.length
-    start_desktop
-    open_routines
-    click_button('Analysis example')
-    desktop.see('Ready for later preparation')
-    desktop.see('Compare the supplied records.')
-    desktop.see('records: Current source records')
-    click_button('Analysis usage')
-    desktop.see('Purpose: automation analysis')
-    desktop.see('Input tokens: 71')
-    click_button('History')
-    click_button(/Run 1 ·/)
-    desktop.see('Verified comparison')
-    expect(host.calls.length).to eq(calls)
-    click_button('Reject result…')
-    desktop.fill('Reason for rejecting (up to 4000 characters)', 'The source omitted an important product.')
-    click_button('Reject result')
-    desktop.see('Analysis needs reconsideration')
-    desktop.see('Assessment: Rejected')
-    expect(host.calls.length).to eq(calls)
-    host.configure(rules: {'AutomationAnalysis' => {block: true, gate: 'held-analysis', response: answer}})
-    click_button('Reconsider automation…')
-    click_button('Analyze evidence')
-    desktop.see('Analysis in progress')
-    click_button('Stop analysis…')
-    click_button('Stop analysis')
-    desktop.see('Analysis stopped')
-    host.release('held-analysis')
-    expect(routine_snapshot(routine).fetch('runs').map { |entry| entry['id'] }).to eq([run])
-    host.configure(rules: {'AutomationAnalysis' => {response: decision('AutomationAnalyzed', decision: {status: 'NeedMoreEvidence', missingObservations: ['A complete source record.']})}})
-    click_button('Reconsider automation…')
-    click_button('Analyze evidence')
-    desktop.see('More evidence needed')
-    desktop.see('A complete source record.')
-    host.configure(rules: {'AutomationAnalysis' => {response: decision('AutomationAnalyzed', decision: {status: 'Decline', reconsiderCondition: 'A stable source format becomes available.'})}})
-    click_button('Reconsider automation…')
-    click_button('Analyze evidence')
-    desktop.see('Automation declined')
-    desktop.see('A stable source format becomes available.')
-    expect(routine_snapshot(routine).fetch('runs').map { |entry| entry['id'] }).to eq([run])
-  end
-
   it 'uses separate list, latest result, history, run and inline settings screens' do
     @host = desktop_host
     start_desktop

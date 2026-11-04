@@ -226,7 +226,7 @@ RSpec.describe 'Local service contracts' do
   it 'streams a large Unicode prompt over stdin and stops detached provider descendants when cancelled' do
     owner = chief
     host.configure(rules: {'Assessing' => {block: true, child: true}})
-    text = '😎 Привет quoted " and newline\n' * 450
+    text = '😎 Hello résumé quoted " and newline\n' * 450
     id = host.submit(owner, text)
     call = Contract.wait { host.calls.first }
     Contract.wait { File.exist?(call['heartbeat']) }

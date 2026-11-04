@@ -2,53 +2,53 @@ require 'yaml'
 require_relative 'support/host'
 
 RSpec.describe 'Scoped completion and explicit conditional criteria' do
-  # Original criterion text and outcome accounting from the observed RAM failure.
+  # English rendering of the original criteria and outcome accounting from the observed RAM failure.
   # Live artifact paths are removed; this controlled check performs no host work.
   RAM_SPEC = JSON.parse(<<~'JSON').freeze
 {
   "completionCriteria": [
-    "В Execution выполнено немедленное измерение занятой и общей RAM этого Mac, а результат подготовлен для доставки Админу в формате <used> of <total>.",
-    "После немедленного измерения RamLive вызвал routine_create с minutes=3 и промптом, сохраняющим все требования к каждому повторному отчёту.",
-    "Получено и сохранено подтверждение host-control с ID активной Scheduled Routine, принадлежащей RamLive; только после этого подготовлено сообщение Админу о её создании.",
-    "Если измерение или создание рутины не удалось, подготовлено сообщение Админу с точной ошибкой и фактическим статусом каждого действия."
+    "Execution immediately measured the used and total RAM of this Mac and prepared the result for delivery to Admin in the format <used> of <total>.",
+    "After the immediate measurement, RamLive called routine_create with minutes=3 and a prompt preserving every requirement for each recurring report.",
+    "A host-control confirmation with the ID of an active Scheduled Routine owned by RamLive was received and saved; only then was a message announcing its creation prepared for Admin.",
+    "If measurement or routine creation failed, a message was prepared for Admin with the exact error and actual status of each action."
   ],
   "expectedOutputs": [
-    "Сообщение Админу с результатом немедленного измерения в формате <used> of <total>.",
-    "Сохранённая Scheduled Routine, принадлежащая RamLive, с интервалом 3 минуты и промптом каждого запуска: измерить актуальную занятую и общую RAM этого Mac и отправить Админу одно сообщение в формате <used> of <total>.",
-    "Подтверждение создания с ID рутины и сообщение Админу о создании после получения подтверждения.",
-    "Если измерение или создание не удастся, сообщение Админу с точной ошибкой и фактическим статусом."
+    "A message to Admin with the immediate measurement result in the format <used> of <total>.",
+    "A saved Scheduled Routine owned by RamLive, with a 3-minute interval and a prompt for each run: measure the current used and total RAM of this Mac and send Admin one message in the format <used> of <total>.",
+    "A creation confirmation with the routine ID and a message to Admin announcing creation after that confirmation was received.",
+    "If measurement or creation fails, a message to Admin with the exact error and actual status."
   ],
   "inputs": [
-    "Исходное намерение Админа: создать нового Sapi RamLive для немедленного измерения RAM и отчётов каждые 3 минуты.",
-    "Исполнитель: RamLive, sapi_35b3f79f3e61; ранее созданный RamMonitor не исполняет это поручение.",
-    "Операция host-control: routine_create(minutes,prompt), где minutes=3; подтверждение содержит сохранённый ID рутины."
+    "Admin original intent: create a new Sapi named RamLive to measure RAM immediately and report every 3 minutes.",
+    "Responsible Sapi: RamLive, sapi_35b3f79f3e61; the previously created RamMonitor is not carrying out this assignment.",
+    "Host-control operation: routine_create(minutes,prompt), with minutes=3; the confirmation contains the saved routine ID."
   ],
-  "objective": "RamLive должен сразу измерить занятую и общую RAM этого Mac, сообщить Админу результат в формате <used> of <total>, затем в Execution создать собственную Scheduled Routine для такого отчёта каждые 3 минуты."
+  "objective": "RamLive must immediately measure the used and total RAM of this Mac, report the result to Admin in the format <used> of <total>, then create its own Scheduled Routine in Execution for this report every 3 minutes."
 }
 JSON
   RAM_OUTCOME = JSON.parse(<<~'JSON').freeze
 {
   "event": "Outcome",
   "evidence": [
-    "Команда top показала PhysMem: 23G used, 113M unused; sysctl показала общий объём 25769803776 байт (24 GiB).",
-    "После измерения routine_create с minutes=3 вернула saved=true и ID routine_sch_00004.",
-    "Повторная проверка routines подтвердила owner=sapi_35b3f79f3e61, minutes=3, paused=false и промпт каждого запуска с измерением RAM и одним сообщением Админу.",
-    "Notes.html обновлён атомарно."
+    "The top command reported PhysMem: 23G used, 113M unused; sysctl reported a total of 25769803776 bytes (24 GiB).",
+    "After measurement, routine_create with minutes=3 returned saved=true and ID routine_sch_00004.",
+    "A subsequent routines check confirmed owner=sapi_35b3f79f3e61, minutes=3, paused=false and a prompt requiring RAM measurement and one message to Admin on each run.",
+    "Notes.html was updated atomically."
   ],
   "outcome": {
     "artifacts": [],
     "notApplicableCriteria": {
-      "Если измерение или создание рутины не удалось, подготовлено сообщение Админу с точной ошибкой и фактическим статусом каждого действия.": "Измерение успешно; routine_create вернула saved=true, а routines подтвердил активную рутину."
+      "If measurement or routine creation failed, a message was prepared for Admin with the exact error and actual status of each action.": "Measurement succeeded; routine_create returned saved=true, and routines confirmed the active routine."
     },
     "satisfiedCriteria": [
-      "В Execution выполнено немедленное измерение занятой и общей RAM этого Mac, а результат подготовлен для доставки Админу в формате <used> of <total>.",
-      "После немедленного измерения RamLive вызвал routine_create с minutes=3 и промптом, сохраняющим все требования к каждому повторному отчёту.",
-      "Получено и сохранено подтверждение host-control с ID активной Scheduled Routine, принадлежащей RamLive; только после этого подготовлено сообщение Админу о её создании."
+      "Execution immediately measured the used and total RAM of this Mac and prepared the result for delivery to Admin in the format <used> of <total>.",
+      "After the immediate measurement, RamLive called routine_create with minutes=3 and a prompt preserving every requirement for each recurring report.",
+      "A host-control confirmation with the ID of an active Scheduled Routine owned by RamLive was received and saved; only then was a message announcing its creation prepared for Admin."
     ],
     "status": "Completed"
   },
-  "reason": "Немедленное измерение выполнено; создание и параметры рутины подтверждены host-control.",
-  "reply": "Админ, 23G of 24G. Создана активная рутина RamLive каждые 3 минуты; подтверждённый ID: routine_sch_00004."
+  "reason": "The immediate measurement was completed; routine creation and parameters were confirmed by host-control.",
+  "reply": "Admin, 23G of 24G. An active RamLive routine was created to run every 3 minutes; confirmed ID: routine_sch_00004."
 }
 JSON
 
@@ -74,9 +74,9 @@ JSON
   end
   def context(call); JSON.parse(call.fetch('prompt').split("\nContext:\n", 2).last); end
 
-  it 'accepts the captured Russian conditional only when explicitly declared in the pinned contract' do
+  it 'accepts the recorded conditional only when explicitly declared in the pinned contract' do
     conditional = RAM_SPEC.fetch('completionCriteria').last
-    rules('ReadyToWork' => {response: decision('TaskPrepared', taskType: 'work', specification: RAM_SPEC.merge('conditionalCriteria' => {conditional => 'Измерение или создание рутины не удалось.'}))},
+    rules('ReadyToWork' => {response: decision('TaskPrepared', taskType: 'work', specification: RAM_SPEC.merge('conditionalCriteria' => {conditional => 'Measurement or routine creation failed.'}))},
       'Execution' => {response: RAM_OUTCOME})
     accepted = host.submit(chief, 'Verify the recorded RAM completion accounting.')
     host.turn(accepted)
