@@ -40,7 +40,7 @@ RSpec.describe 'Checked code consumes retained routine feed observations' do
     @routine = host.api('POST', "/api/agents/#{@owner}/routines", operation: 'create-feed', title: 'Checked feed summary', goal: FeedCodeFixtures::GOAL, criteria: FeedCodeFixtures::CRITERIA, externalProfile: @profile).fetch('routine')
     host.configure(rules: {
       'Execution' => {response: decision('Outcome', reply: FeedCodeFixtures::OBSERVED_TEXT, outcome: {status: 'Completed', satisfiedCriteria: FeedCodeFixtures::CRITERIA, artifacts: []}), usage: {input_tokens: 43, cached_input_tokens: 3, output_tokens: 17}},
-      'AutomationAnalysis' => {response: decision('AutomationAnalyzed', decision: {status: 'Ready', automatablePart: 'Render newly observed integer-valued records using the supplied prefix.', parameters: [{name: 'prefix', description: 'Prefix for the content text'}]}), usage: {input_tokens: 47, cached_input_tokens: 0, output_tokens: 19}}
+      'PreparationFixtures' => {response: {status: 'insufficient_evidence', reason: 'Independent examples are supplied by the explicit preparation request.'}, usage: {input_tokens: 19, output_tokens: 9}}
     })
   end
 
@@ -79,17 +79,14 @@ RSpec.describe 'Checked code consumes retained routine feed observations' do
   end
 
   def prepare(operation: 'prepare-feed', fixtures: independent_feed_cases, fixture_fields: {}, source: feed_code_source, generation: {}, assessment: {})
-    @analysis = Contract.wait(description: 'accepted observed source analysis') do
-      row = routine['analysis']
-      row if row && row['status'] == 'Ready'
-    end
+    Contract.wait(description: 'initial suitability review') { routine.dig('preparation', 'status') == 'insufficient_evidence' }
     host.configure(rules: host.provider.fetch('rules').merge(
-      'PreparationFixtures' => {response: {contentInterface: 'script-text-v1', fixtures: fixtures, reason: 'Independent initial, overlapping and empty complete pages.'}.merge(fixture_fields)},
-      'PreparationGeneration' => {response: {language: 'python', profile: 'python-3.13.15-linux-arm64', source: source, interface: 'json-stdin-result-v1', dependencies: [], capabilities: []}.merge(generation)},
-      'PreparationReview' => {response: {accepted: true, reason: 'Actual independent fixture texts match the original content criteria.'}},
+      'PreparationFixtures' => {usage: {input_tokens: 19, output_tokens: 9}, response: {contentInterface: 'script-text-v1', fixtures: fixtures, reason: 'Independent initial, overlapping and empty complete pages.'}.merge(fixture_fields)},
+      'PreparationGeneration' => {usage: {input_tokens: 19, output_tokens: 9}, response: {language: 'python', profile: 'python-3.13.15-linux-arm64', source: source, interface: 'json-stdin-result-v1', dependencies: [], capabilities: []}.merge(generation)},
+      'PreparationReview' => {usage: {input_tokens: 19, output_tokens: 9}, response: {accepted: true, reason: 'Actual independent fixture texts match the original content criteria.'}},
       'CodeAssessment' => {response: {verdict: 'accepted', reply: 'Verifier replacement text must never be delivered.', reason: 'Actual script text names only the new records and exact values with the accepted prefix.', evidence: ['Retained source page, normalized input and actual script-produced text.'], acceptance: {status: 'Completed', satisfiedCriteria: FeedCodeFixtures::CRITERIA, artifacts: []}, activationAudit: {accepted: true, reason: 'Exact checked implementation satisfied the authorized observed input.'}}.merge(assessment), usage: {input_tokens: 61, cached_input_tokens: 1, output_tokens: 23}}
     ))
-    id = host.api('POST', "#{path}/prepare", operation: operation, revision: 1, analysis: @analysis.fetch('id')).fetch('preparation')
+    id = host.api('POST', "#{path}/prepare", operation: operation, revision: 1).fetch('preparation')
     Contract.wait(timeout: 90, description: 'checked feed candidate') do
       row = host.api('GET', "#{path}/preparations/#{id}")
       raise JSON.pretty_generate(row) if %w[failed stopped stale interrupted cleanup_pending].include?(row['status'])
@@ -134,7 +131,7 @@ RSpec.describe 'Checked code consumes retained routine feed observations' do
     ], usage: {input_tokens: 53, cached_input_tokens: 3, output_tokens: 17}}
     host.configure(rules: host.provider.fetch('rules').merge(
       'PreparationExplanation' => explanation,
-      'PreparationRubricReview' => {response: {criteria: hybrid_verdicts}},
+      'PreparationRubricReview' => {usage: {input_tokens: 19, output_tokens: 9}, response: {criteria: hybrid_verdicts}},
       'HybridExplanation' => explanation,
       'HybridAssessment' => {response: {verdict: 'accepted', reason: 'Retained facts and useful explanation satisfy original criteria.', evidence: ['Actual records and useful text.'], criteria: hybrid_verdicts, activationAudit: {accepted: true, reason: 'The authorized observed hybrid result is correct.'}}, usage: {input_tokens: 61, cached_input_tokens: 1, output_tokens: 23}}
     ))
@@ -151,7 +148,7 @@ RSpec.describe 'Checked code consumes retained routine feed observations' do
 
   it 'prepares from a retained accepted v13 observation without inventing prior history' do
     ordinary = delivered(submit('retained-v13'))
-    Contract.wait { routine.dig('analysis', 'status') == 'Ready' }
+    Contract.wait { routine.dig('preparation', 'status') == 'insufficient_evidence' }
     host.stop
     stored_work(ordinary.fetch('id')) { |work| work.fetch('externalExecution').delete('inputBinding') }
     host.start
@@ -163,8 +160,7 @@ RSpec.describe 'Checked code consumes retained routine feed observations' do
   %w[missing changed].each do |fault|
     it "refuses preparation from a retained v13 observation with #{fault} delivery reservation" do
       ordinary = delivered(submit("retained-v13-#{fault}"))
-      Contract.wait { routine.dig('analysis', 'status') == 'Ready' }
-      analysis = routine.fetch('analysis').fetch('id')
+      Contract.wait { routine.dig('preparation', 'status') == 'insufficient_evidence' }
       host.stop
       stored_work(ordinary.fetch('id')) do |work|
         external = work.fetch('externalExecution')
@@ -177,7 +173,7 @@ RSpec.describe 'Checked code consumes retained routine feed observations' do
       end
       host.start
       before_calls = host.calls.length
-      code, response = host.request('POST', "#{path}/prepare", operation: "invalid-v13-#{fault}", revision: 1, analysis: analysis)
+      code, response = host.request('POST', "#{path}/prepare", operation: "invalid-v13-#{fault}", revision: 1)
       expect(code).to eq(409)
       expect(response.to_s).to include('delivery')
       expect(host.calls.length).to eq(before_calls)

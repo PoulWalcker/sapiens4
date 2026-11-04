@@ -283,6 +283,7 @@ requestOn db candidate identity time explicit = do
   require (not (latestUnsuitable preparations)) 409 "Current contract was unsuitable for preparation; change the contract or explicitly reconsider preparation"
   require (not (any ((==key) . (`D.workField` "preparationKey")) preparations)) 409 "These observations already have a preparation"
  source<-maybe (failure 409 "Preparation needs a saved accepted ordinary result under current instructions") pure (listToMaybe (reverse positives))
+ when (Effects.profileBound (toJSON source)) $ void (Effects.preparationInput (toJSON definition) (toJSON source))
  evidence<-either (failure 413) pure (selectEvidence definition operations works source (listToMaybe (reverse preparations)))
  let pin=AnalysisPin (AgentId (R.definitionOwner definition)) (R.definitionId definition) (R.contractGeneration definition)
        (DB.analysisFeedbackIds operations (toJSON definition) (map toJSON works) [RunId (D.workloadId source)]) [RunId (D.workloadId source)]
