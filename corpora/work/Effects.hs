@@ -106,7 +106,7 @@ routineConsumerOn db work
  | has work "repairPin" = do
   let pin=get work "repairPin"
   definition<-definitionOn db (at pin "routine")
-  require (get definition "owner"==get pin "owner" && any ((==get pin "case") . (`get` "id")) (items definition "repairCases")) 409 "Doctor ancestry contradicts its original Routine consumer"
+  require (get definition "owner"==get pin "owner" && any ((==get pin "case") . (`get` "id")) (items definition "repairCases")) 409 "Preparation ancestry contradicts its original Routine consumer"
   pure (Just (RoutineConsumer (at pin "owner") (at pin "routine")))
  | not (has origin "routine") && snapshot==Null = pure Nothing
  | has origin "group" = pure Nothing
@@ -162,7 +162,6 @@ routineRisk startup work
  | otherwise = fromMaybe (if failedWork && null entries && get work "routineAttemptSchema"/=num 1 then RoutineUnverified else RoutineClear) (listToMaybe unknowns `mplus` listToMaybe unverified)
  where
  verifiedRepairActivity=has work "repairPin" && noAnomalies && case fromJSON (get work "repairInvocationPolicy") :: Result RepairInvocationPolicy of
-  Success DoctorScopedResponseOnly->not (has work "preparation" || has work "codeExecution")
   Success RepairPreparationResponseOnly->has work "preparation" && not (has work "codeExecution")
   Success SavedAuditResponseOnly->has work "savedAudit" && not (has work "preparation")
   Success KitInspectionResponseOnly->has work "kitInspection" && not (has work "preparation" || has work "codeExecution")

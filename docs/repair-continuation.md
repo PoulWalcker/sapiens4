@@ -2,19 +2,19 @@
 
 An exhausted Routine repair case can receive an explicit additional amount of active
 repair time. The shipped **Continue repair…** dialog starts at 5 minutes; edit the whole
-minute amount and enter a reason. Approval immediately queues a fresh diagnosis for the
+minute amount and enter a reason. Approval queues owner preparation or retained-result assessment for the
 same case. There is no automatic refill or escalation and no new fixed attempt cap.
 
 A grant adds to the original case ceiling. It preserves prior spending, reservations,
-history, contract/version pins, selected file permissions and unknown outcomes. It does
+history, contract/version pins and unknown outcomes. It does
 not reopen an old provider operation, reset its deadline or retry counter, repeat a
-confirmed file action, calculate a business result or authorize delivery. Unknown provider
-usage remains unknown. A grant does not grant new file access or reconcile unknown effects.
+confirmed effect, calculate a business result or authorize delivery. Unknown provider
+usage remains unknown. A grant does not reconcile unknown effects.
 
 Only exhausted active resource is eligible. Provider-attempt exhaustion with active time
 remaining, interrupted/uncertain reservations, active repair work, changed instructions,
 explicit Stop and unresolved consumer effects block continuation. Historical operations
-remain available as evidence; the new diagnosis uses a separate recorded operation.
+remain available as evidence; the continuation uses a separate recorded operation.
 
 **Stop repair…** stops this case's queued and active repair work through the existing
 execution gates. It blocks later admission and late publication, preserving unused grants

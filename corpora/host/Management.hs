@@ -55,7 +55,7 @@ data Operation = ReadCorpora | UpdateCorpora | Batch | ReadStatus | Delegate | R
 operationSchema :: [(Text,Operation,[Text])]
 operationSchema =
  [ ("corpora_get", ReadCorpora, [])
- , ("corpora_update", UpdateCorpora, ["name","device","scope","revision","archived","doctor_id"])
+ , ("corpora_update", UpdateCorpora, ["name","device","scope","revision","archived"])
  , ("batch", Batch, ["operations"])
  , ("status", ReadStatus, ["target"])
  , ("delegate", Delegate, ["decision"])
@@ -196,8 +196,7 @@ reviseCorpora d cfg = do
  forM_ [("name",200),("device",200),("scope",16000)] $ \(k,limit) -> when (has d k) $ check (case get d k of String value -> T.length (T.strip value)<=limit && (k=="scope" || not (T.null (T.strip value))); _ -> False) 400 ("Invalid "<>k)
  when (has d "archived") $ check (case get d "archived" of Bool _ -> True; _ -> False) 400 "archived must be a boolean"
  let updated=cfg
-      { corporaDoctor=if has d "doctor_id" then if get d "doctor_id"==Null then Nothing else Just (AgentId (at d "doctor_id")) else corporaDoctor cfg
-      , corporaName=if has d "name" then Just (T.strip (at d "name")) else corporaName cfg
+      { corporaName=if has d "name" then Just (T.strip (at d "name")) else corporaName cfg
       , corporaDevice=if has d "device" then T.strip (at d "device") else corporaDevice cfg
       , corporaScope=if has d "scope" then T.strip (at d "scope") else corporaScope cfg
       , corporaRevision=corporaRevision cfg+1
@@ -206,13 +205,8 @@ reviseCorpora d cfg = do
 
 updateCorpora :: Service -> Value -> IO Value
 updateCorpora s d = do
- require (not (null (keys d)) && all (`elem` ["name","device","scope","revision","archived","doctor_id"]) (keys d)) 400 "Unknown corpora setting"
+ require (not (null (keys d)) && all (`elem` ["name","device","scope","revision","archived"]) (keys d)) 400 "Unknown corpora setting"
  cfg <- corporaSettings s
- when (has d "doctor_id" && get d "doctor_id"/=Null) $ do
-  doctor<-textField d "doctor_id" 128
-  chief<-DB.mainAgent s
-  require (doctor/=chief && not ("group_" `T.isPrefixOf` doctor)) 400 "Assign an active personal specialist as Doctor"
-  requireActive s doctor
  updated <- validated (reviseCorpora d cfg)
  when (boolean (get d "archived")) $ readMVar (serviceRuns s) >>= mapM_ (\r->writeIORef (runCancel r) True) . M.elems
  writeJSON (serviceRoot s </> "corpora-settings.json") updated

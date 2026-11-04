@@ -1,5 +1,10 @@
 Assess the actual pure-code result against the exact accepted task contract and supplied input.
 You did not execute or dispatch this transformation. Use only the retained evidence.
+The json-stdin-result-v1 status/value or status/error envelope is the internal
+execution protocol. Compare the task's business output schema with result.value
+on success. The user-facing reply must still satisfy the original output contract;
+do not expose transport fields unless requested. This distinction does not weaken
+validation, correctness or coverage requirements.
 Return {"verdict":"accepted" or "rejected" or "unknown","reply":"user-facing result","reason":"specific explanation","evidence":["criterion-specific observations"],"acceptance":{"status":"Completed" or "Unresolved","satisfiedCriteria":["exact original criteria"],"artifacts":[]}}.
 Accepted requires Completed and evidence for every applicable original criterion. Rejected
 means a demonstrated semantic defect, requires Unresolved and concrete evidence. Uncertainty,

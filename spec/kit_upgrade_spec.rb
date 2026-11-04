@@ -25,8 +25,6 @@ RSpec.describe 'Consumer-specific suspect inspection and Kit upgrade' do
     @host = Host.new(start: false, repo: repo, command: [File.join(repo, '.build/bin/sapiens4')], environment: {'SAPIENS_GENERATED_DOCKER' => @docker, 'SAPIENS_GENERATED_SOCKET' => @socket})
     host.configure(version: 'codex-cli 0.162.1')
     host.start
-    @doctor = host.state.fetch('corpora').fetch('doctor_id')
-    assign_doctor(nil)
     @owner = host.agent('KitOwner')
     rules('Execution' => {response: decision('Outcome', reply: 'Observed sales under the original criteria.', outcome: {status: 'Completed', satisfiedCriteria: CandidateFixtures::CRITERIA, artifacts: []}), usage: USAGE},
       'AutomationAnalysis' => {response: decision('AutomationAnalyzed', decision: {status: 'Ready', automatablePart: 'Compute supplied sales.', parameters: [{name: 'csv', description: 'Sales rows'}]}), usage: USAGE},
@@ -102,9 +100,6 @@ RSpec.describe 'Consumer-specific suspect inspection and Kit upgrade' do
   def broken_source
     candidate_source.sub('request = json.load(sys.stdin)', "request = json.load(sys.stdin)\nif request.get('force_failure'): raise ValueError('Shared calculation fault')")
   end
-  def assign_doctor(identity = @doctor)
-    host.control(chief, 'corpora_update', revision: host.state.fetch('corpora').fetch('revision'), doctor_id: identity)
-  end
   def wait_case(id, status)
     Contract.wait(timeout: 90, description: "#{id} repair #{status}") do
       saved = routine(id)['repair']
@@ -124,9 +119,7 @@ RSpec.describe 'Consumer-specific suspect inspection and Kit upgrade' do
     run_routine(@owner, @first, 'real-shared-fault', observed_input.merge(force_failure: true))
   end
   def repair_source_and_offer(second)
-    rules('PreparationGeneration' => {response: {language: 'python', profile: 'python-3.13.15-linux-arm64', source: candidate_source, interface: 'json-stdin-result-v1', dependencies: [], capabilities: []}, usage: USAGE},
-      'DoctorDiagnosis' => {response: {verdict: 'implementation_defect', diagnosis: 'The forced branch raises before the accepted calculation.', recommendation: 'Remove it while preserving CSV validation.', hypothesis: 'Remove force_failure exception; preserve complete CSV validation and exact sums.'}, usage: USAGE})
-    assign_doctor
+    rules('PreparationGeneration' => {response: {language: 'python', profile: 'python-3.13.15-linux-arm64', source: candidate_source, interface: 'json-stdin-result-v1', dependencies: [], capabilities: []}, usage: USAGE})
     saved = wait_case(@first, 'awaiting_verification')
     run_routine(@owner, @first, 'verify-source-repair', observed_input)
     recovered = wait_case(@first, 'recovered')

@@ -18,6 +18,17 @@ module CandidateFixtures
   GOAL = 'Sum signed integer sales by category over a half-open date interval. Validate all CSV rows, retain zero-total categories and reject malformed data.'
   CRITERIA = ['Return exact category and total minor-unit sums, row count and requested period.', 'Reject missing columns, invalid integers or dates, empty categories and reversed periods.'].freeze
 
+  # Automatic and explicit preparation share the same candidate report.
+  def await_candidate
+    Contract.wait(timeout: 90) do
+      projected = routine['preparation'] || {}
+      next unless projected['id']
+      row = host.api('GET', "#{path}/preparations/#{projected.fetch('id')}")
+      raise JSON.pretty_generate(row) if %w[failed interrupted stopped insufficient_evidence unsuitable].include?(row['status'])
+      row if row['status'] == 'awaiting_occurrence'
+    end
+  end
+
   def observed_input
     {csv: SALES, start: '2026-11-01', end: '2026-11-02'}
   end

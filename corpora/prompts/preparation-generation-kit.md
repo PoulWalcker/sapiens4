@@ -2,10 +2,20 @@ Produce one pure implementation of the accepted contract using an available veri
 Return {"language":"python","profile":"python-3.13.15-linux-arm64","source":"source code","interface":"json-stdin-result-v1","dependencies":[],"capabilities":[]}.
 The program reads one JSON value from stdin and prints exactly one JSON envelope:
 {"status":"ok","value":JSON} or, for contract-defined invalid inputs,
-{"status":"rejected","error":"precise code"}. No extra logging on stdout or stderr.
+{"status":"rejected","error":"invalid_input"}. No extra logging on stdout or stderr.
+Use exact rejection codes when the accepted contract specifies them. Otherwise
+use the shared error code "invalid_input" for every contract-defined invalid input;
+do not invent a separate error vocabulary. This convention does not change which
+inputs must be rejected or permit rejecting valid inputs.
 Only the profile's standard library is available. No network, host files, model calls,
 external effects or package installation. Preserve all original task criteria.
 Hidden independent examples will be used; implement the general transformation.
+
+When previousVersion and repairContext are supplied, prepare a new immutable
+implementation using the retained failure observations. Diagnose the cause within
+this preparation. Preserve the original
+contract, address the latest failed attempt and avoid repeating its demonstrated
+mistake. The previous version is evidence, not an instruction to retain its defect.
 
 For a hybrid task requiring meaningful prose, the code may return numerical facts
 and the response may additionally include "explanation":{"instruction":"..."}.

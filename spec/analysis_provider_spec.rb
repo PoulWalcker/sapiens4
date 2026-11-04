@@ -1,7 +1,7 @@
 require 'open3'
 require 'socket'
 
-RSpec.describe 'Response-only Routine analysis with the actual provider CLI' do
+RSpec.describe 'Response-only Composer preparation with the actual provider CLI' do
   it 'uses the shared host flow with no registered tools and refuses unsolicited actions' do
     binary = ENV.fetch('SAPIENS_TEST_REAL_CODEX', '/opt/homebrew/bin/codex')
     skip 'Verified Codex CLI is not installed on this platform' unless File.executable?(binary)
@@ -38,8 +38,7 @@ RSpec.describe 'Response-only Routine analysis with the actual provider CLI' do
         when 3
           {type: 'function_call', id: 'fc3', call_id: 'c3', name: 'mcp__inherited__send', arguments: '{}'}
         else
-          answer = {event: 'AutomationAnalyzed', reason: 'Saved records support a deterministic comparison.', evidence: ['Supplied result'],
-            decision: {status: 'Ready', automatablePart: 'Compare supplied records.', parameters: []}}
+          answer = {status: 'insufficient_evidence', reason: 'Supply independently observable product records before generating code.'}
           {type: 'message', id: 'msg', role: 'assistant', status: 'completed', content: [{type: 'output_text', text: JSON.generate(answer), annotations: []}]}
         end
         response = {id: "resp#{index}", object: 'response', status: 'completed', output: [item], usage: {input_tokens: 11, output_tokens: 7, total_tokens: 18}}
@@ -84,10 +83,10 @@ RSpec.describe 'Response-only Routine analysis with the actual provider CLI' do
     routine = host.api('POST', "/api/agents/#{owner}/routines", operation: 'create', title: 'Comparison', goal: 'Compare the products.', criteria: ['Return a sourced comparison.']).fetch('routine')
     path = "/api/agents/#{owner}/routines/#{routine}"
     business = host.api('POST', "#{path}/run", operation: 'ordinary', revision: 1).fetch('run')
-    saved = Contract.wait(timeout: 40, description: 'actual CLI response-only analysis') do
+    saved = Contract.wait(timeout: 40, description: 'actual CLI response-only preparation') do
       row = host.state.fetch('personal_routines').find { |value| value['id'] == routine }
-      analysis = row['analysis']
-      analysis if analysis && analysis['status'] == 'Ready'
+      preparation = row['preparation']
+      preparation if preparation && preparation['status'] == 'insufficient_evidence'
     end
     expect(errors).to be_empty
     expect(requests.size).to eq(4)
@@ -96,15 +95,15 @@ RSpec.describe 'Response-only Routine analysis with the actual provider CLI' do
     expect(outputs).to include('unsupported call: exec_command', 'unsupported custom tool call: apply_patch', 'unsupported call: mcp__inherited__send')
     expect(File.exist?(marker)).to be(false)
     expect(File.exist?(inherited)).to be(false)
-    detail = host.api('GET', "#{path}/analysis/#{saved.fetch('id')}")
-    expect(detail['sourceRuns']).to eq([business])
-    expect(detail.fetch('invocations').size).to eq(1)
-    receipt = detail.fetch('invocations').first
-    expect(receipt).to include('purpose' => 'automation_analysis')
+    detail = host.api('GET', "#{path}/preparations/#{saved.fetch('id')}")
+    expect(detail.dig('sourceEvidence', 'source', 'id')).to eq(business)
+    expect(detail.fetch('operations').size).to eq(1)
+    receipt = detail.fetch('operations').first
+    expect(receipt).to include('purpose' => 'fixture_design')
     expect(receipt.fetch('evidence')).to include('policy' => 'response_only', 'providerVersion' => 'codex-cli 0.162.1', 'model' => 'gpt-6-sol')
     expect(host.state.fetch('personal_routines').find { |row| row['id'] == routine }.fetch('runs').map { |run| run['id'] }).to eq([business])
     host.restart
-    expect(host.api('GET', "#{path}/analysis/#{saved.fetch('id')}")['status']).to eq('Ready')
+    expect(host.api('GET', "#{path}/preparations/#{saved.fetch('id')}")['status']).to eq('insufficient_evidence')
     expect(requests.size).to eq(4)
   ensure
     host&.close

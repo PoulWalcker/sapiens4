@@ -200,7 +200,6 @@ occurrenceAllowed :: Service -> Value -> IO Bool
 occurrenceAllowed s origin
  | has origin "kitInspection" = kitInspectionAllowed s (get origin "kitInspection")
  | has origin "repairAudit" = repairAllowed s (get origin "repairAudit")
- | has origin "repair" = repairAllowed s (get origin "repair")
  | has origin "standaloneRun" = standaloneRunAllowed s (get origin "standaloneRun")
  | has origin "preparation" = preparationAllowed s (get origin "preparation")
  | has origin "analysis" = analysisAllowed s (get origin "analysis")
@@ -353,4 +352,4 @@ repairPinAllowed s pin = do
  pure $ case find (\definition->get definition "id"==get pin "routine" && get definition "owner"==get pin "owner") definitions of
   Nothing->False
   Just definition->not (boolean (get definition "deleted")) && get definition "contractGeneration"==get pin "contractGeneration"
-   && any (\saved->get saved "id"==get pin "case" && at saved "status" `elem` ["waiting_doctor","waiting_access","diagnosing","diagnosed","repairing","awaiting_verification","verifying","auditing_saved_result","waiting_kit_inspection","inspecting_kit"]) (items definition "repairCases")
+   && any (\saved->get saved "id"==get pin "case" && at saved "status" `elem` ["repairing","awaiting_verification","verifying","auditing_saved_result","waiting_kit_inspection","inspecting_kit"]) (items definition "repairCases")

@@ -1,6 +1,6 @@
 # Maintenance provider continuation
 
-Preparation, candidate review, Doctor diagnosis and saved-result audit retain the exact
+Preparation, candidate review and saved-result audit retain the exact
 provider operation, request hash, model/policy, original deadline and attempt receipts.
 A verified response-only Codex CLI 0.162.1 terminal 503 refusal permits at most three host
 process attempts, with durable 1s then 2s backoff. Waiting releases the active slot and
@@ -8,8 +8,8 @@ settles measured active time against the original preparation or repair-case all
 Restart preserves due time, completed fixture reports and cancellation. An unfinished
 admission remains uncertain and consumed; it is never an automatic free retry.
 
-Only the failed provider node continues. Confirmed Doctor file actions, completed
-calculations, fixture executions and delivery are not replayed. Saved-result audits
+Only the failed provider node continues. Completed calculations, fixture executions
+and confirmed delivery are not replayed. Saved-result audits
 revalidate their original source authority before continuation and commit. A single
 separately receipted response-shape correction shares the original deadline and allowance;
 it cannot add missing semantic authority, change negative/unknown judgments or alter

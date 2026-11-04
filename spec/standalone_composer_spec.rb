@@ -23,7 +23,6 @@ RSpec.describe 'Owner-chosen standalone prepared execution' do
     @host = Host.new(start: false, repo: repo, command: [File.join(repo, '.build/bin/sapiens4')], environment: {'SAPIENS_GENERATED_DOCKER' => @docker, 'SAPIENS_GENERATED_SOCKET' => @socket})
     host.configure(version: 'codex-cli 0.162.1', mode: 'Exec', model_catalog: [{slug: 'gpt-6-sol', shell_type: 'unified_exec', apply_patch_tool_type: 'freeform', experimental_supported_tools: [], tool_mode: 'direct', supports_search_tool: false, supported_reasoning_levels: [{effort: 'high', description: 'high'}]}])
     host.start
-    host.control(chief, 'corpora_update', revision: host.state.fetch('corpora').fetch('revision'), doctor_id: nil)
     @owner = host.agent('PreparedOwner')
     rules('ReadyToWork' => {response: prepared_task(observed_input), usage: USAGE},
       'Execution' => {response: decision('ComposeWorkflow', operation: 'initial-version'), usage: USAGE},

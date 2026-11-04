@@ -113,38 +113,20 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     ,V.p "routine-muted" $ whenText routine
     ,V.node "nav" [V.cls "routine-tabs",V.label "Routine views"] [V.control [V.cls $ "routine-link" <> if not history then " selected" else "",V.attr "aria-current" $ if not history then "page" else "false"] "Latest result" (RoutineNavigate $ M.RoutineLatest id),V.control [V.cls $ "routine-link" <> if history then " selected" else "",V.attr "aria-current" $ if history then "page" else "false"] "History" (RoutineNavigate $ M.RoutineHistory id)]
     ,V.when (managed routine) $ repairPanel routine
-    ,V.when (managed routine) $ analysisPanel routine
+    ,V.when (managed routine) $ preparationPanel routine
     ,V.when (managed routine) $ codePanel routine
     ,V.when (managed routine) $ kitPanel routine]
     where r = record routine
           id = D.s "id" r
-  analysisPanel routine = V.div "routine-notice" $
-    [V.textNode "h3" [] "Automation analysis"
-    ,V.p "" $ case current of
-      "Ready" -> "Ready for later preparation"
-      "NeedMoreEvidence" -> "More evidence needed"
-      "Decline" -> "Automation declined"
-      "queued" -> "Analysis queued"
-      "running" -> "Analysis in progress"
-      "stale" -> "Analysis needs reconsideration"
-      "blocked" -> "Analysis unavailable"
-      "failed" -> "Analysis failed"
-      "interrupted" -> "Analysis interrupted"
-      "stopped" -> "Analysis stopped"
-      _ -> "Awaiting an accepted result"
-    ,V.when (D.s "reason" analysis /= "") $ V.p "routine-muted" $ D.s "reason" analysis] <>
-    (if current == "Ready" then [V.p "" $ D.s "automatablePart" analysis,V.p "routine-muted" "Preparation and activation are tracked separately below."] <> map (\parameter -> V.p "routine-muted" $ D.s "name" parameter <> ": " <> D.s "description" parameter) (D.rows "parameters" analysis) else []) <>
-    (if current == "NeedMoreEvidence" then map (V.p "" <<< D.str) (D.rows "missingObservations" analysis) else []) <>
-    (if current == "Decline" then [V.p "" $ D.s "reconsiderCondition" analysis] else []) <>
-    [V.when (D.s "id" analysis /= "") $ V.node "details" [] [V.node "summary" [] [V.text "Analysis usage"],V.p "routine-muted" $ if D.b "conflict" usage then "Purpose: automation analysis · Usage unknown: provider reports conflict." else "Purpose: automation analysis · Input tokens: " <> known "inputTokens" usage <> " · Output tokens: " <> known "outputTokens" usage,V.p "routine-muted" $ "Duration (ms): " <> known "durationMs" analysis <> " · Price: Unknown"]] <>
-    (if D.b "deleted" r then [] else if A.elem current ["queued","running"] then
-      [V.button "routine-link" "Stop analysis…" $ OpenDialog M.RoutineStopAnalysis $ F.RoutineRecord $ D.put "analysis" (D.get "id" analysis) r]
-     else if A.null (runs routine) then [] else [V.button "routine-link" "Reconsider automation…" $ OpenDialog M.RoutineAnalyze $ F.RoutineRecord r])
+  preparationPanel routine = V.div "routine-notice" $
+    [V.p "routine-muted" "Accepted ordinary results can start automation preparation automatically. A prepared version still needs checks and an authorized run before activation."] <>
+    (if D.b "deleted" r then [] else if A.elem current ["queued","fixtures","generation","environment","checks","review","waiting_provider"] then
+      [V.button "routine-link" "Stop preparation…" $ OpenDialog M.RoutineStopPreparation $ F.RoutineRecord $ D.put "preparation" (D.get "id" prepared) r]
+     else if current == "awaiting_occurrence" || A.null (runs routine) then [] else [V.button "routine-link" "Prepare automation…" $ OpenDialog M.RoutinePrepare $ F.RoutineRecord r])
     where
     r = record routine
-    analysis = D.get "analysis" r
-    current = D.s "status" analysis
-    usage = D.get "usage" analysis
+    prepared = D.get "preparation" r
+    current = D.s "status" prepared
   codePanel routine = V.when (D.s "id" prepared /= "" || D.s "digest" reference /= "") $ V.div "routine-notice"
     [V.textNode "h3" [] "Script automation"
     ,V.p "" $ case D.s "status" active of
@@ -152,14 +134,15 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
       "suspect" -> "Script suspended"
       "kit_pending" -> "Script held · ordinary LLM execution until local inspection"
       "stale" -> "Script needs reconsideration"
-      _ -> if D.s "id" prepared /= "" && not (D.b "applicable" prepared) then "Prepared version needs reconsideration" else if D.s "run" trial /= "" then if A.elem (D.s "status" trialRun) ["queued", "running", "waiting", "blocked"] then "Trial claimed" else "Trial finished without activation" else if D.s "status" prepared == "awaiting_occurrence" then "Prepared · awaiting an authorized run" else "Preparation: " <> D.s "status" prepared
+      _ -> if D.s "status" prepared == "insufficient_evidence" then "More evidence needed" else if D.s "status" prepared == "unsuitable" then "Automation unsuitable" else if D.s "id" prepared /= "" && not (D.b "applicable" prepared) then "Prepared version needs reconsideration" else if D.s "run" trial /= "" then if A.elem (D.s "status" trialRun) ["queued", "running", "waiting", "blocked"] then "Trial claimed" else "Trial finished without activation" else if D.s "status" prepared == "awaiting_occurrence" then "Prepared · awaiting an authorized run" else "Preparation: " <> D.s "status" prepared
     ,kitSource $ D.get "kitArtifact" active
     ,V.when (D.b "timerFixturesSimulated" prepared) $ V.p "routine-muted" "Fixture timing is simulated; authorized runs use real waits."
     ,kitSource $ D.get "kitArtifact" prepared
     ,V.when (D.s "digest" (D.at ["expectedBinding","reference"] prepared) /= "") $ V.p "routine-muted" $ "Upgrade basis · expected prior pin " <> CU.take 12 (D.s "digest" $ D.at ["expectedBinding","reference"] prepared)
+    ,V.when (D.s "reason" prepared /= "") $ V.p "routine-muted" $ D.s "reason" prepared
     ,V.when (D.s "error" prepared /= "") $ V.p "routine-problem" $ D.s "error" prepared
     ,providerWaitPanel $ D.get "providerWait" prepared
-    ,V.when (D.s "status" active == "stale" || D.s "id" prepared /= "" && not (D.b "applicable" prepared)) $ V.p "routine-muted" "This historical version no longer applies to the current task or source profile. Its history is retained."
+    ,V.when (D.s "status" active == "stale" || D.s "id" prepared /= "" && not (A.elem (D.s "status" prepared) ["insufficient_evidence","unsuitable"]) && not (D.b "applicable" prepared)) $ V.p "routine-muted" "This historical version no longer applies to the current task or source profile. Its history is retained."
     ,V.when (D.s "digest" (D.get "reference" prepared) /= "") $ V.p "routine-muted" $ "Prepared version · " <> CU.take 8 (D.s "digest" (D.get "reference" prepared))
     ,V.when (D.s "run" active /= "") $ V.p "routine-muted" $ "Activated by run " <> D.s "run" active <> " · " <> formatDate (D.s "decidedAt" active)
     ,V.when (D.s "reason" active /= "") $ V.p "routine-muted" $ D.s "reason" active
@@ -195,21 +178,11 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     ,V.when (D.s "retryAt" waiting /= "") $ V.p "routine-muted" $ "Resume after " <> formatDate (D.s "retryAt" waiting)
     ,V.p "routine-muted" "The original maintenance allowance is retained. Waiting uses no active slot. Provider spend may be unknown."]
   repairPanel routine = V.when (D.s "id" repair /= "") $ V.div "routine-notice"
-    [V.textNode "h3" [] "Doctor repair"
-    ,V.p "routine-muted" "Doctor can inspect selected text files, stage isolated repairs and run isolated checks. Live writes require explicit file access and clear effect receipts."
-    ,V.p "routine-muted" $ case D.s "phase" repair of
-      "kit_inspection" -> "The owner is inspecting this consumer under its existing finite repair allowance."
-      "tool_work" -> "Doctor is performing a scoped tool operation."
-      "waiting_independent_confirmation" -> "Waiting for file access or independent confirmation."
-      _ -> "Doctor diagnoses saved evidence."
-    ,V.when (A.elem (D.s "status" repair) ["waiting_access","waiting_doctor"]) $ V.button "routine-link" "Doctor file access…" $ OpenDialog M.DoctorAccess $ F.RoutineRecord $ record routine
-    ,V.node "details" [] ([V.node "summary" [] [V.text "Doctor access and actions"]] <> map (\resource -> V.p "routine-muted" $ D.s "access" resource <> " · " <> D.s "path" resource) (D.rows "resources" $ D.get "access" repair) <> map (\op -> V.p "routine-muted" $ D.s "tool" op <> " · " <> D.s "status" op <> " · " <> D.s "error" op) (A.filter (\op -> D.s "purpose" op == "repair_tool") $ D.rows "operations" repair))
+    [V.textNode "h3" [] "Automation preparation"
+    ,V.p "routine-muted" "The owner prepares a new version from retained failures or checks a retained result. The existing finite allowance, original criteria and activation checks remain."
     ,providerWaitPanel $ D.get "providerWait" repair
     ,V.p "" $ "Repair: " <> D.s "status" repair
-    ,V.p "routine-muted" $ "Doctor: " <> D.fallback "Not assigned" (D.s "doctor" repair)
     ,V.p "" $ D.s "waitingReason" repair
-    ,V.p "" $ D.s "diagnosis" (D.get "diagnosis" repair)
-    ,V.p "routine-muted" $ D.s "recommendation" (D.get "diagnosis" repair)
     ,V.p "routine-muted" $ "Attempts: " <> show (A.length $ D.rows "attempts" repair) <> " · Measured active time (ms): " <> show (D.int $ D.get "measuredMilliseconds" repair) <> " · Reserved (ms): " <> show (D.int $ D.get "reservedMilliseconds" repair) <> " / " <> show (D.n "limitMilliseconds" repair)
     ,V.p "routine-muted" $ "Remaining active repair time (ms): " <> show (D.n "remainingMilliseconds" repair)
     ,V.when (D.s "status" repair == "exhausted") $ V.div "routine-actions"

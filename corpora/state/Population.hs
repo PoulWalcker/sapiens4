@@ -7,7 +7,6 @@ import Control.Monad
 import Data.Aeson hiding (pairs)
 import Data.Char
 import Data.IORef
-import Data.Time (UTCTime, getCurrentTime, addUTCTime)
 import System.Random (randomRIO)
 import Data.Maybe
 import Data.Text (Text)
@@ -156,10 +155,7 @@ agentDraft d = do
  pure (AgentDraft name role (if has d "color" then Just (text color) else Nothing) (if has d "face" then Just (text face) else Nothing))
 
 createAgent :: Service -> Value -> IO Value
-createAgent s = createAgentAfter s Nothing
-
-createAgentAfter :: Service -> Maybe UTCTime -> Value -> IO Value
-createAgentAfter s predecessor d = do
+createAgent s d = do
  AgentDraft name role color face <- validated (agentDraft d)
  a <- fresh "sapi_"
  parent <- validateManager s a (get d "manager")
@@ -167,8 +163,7 @@ createAgentAfter s predecessor d = do
  (randomFace,randomColor) <- randomAvatar (map (`at` "face") rows)
  let selected = case face of Just chosen | chosen `notElem` map (`at` "face") rows -> chosen; _ -> randomFace
      selectedColor = fromMaybe randomColor color
- clock <- getCurrentTime
- let time=timestamp (maybe clock (max clock . addUTCTime 0.000001) predecessor)
+ time <- now
  let row = toJSON (AgentProfile (AgentId a) name role selectedColor selected time)
  DB.addAgent s row
  dir <- directory s
@@ -259,7 +254,7 @@ changeRetirement s a retire reason = do
   DB.record s [a] a (if retire then "sapi.retired" else "sapi.restored") (obj [("reason",str reason)]) "admin" Nothing
   pure (obj [("id",str a),("retired",Bool retire),("changed",Bool True)])
 corporaSettings :: Service -> IO CorporaConfig
-corporaSettings s = readJSON (serviceRoot s </> "corpora-settings.json") (CorporaConfig Nothing "This computer" "" Active 1 mempty Nothing)
+corporaSettings s = readJSON (serviceRoot s </> "corpora-settings.json") (CorporaConfig Nothing "This computer" "" Active 1 mempty)
 corporaIdentity :: Service -> IO Value
 corporaIdentity s = do
  cfg <- corporaSettings s

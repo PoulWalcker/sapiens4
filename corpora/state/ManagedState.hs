@@ -40,7 +40,7 @@ validateCommand turn command = do
   check False "External occurrence evidence is retained; start a new authorized occurrence instead of Retry. Unknown deliveries require reconciliation first"
  when (at command "action"=="retry" && boolean (get turn "codeBound")) $
   check False "Code-run evidence is retained; start a new authorized occurrence instead of Retry"
- when (at command "action"=="retry" && (has (get turn "origin") "analysis" || has (get turn "origin") "preparation" || has (get turn "origin") "repair")) $
+ when (at command "action"=="retry" && (has (get turn "origin") "analysis" || has (get turn "origin") "preparation")) $
   check False "Use a new explicit Routine analysis or preparation; interrupted maintenance cannot be replayed"
  check (keys command `allIn` ["id","action","revision"] && length (keys command)==3 && not (T.null (at command "id")) && T.length (at command "id")<=128 && get command "action" `elem` map str ["cancel","retry"]) "Invalid managed command; expected id, action and revision"
  let history=items (get turn "managed") "commands"
@@ -134,7 +134,7 @@ save db owner state command = withTransaction db $ do
   -- All user cancel interfaces revoke the same maintenance gate atomically with
   -- the managed command. Feedback invalidation does not write this stop gate.
   let preparationOrigin=get old "origin"
-      maintenance=if has preparationOrigin "repair" then "repair" else if has preparationOrigin "preparation" then "preparation" else "analysis"
+      maintenance=if has preparationOrigin "preparation" then "preparation" else "analysis"
   when (has preparationOrigin maintenance && any ((=="cancel") . (`at` "action")) applied) $ do
    rows_ <- query db "SELECT value FROM workloads WHERE id=?" (Only (at preparationOrigin maintenance)) :: IO [Only Text]
    work <- case rows_ of

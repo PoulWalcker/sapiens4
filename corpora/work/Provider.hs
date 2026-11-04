@@ -88,7 +88,7 @@ failureClass message
 operationFor :: Service -> Run -> Text -> Text -> Text -> Text -> Maybe ModelSettings -> [Value] -> IO Value
 operationFor s running node purpose stage request settings operations = case findOperation of
  Just saved->do
-  require (at saved "policy"=="response_only" && at saved "node"==node && (node=="DoctorDiagnosis" || at saved "promptHash"==sourceHash request) && maybe True ((==get saved "modelSettings") . toJSON) settings) 409 "Saved provider operation policy changed"
+  require (at saved "policy"=="response_only" && at saved "node"==node && at saved "promptHash"==sourceHash request && maybe True ((==get saved "modelSettings") . toJSON) settings) 409 "Saved provider operation policy changed"
   pure saved
  Nothing->do
   identity<-newId
@@ -176,7 +176,6 @@ validatedResponse s running operation save validate = do
         "PreparationRubricReview"->knownCriteria
         "CodeAssessment"->knownVerdict && at (get original "acceptance") "status" `elem` ["Completed","Unresolved"]
         "HybridAssessment"->knownVerdict && knownCriteria
-        "DoctorDiagnosis"->at original "verdict" `elem` ["implementation_defect","structure_revision","stop","request_access"]
         _->case original of Object _->True; _->False
    require authority 422 "Original semantic authority is missing; shape correction is unavailable"
    template<-prompt s "response-correction"

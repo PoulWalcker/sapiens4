@@ -40,9 +40,8 @@ make kind record m = {kind,title,record,fields,content:F.NoContent,status:M.Edit
     M.DecisionPrompts -> "Decision prompts"
     M.GroupTask -> if F.contextId record == "" then "Create Group task" else "Edit Group task"
     M.RoutineStop -> "Stop this run?"
-    M.RoutineAnalyze -> "Analyze saved evidence"
-    M.RoutineStopAnalysis -> "Stop analysis?"
-    M.DoctorAccess -> "Doctor file access"
+    M.RoutinePrepare -> "Prepare automation"
+    M.RoutineStopPreparation -> "Stop preparation?"
     M.RepairGrant -> "Continue this repair"
     M.RepairStop -> "Stop this repair?"
     M.RoutineReject -> "Reject this result?"
@@ -68,7 +67,6 @@ make kind record m = {kind,title,record,fields,content:F.NoContent,status:M.Edit
     M.RoutineRun -> base {inputs=""}
     M.RepairGrant -> base {minutes="5",reason=""}
     M.RepairStop -> base {reason="Stopped by Admin"}
-    M.DoctorAccess -> base {readFiles=S.joinWith "\n" $ map (D.s "path") $ A.filter (\resource -> D.s "access" resource == "read") $ D.rows "resources" $ D.at ["repair","access"] $ F.routineRecord record,writeFiles=S.joinWith "\n" $ map (D.s "path") $ A.filter (\resource -> D.s "access" resource == "write") $ D.rows "resources" $ D.at ["repair","access"] $ F.routineRecord record}
     _ -> base
   base = F.fieldsFor record
   replaceFields template replacements = case A.uncons replacements of
@@ -115,23 +113,18 @@ body m d = case d.kind of
     ,V.p "form-hint" "Your feedback stays with this run and its original instructions. The original assessment is preserved. This does not start another run."]
   M.RoutineStop -> form "Stop run"
     [V.p "" "This stops this run and its delegated work. Completed external actions cannot be undone. Other runs are unchanged."]
-  M.RoutineAnalyze -> form "Analyze evidence"
-    [V.p "" "The owner will make a new analysis of saved results and feedback. This uses a model call and does not start a routine run."]
+  M.RoutinePrepare -> form "Prepare automation"
+    [V.p "" "The owner will prepare automation from saved accepted work and feedback. This uses model calls and does not start a routine run."]
   M.RepairGrant -> form ("Add " <> field F.Minutes <> " minutes and continue")
     [V.p "" $ "This case used " <> show (D.n "spentMilliseconds" (D.get "repair" $ F.routineRecord d.record) / 60000.0) <> " active minutes; remaining: " <> show (D.n "remainingMilliseconds" (D.get "repair" $ F.routineRecord d.record) / 60000.0) <> " active minutes."
     ,input "Additional active minutes" F.Minutes [V.attr "type" "number",V.attr "min" "1",V.attr "step" "1",V.bool "required" true]
     ,textarea "Reason for continuing repair" F.Reason 3 [V.bool "required" true,V.attr "maxlength" "4000"]
-    ,V.p "form-hint" "This immediately queues a fresh diagnosis for the same case. Existing history, spending, pins and unknown outcomes remain. It does not repeat an old operation, clear uncertain effects or authorize a business run. There is no automatic refill."]
+    ,V.p "form-hint" "This resumes preparation or retained-result checking for the same case. Existing history, spending, pins and unknown outcomes remain. It does not repeat an old operation, clear uncertain effects or authorize a business run. There is no automatic refill."]
   M.RepairStop -> form "Stop repair"
     [textarea "Reason for stopping repair" F.Reason 3 [V.bool "required" true,V.attr "maxlength" "4000"]
     ,V.p "form-hint" "Stop this case's queued and active repair work. Unused grants and past spending remain in history; other cases and safe ordinary runs are unchanged. A grant cannot override this Stop."]
-  M.DoctorAccess -> form "Save Doctor access"
-    [textarea "Read-only files (absolute paths, one per line)" F.ReadFiles 4 [V.attr "maxlength" "16000"]
-    ,textarea "Writable files (absolute paths, one per line)" F.WriteFiles 4 [V.attr "maxlength" "16000"]
-    ,V.p "form-hint" "Select exact existing text files for this case. Writable files can also be read. Directories, links and application state are unavailable. Live writes require clear effect receipts."
-    ,V.p "form-hint" "This replaces this case's file access and resumes diagnosis with the same remaining repair allowance. It does not extend time or repeat an interrupted action."]
-  M.RoutineStopAnalysis -> form "Stop analysis"
-    [V.p "" "Stop the current analysis. Saved results and the routine schedule stay available."]
+  M.RoutineStopPreparation -> form "Stop preparation"
+    [V.p "" "Stop this preparation. Saved results and the routine schedule stay available."]
   M.RoutineDiscard -> form "Discard changes"
     [V.p "" "Your changes have not been saved."]
   M.RoutineRun -> form "Run now"

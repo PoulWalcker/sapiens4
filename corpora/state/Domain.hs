@@ -15,7 +15,7 @@ module Domain
  , populationChief, populationMembers, GroupRoster, MembershipError(..), memberRoster, rosterLead
  , messageText, AgentProfile(..), rosterMembers, activeStatus, retryableStatus, completedStatus
 
- , EffectEndpoint(..), FeedSource(..), DeliveryTarget(..), ExternalProfile(..), ProfileChange(..), profileChange, cursorP, FeedPage(..), FeedState(..), feedState, feedSeenIds, FeedContentInterface(..), FeedInputDescriptor(..), feedDescriptor, feedBusinessInput, feedContentText, DeliveryState(..), ModelSettings(..), CriterionKind(..), RubricCriterion(..), CriterionVerdict(..), CriterionAssessment(..), Explanation(..), narrativeText, hybridComposition, candidateExplanation, OrdinarySource(..), CandidateReference(..), StandaloneTaskPin(..), CodeRole(..), ExecutionBinding(..), bindingContract, sourceHash, canonicalHash, ContractGeneration(..), AnalysisPin(..), AnalysisParameter(..), AnalysisDecision(..), RoutineTrigger(..), routineTrigger, ExecutionGate(..), EvidenceUsage(..), EvidenceReceipt(..), EvidencePolicy(..), EvidenceSnapshot(..), AssessmentStatus(..), assessmentValue, SummaryField(..), ToolSummary(..), RepairInvocationPolicy(..)
+ , EffectEndpoint(..), FeedSource(..), DeliveryTarget(..), ExternalProfile(..), ProfileChange(..), profileChange, cursorP, FeedPage(..), FeedState(..), feedState, feedSeenIds, FeedContentInterface(..), FeedInputDescriptor(..), feedDescriptor, feedBusinessInput, feedContentText, DeliveryState(..), ModelSettings(..), CriterionKind(..), RubricCriterion(..), CriterionVerdict(..), CriterionAssessment(..), Explanation(..), narrativeText, hybridComposition, candidateExplanation, OrdinarySource(..), CandidateReference(..), StandaloneTaskPin(..), CodeRole(..), ExecutionBinding(..), bindingContract, sourceHash, canonicalHash, ContractGeneration(..), AnalysisPin(..), RoutineTrigger(..), routineTrigger, ExecutionGate(..), EvidenceUsage(..), EvidenceReceipt(..), EvidencePolicy(..), EvidenceSnapshot(..), AssessmentStatus(..), assessmentValue, SummaryField(..), ToolSummary(..), RepairInvocationPolicy(..)
  ) where
 
 import Control.Monad
@@ -310,39 +310,6 @@ instance FromJSON AnalysisPin where
 instance ToJSON AnalysisPin where
  toJSON pin = obj [("owner",toJSON (analysisOwner pin)),("routine",str (analysisRoutine pin)),("contractGeneration",toJSON (analysisGeneration pin)),("feedback",toJSON (analysisFeedback pin)),("sources",toJSON (analysisSources pin))]
 
-data AnalysisParameter = AnalysisParameter Text Text deriving (Eq, Show)
-instance FromJSON AnalysisParameter where
- parseJSON value = do
-  onlyFields ["name","description"] value
-  AnalysisParameter <$> textFieldP "name" 128 value <*> textFieldP "description" 2000 value
-instance ToJSON AnalysisParameter where
- toJSON (AnalysisParameter name description) = obj [("name",str name),("description",str description)]
-data AnalysisDecision
- = AnalysisReady Text [AnalysisParameter]
- | AnalysisNeedsEvidence [Text]
- | AnalysisDeclined Text
- deriving (Eq, Show)
-instance FromJSON AnalysisDecision where
- parseJSON value = case at value "status" of
-  "Ready" -> do
-   onlyFields ["status","automatablePart","parameters"] value
-   parameters <- fieldP "parameters" value
-   unless (length parameters<=30) (fail "Too many analysis parameters")
-   AnalysisReady <$> textFieldP "automatablePart" 8000 value <*> pure parameters
-  "NeedMoreEvidence" -> do
-   onlyFields ["status","missingObservations"] value
-   missing <- fieldP "missingObservations" value
-   unless (not (null missing) && length missing<=30 && all (\t -> not (T.null (T.strip t)) && T.length t<=2000) missing) (fail "Provide concrete missing observations")
-   pure (AnalysisNeedsEvidence missing)
-  "Decline" -> onlyFields ["status","reconsiderCondition"] value >> AnalysisDeclined <$> textFieldP "reconsiderCondition" 4000 value
-  _ -> fail "Unknown automation analysis decision"
-  where fieldP key = parseJSON . (`get` key)
-instance ToJSON AnalysisDecision where
- toJSON decision = case decision of
-  AnalysisReady part parameters -> obj [("status",str "Ready"),("automatablePart",str part),("parameters",toJSON parameters)]
-  AnalysisNeedsEvidence missing -> obj [("status",str "NeedMoreEvidence"),("missingObservations",toJSON missing)]
-  AnalysisDeclined condition -> obj [("status",str "Decline"),("reconsiderCondition",str condition)]
-
 -- Wire spellings live at the codec boundary; domain code matches constructors.
 class (Eq a, Enum a, Bounded a) => Wire a where
  wireName :: a -> Text
@@ -401,12 +368,12 @@ instance FromJSON CorporaStatus where parseJSON = parseWire
 instance ToJSON CorporaStatus where toJSON = String . wireName
 data CorporaConfig = CorporaConfig
  { corporaName :: Maybe Text, corporaDevice :: Text, corporaScope :: Text
- , corporaStatus :: CorporaStatus, corporaRevision :: Int, corporaOperations :: M.Map Text Value, corporaDoctor :: Maybe AgentId
+ , corporaStatus :: CorporaStatus, corporaRevision :: Int, corporaOperations :: M.Map Text Value
  } deriving (Eq, Show)
 instance FromJSON CorporaConfig where
- parseJSON = withObject "Corpora settings" $ \o -> CorporaConfig <$> o .:? "name" <*> o .: "device" <*> o .: "scope" <*> o .: "status" <*> o .: "revision" <*> o .:? "operations" .!= M.empty <*> o .:? "doctor_id"
+ parseJSON = withObject "Corpora settings" $ \o -> CorporaConfig <$> o .:? "name" <*> o .: "device" <*> o .: "scope" <*> o .: "status" <*> o .: "revision" <*> o .:? "operations" .!= M.empty
 instance ToJSON CorporaConfig where
- toJSON config = object ["name" .= corporaName config, "device" .= corporaDevice config, "scope" .= corporaScope config, "status" .= corporaStatus config, "revision" .= corporaRevision config, "operations" .= corporaOperations config, "doctor_id" .= corporaDoctor config]
+ toJSON config = object ["name" .= corporaName config, "device" .= corporaDevice config, "scope" .= corporaScope config, "status" .= corporaStatus config, "revision" .= corporaRevision config, "operations" .= corporaOperations config]
 data Frequency = Bpm120 | Bpm60 | Bph60 deriving (Eq, Ord, Show, Enum, Bounded)
 instance Wire Frequency where wireName frequency = case frequency of Bpm120 -> "bpm120"; Bpm60 -> "bpm60"; Bph60 -> "bph60"
 instance FromJSON Frequency where parseJSON = parseWire
@@ -636,15 +603,14 @@ instance ToJSON ToolSummary where
  toJSON s = obj [("fields",toJSON (summaryFields s)),("omittedFields",num (summaryOmittedFields s)),("redactedFields",num (summaryRedactedFields s)),("truncatedFields",num (summaryTruncatedFields s))]
 
 -- Admission proof for the two repair activities with no ambient tool capability.
-data RepairInvocationPolicy = DoctorScopedResponseOnly | RepairPreparationResponseOnly | SavedAuditResponseOnly | KitInspectionResponseOnly deriving (Eq,Show)
+data RepairInvocationPolicy = RepairPreparationResponseOnly | SavedAuditResponseOnly | KitInspectionResponseOnly deriving (Eq,Show)
 instance ToJSON RepairInvocationPolicy where
- toJSON policy=obj [("schema",num 1),("kind",str (case policy of DoctorScopedResponseOnly->"doctor_scoped_response_only"; RepairPreparationResponseOnly->"isolated_preparation_response_only"; SavedAuditResponseOnly->"saved_audit_response_only"; KitInspectionResponseOnly->"kit_inspection_response_only"))]
+ toJSON policy=obj [("schema",num 1),("kind",str (case policy of RepairPreparationResponseOnly->"isolated_preparation_response_only"; SavedAuditResponseOnly->"saved_audit_response_only"; KitInspectionResponseOnly->"kit_inspection_response_only"))]
 instance FromJSON RepairInvocationPolicy where
  parseJSON value=do
   onlyFields ["schema","kind"] value
   unless (get value "schema"==num 1) (fail "Unknown repair invocation admission schema")
   case at value "kind" of
-   "doctor_scoped_response_only"->pure DoctorScopedResponseOnly
    "isolated_preparation_response_only"->pure RepairPreparationResponseOnly
    "saved_audit_response_only"->pure SavedAuditResponseOnly
    "kit_inspection_response_only"->pure KitInspectionResponseOnly

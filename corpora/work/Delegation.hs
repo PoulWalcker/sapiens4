@@ -415,7 +415,7 @@ data Decision
  = ReplyNow Text | ExecuteTask | OutsideSpecialization | SelectSpecialist Text
  | NeedSpecialist | AskAdmin Text | SpecifySapi Text Text | PrepareTask Text TaskSpec
  | ChooseWorkflow Text WorkflowPlan
- | Handoff Text | ReportOutcome Text Outcome | ReportAnalysis AnalysisDecision
+ | Handoff Text | ReportOutcome Text Outcome
  deriving (Eq, Show)
 data DecisionResponse = DecisionResponse { decisionBody :: Decision, decisionReason :: Text, decisionEvidence :: [Text], decisionRaw :: Value } deriving (Eq, Show)
 parseDecision :: Node -> Value -> Parser DecisionResponse
@@ -441,12 +441,11 @@ parseDecision node value = do
   "ComposeWorkflow" -> variant ["operation","previous"] (ChooseWorkflow <$> textAt "operation" 128 <*> (ComposeVersion <$> parseJSON (get value "previous")))
   "RunWorkflow" -> variant ["operation","reference"] (ChooseWorkflow <$> textAt "operation" 128 <*> (ExecuteVersion <$> parseJSON (get value "reference")))
   "Outcome" -> variant ["reply","outcome"] (ReportOutcome <$> textAt "reply" 64000 <*> parseJSON (get value "outcome"))
-  "AutomationAnalyzed" -> variant ["decision"] (ReportAnalysis <$> parseJSON (get value "decision"))
   _ -> fail "Unknown decision event"
  pure (DecisionResponse body reason evidence value)
 
 promptNames :: [(Node,Text)]
-promptNames = [(Assessing,"decision-triage"),(ChiefTriage,"decision-chief-triage"),(CreatingSapi,"decision-create-sapi"),(ReadyToWork,"decision-prepare-task"),(Delegation,"decision-delegation"),(Execution,"decision-execution"),(AutomationAnalysis,"decision-automation-analysis")]
+promptNames = [(Assessing,"decision-triage"),(ChiefTriage,"decision-chief-triage"),(CreatingSapi,"decision-create-sapi"),(ReadyToWork,"decision-prepare-task"),(Delegation,"decision-delegation"),(Execution,"decision-execution")]
 eventsFor :: Node -> [Text]
 eventsFor node = case node of
  Assessing -> ["FitsSpecialization","OutsideSpecialization"]
@@ -455,7 +454,7 @@ eventsFor node = case node of
  ReadyToWork -> ["TaskPrepared"]
  Delegation -> ["HandoffPrepared"]
  Execution -> ["Outcome","OutsideSpecialization","ComposeWorkflow","RunWorkflow"]
- AutomationAnalysis -> ["AutomationAnalyzed"]
+ AutomationAnalysis -> []
  Preparation -> []
  OutcomeNode -> []
  WaitingForAdmin -> []
@@ -569,7 +568,7 @@ decide s run turn state node logs = do
   DB.requireOccurrence s (workField w "origin")
   contract <- if node==Execution then executionContract w c else pure Nothing
   let taskContext=if node==ReadyToWork && workField w "standaloneRun"/=Null then put "specification" (get (workField w "standaloneRun") "contract") (workField w "task") else maybe (workField w "task") (\spec -> put "specification" (toJSON spec) (workField w "task")) contract
-  conv <- if node==AutomationAnalysis then pure Null else conversation s (runOwner run) turn state
+  conv <- conversation s (runOwner run) turn state
   chief <- DB.mainAgent s
   members <- team s
   extra <- if KM.member "agency_batch" (agentFields state) then ("\n\n" <>) <$> prompt s "agency-chat" else pure ""
@@ -586,19 +585,19 @@ decide s run turn state node logs = do
   works<-readWorks s
   let versions=[mergeFields [("reference",get version "reference"),("source",pin),("contract",get version "contract"),("activated",get (get prepared "trial") "status")] (select ["status","checks"] prepared) | candidate<-works,let pin=workField candidate "standalonePin",get pin "owner"==toJSON (runOwner run),let prepared=workField candidate "preparation",let version=get prepared "version",at prepared "status"=="awaiting_occurrence"]
   let instruction = at source "content" <> extra <> scheduled <> pinned <> externalInstruction
-      context = if node==AutomationAnalysis then obj [("selfId",toJSON (runOwner run)),("analysisEvidence",workField w "analysisEvidence")] else obj [("availableWorkflows",arr versions),("acceptedInput",feedInput),("externalExecution",workField w "externalExecution"),("originalIntent",workField w "originalIntent"),("task",taskContext),("routine",routine),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
-      rendered = render envelope [("node",wireName node),("instruction",instruction),("notes_wiki",if node==AutomationAnalysis then "" else render wiki [("notes_example",T.pack (repositoryRoot s </> "corpora/prompts/examples/jarvis-notes.html"))]),("context",jsonText context),("events",T.intercalate ", " (sort (eventsFor node)))]
+      context = obj [("availableWorkflows",arr versions),("acceptedInput",feedInput),("externalExecution",workField w "externalExecution"),("originalIntent",workField w "originalIntent"),("task",taskContext),("routine",routine),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
+      rendered = render envelope [("node",wireName node),("instruction",instruction),("notes_wiki",render wiki [("notes_example",T.pack (repositoryRoot s </> "corpora/prompts/examples/jarvis-notes.html"))]),("context",jsonText context),("events",T.intercalate ", " (sort (eventsFor node)))]
   (model,effort) <- modelDefaults
   policy <- executionSettings s (agentIdText (runOwner run))
   i <- newId
   t <- now
   let digest = T.pack (concatMap (\b -> let v=showHex b "" in if length v==1 then '0':v else v) (BS.unpack (hash (TE.encodeUtf8 instruction))))
       record = obj [("decisionId",str i),("callId",toJSON (turnId turn)),("node",toJSON node),("template",get source "template"),("promptHash",str digest),("templatePath",get source "path"),("renderedPrompt",str rendered),("model",str model),("effort",str (if executionMode policy == Deep then "xhigh" else effort)),("created",str t),("accepted",Bool False)]
-      summary = merge (select ["decisionId","callId","node","promptHash","accepted"] record) (obj [("purpose",str (if node==AutomationAnalysis then "automation_analysis" else "ordinary_execution")),("agent",str (agentIdText (runOwner run))),("promptTemplate",get record "template")])
-  preparedSummary<-DB.connection s (\db->Effects.prepareRoutineAttempt db (toJSON w) (node==AutomationAnalysis || Effects.profileBound (toJSON w)) summary)
+      summary = merge (select ["decisionId","callId","node","promptHash","accepted"] record) (obj [("purpose",str "ordinary_execution"),("agent",str (agentIdText (runOwner run))),("promptTemplate",get record "template")])
+  preparedSummary<-DB.connection s (\db->Effects.prepareRoutineAttempt db (toJSON w) (Effects.profileBound (toJSON w)) summary)
   saveWork s (setWorkField "decisions" (arr (workItems w "decisions"++[preparedSummary])) w)
   writeJSON (archivePath s (agentIdText (runOwner run)) ("decisions/"<>i)) record
-  pure (rendered,record,node==AutomationAnalysis || Effects.profileBound (toJSON w))
+  pure (rendered,record,Effects.profileBound (toJSON w))
  logIndex <- length <$> readIORef logs
  modifyIORef' logs (++[obj [("role",toJSON node),("prompt",str rendered),("session",Null)]])
  let updateLog extra = modifyIORef' logs (\entries -> [if index==logIndex then merge entry extra else entry | (index,entry)<-zip [0::Int ..] entries])
@@ -606,7 +605,7 @@ decide s run turn state node logs = do
  result <- try $ do
   let observe snapshot = locked s $ do
        (current,_) <- getWork s (turnId turn)
-       let update entry = if get entry "decisionId"==get record "decisionId" then Effects.admitRoutineAttempt (put "evidence" (put "purpose" (str (if node==AutomationAnalysis then "automation_analysis" else "ordinary_execution")) (toJSON snapshot)) entry) else entry
+       let update entry = if get entry "decisionId"==get record "decisionId" then Effects.admitRoutineAttempt (put "evidence" (put "purpose" (str "ordinary_execution") (toJSON snapshot)) entry) else entry
        let observed=Effects.observeEvidence (at record "decisionId") snapshot (toJSON (setWorkField "decisions" (arr (map update (workItems current "decisions"))) current))
        DB.putValue s DB.Workloads (workloadId current) observed
        require (get (Effects.external observed) "opaqueEffectUnknown"==Null) 409 "Response-only tool evidence is uncertain; external delivery is blocked"
@@ -718,7 +717,7 @@ data DecisionStep
  | PrepareAcceptedTask Text TaskSpec
  | AssessReportedOutcome Text Outcome
  | ComposeWorkflow Text WorkflowPlan
- | SaveAnalysis AnalysisDecision
+
  deriving (Eq, Show)
 
 -- Decide from an immutable snapshot. The runtime interprets only the resulting work.
@@ -743,7 +742,6 @@ advanceDecision chief response work call = case decisionBody response of
  Handoff request -> Right (DelegateRequest request)
  ReportOutcome reply outcome -> Right (AssessReportedOutcome reply outcome)
  ChooseWorkflow operation plan -> Right (ComposeWorkflow operation plan)
- ReportAnalysis analysis -> Right (SaveAnalysis analysis)
  where
  finish changed progress = SaveDecision changed (call { callProgress=progress })
  acceptedCriteria = items (get (workField work "task") "specification") "completionCriteria"
@@ -795,10 +793,6 @@ runDecision s run turn state = do
             recordDecision s owner refused
             saveWork s (withCall (withDecisionRecord refused current) (setCallFields [("observation",obj [("workflowRefused",str reason),("decision",get record "decisionId")])] call))
             pure Nothing
-          SaveAnalysis analysis -> do
-           requireActive s owner
-           let saved=mergeFields [("reason",str (decisionReason response)),("evidence",toJSON (decisionEvidence response))] (toJSON analysis)
-           finish (setWorkField "analysisDecision" saved current) (call {callProgress=FinishedCall (Answered (decisionReason response))})
           ResolveSpecialist name -> do
            target <- resolve s name False
            validateTarget s current owner target

@@ -147,22 +147,27 @@ A stopped occurrence cannot be reopened through ordinary call retry.
 
 ### Preparing a routine candidate
 
-A current `Ready` analysis can be used by
-`POST /api/agents/<owner>/routines/<routine>/prepare`, with `operation`, current
-`revision`, and `analysis` ID. The source run must have an accepted task contract
-for the current instructions. The response contains a `preparation` ID.
-`GET /api/agents/<owner>/routines/<routine>/preparations/<preparation>` exposes
-its immutable candidate version, independent fixtures, actual checks, review,
-and operation evidence. `stop-preparation` accepts `operation`, `revision`, and
-`preparation`. Replaying an unchanged operation returns its original response;
-a failed or interrupted attempt needs a new explicit operation.
+Accepted ordinary Routine results can automatically start preparation through the
+existing dispatcher. The same observations do not create another automatic attempt
+on each tick or restart. An applicable active version avoids needless preparation.
+Standalone tasks may request Composer directly within their accepted task contract.
 
-Preparation designs hidden expected results before generating code, executes the
-actual code against those inputs, then requests separate review. Success is
-`awaiting_occurrence`: it does not activate code, publish a Kit entry, or perform
-another business occurrence. Preparation remains an explicit API operation.
-Editing the goal or criteria, deleting the routine, or stopping preparation
-prevents further promotion. Historical evidence remains inspectable.
+For explicit preparation, use
+`POST /api/agents/<owner>/routines/<routine>/prepare` with `operation` and current
+`revision`. A Routine needs an accepted ordinary source under its current contract;
+the response contains a `preparation` ID.
+`GET /api/agents/<owner>/routines/<routine>/preparations/<preparation>` exposes
+its candidate, independent fixtures, actual checks, review and operation evidence.
+`stop-preparation` accepts `operation`, `revision` and `preparation`.
+An unchanged operation replay returns its original response.
+
+The fixture-design stage may return `insufficient_evidence` or `unsuitable` with a
+reason. Otherwise it establishes expected results before generation, executes the
+actual code against them, and requests candidate review. Success is
+`awaiting_occurrence`: preparation does not activate code or authorize a business
+run. Contract changes, rejected source evidence, deletion and Stop fence promotion.
+Requests and versions under the same Routine contract share their preparation
+allowance; a new request ID cannot refill it or revive stopped work.
 
 The first verified external runtime profile requires macOS ARM64 with a running
 local OrbStack/Docker 29.4.0 daemon and the already-cached official
@@ -363,80 +368,30 @@ in the active projection; archival and large-history scaling are not implemented
 for this opt-in mode yet.
 
 
-### Doctor repair for personal routines
+### Owner preparation and retained-result assessment
 
-A fresh Corpora creates ChiefSapi and a separate Doctor Sapi, assigning that
-Doctor by default. Interrupted fresh initialization resumes those identities;
-existing Corpora receive no automatic agent backfill or reassignment. Chief can
-assign another active personal specialist with `corpora_update`'s optional
-`doctor_id` field; `null` clears it. Chief and Groups cannot be Doctor. The
-existing workspace settings message includes this assignment.
+A proven implementation defect retains its evidence and starts a new immutable
+candidate through the owner's Composer capability. Generation receives the exact
+previous failed version and observations; independent fixture design receives the
+observations without the source. Safe ordinary fallback can finish the user's
+occurrence, but its success does not establish candidate health. A replacement
+still needs an authorized occurrence and accepted result before activation.
 
-Doctor uses retained evidence and scoped host tools. Its provider process remains
-verified response-only, with no ambient host-control token. The host can read
-explicitly selected existing UTF-8 files, retain isolated repair artifacts, check
-staged Python against the original saved fixtures in the existing runtime, and
-inspect that exact runtime. Staged code has no host mounts or network. The routine
-owner still prepares and checks immutable implementation candidates.
+If an otherwise established calculation lacks a valid assessment, the owner can
+independently reassess its exact retained result. The original version, inputs,
+criteria and receipts must remain applicable. This does not recalculate the result
+or replay delivery. Missing or stale evidence, fallback and unknown effects cannot
+be treated as proof of recovery.
 
-Use **Doctor file access…** on a waiting repair to select exact read-only or writable
-files. Writable files also permit reading; directories, symbolic/hard links,
-application state, known private directories (`~/.codex`, `~/.ssh`, `~/.aws`),
-repository metadata and host implementation writes are unavailable.
-Application source may be explicitly selected for reading. Resources are pinned
-by filesystem identity and opened through directory descriptors without following
-links. Files are limited to 256 KiB; staged content to 64 KiB. Live writes require
-explicit write authority, clear original-consumer effects and the observed content
-hash. Hash checking detects ordinary conflicts optimistically; it is not atomic
-compare-and-swap against external editors. Writes change the verified open file in
-place, so interrupted/partial changes remain unknown until independently confirmed.
-File tools fail closed on Windows. No general shell, installation, network sends,
-desktop or administrative operations are granted.
+Each regeneration case has one persisted allowance of 30 active minutes covering
+preparation, checks and authorized verification. Waiting releases active capacity;
+unfinished reservations remain consumed with unknown spend shown explicitly.
+Restart and new candidate IDs do not refill the allowance. An explicit finite grant
+can extend an exhausted eligible case; it cannot override Stop or uncertain effects.
+Confirmed temporary provider failures use the existing bounded continuation policy.
 
-A Doctor request for access only waits; it does not grant paths. Saving selected
-access replaces that waiting case's file authority and resumes diagnosis without
-extending its 30-minute allowance. It cannot revive stopped or exhausted work.
-Confirmed tool effects retain receipts and are not automatically repeated. Stop
-and restart preserve resource accounting and unknown outcomes, which fence the
-original Routine even after Doctor reassignment. Read observations and isolated
-checks do not clear that fence. Fixed runtime inspection does not include arbitrary
-hardware commands such as diskutil.
-
-A failed assessment of an otherwise established calculation can also create a
-case without quarantining healthy code. When the exact latest original run,
-version, inputs, result, optional explanation and criteria remain applicable, a
-separate maintenance call independently audits that retained result. It neither
-recalculates nor replays delivery, and does not generate a replacement candidate.
-The guarded result updates the original occurrence; a trial activates only after
-its exact original claim and activation audit pass. Missing evidence, fallback,
-negative or unknown semantic verdicts, later runs, Stop and stale authority refuse
-audit-only recovery. Receipt-feed results requiring content acceptance or
-publication wait visibly without advancing their cursor or sending anything;
-audit-only recovery can preserve an already confirmed or unnecessary publication
-only when its immutable receipt is valid. Audit and tool usage remain with the
-same repair case.
-
-The first proven implementation fault immediately retains a repair case, even
-without a Doctor. Safe ordinary execution and bounded fallback proceed under
-their existing effect checks. The Doctor distinguishes an implementation defect
-from a structural revision or a justified stop. Structural revisions retain a
-recommendation instead of regenerating the unchanged structure.
-
-The Agency and Doctor choose further candidate iterations from newly failed
-checks or verification and a changed hypothesis. There is no fixed attempt
-count. Every case has one persisted aggregate allowance of 30 active minutes,
-covering diagnosis, scoped tools, saved-result audits, generation, fixture execution, review and the authorized
-verification and audit. Waiting for a Doctor, queue or authorized occurrence
-consumes no active allowance. A stage reserves its remaining allowance before
-work, and only an observed completion returns proven unused time. An unfinished
-reservation after a crash remains consumed, with unknown spend shown explicitly.
-Restart, new run/request, edits or restoring an old failed version do not refill
-that case. Provider failures and lost responses are not automatically retried.
-
-Checked repair candidates wait for the existing authorized routine run; only a
-successful result and activation audit adopt the new version. The routine view
-shows diagnosis, tool actions, selected file rights, confirmation waits, attempts,
-current candidate, measured/reserved active resource,
-terminal reason and purpose-indexed usage receipts. Missing tokens or prices are
-unknown. The state snapshot retains `repairCases`; `repair` is the current case
-and usage projection over its existing Workload operations.
+The Routine view shows preparation status, failure reason, current candidate,
+measured and reserved resource, and retained operation evidence. Missing token or
+price information remains unknown. The state snapshot exposes `repairCases` and
+the current `repair` projection; these records describe owner preparation and
+assessment, not a separate agent or executor.

@@ -26,13 +26,13 @@ import qualified Automation
 
 newtype OperationId = OperationId Text deriving (Eq, Show)
 
-data RoutineCommand = Create RoutineFields | Edit Revision RoutineFields | RunNow Revision Text | StopRun Revision RunId | Delete Revision | Schedule Revision Minutes | Pause Revision Bool | RejectRun Revision RunId Text | Analyze Revision | StopAnalysis Revision RunId | Prepare Revision RunId | StopPreparation Revision RunId | DoctorAccess Revision Text Value | GrantRepair Revision Text Int Text | StopRepair Revision Text Text deriving (Eq, Show)
+data RoutineCommand = Create RoutineFields | Edit Revision RoutineFields | RunNow Revision Text | StopRun Revision RunId | Delete Revision | Schedule Revision Minutes | Pause Revision Bool | RejectRun Revision RunId Text | Prepare Revision | StopPreparation Revision RunId | GrantRepair Revision Text Int Text | StopRepair Revision Text Text deriving (Eq, Show)
 data CommandError = CommandError Int Text deriving (Eq, Show)
-data CommandPlan = CreateDefinition RoutineFields | UpdateDefinition Definition | Admit Definition Text | StopOccurrences [D.Workload] | DeleteDefinition Definition [D.Workload] | RecordFeedback Text RunId | AnalyzeDefinition Definition | StopAnalysisCall Definition RunId | PrepareDefinition Definition RunId | StopPreparationCall Definition RunId | ConfigureDoctorAccess Definition Text Value | GrantRepairCase Definition Text Int Text | StopRepairCase Definition Text Text
+data CommandPlan = CreateDefinition RoutineFields | UpdateDefinition Definition | Admit Definition Text | StopOccurrences [D.Workload] | DeleteDefinition Definition [D.Workload] | RecordFeedback Text RunId | PrepareDefinition Definition | StopPreparationCall Definition RunId | GrantRepairCase Definition Text Int Text | StopRepairCase Definition Text Text
 
 parseCommand :: Text -> Value -> Parser RoutineCommand
 parseCommand action value = withObject "Routine command" (\o -> do
- unless (all (`elem` ["operation","revision","title","goal","criteria","inputs","run","minutes","reason","analysis","preparation","externalProfile","case","resources"]) (keys value)) (fail "Unknown Routine command field")
+ unless (all (`elem` ["operation","revision","title","goal","criteria","inputs","run","minutes","reason","preparation","externalProfile","case"]) (keys value)) (fail "Unknown Routine command field")
  case action of
   "create" -> Create <$> parseJSON value
   "edit" -> Edit <$> o .: "revision" <*> parseJSON value
@@ -52,16 +52,13 @@ parseCommand action value = withObject "Routine command" (\o -> do
   "schedule" -> Schedule <$> o .: "revision" <*> o .: "minutes"
   "pause" -> Pause <$> o .: "revision" <*> pure True
   "resume" -> Pause <$> o .: "revision" <*> pure False
-  "analyze" -> Analyze <$> o .: "revision"
   "repair-grant" -> do
    minutes<-o .: "minutes"
    reason<-textFieldP "reason" 4000 value
    GrantRepair <$> o .: "revision" <*> o .: "case" <*> pure minutes <*> pure reason
   "stop-repair" -> StopRepair <$> o .: "revision" <*> o .: "case" <*> textFieldP "reason" 4000 value
-  "doctor-access" -> DoctorAccess <$> o .: "revision" <*> o .: "case" <*> o .: "resources"
-  "prepare" -> Prepare <$> o .: "revision" <*> o .: "analysis"
+  "prepare" -> Prepare <$> o .: "revision"
   "stop-preparation" -> StopPreparation <$> o .: "revision" <*> o .: "preparation"
-  "stop-analysis" -> StopAnalysis <$> o .: "revision" <*> o .: "analysis"
   _ -> fail "Unknown Routine command") value
 
 -- Pure policy; all persistence and clocks stay in the IO interpreter below.
@@ -74,11 +71,8 @@ decide time current occurrences request = case request of
   pure (UpdateDefinition (R.bumpRevision changed {definitionFields=KM.delete "prompt" (definitionFields changed)}))
  GrantRepair revision identity minutes reason -> GrantRepairCase <$> existing revision <*> pure identity <*> pure minutes <*> pure reason
  StopRepair revision identity reason -> StopRepairCase <$> existing revision <*> pure identity <*> pure reason
- DoctorAccess revision identity resources -> ConfigureDoctorAccess <$> existing revision <*> pure identity <*> pure resources
- Prepare revision analysis -> (`PrepareDefinition` analysis) <$> existing revision
+ Prepare revision -> PrepareDefinition <$> existing revision
  StopPreparation revision identity -> (`StopPreparationCall` identity) <$> existing revision
- Analyze revision -> AnalyzeDefinition <$> existing revision
- StopAnalysis revision identity -> StopAnalysisCall <$> existing revision <*> pure identity
  RunNow revision inputs -> Admit <$> existing revision <*> pure inputs
  StopRun revision identity -> do
   _ <- existing revision
@@ -131,9 +125,7 @@ command s owner action identity payload = do
    result <- try $ do
     requireActive s owner
     parsed <- parseValue 400 (parseCommand action) payload
-    request_ <- case parsed of
-     DoctorAccess revision caseId _ -> DoctorAccess revision caseId <$> Automation.selectDoctorResources s payload
-     _ -> pure parsed
+    let request_ = parsed
     case request_ of
      RunNow _ _ -> do
       cfg <- corporaSettings s
@@ -143,19 +135,12 @@ command s owner action identity payload = do
      GrantRepair _ _ _ _ -> do
       cfg<-corporaSettings s
       require (corporaStatus cfg==Active) 409 "Activate this corpora before continuing repair"
-      doctor<-maybe (failure 409 "Assign an active Doctor before continuing repair") pure (corporaDoctor cfg)
-      chief<-DB.mainAgent s
-      require (agentIdText doctor/=chief && not ("group_" `T.isPrefixOf` agentIdText doctor)) 409 "Assign an active personal specialist as Doctor"
-      requireActive s (agentIdText doctor)
       Automation.preflight
-     Prepare _ _ -> do
+     Prepare _ -> do
       cfg <- corporaSettings s
       require (corporaStatus cfg==Active) 409 "Activate this corpora before preparing code"
       Automation.preflight
-     Analyze _ -> do
-      cfg <- corporaSettings s
-      require (corporaStatus cfg==Active) 409 "Activate this corpora before starting analysis"
-      Automation.preflight
+
      _ -> pure ()
     DB.connection s $ \db -> SQL.withTransaction db $ do
      -- Revision, stop targets and admission are decided from the same transaction.
@@ -196,20 +181,11 @@ applyPlan db owner runIdentity time (OperationId operation) plan = case plan of
  StopRepairCase definition identity reason -> do
   response<-Automation.stopRepairOn db (toJSON definition) identity reason time
   pure (definitionId definition,response)
- ConfigureDoctorAccess definition identity resources -> do
-  response<-Automation.configureDoctorAccessOn db (toJSON definition) identity resources
-  pure (definitionId definition,response)
- PrepareDefinition definition analysis -> do
-  response <- Composer.requestOn db definition analysis runIdentity time
+ PrepareDefinition definition -> do
+  response <- Automation.requestOn db definition runIdentity time True
   pure (definitionId definition,response)
  StopPreparationCall definition identity -> do
   response <- Composer.stopOn db definition identity
-  pure (definitionId definition,response)
- AnalyzeDefinition definition -> do
-  response <- Automation.requestOn db definition runIdentity time True
-  pure (definitionId definition,response)
- StopAnalysisCall definition identity -> do
-  response <- Automation.stopOn db definition identity
   pure (definitionId definition,response)
  RecordFeedback identity run -> pure (identity,obj [("routine",str identity),("run",toJSON run)])
  CreateDefinition fields -> do
@@ -267,7 +243,6 @@ snapshot s = do
  rendered <- forM ds $ \d -> do
   history <- traverse (renderRun RunSummary operations (definitionRevision d)) [w|w<-works,at (D.workField w "origin") "routine"==definitionId d]
   preparation <- Composer.projection s d works
-  analysis <- Automation.projection s d works
   kit<-Kit.catalog (definitionOwner d) (mergeFields (pairs (selectPresent ["contentInterface","rubric"] preparation)) (toJSON d)) (map toJSON works)
   let active_=get (toJSON d) "activeCode"
       activeVersion=maybe Null (\work->get (D.workField work "preparation") "version") (find ((==at (get active_ "reference") "preparation") . D.workloadId) works)
@@ -278,7 +253,7 @@ snapshot s = do
       inspections=[mergeFields ([("case",get saved "id") ]++[("status",str "stopped") | has saved "userStop" && at inspection "status" `elem` ["queued","running"]]) inspection | saved<-items (toJSON d) "repairCases",inspection<-items saved "kitInspections"]
       offers=concatMap (`items` "kitOffers") (items (toJSON d) "repairCases")
       kitConsumer=obj [("reference",get active "reference"),("held",Bool held),("issue",issue),("inspections",arr inspections),("offers",arr offers)]
-  pure (merge (toJSON d) (obj [("kitConsumer",kitConsumer),("kit",kit),("repair",Automation.repairProjection d works),("activeCode",visibleActive),("preparation",preparation),("analysis",analysis),("trigger",str (maybe "manual" (const "interval") (definitionSchedule d))),("title",str (R.definitionTitle d)),("goal",str (R.definitionGoal d)),("criteria",maybe Null toJSON (R.definitionCriteria d)),("revision",toJSON (definitionRevision d)),("deleted",Bool (definitionDeleted d)),("runs",arr history)]))
+  pure (merge (toJSON d) (obj [("kitConsumer",kitConsumer),("kit",kit),("repair",Automation.repairProjection d works),("activeCode",visibleActive),("preparation",preparation),("trigger",str (maybe "manual" (const "interval") (definitionSchedule d))),("title",str (R.definitionTitle d)),("goal",str (R.definitionGoal d)),("criteria",maybe Null toJSON (R.definitionCriteria d)),("revision",toJSON (definitionRevision d)),("deleted",Bool (definitionDeleted d)),("runs",arr history)]))
  pure (obj [("definitions",arr rendered),("errors",arr [remove ["request"] op|op<-reverse operations,int (get op "code")>=400])])
 
 detail :: Service -> Text -> Text -> Text -> IO Value

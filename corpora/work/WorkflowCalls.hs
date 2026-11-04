@@ -231,7 +231,7 @@ validateOn db work version context=do
   when (has (toJSON work) "repairPin") $ do
    let repair=D.workField work "repairPin"
    saved<-maybe (failure 409 "Workflow repair case disappeared") pure (find ((==get repair "case") . (`get` "id")) (items definition "repairCases"))
-   require (not (has saved "userStop") && at saved "status" `elem` ["repairing","verifying","awaiting_verification","diagnosing","diagnosed","waiting_doctor"] && any (\receipt->at receipt "operation"==D.workloadId work && at receipt "status"=="reserved") (items saved "reservations")) 409 "Shared repair reservation is no longer active"
+   require (not (has saved "userStop") && at saved "status" `elem` ["repairing","verifying","awaiting_verification"] && any (\receipt->at receipt "operation"==D.workloadId work && at receipt "status"=="reserved") (items saved "reservations")) 409 "Shared repair reservation is no longer active"
  when (get context "fixture"==Null) $ do
   let prepared=get source "preparation"
   require (at prepared "status"=="awaiting_occurrence" && get (get prepared "review") "accepted"==Bool True && not (null (items prepared "checks")) && all ((==Bool True) . (`get` "matched")) (items prepared "checks")) 409 "Workflow no longer has its own checked acceptance"

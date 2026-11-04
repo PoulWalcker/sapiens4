@@ -1,6 +1,5 @@
 require 'open3'
 require 'sqlite3'
-require 'digest'
 require 'time'
 require_relative 'support/candidate_fixtures'
 require_relative 'support/desktop'
@@ -27,8 +26,6 @@ RSpec.describe 'Bounded maintenance provider continuation' do
     @host = Host.new(start: false, repo: repo, command: [File.join(repo, '.build/bin/sapiens4')], environment: {'SAPIENS_GENERATED_DOCKER' => @docker, 'SAPIENS_GENERATED_SOCKET' => @socket})
     host.configure(version: 'codex-cli 0.162.1')
     host.start
-    @doctor = host.state.fetch('corpora').fetch('doctor_id')
-    assign_doctor(nil)
     @owner = host.agent('ContinuationOwner')
     create_routine('continuation')
     rules('Execution' => {response: decision('Outcome', reply: 'Observed total5000.', outcome: {status: 'Completed', satisfiedCriteria: CandidateFixtures::CRITERIA, artifacts: []}), usage: USAGE},
@@ -49,9 +46,6 @@ RSpec.describe 'Bounded maintenance provider continuation' do
     host.api('POST', "#{path}/run", operation: operation, revision: routine.fetch('revision'), inputs: JSON.generate(input)).fetch('run')
   end
   def rules(changes); host.configure(rules: host.provider.fetch('rules', {}).merge(changes)); end
-  def assign_doctor(identity = @doctor)
-    host.control(chief, 'corpora_update', revision: host.state.fetch('corpora').fetch('revision'), doctor_id: identity)
-  end
   def preparation_rules(source)
     rules('PreparationFixtures' => {response: {fixtures: independent_fixtures, reason: 'Independent inputs and rejection checks.'}, usage: USAGE},
       'PreparationGeneration' => {response: {language: 'python', profile: 'python-3.13.15-linux-arm64', source: source, interface: 'json-stdin-result-v1', dependencies: [], capabilities: []}, usage: USAGE},
@@ -92,10 +86,6 @@ RSpec.describe 'Bounded maintenance provider continuation' do
       db.execute('UPDATE workloads SET value=? WHERE id=?', [JSON.generate(value), identity])
     end
     host.start
-  end
-  def canonical_hash(value)
-    ordered = lambda { |item| item.is_a?(Hash) ? item.sort.to_h.transform_values { |entry| ordered.call(entry) } : item.is_a?(Array) ? item.map { |entry| ordered.call(entry) } : item }
-    Digest::SHA256.hexdigest(JSON.generate(ordered.call(value)))
   end
 
   it 'resumes only the retained review after restart, keeps checks and allowance, and receipts one shape correction' do
@@ -172,69 +162,6 @@ RSpec.describe 'Bounded maintenance provider continuation' do
     expect((routine['repair'] || {})['attempts'] || []).to be_empty
   end
 
-  it 'continues the Doctor cursor after a confirmed file write and refuses a stale saved-audit source before its retry' do
-    broken = candidate_source.sub('request = json.load(sys.stdin)', "request = json.load(sys.stdin)\nif request.get('force_failure'): raise ValueError('Business-only fault')")
-    preparation_rules(broken)
-    prepared = prepare('doctor-original')
-    await_preparation(prepared)
-    rules('CodeAssessment' => {response: assessment, usage: USAGE})
-    host.turn(submit('activate'))
-    rules('LocalFallback' => {response: {resolved: true, result: {status: 'ok', value: {total_minor: 5000}}, reason: 'Finish safely from retained input.'}, usage: USAGE})
-    host.turn(submit('fault', observed_input.merge(force_failure: true)))
-    wait_repair('waiting_doctor')
-    selected = File.join(File.dirname(host.root), 'selected.json')
-    File.write(selected, '{"before":true}')
-    granted = host.api('POST', "#{path}/doctor-access", operation: 'grant-selected', revision: routine.fetch('revision'), case: repair.fetch('id'), resources: [{path: selected, access: 'write'}])
-    resource = granted.dig('access', 'resources').first.fetch('id')
-    content = '{"after":true}'
-    stage = canonical_hash(name: 'repair.json', content: content)
-    final = {verdict: 'request_access', diagnosis: 'The selected repair was confirmed.', recommendation: 'Wait for independent review.'}
-    rules('DoctorDiagnosis' => {responses: [{action: {tool: 'stage_file', name: 'repair.json', content: content}}, {action: {tool: 'apply_file', resource: resource, stage: stage, expectedHash: Digest::SHA256.hexdigest(File.read(selected))}}, final], usage: USAGE,
-      variants: [{contains: '"confirmed":true', terminal_failure: TEMPORARY}]})
-    assign_doctor
-    waiting = Contract.wait { row = repair; row if row.dig('providerWait', 'status') == 'retry_wait' && row.fetch('reservations').none? { |r| r['status'] == 'reserved' } }
-    host.turn(waiting.fetch('diagnosisRun'), 'queued')
-    operation = waiting.fetch('operations').find { |row| row['status'] == 'retry_wait' }
-    expect(File.read(selected)).to eq(content)
-    host.crash
-    rules('DoctorDiagnosis' => {response: final, usage: USAGE})
-    host.start
-    resumed = wait_repair('waiting_access')
-    expect(resumed.fetch('id')).to eq(waiting.fetch('id'))
-    expect(resumed.fetch('operations').count { |row| row['tool'] == 'apply_file' }).to eq(1)
-    continued = resumed.fetch('operations').find { |row| row['id'] == operation['id'] }
-    expect(continued.fetch('attempts').length).to eq(2)
-    expect(calls('DoctorDiagnosis').last(2).map { |row| row['prompt'] }.uniq.length).to eq(1)
-    # A separate observed healthy consumer establishes the adjacent audit-source guard.
-    assign_doctor(nil)
-    create_routine('audit-consumer')
-    host.turn(submit('audit-observe'))
-    @analysis = Contract.wait { routine['analysis'] if routine.dig('analysis', 'status') == 'Ready' }
-    preparation_rules(candidate_source)
-    await_preparation(prepare('audit-version'))
-    rules('CodeAssessment' => {response: assessment, usage: USAGE})
-    host.turn(submit('audit-activate'))
-    rules('CodeAssessment' => {response: {verdict: 'accepted'}, usage: USAGE})
-    source = submit('retained-audit-source')
-    host.turn(source, 'failed')
-    wait_repair('waiting_doctor')
-    rules('CodeAssessment' => {terminal_failure: TEMPORARY}, 'DoctorDiagnosis' => {response: {verdict: 'implementation_defect', diagnosis: 'Only independent assessment is missing.', recommendation: 'Audit the retained exact result.', hypothesis: 'The existing code may already be correct; reassess its retained result.'}, usage: USAGE})
-    assign_doctor
-    audit_wait = Contract.wait do
-      row = repair
-      raise JSON.pretty_generate(row) if %w[interrupted exhausted stale].include?(row['status'])
-      row if row.dig('providerWait', 'status') == 'retry_wait' && row.fetch('reservations').none? { |r| r['status'] == 'reserved' }
-    end
-    host.turn(audit_wait.fetch('auditRun'), 'queued')
-    count = calls('CodeAssessment').length
-    mutate_work(source) { |work| work['executionGate'] = 'stopped' }
-    wait_repair('interrupted')
-    expect(calls('CodeAssessment').length).to eq(count)
-    expect(audit_wait.fetch('kind')).to eq('saved_result_audit')
-    source_record = host.api('GET', "#{path}/runs/#{source}")
-    expect(source_record.dig('codeExecution', 'operations').count { |row| row['purpose'] == 'code_execution' }).to eq(1)
-    expect(calls('PreparationGeneration').length).to eq(2)
-  end
 
   it 'shows the retained refusal and finite host-attempt exhaustion in the native UI', :desktop do
     rules('PreparationFixtures' => {terminal_failure: TEMPORARY})

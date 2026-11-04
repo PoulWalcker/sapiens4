@@ -38,7 +38,7 @@ handle runtime dispatch action = case action of
     if kind == M.ConnectRemote && m.installRequired then dispatch Install else do
       when (m.dialog /= Nothing) $ void $ H.fork $ H.liftAff $ C.cancelPairing runtime
       operation <- liftEffect B.uuid
-      let routine = A.elem kind [M.RoutineRun,M.RoutineDelete,M.RoutineStop,M.RoutineReject,M.RoutineAnalyze,M.RoutineStopAnalysis,M.DoctorAccess,M.RepairGrant,M.RepairStop]
+      let routine = A.elem kind [M.RoutineRun,M.RoutineDelete,M.RoutineStop,M.RoutineReject,M.RoutinePrepare,M.RoutineStopPreparation,M.RepairGrant,M.RepairStop]
           prepared = if routine then F.RoutineRecord $ D.merge (F.routineRecord record) $ D.json {operation, owner: if D.s "owner" (F.routineRecord record) == "" then m.selected else D.s "owner" (F.routineRecord record)} else record
           d = Dialog.make kind prepared m
       H.modify_ $ Dialog.open d
@@ -57,7 +57,7 @@ handle runtime dispatch action = case action of
     E.sync
   Field key value -> do
     operation <- liftEffect B.uuid
-    H.modify_ \m -> m {dialog=map (\d -> let updated = Dialog.updateField key value d in if A.elem d.kind [M.RoutineRun,M.RoutineReject,M.DoctorAccess,M.RepairGrant,M.RepairStop] then updated {record=F.RoutineRecord $ D.put "operation" (D.text operation) $ F.routineRecord updated.record} else updated) m.dialog}
+    H.modify_ \m -> m {dialog=map (\d -> let updated = Dialog.updateField key value d in if A.elem d.kind [M.RoutineRun,M.RoutineReject,M.RepairGrant,M.RepairStop] then updated {record=F.RoutineRecord $ D.put "operation" (D.text operation) $ F.routineRecord updated.record} else updated) m.dialog}
     when (key == F.ShowLink) do
       liftEffect $ B.focus "#host-pair-link"
       m <- H.get
@@ -109,9 +109,8 @@ handle runtime dispatch action = case action of
       Right request -> runSave m d request
     M.GroupTask -> saveTask m d false
     M.RoutineStop -> routineCommand m d "stop"
-    M.RoutineAnalyze -> routineCommand m d "analyze"
-    M.RoutineStopAnalysis -> routineCommand m d "stop-analysis"
-    M.DoctorAccess -> routineCommand m d "doctor-access"
+    M.RoutinePrepare -> routineCommand m d "prepare"
+    M.RoutineStopPreparation -> routineCommand m d "stop-preparation"
     M.RepairGrant -> routineCommand m d "repair-grant"
     M.RepairStop -> routineCommand m d "stop-repair"
     M.RoutineReject -> routineCommand m d "reject"
@@ -188,10 +187,10 @@ handle runtime dispatch action = case action of
   routineCommand m d action =
     let record = F.routineRecord d.record
         path = "/api/agents/" <> B.encodeURI (D.s "owner" record) <> "/routines" <> if action == "create" then "" else "/" <> B.encodeURI (D.s "id" record) <> "/" <> action
-        body = D.json {operation: D.get "operation" record, revision: D.get "revision" record, title: D.text d.fields.title, goal: D.null, criteria: ([] :: Array String), inputs: d.fields.inputs, run: D.get "run" record, reason: d.fields.reason, minutes:fromMaybe 0 $ I.fromString $ d.fields.minutes, analysis:D.get "analysis" record, "case":D.at ["repair","id"] record, resources: (map (\path -> D.json {path,access:"read"}) $ A.filter (_ /= "") $ map S.trim $ S.split (S.Pattern "\n") $ d.fields.readFiles) <> (map (\path -> D.json {path,access:"write"}) $ A.filter (_ /= "") $ map S.trim $ S.split (S.Pattern "\n") $ d.fields.writeFiles)}
+        body = D.json {operation: D.get "operation" record, revision: D.get "revision" record, title: D.text d.fields.title, goal: D.null, criteria: ([] :: Array String), inputs: d.fields.inputs, run: D.get "run" record, reason: d.fields.reason, minutes:fromMaybe 0 $ I.fromString $ d.fields.minutes, preparation:D.get "preparation" record, "case":D.at ["repair","id"] record}
         done response = do
           dispatch CloseDialog
-          when (m.selected == D.s "owner" record) $ dispatch $ RoutineNavigate $ if action == "run" then M.RoutineOccurrence (D.s "id" record) (D.s "run" response) else if action == "delete" then M.RoutineList true else if A.elem action ["analyze","stop-analysis","doctor-access","repair-grant","stop-repair"] then M.RoutineLatest (D.s "id" record) else M.RoutineOccurrence (D.s "id" record) (D.s "run" record)
+          when (m.selected == D.s "owner" record) $ dispatch $ RoutineNavigate $ if action == "run" then M.RoutineOccurrence (D.s "id" record) (D.s "run" response) else if action == "delete" then M.RoutineList true else if A.elem action ["prepare","stop-preparation","repair-grant","stop-repair"] then M.RoutineLatest (D.s "id" record) else M.RoutineOccurrence (D.s "id" record) (D.s "run" record)
           dispatch Poll
     in runDialog d done $ E.api runtime m path "POST" body
   commandAction command = do
