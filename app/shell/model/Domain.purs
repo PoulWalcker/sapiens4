@@ -59,7 +59,7 @@ attachment value =
   }
 
 type Origin =
-  { agent :: String, call :: String, group :: String, caller :: String }
+  { agent :: String, call :: String, group :: String, caller :: String, routine :: String, maintenance :: Boolean }
 
 origin :: Json -> Origin
 origin value =
@@ -67,6 +67,8 @@ origin value =
   , call: D.s "call" value
   , group: D.s "group" value
   , caller: D.s "caller" value
+  , routine: D.s "routine" value
+  , maintenance: A.any (\key -> D.valid $ D.get key value) ["preparation","analysis","repairAudit","kitInspection","standaloneRun"]
   }
 
 type Turn =
@@ -550,7 +552,7 @@ checkAttachment :: Check
 checkAttachment = record [optional "id" stringValue, optional "kind" stringValue, optional "name" stringValue, optional "value" stringValue]
 
 checkOrigin :: Check
-checkOrigin = record [optional "agent" stringValue, optional "call" stringValue, optional "group" stringValue, optional "caller" stringValue]
+checkOrigin = record [optional "agent" stringValue, optional "call" stringValue, optional "group" stringValue, optional "caller" stringValue, optional "routine" stringValue]
 
 checkTurn :: Check
 checkTurn = record [optional "id" stringValue, optional "agent" stringValue, optional "group" stringValue, optional "flow" stringValue, optional "status" stringValue, optional "input" stringValue, optional "output" stringValue, optional "created" stringValue, optional "output_at" stringValue, optional "output_order" numberValue, optional "error" stringValue, optional "batch_id" stringValue, optional "origin" checkOrigin, optional "attachments" (list checkAttachment)]
