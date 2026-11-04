@@ -26,6 +26,65 @@ RSpec.describe 'Routine list, results and settings in the native app', :desktop 
     desktop.see('No results yet')
   end
 
+  it 'saves daily timezones and previews the same schedule before switching to interval and manual' do
+    @host = desktop_host
+    owner = host.state.fetch('main_agent_id')
+    start_desktop
+    open_routines
+    create_routine('Timezone comparison')
+    id = host.state.fetch('personal_routines').first.fetch('id')
+    open_schedule = lambda do
+      click_button('Manage Timezone comparison')
+      click_button('Settings')
+      click_button('Schedule settings')
+    end
+    choose = lambda do |steps|
+      click_button('When')
+      desktop.control('key', '--key', 'home')
+      steps.times { desktop.control('key', '--key', 'down') }
+      desktop.control('key', '--key', 'return')
+    end
+    saved = lambda { host.state.fetch('personal_routines').find { |row| row['id'] == id } }
+    open_schedule.call
+    choose.call(1)
+    desktop.fill('Time (24h)', '09:00')
+    local_zone = desktop.text[/Leave blank to use ([A-Za-z0-9_+\/-]+)\./, 1]
+    expect(local_zone).not_to be_nil
+    desktop.value('IANA timezone', '')
+    click_button('Preview next run')
+    desktop.see('Next run (UTC):')
+    expect(saved.call.fetch('trigger')).to eq('manual')
+    click_button('Save schedule')
+    desktop.see('Daily at 09:00')
+    expect(saved.call.fetch('schedule')).to include('kind' => 'daily', 'time' => '09:00', 'timezone' => local_zone)
+    open_schedule.call
+    desktop.value('IANA timezone', local_zone)
+    before = saved.call
+    desktop.fill('IANA timezone', 'Invalid/Zone')
+    click_button('Preview next run')
+    desktop.see('Unknown IANA timezone')
+    expect(saved.call).to eq(before)
+    desktop.fill('IANA timezone', 'Asia/Dubai')
+    click_button('Preview next run')
+    desktop.see('Next run (UTC):')
+    click_button('Save schedule')
+    desktop.see('Daily at 09:00 · Asia/Dubai')
+    expect(saved.call.fetch('schedule').fetch('timezone')).to eq('Asia/Dubai')
+    open_schedule.call
+    choose.call(0)
+    desktop.fill('Interval, minutes', '60')
+    click_button('Enable interval')
+    desktop.see('Every 60 minutes')
+    expect(saved.call).not_to have_key('schedule')
+    open_schedule.call
+    choose.call(2)
+    click_button('Save schedule')
+    desktop.see('On request')
+    expect(saved.call).to include('id' => id, 'trigger' => 'manual', 'contractGeneration' => 1)
+    expect(saved.call).not_to have_key('nextDue')
+    expect(host.calls).to be_empty
+  end
+
   it 'shows sourced evidence and unknown usage without starting work, and saves run feedback' do
     @host = desktop_host
     owner = host.state.fetch('main_agent_id')
@@ -125,6 +184,9 @@ RSpec.describe 'Routine list, results and settings in the native app', :desktop 
     click_button('Manage Weekly comparison')
     click_button('Settings')
     click_button('Schedule settings')
+    click_button('When')
+    desktop.control('key', '--key', 'home')
+    desktop.control('key', '--key', 'return')
     desktop.fill('Interval, minutes', '60')
     click_button('Enable interval')
     desktop.see('Every 60 minutes')

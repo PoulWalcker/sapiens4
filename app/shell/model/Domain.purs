@@ -250,7 +250,7 @@ orchestration value =
   }
 
 type Routine =
-  { id :: String, owner :: String, title :: String, prompt :: String, minutes :: Number, nextDue :: String, runCount :: Number, paused :: Boolean }
+  { id :: String, owner :: String, title :: String, prompt :: String, minutes :: Number, frequency :: String, nextDue :: String, runCount :: Number, paused :: Boolean }
 
 routine :: Json -> Routine
 routine value =
@@ -259,6 +259,7 @@ routine value =
   , title: D.s "title" value
   , prompt: D.s "prompt" value
   , minutes: D.n "minutes" value
+  , frequency: if D.s "kind" (D.get "schedule" value) == "daily" then "Daily at " <> D.s "time" (D.get "schedule" value) <> " · " <> D.s "timezone" (D.get "schedule" value) else "Every " <> show (D.int $ D.get "minutes" value) <> " minutes"
   , nextDue: D.s "nextDue" value
   , runCount: D.n "runCount" value
   , paused: D.b "paused" value
@@ -588,7 +589,7 @@ checkOrchestration :: Check
 checkOrchestration = record [optional "manager" stringValue, optional "notes" checkNotes]
 
 checkRoutine :: Check
-checkRoutine = record [optional "id" stringValue, optional "owner" stringValue, optional "title" stringValue, optional "prompt" stringValue, optional "minutes" numberValue, optional "nextDue" stringValue, optional "runCount" numberValue, optional "paused" booleanValue]
+checkRoutine = record [optional "id" stringValue, optional "owner" stringValue, optional "title" stringValue, optional "prompt" stringValue, optional "minutes" numberValue, optional "schedule" (record [field "kind" stringValue,field "time" stringValue,field "timezone" stringValue]), optional "nextDue" stringValue, optional "runCount" numberValue, optional "paused" booleanValue]
 
 checkEvent :: Check
 checkEvent = record [optional "timestamp" stringValue, optional "actor" stringValue, optional "entity" stringValue, optional "event" stringValue, optional "agency" stringValue]

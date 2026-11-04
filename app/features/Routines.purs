@@ -60,7 +60,7 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     where
     r = record routine
     minutes = D.int $ D.get "minutes" r
-    frequency = if interval routine then "Every " <> show minutes <> (if minutes == 1 then " minute" else " minutes") else "On request"
+    frequency = if D.s "kind" (D.get "schedule" r) == "daily" then "Daily at " <> D.s "time" (D.get "schedule" r) <> " · " <> D.s "timezone" (D.get "schedule" r) else if interval routine then "Every " <> show minutes <> (if minutes == 1 then " minute" else " minutes") else "On request"
     next = if D.b "deleted" r then " · No future runs" else if not (interval routine) then "" else if D.b "paused" r then " · Schedule paused" else " · Next: " <> formatDate (D.s "nextDue" r)
   formatDate value = if value == "" then "Time unavailable" else B.formatDate "en-GB" (D.json {day:"numeric",month:"short",hour:"2-digit",minute:"2-digit",second:"2-digit"}) value
   timestamp run = D.fallback (D.s "created" $ fromMaybe D.empty $ A.find (\t -> D.s "id" t == D.s "id" run) $ D.rows "turns" m.snapshot.automation) $ D.s "created" run
@@ -90,7 +90,7 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
     [V.node "summary" [V.label $ "Manage " <> title routine] [V.text "⋯"]
     ,V.div "" $ if D.b "deleted" $ record routine then [] else case routine of
       Managed r -> [link "Settings" $ M.RoutineSettings (D.s "id" r)] <> scheduleControl routine <> [V.button "routine-link" "Delete…" $ OpenDialog M.RoutineDelete $ F.RoutineRecord r]
-      Legacy r -> [V.button "routine-link" "Edit through chat" $ PrepareDraft ("Edit @" <> D.s "id" r <> " ( " <> D.s "title" r <> " )\nEdit Frequency (prev every " <> show (D.int $ D.get "minutes" r) <> " minutes): new every XXX minutes\nEdit Execution Prompt as: " <> D.s "prompt" r) "XXX",V.button "routine-link" (if D.b "paused" r then "Resume schedule through chat" else "Pause schedule through chat") $ PrepareDraft ((if D.b "paused" r then "Resume Scheduled Routine" else "Pause Scheduled Routine") <> "\n@" <> D.s "id" r) ""]]
+      Legacy r -> [V.button "routine-link" "Edit through chat" $ PrepareDraft (if D.s "kind" (D.get "schedule" r) == "daily" then "Change @" <> D.s "id" r <> " schedule to XXX. Keep the execution instructions unchanged." else "Edit @" <> D.s "id" r <> " ( " <> D.s "title" r <> " )\nEdit Frequency (prev every " <> show (D.int $ D.get "minutes" r) <> " minutes): new every XXX minutes\nEdit Execution Prompt as: " <> D.s "prompt" r) "XXX",V.button "routine-link" (if D.b "paused" r then "Resume schedule through chat" else "Pause schedule through chat") $ PrepareDraft ((if D.b "paused" r then "Resume Scheduled Routine" else "Pause Scheduled Routine") <> "\n@" <> D.s "id" r) ""]]
   scheduleControl routine = if not (managed routine && interval routine) then [] else
     [V.control [V.cls "routine-link",V.disabled $ case state.scheduleRequest of
       Nothing -> false
@@ -368,15 +368,30 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
   legacySettings r =
     [V.textNode "h1" [] "Routine settings",V.p "" $ D.s "goal" r
     ,V.p "routine-muted" "This existing routine prepares its completion criteria when it runs. Edit its instructions through chat."
-    ,V.button "button" "Edit instructions through chat" $ PrepareDraft ("Edit @" <> D.s "id" r <> " ( " <> D.s "title" r <> " )\nEdit Frequency (prev every " <> show (D.int $ D.get "minutes" r) <> " minutes): new every XXX minutes\nEdit Execution Prompt as: " <> D.s "goal" r) "XXX"
+    ,V.button "button" "Edit instructions through chat" $ PrepareDraft (if D.s "kind" (D.get "schedule" r) == "daily" then "Change @" <> D.s "id" r <> " schedule to XXX. Keep the execution instructions unchanged." else "Edit @" <> D.s "id" r <> " ( " <> D.s "title" r <> " )\nEdit Frequency (prev every " <> show (D.int $ D.get "minutes" r) <> " minutes): new every XXX minutes\nEdit Execution Prompt as: " <> D.s "goal" r) "XXX"
     ,link "Schedule settings" $ M.RoutineSchedule $ D.s "id" r
     ,link "← Latest result" $ M.RoutineLatest $ D.s "id" r]
   scheduleEditor editor =
     [link "← Settings" $ M.RoutineSettings id,V.textNode "h1" [] "Routine schedule"
     ,V.p "routine-muted" $ whenText (Managed editor.record)
     ,V.node "form" [V.cls "routine-editor",V.submit RoutineSave]
-      [V.node "label" [] [V.text "Interval, minutes",V.node "input" [V.label "Interval, minutes",V.attr "type" "number",V.attr "min" "1",V.attr "max" "525600",V.attr "step" "1",V.bool "required" true,V.value $ D.s "minutes" editor.fields,V.input $ RoutineField "minutes",V.disabled editor.busy] []]
+      [V.node "label" [] [V.text "When",V.node "select" [V.label "When",V.value mode,V.change $ RoutineField "frequency",V.disabled editor.busy]
+        [option "interval" "At an interval",option "daily" "Every day",option "manual" "Only on request"]]
+      ,V.when (mode == "interval") $ input "Interval, minutes" "minutes" "number" [V.attr "min" "1",V.attr "max" "525600",V.attr "step" "1"]
+      ,V.when (mode == "daily") $ V.div "routine-schedule-fields"
+        [input "Time (24h)" "time" "text" [V.attr "placeholder" "HH:MM",V.attr "pattern" "([01][0-9]|2[0-3]):[0-5][0-9]",V.attr "maxlength" "5"]
+        ,V.node "label" [] [V.text "IANA timezone (optional)",V.node "input" [V.label "IANA timezone",V.attr "placeholder" localZone,V.value $ D.s "timezone" editor.fields,V.input $ RoutineField "timezone",V.disabled editor.busy] []]
+        ,V.p "routine-muted" $ "Leave blank to use " <> (if localZone == "" then "an explicit IANA timezone; this browser did not supply one" else localZone) <> ". The saved timezone stays fixed until you edit it."]
+      ,V.control [V.cls "button",V.disabled $ editor.busy || D.b "busy" preview] (if D.b "busy" preview then "Checking…" else "Preview next run") RoutinePreviewSchedule
+      ,V.when (D.s "frequency" preview /= "") $ V.p "routine-muted" $ D.s "frequency" preview <> if D.s "nextDue" preview == "" then " · No scheduled run" else " · Next run (UTC): " <> D.s "nextDue" preview
+      ,V.when (D.s "error" preview /= "") $ V.textNode "p" [V.cls "routine-problem",V.attr "role" "alert"] $ D.s "error" preview
       ,V.p "routine-muted" "This changes future scheduled runs. Current runs keep their accepted instructions."
-      ,V.when (editor.error /= "") $ V.div "" [V.textNode "p" [V.cls "routine-problem",V.attr "role" "alert"] editor.error,V.button "routine-link" "Reload current schedule" RoutineReloadEditor]
-      ,V.div "routine-actions" [V.textNode "button" [V.attr "type" "submit",V.cls "button primary",V.disabled editor.busy] (if D.s "trigger" editor.record == "interval" then "Save interval" else "Enable interval"),link "Cancel" $ M.RoutineSettings id]]]
-    where id = D.s "id" editor.record
+      ,V.when (editor.error /= "") $ V.div "" [V.textNode "p" [V.cls "routine-problem",V.attr "role" "alert"] editor.error,V.button "button" "Reload current schedule" RoutineReloadEditor]
+      ,V.div "routine-actions" [V.textNode "button" [V.attr "type" "submit",V.cls "button primary",V.disabled editor.busy] (if mode == "interval" then if D.s "trigger" editor.record == "interval" && D.s "kind" (D.get "schedule" editor.record) /= "daily" then "Save interval" else "Enable interval" else "Save schedule"),link "Cancel" $ M.RoutineSettings id]]]
+    where
+    id = D.s "id" editor.record
+    mode = D.s "frequency" editor.fields
+    localZone = D.s "localZone" editor.fields
+    preview = D.get "preview" editor.fields
+    option value caption = V.textNode "option" [V.value value] caption
+    input label key kind props = V.node "label" [] [V.text label,V.node "input" ([V.label label,V.attr "type" kind,V.value $ D.s key editor.fields,V.input $ RoutineField key,V.bool "required" true,V.disabled editor.busy] <> props) []]

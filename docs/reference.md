@@ -32,20 +32,20 @@ start work. Each run keeps its original owner, definition revision, goal, criter
 and inputs even when the routine is edited. Work can delegate through the existing
 team; its history identifies the current responsible Sapi. Open a routine to view
 its latest result or history, then open an individual run for its details.
-Settings edits the definition; its Schedule page saves the interval separately.
+Settings edits the definition; its Schedule page separately selects an interval, a daily local time with an IANA timezone, or on-request only. Preview the next UTC run before saving. An empty timezone field uses the browser's current IANA zone and saves that concrete zone; later travel or host timezone changes do not move the schedule.
 
 **Stop run** stops that occurrence, including delegated calls, and prevents later
 results from being published. It does not stop other runs or undo completed
 external actions. **Delete routine** prevents new runs and stops active occurrences;
 completed history remains visible. A routine without a schedule runs on request.
-Setting an interval preserves its identity and history. **Pause** stops future
+Changing the schedule preserves its identity, accepted contract and prepared implementation. **Pause** stops future
 timer admissions, while current work continues and **Run now** remains available.
-**Resume** schedules the next interval from the time of resumption. The schedule
+**Resume** finds the next occurrence after resumption using the saved rule. The schedule
 and the current run have separate statuses.
 
 Minute pulses admit due work. One routine and due time identify one scheduled
 occurrence; its admission and the next deadline are saved together. Downtime does
-not replay every missed interval. Previously started work is not automatically
+not replay every missed period. Daily rules follow the saved local calendar rather than 1440 elapsed minutes. Repeated local times use the first occurrence; nonexistent times shift forward by the transition gap. Previously started work is not automatically
 repeated merely because its result is unknown after restart.
 
 ## Notes and files
@@ -129,7 +129,7 @@ Create accepts `operation`, `title`, `goal`, and a nonempty `criteria` array.
 Actions are `edit`, `run`, `stop`, `delete`, `schedule`, `pause`, and `resume`; each also requires the current
 `revision`. Edit supplies the same definition fields; run accepts optional text
 `inputs`; stop requires the occurrence's `run` ID. Schedule accepts an integer
-`minutes` from 1 to 525600 and preserves the routine ID. Definition and schedule
+`minutes` from 1 to 525600, a `schedule` object such as `{"kind":"daily","time":"09:00","timezone":"Asia/Dubai"}`, or `trigger:"manual"`. These alternatives are exclusive. Daily rules require an explicit valid IANA timezone and HH:MM time. Schedule changes preserve the routine ID and contract generation; saving the same daily rule retains its previously saved deadline. Definition and schedule
 edits are separate commands, each checked against the current revision.
 Ownership comes from the route,
 not the body. `/api/state` exposes definitions and occurrence history in
@@ -137,6 +137,8 @@ not the body. `/api/state` exposes definitions and occurrence history in
 includes legacy personal interval routines, whose unspecified completion criteria
 remain `null`. Its explicit `trigger` is `manual` or `interval`; legacy storage is
 not rewritten merely to render this normalized view.
+
+The existing host-control endpoint also accepts `routine_schedule_preview` with the same rule fields and an optional explicit UTC/offset `after` timestamp. It returns the next UTC deadline without changing state, admitting work or invoking a model. This hypothetical timestamp is never scheduling authority. Host-control `routine_create` and `routine_update` accept the daily `schedule` instead of `minutes`.
 
 Reuse the same operation ID and unchanged request to recover its original response
 without duplicating work, including after restart or while the corpora is paused.

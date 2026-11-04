@@ -16,8 +16,10 @@ import Types
 import Population
 import qualified Store as DB
 import Data.Time (UTCTime, getCurrentTime)
-import Routines (Revision(..), Minutes, RoutineFields(..), RoutineContract(..), Definition(..))
+import Routines (Revision(..), RoutineFields(..), RoutineContract(..), Definition(..))
 import qualified Routines as R
+import Schedule (ScheduleRule)
+import qualified Schedule
 import qualified Delegation as D
 import qualified Effects
 import qualified Kit
@@ -26,13 +28,13 @@ import qualified Automation
 
 newtype OperationId = OperationId Text deriving (Eq, Show)
 
-data RoutineCommand = Create RoutineFields | Edit Revision RoutineFields | RunNow Revision Text | StopRun Revision RunId | Delete Revision | Schedule Revision Minutes | Pause Revision Bool | RejectRun Revision RunId Text | Prepare Revision | StopPreparation Revision RunId | GrantRepair Revision Text Int Text | StopRepair Revision Text Text deriving (Eq, Show)
+data RoutineCommand = Create RoutineFields | Edit Revision RoutineFields | RunNow Revision Text | StopRun Revision RunId | Delete Revision | Schedule Revision (Maybe ScheduleRule) | Pause Revision Bool | RejectRun Revision RunId Text | Prepare Revision | StopPreparation Revision RunId | GrantRepair Revision Text Int Text | StopRepair Revision Text Text deriving (Eq, Show)
 data CommandError = CommandError Int Text deriving (Eq, Show)
 data CommandPlan = CreateDefinition RoutineFields | UpdateDefinition Definition | Admit Definition Text | StopOccurrences [D.Workload] | DeleteDefinition Definition [D.Workload] | RecordFeedback Text RunId | PrepareDefinition Definition | StopPreparationCall Definition RunId | GrantRepairCase Definition Text Int Text | StopRepairCase Definition Text Text
 
 parseCommand :: Text -> Value -> Parser RoutineCommand
 parseCommand action value = withObject "Routine command" (\o -> do
- unless (all (`elem` ["operation","revision","title","goal","criteria","inputs","run","minutes","reason","preparation","externalProfile","case"]) (keys value)) (fail "Unknown Routine command field")
+ unless (all (`elem` ["operation","revision","title","goal","criteria","inputs","run","minutes","schedule","trigger","reason","preparation","externalProfile","case"]) (keys value)) (fail "Unknown Routine command field")
  case action of
   "create" -> Create <$> parseJSON value
   "edit" -> Edit <$> o .: "revision" <*> parseJSON value
@@ -49,7 +51,7 @@ parseCommand action value = withObject "Routine command" (\o -> do
    unless (not (T.null (T.strip reason)) && T.length reason<=4000) (fail "Feedback reason must contain 1–4000 characters")
    RejectRun <$> o .: "revision" <*> (RunId <$> o .: "run") <*> pure reason
   "delete" -> Delete <$> o .: "revision"
-  "schedule" -> Schedule <$> o .: "revision" <*> o .: "minutes"
+  "schedule" -> Schedule <$> o .: "revision" <*> Schedule.ruleFromInput value
   "pause" -> Pause <$> o .: "revision" <*> pure True
   "resume" -> Pause <$> o .: "revision" <*> pure False
   "repair-grant" -> do
@@ -89,7 +91,7 @@ decide time current occurrences request = case request of
   pure (DeleteDefinition (R.bumpRevision d {definitionDeleted=True}) (filter (not . finished) occurrences))
  Schedule revision minutes -> do
   d <- existing revision
-  pure (UpdateDefinition (R.bumpRevision (R.setInterval time minutes d)))
+  pure (UpdateDefinition (R.bumpRevision (R.setSchedule time minutes d)))
  Pause revision paused -> do
   d <- existing revision
   changed <- either (Left . CommandError 409) Right (R.setSchedulePaused time paused d)

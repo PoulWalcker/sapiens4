@@ -34,6 +34,7 @@ data Action
   | RoutineRefreshEvidence
   | RoutineNavigate RoutinePage
   | RoutineField String String
+  | RoutinePreviewSchedule
   | RoutineSave
   | RoutineReloadEditor
   | RoutineScheduleAction ScheduleAction Json

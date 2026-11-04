@@ -137,6 +137,7 @@ handle runtime input = session input
     RoutineRefreshEvidence -> Routine.handle runtime dispatch action
     RoutineNavigate _ -> Routine.handle runtime dispatch action
     RoutineField _ _ -> Routine.handle runtime dispatch action
+    RoutinePreviewSchedule -> Routine.handle runtime dispatch action
     RoutineSave -> Routine.handle runtime dispatch action
     RoutineReloadEditor -> Routine.handle runtime dispatch action
     RoutineScheduleAction _ _ -> Routine.handle runtime dispatch action

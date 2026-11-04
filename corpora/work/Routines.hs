@@ -1,9 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Routines
  ( Minutes(..), Revision(..), RoutineFields(..), RoutineContract(..)
- , IntervalSchedule(..), Definition(..), readDefinitions, readRoutines
+ , RoutineSchedule(..), Definition(..), readDefinitions, readRoutines
  , definitionTitle, definitionGoal, definitionCriteria, intervalView, bumpRevision
- , setInterval, setSchedulePaused, storeRoutine, initializeRoutines
+ , setSchedule, setSchedulePaused, storeRoutine, initializeRoutines
  , contractGeneration, changeContract
  , RoutineEdit(..), save, setPaused, command, receipt, acknowledge, dispatch
  ) where
@@ -20,7 +20,7 @@ import qualified Data.List.NonEmpty as NE
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Time hiding (Minutes)
+import Data.Time
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V5 as UUID5
 import qualified Data.Text.Encoding as TE
@@ -30,16 +30,8 @@ import Types
 import qualified Store as DB
 import Population
 import qualified Delegation as D
-
-newtype Minutes = Minutes { minuteCount :: Int } deriving (Eq, Show)
-instance FromJSON Minutes where
- parseJSON value = do
-  n <- parseJSON value
-  unless (n >= 1 && n <= 525600) (fail "Choose 1–525600 minutes")
-  pure (Minutes n)
-instance ToJSON Minutes where toJSON = toJSON . minuteCount
-intervalSeconds :: Minutes -> NominalDiffTime
-intervalSeconds = fromIntegral . (*60) . minuteCount
+import Schedule (Minutes(..), ScheduleRule)
+import qualified Schedule
 
 newtype Revision = Revision Int deriving (Eq, Show)
 instance FromJSON Revision where
@@ -66,12 +58,12 @@ boundedText label limit raw = do
  pure value
 
 data RoutineContract = LegacyPrompt Text | AcceptedContract RoutineFields deriving (Eq, Show)
-data IntervalSchedule = IntervalSchedule
- { intervalMinutes :: Minutes, intervalDue :: UTCTime, intervalCount :: Int, intervalPaused :: Bool
+data RoutineSchedule = RoutineSchedule
+ { scheduleRule :: ScheduleRule, scheduleDue :: UTCTime, scheduleCount :: Int, schedulePaused :: Bool
  } deriving (Eq, Show)
 data Definition = Definition
  { definitionId :: Text, definitionOwner :: Text, definitionRevision :: Revision
- , definitionContract :: RoutineContract, definitionSchedule :: Maybe IntervalSchedule
+ , definitionContract :: RoutineContract, definitionSchedule :: Maybe RoutineSchedule
  , definitionDeleted :: Bool, definitionFields :: Object
  } deriving (Eq, Show)
 instance FromJSON Definition where
@@ -93,12 +85,12 @@ instance FromJSON Definition where
     due <- o .: "nextDue" >>= maybe (fail "Invalid routine due time") pure . parseTime
     count <- o .:? "runCount" .!= 0
     unless (count>=0) (fail "Invalid routine run count")
-    Just <$> (IntervalSchedule <$> o .: "minutes" <*> pure due <*> pure count <*> o .:? "paused" .!= False)
+    Just <$> (RoutineSchedule <$> Schedule.storedRule value <*> pure due <*> pure count <*> o .:? "paused" .!= False)
   Definition <$> o .: "id" <*> o .: "owner" <*> pure revision <*> pure contract <*> pure schedule <*> o .:? "deleted" .!= False <*> pure o) value
 -- The persisted due-time spelling participates in deterministic occurrence IDs.
 -- Retain it until the deadline changes, including legacy fractional precision.
 instance ToJSON Definition where
- toJSON d = mergeFields (identity++contract++schedule) original
+ toJSON d = mergeFields (identity++contract++schedule) (remove ["minutes","schedule","nextDue","paused"] original)
   where
    original=Object (definitionFields d)
    explicit=case definitionContract d of AcceptedContract _ -> True; LegacyPrompt _ -> False
@@ -110,7 +102,7 @@ instance ToJSON Definition where
     AcceptedContract fields -> [("title",str (fieldTitle fields)),("goal",str (fieldGoal fields)),("criteria",toJSON (NE.toList (fieldCriteria fields)))]
    schedule=case definitionSchedule d of
     Nothing -> [("trigger",toJSON ManualTrigger)]
-    Just interval -> [("minutes",toJSON (intervalMinutes interval)),("runCount",num (intervalCount interval)),("paused",Bool (intervalPaused interval)),("nextDue",if parseTime (at original "nextDue")==Just (intervalDue interval) then get original "nextDue" else str (timestamp (intervalDue interval)))]
+    Just interval -> Schedule.ruleFields (scheduleRule interval) ++ [("runCount",num (scheduleCount interval)),("paused",Bool (schedulePaused interval)),("nextDue",if parseTime (at original "nextDue")==Just (scheduleDue interval) then get original "nextDue" else str (timestamp (scheduleDue interval)))]
       ++[("trigger",toJSON IntervalTrigger) | explicit || has original "trigger"]
 definitionTitle :: Definition -> Text
 definitionTitle d = case definitionContract d of
@@ -137,16 +129,21 @@ changeContract contract d = d {definitionContract=contract,definitionFields=KM.i
   LegacyPrompt goal -> (goal,Nothing)
   AcceptedContract fields -> (fieldGoal fields,Just (fieldCriteria fields))
  next=if semantic contract==semantic (definitionContract d) then current else let ContractGeneration n=current in ContractGeneration (n+1)
-setInterval :: UTCTime -> Minutes -> Definition -> Definition
-setInterval time minutes d = d {definitionSchedule=Just (IntervalSchedule minutes (addUTCTime (intervalSeconds minutes) time) count paused)}
- where count=maybe 0 intervalCount (definitionSchedule d); paused=maybe False intervalPaused (definitionSchedule d)
+setSchedule :: UTCTime -> Maybe ScheduleRule -> Definition -> Definition
+setSchedule time rule d = d {definitionSchedule=make <$> rule}
+ where
+ make selected = case (selected,definitionSchedule d) of
+  (Schedule.Daily _ _ _,Just previous) | scheduleRule previous==selected -> previous
+  _ -> RoutineSchedule selected (Schedule.nextDue selected time Nothing) count paused
+ count=maybe (max 0 (int (get (Object (definitionFields d)) "runCount"))) scheduleCount (definitionSchedule d)
+ paused=maybe False schedulePaused (definitionSchedule d)
 setSchedulePaused :: UTCTime -> Bool -> Definition -> Either Text Definition
 setSchedulePaused time paused d = case definitionSchedule d of
- Nothing -> Left "This Routine has no interval schedule"
- Just schedule | intervalPaused schedule==paused -> Right d
+ Nothing -> Left "This Routine has no schedule"
+ Just schedule | schedulePaused schedule==paused -> Right d
  Just schedule -> Right d {definitionSchedule=Just schedule
-  {intervalPaused=paused,intervalDue=if paused then intervalDue schedule else addUTCTime (intervalSeconds (intervalMinutes schedule)) time
-  ,intervalCount=if not paused && intervalCount schedule>=1000 then 0 else intervalCount schedule}}
+  {schedulePaused=paused,scheduleDue=if paused then scheduleDue schedule else Schedule.nextDue (scheduleRule schedule) time Nothing
+  ,scheduleCount=if not paused && scheduleCount schedule>=1000 then 0 else scheduleCount schedule}}
 readDefinitions :: Service -> IO [Definition]
 readDefinitions s = DB.values s DB.ScheduledRoutines >>= traverse (decodeValue 500)
 readRoutines :: Service -> IO [Definition]
@@ -172,10 +169,10 @@ data RoutineEdit = AddRoutine (Maybe Text) | EditRoutine Text (Maybe Int)
 data RoutineWrite = NewRoutine (Maybe Text) | ReviseRoutine Value
 data RoutineSelection = RoutineReplay Value | RoutineChange RoutineWrite
 
-routineInput :: Value -> Value -> Validation (Text,Minutes)
+routineInput :: Value -> Value -> Validation (Text,ScheduleRule)
 routineInput minutes execution = do
  body <- validateValue 400 (textFieldP "prompt" 16000) (obj [("prompt",execution)])
- interval <- validateValue 400 parseJSON minutes
+ interval <- validateValue 400 Schedule.storedRule (case minutes of Object _ -> minutes; _ -> obj [("minutes",minutes)])
  check (body `notElem` ["PROMPT","TODO"]) 400 "Replace PROMPT with the work to execute"
  pure (body,interval)
 selectRoutine :: RoutineEdit -> Value -> Text -> [Value] -> Validation RoutineSelection
@@ -185,7 +182,7 @@ selectRoutine edit minutes body routines = case edit of
   check (not (boolean (get existing "deleted"))) 409 "Routine is deleted"
   forM_ previous $ \old -> check (int (get existing "minutes")==old) 409 "Frequency changed; open Edit again for the current routine"
   pure (RoutineChange (ReviseRoutine existing))
- AddRoutine source -> case source >>= \call -> find (\r -> get r "sourceCall" == str call && get r "minutes" == minutes && at r "prompt" == body) routines of
+ AddRoutine source -> case source >>= \call -> find (\r -> get r "sourceCall" == str call && (if get minutes "schedule"/=Null then get r "schedule"==get minutes "schedule" else get r "minutes"==minutes) && at r "prompt" == body) routines of
   Just existing -> Right (RoutineReplay existing)
   Nothing -> Right (RoutineChange (NewRoutine source))
 save :: Service -> Text -> Value -> Value -> RoutineEdit -> IO Value
@@ -210,7 +207,7 @@ save s owner minutes execution edit = do
        contract=case definitionContract initial of
         LegacyPrompt _ -> LegacyPrompt body
         AcceptedContract fields -> AcceptedContract fields {fieldGoal=body}
-       changed=changeContract contract (setInterval t interval initial)
+       changed=changeContract contract (setSchedule t (Just interval) initial)
        updated=changed {definitionFields=KM.insert "updated" (str (timestamp t)) (case contract of
           LegacyPrompt _ -> KM.insert "title" (str (T.unwords (take 7 (T.words body)))) (definitionFields changed)
           AcceptedContract _ -> definitionFields changed)}
@@ -223,8 +220,8 @@ setPaused s owner identity paused = do
  routines <- readDefinitions s
  r <- maybe (failure 404 "Unknown Scheduled Routine in this conversation") pure (find (\r -> definitionOwner r==owner && definitionId r==identity) routines)
  require (not (definitionDeleted r)) 409 "Routine is deleted"
- schedule <- maybe (failure 409 "This Routine has no interval schedule") pure (definitionSchedule r)
- if intervalPaused schedule==paused then pure (intervalView r) else do
+ schedule <- maybe (failure 409 "This Routine has no schedule") pure (definitionSchedule r)
+ if schedulePaused schedule==paused then pure (intervalView r) else do
   t <- getCurrentTime
   changed <- either (failure 409) pure (setSchedulePaused t paused r)
   let updated=bumpRevision changed {definitionFields=KM.insert "updated" (str (timestamp t)) (definitionFields changed)}
@@ -240,8 +237,9 @@ command s owner input attached = case C.interpret attached (T.unpack input) of
   C.Edit i old interval body -> save s owner (toJSON interval) (str (T.pack body)) (EditRoutine (T.pack i) (Just (fromIntegral old)))
   C.SetPaused i paused -> setPaused s owner (T.pack i) paused
 receipt :: Value -> Text -> Text
-receipt r input = action <> " @"<>at r "id"<>" ( "<>at r "title"<>" )\nStatus: "<>status<>" · "<>jsonText (get r "runCount")<>"/1000 runs\nFrequency: every "<>jsonText (get r "minutes")<>" minutes\nExecute: "<>text (get r "prompt" `fallback` get r "goal")
- where action=fromMaybe "Updated" (listToMaybe (T.words input) >>= (`lookup` [("Pause","Paused"),("Resume","Resumed"),("Add","Created")]))
+receipt r input = action <> " @"<>at r "id"<>" ( "<>at r "title"<>" )\nStatus: "<>status<>" · "<>jsonText (get r "runCount")<>"/1000 runs\nFrequency: "<>frequency<>"\nExecute: "<>text (get r "prompt" `fallback` get r "goal")
+ where frequency=case validateValue 500 Schedule.storedRule r of Right rule -> Schedule.frequency rule; Left _ -> "on request"
+       action=fromMaybe "Updated" (listToMaybe (T.words input) >>= (`lookup` [("Pause","Paused"),("Resume","Resumed"),("Add","Created")]))
        status=if boolean (get r "paused") then "Paused" else "Planned"
 acknowledge :: Service -> Text -> Text -> Value -> IO Value
 acknowledge s owner input r = do
@@ -257,19 +255,17 @@ acknowledge s owner input r = do
 occurrenceIdentity :: Definition -> Text
 occurrenceIdentity definition = T.filter (/='-') (UUID.toText (UUID5.generateNamed UUID5.namespaceURL
  (BS.unpack (TE.encodeUtf8 (definitionId definition<>":"<>at (toJSON definition) "nextDue")))))
-advanceSchedule :: UTCTime -> IntervalSchedule -> IntervalSchedule
+advanceSchedule :: UTCTime -> RoutineSchedule -> RoutineSchedule
 advanceSchedule time schedule =
- let interval=intervalSeconds (intervalMinutes schedule)
-     jumps=floor (diffUTCTime time (intervalDue schedule)/interval)+1 :: Integer
-     count=intervalCount schedule+1
- in schedule {intervalDue=addUTCTime (interval*fromIntegral jumps) (intervalDue schedule),intervalCount=count,intervalPaused=count>=1000}
+ let count=scheduleCount schedule+1
+ in schedule {scheduleDue=Schedule.nextDue (scheduleRule schedule) time (Just (scheduleDue schedule)),scheduleCount=count,schedulePaused=count>=1000}
 
 dispatch :: Service -> Pulse -> IO ()
 dispatch s tick = when (pulseFrequency tick==Bph60) $ do
  time <- getCurrentTime
  routines <- readRoutines s
  forM_ routines $ \candidate -> (forM_ (definitionSchedule candidate) $ \schedule ->
-  when (not (definitionDeleted candidate) && not (intervalPaused schedule) && (intervalCount schedule>=1000 || intervalDue schedule<=time)) $ do
+  when (not (definitionDeleted candidate) && not (schedulePaused schedule) && (scheduleCount schedule>=1000 || scheduleDue schedule<=time)) $ do
    let owner=definitionOwner candidate
    groups <- DB.values s DB.Groups
    let group=findId owner groups
@@ -286,13 +282,13 @@ dispatch s tick = when (pulseFrequency tick==Bph60) $ do
      rows <- DB.queryRowsOn db "SELECT value FROM scheduled_routines ORDER BY sequence" ["value"] [] >>= traverse (DB.decodeStored . (`at` "value"))
      definitions <- traverse (decodeValue 500) rows
      current <- maybe (failure 409 "Routine disappeared before admission") pure (find ((==definitionId candidate) . definitionId) definitions)
-     forM_ (definitionSchedule current) $ \interval -> when (not (definitionDeleted current) && not (intervalPaused interval)) $
-      if intervalCount interval>=1000 then do
-       void (DB.saveRoutineOn db (toJSON current {definitionSchedule=Just interval {intervalPaused=True}}))
-       DB.recordOn s db [owner] (definitionId current) "routine.paused" (obj [("reason",str "run limit"),("runCount",num (intervalCount interval))]) "system" Nothing
-      else when (intervalDue interval<=time) $ do
+     forM_ (definitionSchedule current) $ \interval -> when (not (definitionDeleted current) && not (schedulePaused interval)) $
+      if scheduleCount interval>=1000 then do
+       void (DB.saveRoutineOn db (toJSON current {definitionSchedule=Just interval {schedulePaused=True}}))
+       DB.recordOn s db [owner] (definitionId current) "routine.paused" (obj [("reason",str "run limit"),("runCount",num (scheduleCount interval))]) "system" Nothing
+      else when (scheduleDue interval<=time) $ do
        let identity=occurrenceIdentity current
-           origin=obj [("routine",str (definitionId current)),("routineOwner",str owner),("occurrence",str identity),("trigger",toJSON IntervalTrigger),("due",get (toJSON current) "nextDue"),("title",str (definitionTitle current)),("minutes",toJSON (intervalMinutes interval)),("taskType",str "automated"),("executionPrompt",str (definitionGoal current))]
+           origin=obj (Schedule.ruleFields (scheduleRule interval) ++ [("routine",str (definitionId current)),("routineOwner",str owner),("occurrence",str identity),("trigger",toJSON IntervalTrigger),("due",get (toJSON current) "nextDue"),("title",str (definitionTitle current)),("taskType",str "automated"),("executionPrompt",str (definitionGoal current))])
            turn=newTurn (RunId identity) Chat (definitionGoal current) (timestamp time) origin True
            snapshot_=toJSON current
            accepted=case definitionContract current of
@@ -307,8 +303,8 @@ dispatch s tick = when (pulseFrequency tick==Bph60) $ do
          admitGroupOn db current g turn
        let next=advanceSchedule time interval
        void (DB.saveRoutineOn db (toJSON current {definitionSchedule=Just next}))
-       DB.recordOn s db [owner] (definitionId current) "routine.triggered" (obj [("turn",str identity),("runCount",num (intervalCount next)),("nextDue",str (timestamp (intervalDue next)))]) "system" Nothing
-       when (intervalPaused next) $ DB.recordOn s db [owner] (definitionId current) "routine.paused" (obj [("reason",str "run limit"),("runCount",num (intervalCount next))]) "system" Nothing)
+       DB.recordOn s db [owner] (definitionId current) "routine.triggered" (obj [("turn",str identity),("runCount",num (scheduleCount next)),("nextDue",str (timestamp (scheduleDue next)))]) "system" Nothing
+       when (schedulePaused next) $ DB.recordOn s db [owner] (definitionId current) "routine.paused" (obj [("reason",str "run limit"),("runCount",num (scheduleCount next))]) "system" Nothing)
   `catch` reportDispatchFailure ("Scheduled Routine enqueue failed: " <> definitionId candidate)
  where unique=foldr (\x xs -> if x `elem` xs then xs else x:xs) []
 

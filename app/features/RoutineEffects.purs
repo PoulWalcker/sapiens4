@@ -1,5 +1,6 @@
 module Sapiens.RoutineEffects (handle) where
 
+import Data.Argonaut.Core (Json)
 import Sapiens.Form as F
 import Sapiens.Domain as X
 import Prelude
@@ -65,7 +66,7 @@ handle runtime dispatch = case _ of
   RoutineField key value -> do
     m <- H.get
     operation <- liftEffect B.uuid
-    H.modify_ $ M.modifyRoutineView (M.routineKey m) \view -> view {editor=map (\e -> e {fields=D.put key (D.text value) e.fields,operation=operation,dirty=true,error=""}) view.editor}
+    H.modify_ $ M.modifyRoutineView (M.routineKey m) \view -> view {editor=map (\e -> e {operation=operation,dirty=true,error="",fields=D.remove "preview" $ D.put key (D.text value) e.fields}) view.editor}
   RoutineReloadEditor -> do
     m <- H.get
     let page = (M.routineView m).page
@@ -78,6 +79,19 @@ handle runtime dispatch = case _ of
         H.modify_ $ M.project snapshot
         current <- H.get
         when (M.routineKey current == key && (_.identity <$> (M.routineView current).editor) == identity && (_.operation <$> (M.routineView current).editor) == operation) $ navigate page
+  RoutinePreviewSchedule -> do
+    m <- H.get
+    case (M.routineView m).editor of
+      Just editor | not editor.busy -> do
+        let key = M.routineKey m
+            body = D.put "op" (D.text "routine_schedule_preview") $ scheduleFields editor.fields
+            path = "/api/agents/" <> B.encodeURI (D.s "owner" editor.record) <> "/control"
+            update fields = H.modify_ $ M.modifyRoutineView key \view -> view {editor=map (\current -> if current.identity == editor.identity && current.operation == editor.operation then current {fields=D.put "preview" fields current.fields} else current) view.editor}
+        update $ D.json {busy:true}
+        E.attempt (E.api runtime m path "POST" body) \result -> E.inEpoch m.epoch \_ -> case result of
+          Left failure -> update $ D.json {error:message failure}
+          Right response -> update response
+      _ -> pure unit
   RoutineSave -> do
     m <- H.get
     case (M.routineView m).editor of
@@ -90,7 +104,7 @@ handle runtime dispatch = case _ of
               M.RoutineSchedule _ -> true
               _ -> false
             path = "/api/agents/" <> B.encodeURI (D.s "owner" editor.record) <> "/routines" <> if id == "" then "" else "/" <> B.encodeURI id <> if scheduling then "/schedule" else "/edit"
-            body = if scheduling then D.json {operation:editor.operation,revision:D.get "revision" editor.record,minutes:D.parse $ D.s "minutes" editor.fields} else D.json {operation:editor.operation,revision:D.get "revision" editor.record,title:D.s "title" editor.fields,goal:D.s "goal" editor.fields,criteria:A.filter (_ /= "") $ map S.trim $ S.split (S.Pattern "\n") $ D.s "criteria" editor.fields}
+            body = if scheduling then D.merge (scheduleFields editor.fields) $ D.json {operation:editor.operation,revision:D.get "revision" editor.record} else D.json {operation:editor.operation,revision:D.get "revision" editor.record,title:D.s "title" editor.fields,goal:D.s "goal" editor.fields,criteria:A.filter (_ /= "") $ map S.trim $ S.split (S.Pattern "\n") $ D.s "criteria" editor.fields}
             update f = H.modify_ $ M.modifyRoutineView key \view -> view {editor=map (\current -> if current.identity == editor.identity then f current else current) view.editor}
         update _ {busy=true,error=""}
         E.attempt (E.api runtime m path "POST" body) \result -> E.inEpoch m.epoch \_ -> case result of
@@ -169,7 +183,14 @@ handle runtime dispatch = case _ of
 
   prepareEditor m page id scheduling = do
     operation <- liftEffect B.uuid
+    localZone <- liftEffect B.localTimezone
     let record = D.put "owner" (D.text m.selected) $ fromMaybe D.empty $ A.find (\r -> D.s "id" r == id && D.s "owner" r == m.selected) $ D.rows "personal_routines" m.snapshot.automation
-        fields = if scheduling then D.json {minutes:show $ if D.n "minutes" record > 0.0 then D.int $ D.get "minutes" record else 60} else D.json {title:D.s "title" record,goal:D.s "goal" record,criteria:S.joinWith "\n" $ D.strings $ D.get "criteria" record}
+        fields = if scheduling then D.json {frequency:if D.s "trigger" record == "manual" then "manual" else if D.s "kind" (D.get "schedule" record) == "daily" then "daily" else "interval",minutes:show $ if D.n "minutes" record > 0.0 then D.int $ D.get "minutes" record else 60,time:D.fallback "09:00" $ D.s "time" $ D.get "schedule" record,timezone:D.s "timezone" $ D.get "schedule" record,localZone} else D.json {title:D.s "title" record,goal:D.s "goal" record,criteria:S.joinWith "\n" $ D.strings $ D.get "criteria" record}
         editor = {record,fields,operation,error:"",busy:false,dirty:false,identity:m.sequence+1}
     H.modify_ \current -> M.modifyRoutineView (M.routineKey m) (_ {page=page,editor=Just editor,pending=Nothing,evidence=Nothing}) current {sequence=m.sequence+1,menu=Nothing}
+
+scheduleFields :: Json -> Json
+scheduleFields fields = case D.s "frequency" fields of
+  "manual" -> D.json {trigger:"manual"}
+  "daily" -> D.json {schedule:{kind:"daily",time:D.s "time" fields,timezone:if S.trim (D.s "timezone" fields) == "" then D.s "localZone" fields else S.trim $ D.s "timezone" fields}}
+  _ -> D.json {minutes:D.parse $ D.s "minutes" fields}
