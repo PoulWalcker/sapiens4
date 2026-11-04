@@ -1,12 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
-module RoutineCommands (command, snapshot, detail) where
+module RoutineCommands (command, snapshot, detail, inspect) where
 
 import Control.Exception
 import Control.Monad
 import Data.Aeson hiding (pairs)
 import Data.Aeson.Types (Parser)
 import qualified Data.Aeson.KeyMap as KM
-import Data.List (find,nubBy)
+import Data.List (find,nubBy,sortOn)
 import qualified Data.List.NonEmpty as NE
 import Data.Maybe
 import Data.Text (Text)
@@ -257,6 +257,21 @@ snapshot s = do
       kitConsumer=obj [("reference",get active "reference"),("held",Bool held),("issue",issue),("inspections",arr inspections),("offers",arr offers)]
   pure (merge (toJSON d) (obj [("kitConsumer",kitConsumer),("kit",kit),("repair",Automation.repairProjection d works),("activeCode",visibleActive),("preparation",preparation),("trigger",str (maybe "manual" (const "interval") (definitionSchedule d))),("title",str (R.definitionTitle d)),("goal",str (R.definitionGoal d)),("criteria",maybe Null toJSON (R.definitionCriteria d)),("revision",toJSON (definitionRevision d)),("deleted",Bool (definitionDeleted d)),("runs",arr history)]))
  pure (obj [("definitions",arr rendered),("errors",arr [remove ["request"] op|op<-reverse operations,int (get op "code")>=400])])
+
+inspect :: Service -> Text -> Text -> IO Value
+inspect s owner identity = do
+ ds <- definitions s
+ definition <- maybe (failure 404 "Unknown personal Routine") pure (find (\d -> definitionId d==identity && definitionOwner d==owner) ds)
+ works <- D.readWorks s
+ let related=[w|w<-works,any (==str identity) [get (D.workField w "origin") "routine",get (D.workField w "routineSnapshot") "id",get (D.workField w "repairPin") "routine"]]
+ blockers <- DB.connection s $ \db -> Effects.routineBlockersOn db owner identity
+ operations <- readOperations s
+ let business=[w|w<-related,get (D.workField w "origin") "routine"==str identity,not (has (D.workField w "origin") "group")]
+     latest=listToMaybe (reverse (sortOn ((`at` "created") . toJSON) business))
+ lastRun <- forM latest $ \work -> select ["id","created","status","assessment","outcome","executionBinding","routineEffectUnknown","error"] <$> renderRun RunDetail operations (definitionRevision definition) work
+ let routine=merge (selectPresent ["id","owner","revision","title","minutes","schedule","trigger","paused","nextDue","runCount","deleted","contractGeneration"] (toJSON definition))
+       (obj [("goal",str (R.definitionGoal definition)),("criteria",maybe Null toJSON (R.definitionCriteria definition))])
+ pure (obj [("routine",routine),("latestRun",fromMaybe Null lastRun),("blockers",arr blockers)])
 
 detail :: Service -> Text -> Text -> Text -> IO Value
 detail s owner identity run = do

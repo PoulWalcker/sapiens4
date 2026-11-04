@@ -5,7 +5,7 @@ module Effects
  ( configureOn, definitionOn, pinOn, profileBound, external
  , beforeContent, ContentCommit(..), acceptContentOn, deliver, finishOccurrence
  , completeActionFree, positiveAnomaly, observedInput, preparationInput, fixtureInput, requireCandidateInput, requireCurrentInput
- , auditPublication, requireDefinitionClearOn, requireRunClear, prepareRoutineAttempt, admitRoutineAttempt, sealRoutineAttempt, requireContentTrace, observeEvidence, recover, reconcile, summary, pendingTransport
+ , auditPublication, requireDefinitionClearOn, requireRunClear, routineBlockersOn, prepareRoutineAttempt, admitRoutineAttempt, sealRoutineAttempt, requireContentTrace, observeEvidence, recover, reconcile, summary, pendingTransport
  ) where
 
 import Control.Concurrent (threadDelay)
@@ -203,6 +203,19 @@ retainRoutineRisk :: Bool -> Value -> Value
 retainRoutineRisk startup work = case routineRisk startup work of
  RoutineUnknown identity reason->put "routineEffectUnknown" (obj [("decisionId",str identity),("reason",str reason)]) work
  _->work
+
+routineWorksOn :: SQL.Connection -> RoutineConsumer -> IO [Value]
+routineWorksOn db owner@(RoutineConsumer _ identity)=do
+ works<-worksOn db
+ filterM (\work -> (==Just owner) <$> routineConsumerOn db work)
+  [work | work<-works,at (get work "routineSnapshot") "id"==identity || at (get work "origin") "routine"==identity || at (get work "repairPin") "routine"==identity]
+
+routineBlockersOn :: SQL.Connection -> Text -> Text -> IO [Value]
+routineBlockersOn db owner identity=do
+ works<-routineWorksOn db (RoutineConsumer owner identity)
+ pure $ mapMaybe (\work -> case routineRisk False work of
+  RoutineUnknown decision reason -> Just (obj [("run",get work "workloadId"),("decision",str decision),("reason",str reason)])
+  _ -> (\reason -> obj [("run",get work "workloadId"),("reason",str reason)]) <$> uncertainty work) works
 
 requireClearOn :: SQL.Connection -> RoutineConsumer -> Maybe Text -> IO ()
 requireClearOn db owner@(RoutineConsumer _ identity) except=do

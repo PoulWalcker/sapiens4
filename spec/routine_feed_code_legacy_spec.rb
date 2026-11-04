@@ -124,6 +124,35 @@ RSpec.describe 'Ordinary Routine uncertainty and legacy admission evidence' do
 
   end
 
+  it 'lets the owner inspect a blocked routine without changing its evidence or admission' do
+    @owner = host.agent('Inspector')
+    @routine = host.api('POST', "/api/agents/#{@owner}/routines", @fields.merge(operation: 'inspect-owner')).fetch('routine')
+    host.configure(feed_legacy_mode: 'tool_loss')
+    failed = submit('inspect-uncertain')
+    settled(failed)
+    unknown = detail(failed).fetch('routineEffectUnknown')
+    before = public_work(failed)
+    calls = host.calls.length
+    inspection = host.control(@owner, 'routine_inspect', id: @routine)
+    expect(inspection.fetch('routine')).to include('id' => @routine, 'revision' => 1)
+    expect(inspection.fetch('latestRun')).to include('id' => failed, 'status' => 'failed')
+    expect(inspection.fetch('blockers')).to include(include('run' => failed,
+      'decision' => unknown.fetch('decisionId'), 'reason' => unknown.fetch('reason')))
+    expect(inspection.fetch('latestRun')).not_to have_key('invocations')
+    expect(inspection.fetch('routine')).not_to have_key('prompt')
+    expect(host.calls.length).to eq(calls)
+    expect(public_work(failed)).to eq(before)
+    other = host.agent
+    expect(host.request('POST', "/api/agents/#{other}/control", op: 'routine_inspect', id: @routine).first).to eq(404)
+    host.control(chief, 'retire_agent', target: @owner)
+    expect(host.control(@owner, 'routine_inspect', id: @routine).fetch('blockers')).to eq(inspection.fetch('blockers'))
+    host.control(chief, 'rehire_agent', target: @owner)
+    host.restart
+    expect(host.control(@owner, 'routine_inspect', id: @routine).fetch('blockers')).to eq(inspection.fetch('blockers'))
+    expect(host.request('POST', "#{path}/run", operation: 'inspect-does-not-clear', revision: 1).first).to eq(409)
+    expect(@peer.deliveries.length).to eq(1)
+  end
+
   it 'isolates a blocked scheduled routine from other schedules and ordinary messages', :slow do
     host.configure(feed_legacy_mode: 'tool_loss')
     failed = submit('uncertain-before-schedule')
