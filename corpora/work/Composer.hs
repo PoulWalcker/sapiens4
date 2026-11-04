@@ -314,10 +314,11 @@ prepare s running = do
    envelope<-prompt s "preparation-envelope"
    let explanation=mergeFields [("templateHash",str (sourceHash template)),("envelopeHash",str (sourceHash envelope)),("model",toJSON settings),("policy",str "response_only")] (get candidate "explanation")
    pure [("composition",hybridComposition),("structureHash",str (canonicalHash hybridComposition)),("rubric",toJSON rubric),("explanation",put "implementationHash" (str (canonicalHash explanation)) explanation)]
-  workflowFields<-if not (has candidate "workflow") then pure [] else if has saved "version" then pure (pairs (select ["workflowModel","workflowPrompt","structureHash"] (get saved "version"))) else do
+  workflowFields<-if not (has candidate "workflow") then pure [] else if has saved "version" then pure (pairs (selectPresent ["workflowModel","workflowPrompt","agentPrompt","structureHash"] (get saved "version"))) else do
    settings<-Provider.verifiedResponseSettings s running
    template<-prompt s "workflow-step"
-   pure [("workflowPrompt",str template),("workflowModel",toJSON settings),("structureHash",str (Workflow.contentHash (get candidate "workflow")))]
+   agentTemplate<-if any ((=="agent") . (`at` "kind") . snd) (pairs (get (get candidate "workflow") "nodes")) then Just <$> prompt s "workflow-agent" else pure Nothing
+   pure ([("workflowPrompt",str template),("workflowModel",toJSON settings),("structureHash",str (Workflow.contentHash (get candidate "workflow")))]++[("agentPrompt",str value) | value<-maybeToList agentTemplate])
   feedFields<-case feedMode of
    Nothing->pure []
    Just content->do
@@ -407,6 +408,11 @@ workflowFixture s running profile version fixture = do
       let prepared=D.workField current "preparation"
       D.saveWork s (D.setWorkField "preparation" (put "workflowFixtures" (put key (put "nodes" (put node receipt (get (get (get prepared "workflowFixtures") key) "nodes" `fallback` obj [])) (get (get prepared "workflowFixtures") key `fallback` obj [])) (get prepared "workflowFixtures" `fallback` obj [])) prepared) current)
      invoke nodeId node input=case at node "kind" of
+      "agent"->do
+       void (either (failure 422) pure (Workflow.agentRecipient input))
+       let stubs=get fixture "modelStubs"
+       require (has stubs nodeId) 422 "Independent fixture has no simulated agent result"
+       pure (get stubs nodeId)
       "awaitResult"->do
        void (either (failure 422) pure (Workflow.resultSpec input))
        let stubs=get fixture "modelStubs"
@@ -430,7 +436,8 @@ workflowFixture s running profile version fixture = do
         locked s $ do (current,_)<-D.getWork s (runId running); D.saveWork s (WC.container running receipt current))
        require (at result "status"=="exited" && get result "exitCode"==num 0 && not (boolean (get result "wasRunning"))) 422 "Workflow fixture script failed"
        either (failure 422 . T.pack) pure (eitherDecodeStrict (TE.encodeUtf8 (at result "output")))
- let authority=if any ((=="awaitResult") . (`at` "kind") . snd) (pairs (get (get version "workflow") "nodes")) then put "fixtureResult" (Bool True) (select ["reference","workflowModel","workflowPrompt","runtime"] version) else select ["reference","workflowModel","workflowPrompt","runtime"] version
+ let baseAuthority=if any ((=="awaitResult") . (`at` "kind") . snd) (pairs (get (get version "workflow") "nodes")) then put "fixtureResult" (Bool True) (select ["reference","workflowModel","workflowPrompt","runtime"] version) else select ["reference","workflowModel","workflowPrompt","runtime"] version
+     authority=if any ((=="agent") . (`at` "kind") . snd) (pairs (get (get version "workflow") "nodes")) then put "fixtureAgent" (Bool True) baseAuthority else baseAuthority
      entry=if WC.child call then at (WC.childData call) "entry" else at (get version "workflow") "entry"
      stop=if WC.child call then Just (at (WC.childData call) "join") else Nothing
  value<-Workflow.runRegion (get version "workflow") (get fixture "input") (if any ((=="defer") . (`at` "kind") . snd) (pairs (get (get version "workflow") "nodes")) then put "fixtureTimer" (Bool True) authority else authority) entry stop loadTrace saveTrace invoke

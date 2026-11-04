@@ -50,3 +50,25 @@ Output is {source,outcome,value}; outcome is the accepted source outcome, and va
 its retained runtime result (or null for ordinary tasks). This does not complete the
 waiting Task's own criteria. Independent fixtures supply a modelStubs entry for each
 selected awaitResult node, explicitly simulated and never business authority.
+
+
+For a necessary instrumental step use a separate closed node:
+{"kind":"agent","instruction":"Intermediate assignment within the original task","criteria":["Observable local result"],"input":SELECTOR,"next":"existing-node"}.
+Optional "recipient":SELECTOR chooses an existing Sapi ID, or null for self. Use only
+existing permitted Chief-to-Sapi or Sapi-to-Chief assignments; never infer permissions
+from an owner field. The recipient must be available and active. Do not select another
+Sapi merely to bypass a restriction or a retained uncertain effect. A response-only
+content profile cannot use agent nodes. The existing model node remains response-only.
+
+The agent uses ordinary authorized Sapi tools within the original accepted business
+assignment and returns only its local Outcome. Its criteria may describe intermediate
+evidence, but cannot expand business scope or settle the original Task. The outer
+structure and chosen recipient stay fixed; the agent cannot compose/handoff/replan.
+Output is {reply,outcome,author}, not arbitrary prose parsed as JSON. Consume its saved
+reply/outcome in later nodes to produce a strict Boolean branch with a reason when
+needed. Unknown or unsuccessful outcomes block dependent nodes. Preserve completed
+actions; never create a new agent node just to repeat an uncertain operation.
+
+Independent examples supply simulated modelStubs for agent nodes with that output
+envelope. They do not call real agent tools or authorize business execution. A real
+authorized occurrence and whole-result assessment remain required before activation.

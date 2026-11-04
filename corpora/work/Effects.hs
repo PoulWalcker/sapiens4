@@ -4,7 +4,7 @@
 module Effects
  ( configureOn, definitionOn, pinOn, profileBound, external
  , beforeContent, ContentCommit(..), acceptContentOn, deliver, finishOccurrence
- , completeActionFree, positiveAnomaly, observedInput, preparationInput, fixtureInput, requireCandidateInput, requireCurrentInput
+ , completeEvidence, completeActionFree, positiveAnomaly, observedInput, preparationInput, fixtureInput, requireCandidateInput, requireCurrentInput
  , auditPublication, requireDefinitionClearOn, requireRunClear, routineBlockersOn, prepareRoutineAttempt, admitRoutineAttempt, sealRoutineAttempt, requireContentTrace, observeEvidence, recover, reconcile, summary, pendingTransport
  ) where
 
@@ -123,18 +123,21 @@ routineConsumerOn db work
   pure (Just (RoutineConsumer owner identity))
  where origin=get work "origin"; snapshot=get work "routineSnapshot"
 
-completeActionFree :: Value -> Bool
-completeActionFree evidence = case parseEither checked evidence of Right value->value; Left _->False
+completeEvidence :: Value -> Bool
+completeEvidence evidence = case parseEither checked evidence of Right value->value; Left _->False
  where
  checked value=do
   finished<-withObject "Invocation evidence" (.: "finished") value
   exit<-withObject "Invocation evidence" (.: "processExit") value :: Parser Int
-  events<-withObject "Invocation evidence" (.: "events") value :: Parser [Value]
+  void (withObject "Invocation evidence" (.: "events") value :: Parser [Value])
   let completeness=get value "completeness"
   flags<-mapM (\key->withObject "Capture completeness" (.: key) completeness) ["finalSeen","turnEndSeen","streamEndSeen"] :: Parser [Bool]
   counts<-mapM (\key->withObject "Capture completeness" (.: key) completeness) ["pendingTools","malformedEvents","unknownEvents","droppedEvents","outOfOrderEvents"] :: Parser [Int]
-  pure (finished && exit==0 && and flags && all (==0) counts && not (any toolEvent events))
- toolEvent event=get event "summary"/=Null || "tool" `T.isInfixOf` T.toLower (at event "kind")
+  pure (finished && exit==0 && and flags && all (==0) counts)
+
+completeActionFree :: Value -> Bool
+completeActionFree evidence = completeEvidence evidence && not (any toolEvent (items evidence "events"))
+ where toolEvent event=get event "summary"/=Null || "tool" `T.isInfixOf` T.toLower (at event "kind")
 
 positiveAnomaly :: Value -> Bool
 positiveAnomaly evidence =

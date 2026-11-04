@@ -15,6 +15,7 @@ import qualified Data.Aeson.Key
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.ByteString as BS
+import Data.Time.Clock (getCurrentTime)
 import Data.IORef
 import Data.List (find,nub,sort)
 import Data.Maybe
@@ -394,9 +395,62 @@ inheritedWorkflowCall work call=walk [] call
    in callIdentity current/=callIdentity root && callOwner current==callOwner root
     && callField current "executionBinding"==callField root "executionBinding"
     && at context "root"==workloadId work && get context "parent"==toJSON (callParent current)
-    && get cohort "parent"==get context "parent" && toJSON (callIdentity current) `elem` items cohort "children"
+    && at cohort "kind"/="agent" && get cohort "parent"==get context "parent" && toJSON (callIdentity current) `elem` items cohort "children"
     && get (get context "version") "reference"==reference
     && maybe False (\value->callOwner value==callOwner root && (callIdentity value==callIdentity root || walk (callIdentity current:seen) value)) parent
+
+workflowAgent :: WorkCall -> Bool
+workflowAgent call=callField call "workflowAgent"/=Null
+
+agentCohort :: Workload -> WorkCall -> Value
+agentCohort work call=get (workField work "workflowCohorts") (at (callField call "workflowAgent") "cohort")
+
+-- The node request retained by Workflow is the sole authority for this local contract.
+agentContract :: Workload -> WorkCall -> RunId -> Text -> CandidateReference -> IO TaskSpec
+agentContract work call rootIdentity nodeIdentity reference=do
+ let root=NE.head (workCalls work)
+     cohort=agentCohort work call
+     version=get cohort "version"
+     node=get (get (get version "workflow") "nodes") nodeIdentity
+     receipt=get (get (get (workField work "codeExecution") "workflowRun") "nodes") nodeIdentity
+     parent=find ((==callParent call) . Just . callIdentity) (workCalls work)
+ require (callIdentity root==rootIdentity && rootIdentity/=callIdentity call && at cohort "kind"=="agent" && get cohort "children"==toJSON [callIdentity call]
+  && get cohort "parent"==toJSON (callParent call) && at cohort "node"==nodeIdentity && get cohort "recipient"==toJSON (callOwner call)
+  && at node "kind"=="agent" && get version "reference"==toJSON reference && get (workField work "codeExecution") "reference"==toJSON reference
+  && get version "workflow"==get (workField work "codeExecution") "workflowDefinition" && get cohort "request"==get receipt "request"
+  && get cohort "requestHash"==get receipt "requestHash" && get cohort "input"==get (get receipt "request") "input"
+  && at (callField call "workflowAgent") "root"==workloadId work
+  && maybe False (\value->callIdentity value==rootIdentity || inheritedWorkflowCall work value) parent) 409 "Agent Call has no canonical workflow step membership"
+ let CandidateReference _ _ digest=reference
+ require (canonicalHash (remove ["reference"] version)==digest) 409 "Agent step version bytes changed"
+ void (executionContract work root >>= maybe (failure 409 "Original workflow contract disappeared") pure)
+ decodeValue 409 (obj [("objective",get node "instruction"),("inputs",arr [str (jsonText (get cohort "input"))]),("expectedOutputs",get node "criteria"),("completionCriteria",get node "criteria")])
+
+requireAgentAllowed :: Service -> Run -> IO ()
+requireAgentAllowed s running=do
+ (work,call)<-getWork s (runId running)
+ when (workflowAgent call) $ do
+  void (executionContract work call)
+  (version,_)<-resolveCandidate s work (NE.head (workCalls work))
+  require (version==get (agentCohort work call) "version") 409 "Agent candidate acceptance or version changed"
+  when (has (toJSON work) "repairPin") $ DB.repairPinAllowed s (workField work "repairPin") >>= \clear->require clear 409 "Agent repair authority changed"
+  require (workField work "executionGate"==toJSON ExecutionOpen && not (has (toJSON work) "workflowHalt") && at (workField work "workflowBudget") "status"=="reserved") 409 "Responsible workflow is stopped or its resource is unavailable"
+  require (not (Effects.profileBound (toJSON work))) 409 "Response-only consumer cannot admit an instrumental agent"
+  wall<-getCurrentTime
+  require (maybe False (>wall) (parseTime (at (workField work "codeExecution") "workflowDeadline"))) 409 "Original workflow deadline expired"
+  cancelled<-readIORef (runCancel running)
+  require (not cancelled) 409 "Agent step stopped by Admin"
+  requireActive s (agentIdText (callOwner call))
+  requireAgentRoute s (callOwner (NE.head (workCalls work))) (callOwner call)
+  DB.requireOccurrence s (workField work "origin")
+  Effects.requireRunClear s (runId running)
+
+requireAgentRoute :: Service -> AgentId -> AgentId -> IO ()
+requireAgentRoute s source target=do
+ requireActive s (agentIdText source)
+ requireActive s (agentIdText target)
+ chief<-DB.mainAgent s
+ require (source==target || source==AgentId chief || target==AgentId chief) 403 "Workflow recipient is outside the existing Chief routing permissions"
 
 executionContract :: Workload -> WorkCall -> IO (Maybe TaskSpec)
 executionContract work call | has (toJSON call) "workflowChild" = do
@@ -420,6 +474,7 @@ executionContract work call = do
     let snapshot=workField work "routineSnapshot"
     require (callIdentity call==callIdentity (NE.head (workCalls work)) && get snapshot "owner"==toJSON owner && has snapshot "acceptedTask") 409 "Routine contract source does not belong to this call"
     Just <$> decodeValue 409 (get snapshot "acceptedTask")
+   WorkflowStepSource root node reference -> Just <$> agentContract work call root node reference
    TaskDecisionSource identity -> do
     record <- maybe (failure 409 "Accepted task decision is missing") pure (find ((==identity) . (`at` "decisionId")) (workItems work "decisions"))
     require (get record "callId"==toJSON (callIdentity call) && get record "agent"==toJSON owner && boolean (get record "accepted") && at record "node"=="ReadyToWork" && at (get record "response") "event"=="TaskPrepared") 409 "Execution contract is not this call's accepted task decision"
@@ -520,7 +575,8 @@ findWork s i = do
 callAllowed :: Service -> Turn -> IO Bool
 callAllowed s turn = do
  found <- findWork s (turnId turn)
- DB.occurrenceAllowed s (maybe (turnField turn "origin") (\(work,_) -> workField work "origin") found)
+ permitted<-DB.occurrenceAllowed s (maybe (turnField turn "origin") (\(work,_) -> workField work "origin") found)
+ pure (permitted && maybe True (\(work,call)->not (workflowAgent call) || workField work "executionGate"==toJSON ExecutionOpen && not (has (toJSON work) "workflowHalt")) found)
 requireCallAllowed :: Service -> Turn -> IO ()
 requireCallAllowed s turn = do
  allowed <- callAllowed s turn
@@ -606,6 +662,7 @@ decide s run turn state node logs = do
   source <- templates s >>= maybe (failure 400 "Unknown decision node") pure . find ((==toJSON node) . (`get` "node"))
   (w,c) <- getWork s (turnId turn)
   DB.requireOccurrence s (workField w "origin")
+  requireAgentAllowed s run
   contract <- if node==Execution then executionContract w c else pure Nothing
   let taskContext=if node==ReadyToWork && workField w "standaloneRun"/=Null then put "specification" (get (workField w "standaloneRun") "contract") (workField w "task") else workField w "task"
   conv <- conversation s (runOwner run) turn state
@@ -624,9 +681,10 @@ decide s run turn state node logs = do
   feedInput<-if Effects.profileBound (toJSON w) then either (failure 409 . T.pack) (pure . (`get` "input")) (Effects.observedInput (toJSON w)) else pure Null
   works<-readWorks s
   let versions=[mergeFields [("reference",get version "reference"),("source",pin),("contract",get version "contract"),("activated",get (get prepared "trial") "status")] (select ["status","checks"] prepared) | candidate<-works,let pin=workField candidate "standalonePin",get pin "owner"==toJSON (runOwner run),let prepared=workField candidate "preparation",let version=get prepared "version",at prepared "status"=="awaiting_occurrence"]
-  let instruction = at source "content" <> extra <> scheduled <> pinned <> externalInstruction
+  agentInstruction<-if workflowAgent c then pure (at (get (agentCohort w c) "version") "agentPrompt") else pure ""
+  let instruction = at source "content" <> extra <> scheduled <> pinned <> externalInstruction <> agentInstruction
       context = obj [("executionSpecification",maybe Null toJSON contract),("responsible",workField w "responsible"),("remainingCriteria",workField w "remainingCriteria"),("partialResults",arr [obj [("callId",toJSON (callIdentity local)),("author",toJSON (callOwner local)),("outcome",callField local "outcome")] | local<-NE.toList (workCalls w),callField local "outcome"/=Null]),("preparationScope",str (if at (toJSON c) "afterPreparation"=="Delegation" then "root" else "assignment")),("availableWorkflows",arr versions),("acceptedInput",feedInput),("externalExecution",workField w "externalExecution"),("originalIntent",workField w "originalIntent"),("task",taskContext),("routine",routine),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
-      rendered = render envelope [("node",wireName node),("instruction",instruction),("notes_wiki",render wiki [("notes_example",T.pack (repositoryRoot s </> "corpora/prompts/examples/jarvis-notes.html"))]),("context",jsonText context),("events",T.intercalate ", " (sort (eventsFor node)))]
+      rendered = render envelope [("node",wireName node),("instruction",instruction),("notes_wiki",render wiki [("notes_example",T.pack (repositoryRoot s </> "corpora/prompts/examples/jarvis-notes.html"))]),("context",jsonText context),("events",T.intercalate ", " (if workflowAgent c then ["Outcome"] else sort (eventsFor node)))]
   (model,effort) <- modelDefaults
   policy <- executionSettings s (agentIdText (runOwner run))
   i <- newId
@@ -644,9 +702,11 @@ decide s run turn state node logs = do
  rawResponse <- newIORef Nothing
  result <- try $ do
   let observe snapshot = locked s $ do
-       (current,_) <- getWork s (turnId turn)
+       (current,localCall) <- getWork s (turnId turn)
        let update entry = if get entry "decisionId"==get record "decisionId" then Effects.admitRoutineAttempt (put "evidence" (put "purpose" (str "ordinary_execution") (toJSON snapshot)) entry) else entry
-       let observed=Effects.observeEvidence (at record "decisionId") snapshot (toJSON (setWorkField "decisions" (arr (map update (workItems current "decisions"))) current))
+       when (workflowAgent localCall) (void (executionContract current localCall))
+       let saved=toJSON (setWorkField "decisions" (arr (map update (workItems current "decisions"))) current)
+           observed=if workflowAgent localCall then saved else Effects.observeEvidence (at record "decisionId") snapshot saved
        DB.putValue s DB.Workloads (workloadId current) observed
        require (get (Effects.external observed) "opaqueEffectUnknown"==Null) 409 "Response-only tool evidence is uncertain; external delivery is blocked"
   raw <- (if responseOnly then invokeAnalysisObserved else invokeObserved) s run rendered observe
@@ -710,6 +770,7 @@ handoffSpecification work call response = do
 -- Save the local receipt and the owner's continuation in the same workload write.
 -- The existing dispatcher admits that queued call under the original gate/resources.
 scopedResult :: RunId -> Workload -> WorkCall -> Value -> Workload
+scopedResult _ work call result | workflowAgent call=withCall work (setCallFields [("outcome",result)] call)
 scopedResult continuation work call result =
  let saved=withCall work (setCallFields [("outcome",result)] call)
      root=get (workField saved "task") "specification"
@@ -846,6 +907,10 @@ runDecision s run turn state = do
         result <- locked s $ do
          (current,call) <- getWork s (turnId turn)
          DB.requireOccurrence s (workField current "origin")
+         requireAgentAllowed s run
+         when (workflowAgent call) $ do
+          require (at (decisionRaw response) "event"=="Outcome") 409 "Agent step cannot change the outer workflow or hand off its assignment"
+          require (Effects.completeEvidence (maybe Null (`get` "evidence") (find ((==get record "decisionId") . (`get` "decisionId")) (workItems current "decisions")))) 409 "Agent step capture is incomplete or uncertain; no automatic replay"
          stopped <- readIORef (runCancel run)
          require (not stopped) 409 "Stopped by Admin"
          chief <- DB.mainAgent s

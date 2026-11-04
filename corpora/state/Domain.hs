@@ -230,7 +230,7 @@ candidateExplanation version
  | not (has version "rubric") || get version "composition"/=hybridComposition || get version "structureHash"/=str (canonicalHash hybridComposition) = fail "Unsupported or changed hybrid composition"
  | otherwise = Just <$> parseJSON (get version "explanation")
 
-data OrdinarySource = RoutineSnapshotSource | TaskDecisionSource Text deriving (Eq, Show)
+data OrdinarySource = RoutineSnapshotSource | TaskDecisionSource Text | WorkflowStepSource RunId Text CandidateReference deriving (Eq, Show)
 data CandidateReference = CandidateReference AgentId RunId Text deriving (Eq,Show)
 instance FromJSON CandidateReference where
  parseJSON value = do
@@ -271,12 +271,16 @@ instance FromJSON ExecutionBinding where
   kind <- case at source "kind" of
    "routine_snapshot" -> onlyFields ["kind"] source >> pure RoutineSnapshotSource
    "task_decision" -> onlyFields ["kind","decisionId"] source >> TaskDecisionSource <$> textFieldP "decisionId" 128 source
+   "workflow_step" -> do
+    onlyFields ["kind","root","node","reference"] source
+    WorkflowStepSource <$> parseJSON (get source "root") <*> textFieldP "node" 100 source <*> parseJSON (get source "reference")
    _ -> fail "Unknown accepted contract source"
   if script then ScriptBinding owner kind <$> parseJSON (get value "reference") <*> parseJSON (get value "role") else pure (OrdinaryBinding owner kind)
 instance ToJSON ExecutionBinding where
  toJSON value = obj ([("schema",num 1),("mode",str mode),("owner",toJSON owner),("source",case source of
   RoutineSnapshotSource -> obj [("kind",str "routine_snapshot")]
-  TaskDecisionSource identity -> obj [("kind",str "task_decision"),("decisionId",str identity)])]++extra)
+  TaskDecisionSource identity -> obj [("kind",str "task_decision"),("decisionId",str identity)]
+  WorkflowStepSource root node reference -> obj [("kind",str "workflow_step"),("root",toJSON root),("node",str node),("reference",toJSON reference)])]++extra)
   where
   (owner,source)=bindingContract value
   (mode,extra)=case value of OrdinaryBinding _ _->("ordinary",[]); ScriptBinding _ _ reference role->("script",[("reference",toJSON reference),("role",toJSON role)])

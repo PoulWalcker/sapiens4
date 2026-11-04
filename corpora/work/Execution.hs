@@ -207,7 +207,7 @@ settleRun outcome time ids turn state = result
  updated=mapTurns update state
  result | isJust failureText = updated
         | buffered = mapStateFields (appendItems "output_buffer" [obj [("turn",str i),("members",toJSON ids),("content",str output),("origin",origin)]]) updated
-        | has origin "group" || has origin "analysis" || has origin "preparation" || has origin "standaloneRun" = updated
+        | has origin "group" || has origin "analysis" || has origin "preparation" || has origin "standaloneRun" || has origin "workflowAgent" = updated
         | otherwise = mapStateFields (put "last_output" (str output) . appendItems "chat" [obj [("role",str "agent"),("content",str output),("turn",str i),("time",str time),("origin",origin)]]) updated
 
 finish :: Service -> Run -> Turn -> Either SomeException (Text,[Value]) -> IO ()
@@ -256,14 +256,14 @@ launch s a batch tick slot batching = do
  deadline <- (+1800000000000) <$> getMonotonicTimeNSec
  let run=Run (AgentId a) i slot cancel process activity deadline
  found<-D.findWork s i
- forM_ found $ \(work,call)->when (not (WC.child call) && any ((`elem` ["defer","awaitResult"]) . (`at` "kind") . snd) (pairs (get (get (D.workField work "codeExecution") "workflowDefinition") "nodes")) && not (has (D.workField work "codeExecution") "workflowDeadline")) $ do
+ forM_ found $ \(work,call)->when (not (WC.child call) && any ((`elem` ["defer","awaitResult","agent"]) . (`at` "kind") . snd) (pairs (get (get (D.workField work "codeExecution") "workflowDefinition") "nodes")) && not (has (D.workField work "codeExecution") "workflowDeadline")) $ do
   wall<-getCurrentTime
   D.saveWork s (D.setWorkField "codeExecution" (put "workflowDeadline" (str (timestamp (addUTCTime 1800 wall))) (D.workField work "codeExecution")) work)
  modifyMVar_ (serviceRuns s) (pure . M.insert i run)
  DB.pulseCall s tick a "chatInput" slot (nub [at (turnField t "origin") "group" | t <- NE.toList batch,has (turnField t "origin") "group"])
  DB.project s a
  void $ forkIO $ do
-  result <- try (Automation.withRepairBudget s run $ \repairRun -> withActor s a (Just "chatInput") (if has (turnField execution "origin") "workflowChild" then (if get (get (turnField execution "origin") "workflowChild") "fixture"/=Null then Composer.runWorkflowChild s repairRun execution else runWorkflowChild s repairRun execution) else if has (turnField execution "origin") "group" then G.runGroup s repairRun execution else if has (turnField execution "origin") "kitInspection" then Automation.runKitInspection s repairRun execution else if has (turnField execution "origin") "repairAudit" then runSavedAudit s repairRun execution else if has (turnField execution "origin") "analysis" then failure 409 "Separate analysis was retired" else if has (turnField execution "origin") "preparation" then Composer.run s repairRun execution else dispatchOrdinary s repairRun execution snapshot))
+  result <- try (Automation.withRepairBudget s run $ \repairRun -> withActor s a (Just "chatInput") (if has (turnField execution "origin") "workflowAgent" then runWorkflowAgent s repairRun execution snapshot else if has (turnField execution "origin") "workflowChild" then (if get (get (turnField execution "origin") "workflowChild") "fixture"/=Null then Composer.runWorkflowChild s repairRun execution else runWorkflowChild s repairRun execution) else if has (turnField execution "origin") "group" then G.runGroup s repairRun execution else if has (turnField execution "origin") "kitInspection" then Automation.runKitInspection s repairRun execution else if has (turnField execution "origin") "repairAudit" then runSavedAudit s repairRun execution else if has (turnField execution "origin") "analysis" then failure 409 "Separate analysis was retired" else if has (turnField execution "origin") "preparation" then Composer.run s repairRun execution else dispatchOrdinary s repairRun execution snapshot))
   locked s $ finish s run execution result `finally` do
    lease <- readIORef (serviceLease s)
    when (lease==Just (AgentId a,i)) $ writeIORef (serviceLease s) Nothing
@@ -551,6 +551,7 @@ executeWorkflowCalculation s running version input = do
       require (current==version) 409 "Workflow candidate changed"
       D.saveWork s (D.setWorkField "codeExecution" (let code=D.workField work "codeExecution"; trace=get code "workflowRun" `fallback` obj [] in put "workflowRun" (put "nodes" (put node receipt (get trace "nodes" `fallback` obj [])) trace) code) work)
      invoke identity node selected=case at node "kind" of
+      "agent"->WC.agent s running version (obj []) identity node selected
       "awaitResult"->WC.defer s running version (obj []) identity node selected
       "defer"->WC.defer s running version (obj []) identity node selected
       "fork"->WC.fork s running version input (obj []) identity node
@@ -591,6 +592,19 @@ executeWorkflowCalculation s running version input = do
   let runtime=obj [("status",str "exited"),("exitCode",num 0),("wasRunning",Bool False),("actual",actual),("reference",get version "reference"),("sourceHash",get version "sourceHash"),("inputHash",str (canonicalHash input)),("workflow",Bool True)]
   codeUpdate s running (appendItems "operations" [obj [("id",str (canonicalHash runtime)),("purpose",str "code_execution"),("stage",str "calculate"),("status",str "completed"),("result",runtime)]])
   pure (actual,runtime)
+
+runWorkflowAgent :: Service -> Run -> Turn -> AgentState -> IO (Text,[Value])
+runWorkflowAgent s running turn snapshot=do
+ locked s $ do
+  D.requireAgentAllowed s running
+  (work,_)<-D.getWork s (runId running)
+  require (not (any ((==toJSON (runId running)) . (`get` "callId")) (D.workItems work "decisions"))) 409 "Agent step already admitted; no automatic replay"
+ result<-D.runDecision s running turn snapshot
+ locked s $ do
+  D.requireAgentAllowed s running
+  (_,call)<-D.getWork s (runId running)
+  require (D.callState call==D.CallCompleted) 409 "Agent step did not complete its local criteria"
+ pure result
 
 runWorkflowChild :: Service -> Run -> Turn -> IO (Text,[Value])
 runWorkflowChild s running turn=do
@@ -933,7 +947,7 @@ admission owner runs state tick
  scheduled=pulseFrequency tick==Bph60
  queued=[t | t<-agentTurns state,turnStatus t==Queued,boolean (turnField t "batchable"),has (turnField t "origin") "routine"==scheduled]
  legacy=[t | t<-agentTurns state,turnStatus t==Queued,not (boolean (turnField t "batchable"))]
- continuation turn=any (has (turnField turn "origin")) ["workflowChild","standaloneRun","standalonePreparation"]
+ continuation turn=any (has (turnField turn "origin")) ["workflowChild","workflowAgent","standaloneRun","standalonePreparation"]
  children=filter continuation legacy
  roots=filter (not . continuation) legacy
 onPulse :: Service -> Pulse -> IO ()

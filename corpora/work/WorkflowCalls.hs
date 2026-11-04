@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module WorkflowCalls (fork, ready, child, childData, yielding, openBudget, activity, used, cap, finishBudget, quiesce, allowed, trace, publish, container, safeIdle, recover, stop, defer, dispatchWaits) where
+module WorkflowCalls (fork, ready, child, childData, yielding, openBudget, activity, used, cap, finishBudget, quiesce, allowed, trace, publish, container, safeIdle, recover, stop, defer, dispatchWaits, agent) where
 
 import Control.Concurrent
 import Control.Exception
@@ -28,7 +28,7 @@ import qualified Workflow
 childData :: D.WorkCall -> Value
 childData call=D.callField call "workflowChild"
 child :: D.WorkCall -> Bool
-child call=childData call/=Null
+child call=childData call/=Null || D.workflowAgent call
 
 change :: Service -> RunId -> (D.Workload -> D.Workload) -> IO ()
 change s identity transform=locked s $ do
@@ -98,6 +98,65 @@ fork s running version input context nodeId node=do
  DB.project s (agentIdText (runOwner running))
  if snd result then activity s running True >> pure Null else throwIO (Workflow.Yield (fst result))
 
+agent :: Service -> Run -> Value -> Value -> Text -> Value -> Value -> IO Value
+agent s running version context nodeId node envelope=do
+ allowed s running
+ identity<-RunId <$> newId
+ time<-now
+ (original,_)<-D.getWork s (runId running)
+ recipient<-either (failure 422) pure (Workflow.agentRecipient envelope)
+ let target=maybe (runOwner running) AgentId recipient
+ D.requireAgentRoute s (runOwner running) target
+ result<-locked s $ do
+  -- Recipient admission keeps existing routing/busy limits; durable membership is
+  -- checked separately when this already accepted Call reaches execution.
+  (current,_)<-D.getWork s (runId running)
+  let key=canonicalHash (obj [("call",toJSON (runId running)),("node",str nodeId),("reference",get version "reference")])
+  when (get (D.workField current "workflowCohorts") key==Null && target/=runOwner running) (D.validateTarget s current (agentIdText (runOwner running)) (agentIdText target))
+  DB.connection s $ \db->SQL.withTransaction db $ do
+   rows<-DB.queryRowsOn db "SELECT value FROM workloads WHERE id=?" ["value"] [SQL.SQLText (D.workloadId original)]
+   work<-case rows of [row]->DB.decodeStored (at row "value") >>= decodeValue 500; _->failure 409 "Agent workflow disappeared"
+   validateOn db work version context
+   require (not (Effects.profileBound (toJSON work))) 409 "Response-only consumer cannot admit an instrumental agent"
+   wall<-getCurrentTime
+   require (maybe False (>wall) (parseTime (at (D.workField work "codeExecution") "workflowDeadline"))) 409 "Original workflow deadline expired"
+   let cohorts=D.workField work "workflowCohorts" `fallback` obj []
+       previous=get cohorts key
+       receipt=get (get (trace work context) "nodes") nodeId
+       requestHash=get receipt "requestHash"
+       nodeReceipt status=mergeFields [("status",str status),("cohort",str key)] receipt
+   require (not (boolean (get receipt "fixtureSimulation")) && requestHash/=Null) 409 "Agent requires an actual retained node admission"
+   if previous/=Null then do
+    require (at previous "kind"=="agent" && get previous "requestHash"==requestHash && get previous "recipient"==toJSON target && get previous "input"==get envelope "input" && get previous "version"==version) 409 "Agent request identity changed"
+    local<-maybe (failure 409 "Required agent Call disappeared") pure (find (\call->get previous "children"==toJSON [D.callIdentity call]) (D.workCalls work))
+    void (D.executionContract work local)
+    require (D.callState local==D.CallCompleted && at (D.callField local "outcome") "status"=="Completed") 409 "Required agent result is failed, unresolved or uncertain; no automatic replay"
+    let outcome=D.callField local "outcome"
+        output=obj [("reply",get outcome "reply"),("outcome",outcome),("author",toJSON (D.callOwner local))]
+    require (BL.length (encode output)<=65536) 409 "Agent result exceeds workflow output bound"
+    pure (Right output)
+    else do
+     reference<-decodeValue 409 (get version "reference")
+     let root=D.callIdentity (NE.head (D.workCalls work))
+         cohort=obj [("kind",str "agent"),("node",str nodeId),("parent",toJSON (runId running)),("children",toJSON [identity]),("recipient",toJSON target),("input",get envelope "input"),("request",get receipt "request"),("requestHash",requestHash),("version",version)]
+         metadata=obj [("root",str (D.workloadId work)),("cohort",str key)]
+         local=D.setCallFields [("workflowAgent",metadata),("executionBinding",toJSON (OrdinaryBinding target (WorkflowStepSource root nodeId reference)))] (D.newCall identity target (Just (runId running)) (D.QueuedAt D.Execution) (at node "instruction"))
+         queued=D.setWorkField "workflowCohorts" (put key cohort cohorts) work {D.workCalls=fmap (\call->if D.callIdentity call==runId running then D.setCallFields [("workflowWait",str key)] call {D.callProgress=D.QueuedAt (D.callNode call)} else call) (D.workCalls work) <> (local NE.:| [])}
+     clock<-toInteger <$> getMonotonicTimeNSec
+     let budget=tick clock (D.workField queued "workflowBudget")
+         idle=put "activities" (put (runIdText (runId running)) (Bool False) (get budget "activities")) budget
+         saved=publish context nodeId (nodeReceipt "waiting") (D.setWorkField "workflowBudget" idle queued)
+     void (D.executionContract saved local)
+     DB.putValueOn db DB.Workloads (D.workloadId work) (toJSON saved)
+     Managed.transitionOn db (runIdText (runId running)) (put "workflowWait" (str key) . put "status" (str "queued"))
+     let origin=put "workflowAgent" metadata (D.workField work "origin")
+         turn=withTurnFields (put "codeBound" (Bool True)) (newTurn identity Chat (D.callRequest local) time origin False)
+     Managed.enrollOn db (agentIdText target) turn Null (D.callRequest local) []
+     pure (Left key)
+ DB.project s (agentIdText target)
+ DB.project s (agentIdText (runOwner running))
+ either (throwIO . Workflow.Yield) pure result
+
 ready :: Service -> Turn -> IO Bool
 ready s turn=do
  found<-D.findWork s (turnId turn)
@@ -117,6 +176,7 @@ ready s turn=do
       turns<-DB.turns s
       pure (any (\value->at value "id"==at waiting "child" && at value "status" `elem` ["failed","interrupted","cancelled"]) turns)
     else pure (any (\current->D.workloadId current==at waiting "preparation" && (terminal current || at (D.workField current "preparation") "status" `elem` ["failed","stopped","stale","interrupted","declined"])) works)
+   Just (work,call) | D.workflowAgent call->agentReady s work (at (D.callField call "workflowAgent") "cohort") (D.agentCohort work call)
    Just (work,call)->
     if (child call || turnField turn "workflowWait"/=Null) && (at (D.workField work "workflowBudget") "status"/="reserved" || has (toJSON work) "workflowHalt") then pure False else case turnField turn "workflowWait" of
      Null->pure True
@@ -170,7 +230,7 @@ sourceResultOn db consumer caller reference previous=do
      states=map D.callState frontier
      outcome=D.workField source "outcome"
  require (not (null states) && all (`notElem` [D.CallFailed,D.CallInterrupted,D.CallCancelled,D.CallUnresolved]) states) 409 "Awaited execution did not complete successfully"
- if any (`elem` [D.CallQueued,D.CallRunning,D.CallDelegated,D.CallWaiting]) states then pure (pin,ResultPending) else do
+ if any (`elem` [D.CallQueued,D.CallRunning,D.CallDelegated,D.CallWaiting]) states || (D.callState root `elem` [D.CallQueued,D.CallRunning] && D.callField root "workflowWait"/=Null) then pure (pin,ResultPending) else do
   require (all (==D.CallCompleted) states && at outcome "status"=="Completed" && null (items (toJSON source) "remainingCriteria") && at (DB.workAssessment operations (toJSON source)) "status"=="Accepted") 409 "Awaited result has no accepted whole Task completion"
   let value=obj [("source",reference),("outcome",outcome),("value",get (D.codeProjection (D.workField source "codeExecution")) "runtimeResult")]
   require (BL.length (encode value)<=65536) 409 "Awaited result exceeds the workflow output bound"
@@ -273,10 +333,40 @@ timeReady s work call key=do
   DB.project s (agentIdText (D.callOwner call))
   pure False
 
+-- Runs under the existing Pulse lock even when the recipient is retired and
+-- therefore excluded from ordinary admission. A refusal settles this exact wait.
+agentReady :: Service -> D.Workload -> Text -> Value -> IO Bool
+agentReady s work key cohort=do
+ if D.workField work "executionGate"/=toJSON ExecutionOpen then pure False else do
+  checked<-try (do
+   local<-maybe (failure 409 "Required agent Call disappeared") pure (find (\call->get cohort "children"==toJSON [D.callIdentity call]) (D.workCalls work))
+   void (D.executionContract work local)
+   D.requireAgentRoute s (D.callOwner (NE.head (D.workCalls work))) (D.callOwner local)
+   wall<-getCurrentTime
+   require (maybe False (>wall) (parseTime (at (D.workField work "codeExecution") "workflowDeadline"))) 409 "Original workflow deadline expired during agent wait"
+   DB.connection s (\db->SQL.withTransaction db (validateOn db work (get cohort "version") (obj [])))
+   Effects.requireRunClear s (D.callIdentity local)
+   require (D.callState local `notElem` [D.CallFailed,D.CallInterrupted,D.CallUnresolved,D.CallCancelled]) 409 "Required agent result is unsuccessful or uncertain"
+   pure True) :: IO (Either APIError Bool)
+  case checked of
+   Right value->pure value
+   Left (APIError _ reason)->do
+    stop s (D.callIdentity (NE.head (D.workCalls work)))
+    DB.connection s $ \db->SQL.withTransaction db $ do
+     rows<-DB.queryRowsOn db "SELECT value FROM workloads WHERE id=?" ["value"] [SQL.SQLText (D.workloadId work)]
+     current<-case rows of [row]->DB.decodeStored (at row "value") >>= decodeValue 500; _->failure 409 "Agent workflow disappeared"
+     let updated=D.setWorkField "workflowCohorts" (put key (mergeFields [("status",str "blocked"),("reason",str reason)] cohort) (D.workField current "workflowCohorts")) current
+     DB.putValueOn db DB.Workloads (D.workloadId work) (toJSON updated)
+     forM_ [call | call<-NE.toList (D.workCalls current),D.callState call==D.CallCancelled] $ \call->Managed.transitionOn db (runIdText (D.callIdentity call)) (put "status" (str "cancelled") . put "error" (str reason))
+    forM_ (NE.toList (D.workCalls work)) (DB.project s . agentIdText . D.callOwner)
+    pure False
+
 dispatchWaits :: Service -> IO ()
 dispatchWaits s=do
  works<-D.readWorks s
- forM_ works $ \work->forM_ (pairs (D.workField work "workflowWaits")) $ \(key,record)->when (at record "status"=="waiting") $
+ forM_ works $ \work->forM_ (pairs (D.workField work "workflowCohorts")) $ \(key,cohort)->when (at cohort "kind"=="agent" && any (\call->toJSON (D.callIdentity call)==get cohort "parent" && D.callState call==D.CallQueued && D.callField call "workflowWait"==str key) (D.workCalls work)) (void (agentReady s work key cohort))
+ currentWorks<-D.readWorks s
+ forM_ currentWorks $ \work->forM_ (pairs (D.workField work "workflowWaits")) $ \(key,record)->when (at record "status"=="waiting") $
   forM_ (find ((==get record "call") . toJSON . D.callIdentity) (D.workCalls work)) $ \call->when (D.callState call==D.CallQueued) (void (timeReady s work call key))
 
 validateOn :: SQL.Connection -> D.Workload -> Value -> Value -> IO ()

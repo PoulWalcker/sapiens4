@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module Workflow (Yield(..), validate, selectInput, run, runRegion, contentHash, waitSpec, resultSpec) where
+module Workflow (Yield(..), validate, selectInput, run, runRegion, contentHash, waitSpec, resultSpec, agentRecipient) where
 
 import Control.Exception
 import Control.Monad
@@ -51,6 +51,11 @@ resultSpec value=either (Left . T.pack) Right (parseEither checked value)
   void (textFieldP "call" 100 source)
   pure source
 
+agentRecipient :: Value -> Either Text (Maybe Text)
+agentRecipient selected=either (Left . T.pack) Right (parseEither checked selected)
+ where
+ checked value=if get value "recipient"==Null then pure Nothing else Just <$> textFieldP "recipient" 128 value
+
 contentHash :: Value -> Text
 contentHash=canonicalHash
 
@@ -68,10 +73,14 @@ validate graph=either (Left . T.pack) Right (parseEither definition graph)
   unless (entry `elem` ids && all (\i->not (T.null i) && T.length i<=100) ids) (fail "Invalid workflow entry or node identity")
   forM_ (pairs nodes) $ \(identity,node)->do
    let kind=at node "kind"
-   onlyFields (case kind of "script"->["kind","source","input","next"]; "model"->["kind","instruction","input","next"]; "branch"->["kind","input","true","false"]; "finish"->["kind","input"]; "fork"->["kind","children","join"]; "join"->["kind","fork","input","next"]; "defer"->["kind","input","next"]; "awaitResult"->["kind","input","next"]; _->[]) node
-   unless (kind `elem` ["script","model","branch","finish","fork","join","defer","awaitResult"]) (fail "Unsupported workflow node kind")
+   onlyFields (case kind of "script"->["kind","source","input","next"]; "model"->["kind","instruction","input","next"]; "branch"->["kind","input","true","false"]; "finish"->["kind","input"]; "fork"->["kind","children","join"]; "join"->["kind","fork","input","next"]; "defer"->["kind","input","next"]; "awaitResult"->["kind","input","next"]; "agent"->["kind","instruction","criteria","input","recipient","next"]; _->[]) node
+   unless (kind `elem` ["script","model","branch","finish","fork","join","defer","awaitResult","agent"]) (fail "Unsupported workflow node kind")
    when (kind=="script") (void (textFieldP "source" 65536 node))
-   when (kind=="model") (void (textFieldP "instruction" 16000 node))
+   when (kind=="model" || kind=="agent") (void (textFieldP "instruction" 16000 node))
+   when (kind=="agent") $ do
+    criteria<-withObject "Agent step" (.: "criteria") node :: Parser [Text]
+    unless (not (null criteria) && length criteria<=100 && all (\value->not (T.null (T.strip value)) && T.length value<=8000) criteria) (fail "Agent step needs bounded nonempty criteria")
+    when (has node "recipient") (selector (get node "recipient"))
    unless (kind=="fork") (selector (get node "input"))
    when (kind=="fork") $ do
     children<-withObject "Fork" (.: "children") node :: Parser [Text]
@@ -119,7 +128,7 @@ validate graph=either (Left . T.pack) Right (parseEither definition graph)
        in unique (concatMap guaranteed groups)
        else case sets of []->[]; first:rest->foldl intersect first rest
   unless (identity==entry || not (null parents)) (fail "Workflow node is unreachable")
-  unless (all (`elem` available) (references (get (get nodes identity) "input"))) (fail "Workflow output reference is unavailable on an incoming path")
+  unless (all (`elem` available) (references (get (get nodes identity) "input")++references (get (get nodes identity) "recipient"))) (fail "Workflow output reference is unavailable on an incoming path")
   pure ((identity,available):known)
  region nodes stop initial identity=walk initial [identity]
   where
@@ -178,14 +187,16 @@ runRegion graph input authority entry stop load publish invoke=do
   saved<-load
   let receipts=get saved "nodes"; node=get (get graph "nodes") identity
   selected<-either (failure 422) pure (if at node "kind"=="fork" then Right Null else selectInput input receipts (get node "input"))
-  let request=obj [("node",node),("input",selected),("structureHash",str (contentHash graph)),("authority",authority)]
+  recipient<-if at node "kind"=="agent" && has node "recipient" then either (failure 422) pure (selectInput input receipts (get node "recipient")) else pure Null
+  let invocationInput=if at node "kind"=="agent" then obj [("input",selected),("recipient",recipient)] else selected
+      request=obj ([("recipient",recipient) | at node "kind"=="agent"]++[("node",node),("input",selected),("structureHash",str (contentHash graph)),("authority",authority)])
       hash_=canonicalHash request
       previous=get receipts identity
       store receipt=publish identity receipt
   when (previous/=Null) $ do
    require (at previous "requestHash"==hash_) 409 "Retained workflow request authority changed"
-   require (not (boolean (get previous "fixtureSimulation")) || (boolean (get authority "fixtureTimer") || boolean (get authority "fixtureResult"))) 409 "Fixture timer evidence cannot authorize business execution"
-  output<-if previous/=Null && not (at node "kind"=="fork" && at previous "status"=="admitted" || at node "kind" `elem` ["defer","awaitResult"] && at previous "status"=="waiting") then do
+   require (not (boolean (get previous "fixtureSimulation")) || (boolean (get authority "fixtureTimer") || boolean (get authority "fixtureResult") || boolean (get authority "fixtureAgent"))) 409 "Fixture timer evidence cannot authorize business execution"
+  output<-if previous/=Null && not (at node "kind"=="fork" && at previous "status"=="admitted" || at node "kind" `elem` ["defer","awaitResult","agent"] && at previous "status"=="waiting") then do
    require (at previous "requestHash"==hash_ && at previous "status"=="completed") 409 "Workflow admission is failed or uncertain; no automatic replay"
    require (at previous "outputHash"==canonicalHash (get previous "output")) 409 "Retained workflow output changed"
    pure (get previous "output")
@@ -200,13 +211,13 @@ runRegion graph input authority entry stop load publish invoke=do
       pure selected
      "finish"->pure selected
      "join"->pure selected
-     _->invoke identity node selected) :: IO (Either SomeException Value)
+     _->invoke identity node invocationInput) :: IO (Either SomeException Value)
     case result of
      Left exception | Just (_::Yield)<-fromException exception->throwIO exception
      Left exception->store (mergeFields [("status",str "unknown"),("reason",str (T.pack (displayException exception)))] admitted) >> throwIO exception
      Right value->do
       require (BL.length (encode value)<=65536) 422 "Workflow output exceeds 64 KiB"
-      let timerFields=[("fixtureSimulation",Bool True) | at node "kind" `elem` ["defer","awaitResult"] && (boolean (get authority "fixtureTimer") || boolean (get authority "fixtureResult"))]
+      let timerFields=[("fixtureSimulation",Bool True) | at node "kind" `elem` ["defer","awaitResult","agent"] && (boolean (get authority "fixtureTimer") || boolean (get authority "fixtureResult") || boolean (get authority "fixtureAgent"))]
           decisionFields=if at node "kind"=="branch" then [("selected",get node (if get value "value"==Bool True then "true" else "false")),("reason",get value "reason")] else []
       store (mergeFields ([("status",str "completed"),("output",value),("outputHash",str (canonicalHash value))]++decisionFields++timerFields) admitted)
       pure value

@@ -2,9 +2,9 @@
 
 Ordinary agent work keeps its existing loop. When preparation chooses a workflow, it
 produces a finite immutable structure containing isolated Python calculations,
-response-only model steps, strict Boolean branches and result steps. Tool-capable
-model steps, external effects and cycles are unavailable. Finite same-owner
-fork/join may run independent prepared regions in parallel.
+response-only model steps, authorized agent steps, strict Boolean branches and result
+steps. Isolated scripts retain their existing capability restrictions; cycles are
+unavailable. Finite fork/join may run independent prepared regions in parallel.
 
 A condition is retained data, not a prose edge evaluated implicitly. A calculation or
 explicit model step produces {value:boolean,reason:text}; a branch selects its existing
@@ -37,8 +37,9 @@ block the join rather than becoming missing values or partial success.
 Children use existing managed Calls, Pulse admission, owner capacity and process cleanup.
 A waiting parent is durably queued and releases its execution slot and lease; it reacquires
 capacity before continuing. It remains addressable by Stop. Each child has its own process
-handle and exact inherited root contract, implementation and cohort membership; other-Sapi
-assignment is unavailable. Ordinary work by other owners competes for the same host capacity.
+handle and checked cohort membership. Prepared regions inherit the exact root contract
+and implementation. Agent Calls have a local contract derived from their pinned node;
+explicit other-Sapi assignment uses the existing Chief routing permissions. Ordinary work by other owners competes for the same host capacity.
 
 A root repair/preparation reserves its existing resource once while its fork cohort is
 active. Children inherit that reservation rather than receiving fresh time. Recorded active
@@ -100,3 +101,39 @@ preparation returns retained evidence to the Sapi without replaying old provider
 Task details show preparation, version, checks, verification, result and Stop.
 No user Compose or Run action is required. Multi-input batches and prior business
 or unknown tool activity retain ordinary execution instead of changing execution.
+
+An instrumental step is a closed node
+`{kind:"agent",instruction,criteria:["local obligation"],input:SELECTOR,next:"id"}`
+with an optional `recipient:SELECTOR`. Recipient selects a nonempty Sapi ID or null
+for the current owner. Its output references must dominate the node just like input
+references. Recipient selection grants no authority: current owner/recipient activity,
+Chief-to-Sapi or Sapi-to-Chief routing, recipient availability and existing routing
+bounds are checked. A response-only content consumer cannot execute agent tools.
+
+The agent uses its ordinary authorized Sapi execution, workspace, tool policy and
+effect admission under one managed Call. Its internal provider tool cycle is bounded
+by the inherited resource and original deadline. Only an Outcome may finish that
+Call; it cannot compose, hand off, change the outer graph or publish root completion.
+Local criteria describe an intermediate obligation within the original assignment.
+The outer task retains its original accepted goal, inputs and completion criteria.
+
+The retained output is `{reply,outcome,author}`. Only a Completed local outcome with
+complete successful provider capture becomes an output. Existing script/model nodes
+and selectors can consume that output or produce a strict branch predicate. Text is
+not implicitly parsed into a Boolean or treated as proof of the whole task. Calls,
+ordinary tool evidence and local outcomes are visible separately from node receipts.
+
+The parent yields its slot while the agent Call is queued or running; agent Calls
+use the same Pulse, owner capacity, original root budget and Stop gate as other work.
+Parallel recipients share active-time union accounting and join still requires every
+child. Stop or changed authority prevents acceptance and later nodes. Incomplete or
+unknown effects remain held without automatic agent retry; completed outputs remain
+reusable across restart. Pending agent waits are also checked when a retired owner
+is excluded from ordinary admission, so refusal remains visible.
+
+Independent preparation examples supply explicitly simulated `modelStubs` for agent
+nodes. They invoke no agent tools and do not authorize business execution or activate
+the candidate. The receiving consumer still requires its checked candidate and own
+authorized actual occurrence/audit. The immutable candidate pins the agent instruction,
+criteria and additional workflow-agent prompt; ordinary Sapi policy remains the
+authority for tools rather than a permissions field in the graph.
