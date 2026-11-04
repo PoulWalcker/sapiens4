@@ -10,7 +10,7 @@ import Data.Aeson.Types (Parser)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Data.Time
+import Data.Time hiding (Minutes)
 import Data.Time.Zones (TZ, LocalToUTCResult(..), localTimeToUTCFull, utcToLocalTimeTZ)
 import Data.Time.Zones.All (tzByName)
 import Types
