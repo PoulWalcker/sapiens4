@@ -37,4 +37,16 @@ same node/successor through Pulse. The original business wall deadline is never 
 Defer's output is value; use that retained output instead of rewriting accepted inputs.
 Independent fixture timers are explicitly simulated after identical format validation;
 real authorized occurrences must actually wait. Fixtures never authorize business wake.
-Own-child result waiting uses the declared join. No external Task/Workflow references.
+Own-child result waiting uses the declared join.
+
+External whole Task results use {"kind":"awaitResult","input":SELECTOR,"next":"existing-node"}.
+Selected input is exactly {"source":{"workload":"root-workload-id","call":"root-call-id"},"progress":"why this result is needed"}.
+The exact source object must occur explicitly in accepted task input. Never invent an
+ID or use a mutable Workflow name, another owner, a Group or a partial Call result.
+The host pins the existing source contract and implementation, releases the slot and
+continues once only after accepted whole completion. Failed, unknown, deleted,
+rejected or inaccessible results block this path; never rerun the source automatically.
+Output is {source,outcome,value}; outcome is the accepted source outcome, and value is
+its retained runtime result (or null for ordinary tasks). This does not complete the
+waiting Task's own criteria. Independent fixtures supply a modelStubs entry for each
+selected awaitResult node, explicitly simulated and never business authority.

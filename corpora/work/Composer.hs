@@ -407,6 +407,11 @@ workflowFixture s running profile version fixture = do
       let prepared=D.workField current "preparation"
       D.saveWork s (D.setWorkField "preparation" (put "workflowFixtures" (put key (put "nodes" (put node receipt (get (get (get prepared "workflowFixtures") key) "nodes" `fallback` obj [])) (get (get prepared "workflowFixtures") key `fallback` obj [])) (get prepared "workflowFixtures" `fallback` obj [])) prepared) current)
      invoke nodeId node input=case at node "kind" of
+      "awaitResult"->do
+       void (either (failure 422) pure (Workflow.resultSpec input))
+       let stubs=get fixture "modelStubs"
+       require (has stubs nodeId) 422 "Independent fixture has no external result stub for the selected node"
+       pure (get stubs nodeId)
       "defer"->do
        wall<-getCurrentTime
        snd <$> either (failure 422) pure (Workflow.waitSpec wall (addUTCTime 1800 wall) input)
@@ -425,9 +430,10 @@ workflowFixture s running profile version fixture = do
         locked s $ do (current,_)<-D.getWork s (runId running); D.saveWork s (WC.container running receipt current))
        require (at result "status"=="exited" && get result "exitCode"==num 0 && not (boolean (get result "wasRunning"))) 422 "Workflow fixture script failed"
        either (failure 422 . T.pack) pure (eitherDecodeStrict (TE.encodeUtf8 (at result "output")))
- let entry=if WC.child call then at (WC.childData call) "entry" else at (get version "workflow") "entry"
+ let authority=if any ((=="awaitResult") . (`at` "kind") . snd) (pairs (get (get version "workflow") "nodes")) then put "fixtureResult" (Bool True) (select ["reference","workflowModel","workflowPrompt","runtime"] version) else select ["reference","workflowModel","workflowPrompt","runtime"] version
+     entry=if WC.child call then at (WC.childData call) "entry" else at (get version "workflow") "entry"
      stop=if WC.child call then Just (at (WC.childData call) "join") else Nothing
- value<-Workflow.runRegion (get version "workflow") (get fixture "input") (if any ((=="defer") . (`at` "kind") . snd) (pairs (get (get version "workflow") "nodes")) then put "fixtureTimer" (Bool True) (select ["reference","workflowModel","workflowPrompt","runtime"] version) else select ["reference","workflowModel","workflowPrompt","runtime"] version) entry stop loadTrace saveTrace invoke
+ value<-Workflow.runRegion (get version "workflow") (get fixture "input") (if any ((=="defer") . (`at` "kind") . snd) (pairs (get (get version "workflow") "nodes")) then put "fixtureTimer" (Bool True) authority else authority) entry stop loadTrace saveTrace invoke
  pure (obj [("status",str "exited"),("exitCode",num 0),("wasRunning",Bool False),("output",str (jsonText value)),("workflow",Bool True)])
 
 runWorkflowChild :: Service -> Run -> Turn -> IO (Text,[Value])

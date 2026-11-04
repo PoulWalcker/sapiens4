@@ -243,13 +243,13 @@ view m = V.node "section" [V.cls "routine-ui",V.label "Routines"] $
   waitPanel run = V.when (not $ A.null waits) $ V.div "routine-notice" $
     [V.textNode "h3" [] "Waiting steps"] <> map (\wait -> V.div "routine-wait"
       [V.p "" $ D.s "node" wait <> " · " <> D.s "status" wait
-      ,V.p "" $ "Due: " <> D.s "due" wait
+      ,V.p "" $ if D.valid (D.get "source" wait) then "Awaited task: " <> D.s "workload" (D.get "source" wait) <> " · Call: " <> D.s "call" (D.get "source" wait) else "Due: " <> D.s "due" wait
       ,V.p "" $ "Progress: " <> D.s "progress" wait
       ,V.p "routine-muted" $ "Next step: " <> D.s "next" wait
       ,V.when (D.s "reason" wait /= "") $ V.p "routine-problem" $ D.s "reason" wait]) waits
     where waits = D.rows "workflowWaits" run
   parallelPanel run = V.when (D.valid parallel) $ V.div "routine-notice" $
-    [V.textNode "h3" [] "Parallel steps"
+    [V.textNode "h3" [] "Workflow resource and child steps"
     ,V.p "routine-muted" $ "Active time (union): " <> show (D.int $ D.get "activeMilliseconds" parallel) <> " ms · " <> D.s "resourceStatus" parallel
     ,V.p "routine-muted" "Provider usage is summed separately; overlapping child time is counted once."
     ,V.when (D.s "reason" parallel /= "") $ V.p "routine-problem" $ D.s "reason" parallel] <>

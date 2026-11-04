@@ -69,7 +69,25 @@ an expired or blocked wait retains a visible reason. History shows due time, sav
 progress, successor and wait status. Independent preparation fixtures validate wait
 inputs using explicitly simulated timing; authorized occurrences perform real waits
 before activation. Waiting for declared child results uses the fork/join contract above;
-external Task or Workflow result references are unavailable.
+external results use an `awaitResult` node with `input` and an immutable `next`.
+Its selected input is exactly `{source:{workload,call},progress}`. The exact source
+object must occur explicitly in the accepted input. It identifies an existing personal
+root execution belonging to the same Sapi, including a separately started Task or
+Workflow; partial Calls, Group results and mutable Workflow names are unavailable.
+The host derives and retains the source Task identity, accepted contract hash and
+implementation binding. Only an accepted whole Completed result with a successful
+terminal frontier permits continuation. Delegated work retains its original root
+identity. The output contains `source`, the accepted `outcome`, and `value` (the retained
+runtime envelope, or null for an ordinary Task); the waiting Task still needs its own
+completion assessment.
+
+Result waits reuse the same Call, Pulse, resource, original wall deadline, Stop and
+restart rules as defer. Authority and source pins are checked both at readiness and
+at actual consumption after capacity admission. Failed, unresolved, unknown, stopped,
+deleted, rejected or inaccessible sources leave a visible blocked reason. No source
+is automatically rerun, and a blocked wait does not retarget a newer execution.
+Independent fixtures use explicitly simulated `modelStubs` entries for result nodes;
+they never grant access to a real source or authorize business continuation.
 
 For an accepted ordinary personal Task, its Sapi may choose prepared execution
 before business actions. Preparation checks a separate immutable candidate under
