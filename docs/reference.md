@@ -24,6 +24,15 @@ actions. Never-started queued work resumes after restart; previously running wor
 becomes interrupted and requires explicit retry. Inspect uncertain external
 outcomes before retrying. The shared computer allows one owner at a time.
 
+If Sapi creation was interrupted after its database profile was saved, restart
+restores missing workspace files and defaults a missing manager to Chief. If the
+original request explicitly named another manager, open the existing Sapi's
+settings, select that **Manager**, save, then retry the original Chief request.
+Keep the existing name and role; retrying the same `create_agent` operation reuses
+the Sapi once its manager matches. Do not create another Sapi to recover it.
+The intended non-Chief manager cannot be inferred safely from a partially saved
+profile, so this case requires an explicit correction.
+
 ## Notes and files
 
 Memo reads `workspaces/<id>/Notes.html`. Its wiki has `about`, `map` and `content`
