@@ -486,7 +486,8 @@ runDecision prepareSpecialist verifyCompletion s run turn state = do
       (existing,c) <- locked s (getWork s (turnId turn))
       case callOutput c of
        Just output -> do
-        when (callState c `elem` [CallCompleted,CallUnresolved]) (locked s (verifyCompletion existing))
+        -- Policy clarification needs a saved provisional choice; handoff keeps a queued child.
+        when (callState c `elem` [CallCompleted,CallUnresolved,CallWaiting]) (locked s (verifyCompletion existing))
         pure output
        Nothing -> do
         let node=callNode c
@@ -500,7 +501,7 @@ runDecision prepareSpecialist verifyCompletion s run turn state = do
              finish work updated = do
               let following=setCallFields [("observation",decisionRaw response)] updated
                   next=callNode following
-              when (callState following `elem` [CallCompleted,CallUnresolved]) (verifyCompletion work)
+              when (callState following `elem` [CallCompleted,CallUnresolved,CallWaiting]) (verifyCompletion work)
               saveWork s (withCall work following)
               accept s owner record (wireName node) (wireName next)
               pure (callOutput following)
