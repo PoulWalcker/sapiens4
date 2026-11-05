@@ -146,8 +146,7 @@ retainedTurn s owner identity = do
   files <- listDirectory directory
   foldM (readLatest directory) Nothing [file | file<-files,takeExtension file==".json"]
  where
- -- A turn can be retained again after an explicit retry; older attempts must
- -- not replace its most recent retry metadata. This scan runs only on request.
+ -- Retried Turns can appear in multiple archives; keep the latest attempt.
  readLatest directory current file = do
   turns <- readJSON (directory </> file) []
   pure $ foldl newer current (filter ((==identity) . turnId) turns)

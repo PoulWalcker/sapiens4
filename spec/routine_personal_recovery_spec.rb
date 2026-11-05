@@ -52,9 +52,6 @@ RSpec.describe 'Personal routine historical recovery', :desktop, :slow do
     desktop.click('Open PersonalHistorian')
   end
 
-  # Schema9 installation input, not evidence of an actual process crash.
-  # UUIDv5 is the persisted identity encoding; deadlines below are independent
-  # fixture data, not an implementation of the scheduler's admission algorithm.
   def recovery_identity(routine_id, due)
     namespace = ['6ba7b8119dad11d180b400c04fd430c8'].pack('H*')
     bytes = Digest::SHA1.digest(namespace + "#{routine_id}:#{due}").bytes.first(16)
@@ -125,8 +122,7 @@ RSpec.describe 'Personal routine historical recovery', :desktop, :slow do
     @desktop = nil
     host.stop
 
-    # Simulated persisted intermediate state: one accepted old snapshot without
-    # a materialized Turn, followed by exactly two deferred historical deadlines.
+    # Saved installation: one admitted snapshot and two deferred deadlines.
     anchor = Time.at((Time.now.to_i / 60) * 60).utc
     deadlines = [-75, -45, -15].map { |minutes| (anchor + minutes * 60).iso8601(6).sub('Z', '+00:00') }
     future_due = (anchor + 15 * 60).iso8601(6).sub('Z', '+00:00')

@@ -20,8 +20,7 @@ RSpec.describe 'Routine retry admission', :host do
     host.configure(rules: {'Execution' => {block: true, gate: 'routine-execution'}})
     host.stop
 
-    # Saved installation input: two already admitted deadlines, an older failed
-    # occurrence and a newer queued one. The real service owns execution/retry.
+    # Saved installation: an older failed Run and a newer queued Run.
     anchor = Time.now.utc
     created = anchor.iso8601(6).sub('Z', '+00:00')
     snapshots = [120, 60].map { |minutes| routine.merge('nextDue' => (anchor - minutes * 60).iso8601(6).sub('Z', '+00:00')) }
@@ -55,7 +54,6 @@ RSpec.describe 'Routine retry admission', :host do
     expect(host.request('POST', retry_path, {}).first).to eq(409)
     expect(JSON.parse(File.read(state_path)).fetch('turns').find { |turn| turn['id'] == older }).to eq(saved)
 
-    # A reservation belongs to the Routine, not its Sapi's unrelated work.
     host.api('POST', "/api/agents/#{owner}/turns/#{unrelated}/retry", {})
     host.turn(unrelated)
     Contract.wait(timeout: 85, description: 'newer Routine occurrence is executing at the provider gate') do
@@ -90,8 +88,7 @@ RSpec.describe 'Routine retry admission', :host do
       lead: owner, members: [owner, member]}, status: 201)
     host.stop
 
-    # Saved terminal Group installation, not a simulated crash: the original
-    # request has settled and its failure result is already in the task history.
+    # Saved terminal Group Run with a settled request and failure result.
     anchor = Time.now.utc
     created = anchor.iso8601(6).sub('Z', '+00:00')
     routine = {'id' => 'routine_sch_00001', 'owner' => group.fetch('id'), 'title' => 'Scheduled comparison',

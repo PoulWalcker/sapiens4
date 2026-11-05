@@ -35,7 +35,6 @@ module RoutineGroupRecovery
     end
   end
 
-  # UUID v5 is the saved-installation identity format, not a scheduler oracle.
   def saved_due_id(routine, due)
     namespace = ['6ba7b8119dad11d180b400c04fd430c8'].pack('H*')
     bytes = Digest::SHA1.digest(namespace + "#{routine}:#{due}").bytes.first(16)
@@ -59,10 +58,7 @@ module RoutineGroupRecovery
     deferred = {id: @deferred_id, routine: snapshot.merge('nextDue' => first_deferred), target: target,
       created: stamp.call(observed - 5 * 60), through: last_deferred, reason: {kind: 'active_run', run: @admitted_id}}
     current = routine.merge('nextDue' => stamp.call(observed + 5 * 60), 'runCount' => 1)
-    # Labelled persisted installation input, not an actual crash. Admission is
-    # durable but Group materialization has not begun: no half-written Group
-    # message/task/request transaction is invented. The compact deferred row
-    # represents exactly three two-minute historical deadlines.
+    # Saved installation: one admitted Run and three deferred deadlines.
     SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
       raise 'Only current schema 9 is supported' unless db.get_first_value('PRAGMA user_version') == 9
       db.transaction do

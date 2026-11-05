@@ -89,8 +89,6 @@ newtype GroupId = GroupId { groupIdText :: Text } deriving (Eq, Show)
 instance FromJSON GroupId where parseJSON value = GroupId <$> parseJSON value
 instance ToJSON GroupId where toJSON = str . groupIdText
 
--- Group recipients record admission routing, not permanent membership or access.
--- Materialization reads the current Group before creating a new request.
 data ScheduledTarget = PersonalTarget AgentId | GroupTarget GroupId AgentId deriving (Eq, Show)
 instance FromJSON ScheduledTarget where
  parseJSON = withObject "Scheduled target" $ \o -> do
@@ -139,7 +137,6 @@ instance ToJSON DeferredReason where
   AwaitingPolicy -> obj [("kind",str "awaiting_policy")]
   AwaitingRecovery -> obj [("kind",str "awaiting_recovery")]
 
--- A deadline exists independently of whether it waited, ran or was skipped.
 data Due = Due
  { dueId :: DueId, dueRoutine :: Routine, dueTarget :: ScheduledTarget
  , dueObserved :: UTCTime
@@ -156,8 +153,6 @@ instance ToJSON Due where
   [("id",toJSON (dueId due)),("routine",toJSON (dueRoutine due)),("target",toJSON (dueTarget due))
   ,("created",str (timestamp (dueObserved due)))]
 
--- A contiguous grid of deadlines with one immutable instruction/interval snapshot.
--- The constructor stays private; persisted ranges must be ordered and aligned.
 data DueSpan = DueSpan { spanFirst :: Due, spanThrough :: UTCTime } deriving (Eq, Show)
 instance FromJSON DueSpan where
  parseJSON value = withObject "Routine due range" (\o -> do
@@ -188,7 +183,6 @@ spanDueAt range time
 spanLast :: DueSpan -> Due
 spanLast range = spanDueAt range (spanThrough range)
 
--- Splitting retains the captured observation, target and instruction snapshot.
 spanTail :: DueSpan -> Maybe DueSpan
 spanTail range
  | spanCount range == 1 = Nothing
@@ -219,8 +213,6 @@ data StoredDue
  | Closed DueSpan ClosureReason
  deriving (Eq, Show)
 
--- At most one admission, compact closures, and unconsumed ranges.
--- Unmentioned spans remain queued. All replacements commit together.
 data DuePlan = KeepDues | ResolveDues (Maybe Due) [(DueSpan,ClosureReason)] [(DueSpan,DeferredReason)] deriving (Eq, Show)
 resolveDues :: UTCTime -> PolicySelection -> Maybe RunId -> [(DueSpan,DeferredReason)] -> DuePlan
 resolveDues time selection active pending
@@ -239,8 +231,6 @@ resolveDues time selection active pending
           admitted=spanLast . fst <$> listToMaybe eligible
           closed=[(range,SkippedByPolicy) | entry@(range,_) <- ordered, not (current entry)]
            ++ [(prefix,SkippedByPolicy) | (range,_) <- eligible, prefix <- maybeToList (spanPrefix range)]
-          -- Other current slots remain queued. If a range's stale prefix was
-          -- closed above, retain its current singleton under that deadline's ID.
           remaining=[(DueSpan (spanLast range) (spanThrough range),reason)
            | (range,reason) <- drop 1 eligible, spanCount range > 1]
       in ResolveDues admitted closed remaining
@@ -312,8 +302,7 @@ routineInput minutes execution = do
  interval <- validateValue 400 parseJSON minutes
  check (body `notElem` ["PROMPT","TODO"]) 400 "Replace PROMPT with the work to execute"
  pure (body,interval)
--- Match persisted rows before decoding so an unrelated corrupt Routine does not
--- block this write. Domain decisions receive only the decoded candidate.
+-- Decode only the candidate so unrelated corrupt rows cannot block this write.
 decodeRoutineCandidate :: RoutineEdit -> Minutes -> Text -> [Value] -> Validation (Maybe Routine)
 decodeRoutineCandidate edit interval body routines = traverse (validateValue 500 parseJSON) candidate
  where
@@ -369,8 +358,6 @@ save s owner minutes execution policy edit = do
      ReviseRoutine existing -> do
       sequenceId <- routineSequence existing
       latest <- readRoutineOn db sequenceId
-      -- Preserve the elapsed old grid before Edit replaces nextDue. Deliberate
-      -- paused time is excluded, just as it is when the schedule resumes.
       unless (routinePaused latest || routineDue latest > time) $ do
        target <- maybe (failure 409 "Routine target is unavailable before editing elapsed deadlines") pure destination
        validateTargetOn db target
@@ -389,7 +376,6 @@ save s owner minutes execution policy edit = do
    tryRoutine ("routine policy " <> routineId prepared) (ensurePolicyPreparation s prepared)
    pure result
 
--- Policy-only edits must not reset nextDue or overwrite a newer execution prompt.
 setPolicy :: Service -> Text -> Text -> Text -> PolicySelection -> MissedDuePolicy -> IO Value
 setPolicy s actor identity expectedPrompt expectedSelection policy = do
  sequenceId <- parseRoutineSequence identity
@@ -419,8 +405,6 @@ setPaused s owner identity paused = do
  DB.connection s $ \db -> SQL.withTransaction db $ do
   latest <- readRoutineOn db sequenceId
   if routinePaused latest == paused then pure (toJSON latest) else do
-   -- Capture deadlines already elapsed before Pause. Resume excludes only the
-   -- intentionally paused period; it must not erase an unobserved earlier due.
    captured <- case target of
     Nothing -> pure latest
     Just destination -> do
@@ -462,7 +446,6 @@ advanceDeadline :: Routine -> Routine
 advanceDeadline routine = routine
  { routineDue=addUTCTime (intervalSeconds (routineMinutes routine)) (routineDue routine) }
 
--- Capture an arbitrarily long downtime without enumerating its deadlines.
 captureDues :: UTCTime -> Routine -> ScheduledTarget -> ([DueSpan],Routine)
 captureDues time routine target
  | routineDue routine > time = ([],routine)
@@ -591,7 +574,7 @@ activePersonal s db routine dues = do
  active <- filterM (activeIdentity turns works projected) identities
  pure (case active of i:_ -> Just i; [] -> Nothing)
  where
- -- Bound placeholders across SQLite builds and batch historic Run lookups.
+ -- Bound placeholders for SQLite builds with lower variable limits.
  readRuns _ _ [] = pure []
  readRuns query columns identities = do
   let (batch,remaining)=splitAt 128 identities
@@ -633,8 +616,7 @@ activeRun s db routine target dues = case [occurrenceId occurrence | Admitted oc
   PersonalTarget _ -> activePersonal s db routine dues
   GroupTarget _ _ -> activeGroup db routine
 
--- The caller holds the host lock through requeueing. A manual retry reserves
--- the same Routine admission as an automatic occurrence, even while paused.
+-- Caller must hold the host lock through requeueing.
 ensureRetryAvailable :: Service -> Turn -> IO ()
 ensureRetryAvailable s turn = when (has origin "routine") $ do
  sequenceId <- parseRoutineSequence (at origin "routine")
@@ -660,8 +642,7 @@ occurrenceTurn occurrence = newTurn (occurrenceId occurrence) Chat
   ,("due",get value "nextDue"),("title",get value "title"),("minutes",toJSON (routineMinutes routine))
   ,("taskType",str "automated"),("executionPrompt",str (routinePrompt routine))]
 
--- Admission fixes the current instructions; the original deadline owns identity
--- and interval. Never replace its nextDue with the edited schedule's nextDue.
+-- Run identity uses the original deadline, even after instruction edits.
 prepareOccurrence :: UTCTime -> Routine -> ScheduledTarget -> Due -> Validation ScheduledOccurrence
 prepareOccurrence time current target due = do
  let original=dueRoutine due
@@ -706,8 +687,7 @@ admitDue s time candidate target = do
         [SQL.SQLText (jsonText (merge (toJSON due) (obj [("closure",toJSON reason)]))),SQL.SQLText (dueIdText (dueId (spanFirst due)))]
        changed <- SQL.changes db
        require (changed == 1) 409 "Deferred range changed before closure"
-      -- Each durable row retains its own closure. Summarize the batch in the
-      -- bounded activity feed instead of replacing that feed thousands of times.
+      -- Keep per-deadline closures in storage and emit one batch event.
       case closed of
        [] -> pure ()
        (first,reason):rest -> do
@@ -767,8 +747,6 @@ validateTargetOn db target = case target of
   require (not (boolean (get value "archived")) && get value "lead" == toJSON agent)
    409 "Group changed before routine admission"
 
--- The pending Routine is the durable intent; the existing Task owns execution,
--- failure and retry. Stable identity repairs partial creation without new calls.
 policyPreparationId :: Routine -> RunId
 policyPreparationId routine = stableRunId ("routine-policy:" <> routineId routine <> ":" <> routinePrompt routine)
 
@@ -781,8 +759,6 @@ policyPreparationCompletion owner identity routine
  | identity /= policyPreparationId routine = Left PolicyInstructionsChanged
  | otherwise = Left PolicyNotSaved
 
--- Callers hold the host lock through completion. Read the authoritative Routine
--- after execution; a newer valid selection satisfies setup without another write.
 verifyPolicyPreparation :: Service -> Text -> RunId -> Value -> IO ()
 verifyPolicyPreparation s owner identity origin = when (has origin "policyRoutine") $ do
  sequenceId <- parseRoutineSequence (at origin "policyRoutine")
@@ -806,8 +782,7 @@ verifyPolicyPreparation s owner identity origin = when (has origin "policyRoutin
 
 data GroupPolicyPreparation = KeepGroupPolicyPreparation | StartGroupPolicyPreparation (Maybe G.GroupRequest)
 
--- A leadership change may supersede queued or terminal setup, never a running
--- call. The projected Turn is authoritative when the Request has not caught up.
+-- Use the projected Turn when Request status lags behind execution.
 groupPolicyPreparation :: AgentId -> Maybe (G.GroupRequest,Maybe TurnStatus) -> GroupPolicyPreparation
 groupPolicyPreparation _ Nothing = StartGroupPolicyPreparation Nothing
 groupPolicyPreparation lead (Just (request,projected))
@@ -832,7 +807,6 @@ ensurePolicyPreparation s routine = case routinePolicy routine of
      state <- agentState s (agentIdText agent)
      archived <- DB.queryRows s "SELECT id FROM turns WHERE id=? UNION SELECT id FROM workloads WHERE id=?"
       ["id"] [SQL.SQLText (runIdText identity),SQL.SQLText (runIdText identity)]
-     -- Conversation retention removes old Turns, not their durable history.
      when (any ((==identity) . turnId) (agentTurns state) || null archived) $
       materializePersonal s agent turn
     GroupTarget group agent -> do
@@ -849,8 +823,7 @@ ensurePolicyPreparation s routine = case routinePolicy routine of
      case groupPolicyPreparation agent projected of
       KeepGroupPolicyPreparation -> pure ()
       StartGroupPolicyPreparation predecessor -> do
-       -- Save cancellation before the successor. Restart reprojects the old
-       -- Turn before resuming setup, so a crash cannot leave two runnable Turns.
+       -- Persist cancellation before the successor so recovery cannot run both.
        forM_ predecessor $ \previous -> when (G.requestStatus previous == Queued) $ do
         let oldOwner=agentIdText (G.requestTarget previous)
         modifyTurns s oldOwner $ \saved -> if turnId saved == G.requestId previous
@@ -929,11 +902,8 @@ materializePersonal s agent turn = do
    ,("chat",arr (items currentState "chat"++[obj
      [("role",str "user"),("content",str (turnInput turn)),("turn",str identity)
      ,("time",created),("origin",origin)]]))])
- -- Retention leaves durable terminal history. Recreating its admission snapshot
- -- would queue the old Run again and regress its projected terminal status.
+ -- Retained terminal Runs must not be recreated or restarted.
  unless (materialization == KeepRetainedHistory) (DB.project s owner)
- -- A live terminal Turn can still need its final projection after interruption,
- -- but its Run must not gain or restart execution work during recovery.
  when (materialization `elem` [CreateTurn,KeepActiveTurn]) $ do
   found <- D.findWork s (turnId turn)
   when (isNothing found) (D.begin s agent turn)
@@ -958,9 +928,7 @@ groupRecoveryReason problem = case problem of
  GroupArchived -> "Routine recovery is waiting: restore this archived Group to continue the same Run."
  LeadUnavailable -> "Routine recovery is waiting: choose an active Group Lead to continue the same Run."
 
--- The admission snapshot stays unchanged. Only a new Group request is routed to
--- the current Lead; an existing request owns its assignment and execution history.
--- Callers hold the host lock, including while reading retirement settings.
+-- Existing requests keep their assignee; new requests use the current Lead.
 materializeGroup :: Service -> GroupId -> Turn -> IO Materialization
 materializeGroup s groupId turn = DB.connection s $ \db -> SQL.withTransaction db $ do
  let owner=groupIdText groupId

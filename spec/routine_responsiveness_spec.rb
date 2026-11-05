@@ -110,8 +110,6 @@ RSpec.describe 'Routine responsiveness and pending deadlines', :desktop, :slow d
     busy_journal = File.join(busy_workspace, 'effects.txt')
     other_journal = File.join(other_workspace, 'effects.txt')
 
-    # These rules select the actual received routine instructions, including
-    # after Edit; the fixture never swaps a global old response for a new one.
     host.configure(rules: {
       "#{chief}:Assessing" => {response: decision('FitsSpecialization', mode: 'Repl', reply: 'Chief remains responsive during the inventory report.')}
     }, messages: [
@@ -131,8 +129,6 @@ RSpec.describe 'Routine responsiveness and pending deadlines', :desktop, :slow d
     select_routine_owner('OrchardChecker')
     edit_routine('OrchardChecker', other_id, 1, independent_prompt, previous_minutes: 10)
 
-    # A newly edited minute schedule is due after 60 seconds, then waits for
-    # the host's next real minute pulse. No scheduler clock is replaced.
     old_call = Contract.wait(timeout: 150, description: 'busy routine reaches its external execution gate') do
       routine_executions(busy_owner).first
     end
@@ -194,8 +190,6 @@ RSpec.describe 'Routine responsiveness and pending deadlines', :desktop, :slow d
     expect(File.exist?(busy_journal)).to eq(false)
     host.release('busy-old-release')
 
-    # Scheduled output publishes on a minute pulse; the following pulse may
-    # admit the retained deadline after the previous Turn becomes terminal.
     new_call = Contract.wait(timeout: 150, description: 'run_latest admits the retained latest deadline after the gated run') do
       routine_executions(busy_owner).find { |call| routine_context(call).fetch('originalIntent') == new_prompt }
     end

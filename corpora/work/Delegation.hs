@@ -498,7 +498,6 @@ runDecision prepareSpecialist verifyCompletion s run turn state = do
       (existing,c) <- locked s (getWork s (turnId turn))
       case callOutput c of
        Just output -> do
-        -- Policy clarification needs a saved provisional choice; handoff keeps a queued child.
         when (callState c `elem` [CallCompleted,CallUnresolved,CallWaiting]) (locked s (verifyCompletion existing))
         pure output
        Nothing -> do

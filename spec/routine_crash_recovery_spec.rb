@@ -44,8 +44,7 @@ RSpec.describe 'Routine recovery with unknown external outcomes', :desktop, :slo
     crash_start_minute_schedule('CrashPersonal', personal_routine)
     crash_select_group
     crash_start_minute_schedule('Crash Group', group_routine)
-    # These gates run AFTER the append and BEFORE any model reply. This is a
-    # process crash with an unknown external outcome, not a saved-state fixture.
+    # Crash after the effect, before the provider reply.
     Contract.wait(timeout: 150, description: 'both scheduled performers append an effect and wait before replying') do
       crash_entries(personal_journal).size == 1 && crash_entries(group_journal).size == 1
     end
@@ -77,8 +76,7 @@ RSpec.describe 'Routine recovery with unknown external outcomes', :desktop, :slo
     desktop.close
     @desktop = nil
     host.process.signal('KILL')
-    # Kill only the exact fixture processes captured above; otherwise their
-    # inherited pipes can keep the dead host's stdout readers alive.
+    # Orphan providers retain the host's stdout pipes.
     crash_cleanup_providers
     host.crash
     host.start
@@ -122,7 +120,6 @@ RSpec.describe 'Routine recovery with unknown external outcomes', :desktop, :slo
       crash_group.fetch('requests').find { |row| row['id'] == group_run }['status'] == 'cancelled'
     end
     crash_select_personal
-    # The warning disclosure remains expanded across conversation navigation.
     crash_click_visible('Retry')
     Contract.wait(timeout: 85, description: 'explicit Personal retry reaches the external action gate as attempt two') do
       crash_entries(personal_journal).size == 2 && crash_task(personal, personal_run).fetch('execution')['attempt'] == 2

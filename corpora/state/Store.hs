@@ -104,12 +104,9 @@ initialize s = connection s $ \db -> do
    "CREATE TABLE IF NOT EXISTS activity_events (id INTEGER PRIMARY KEY, owner TEXT NOT NULL, timestamp TEXT NOT NULL, actor TEXT NOT NULL, entity TEXT NOT NULL, event TEXT NOT NULL, agency TEXT, details TEXT NOT NULL)",
    "CREATE INDEX IF NOT EXISTS activity_events_owner ON activity_events(owner,id)"]
   when (version `elem` [1,2]) $ execute_ db "INSERT OR IGNORE INTO turns SELECT * FROM jobs WHERE flow IN ('chat','computer')"
-  -- All unreleased Routine changes form a single upgrade from main's schema 8.
   when (version < 9) $ do
-   -- Absence of a policy is explicit; preserve existing choices and corrupt rows.
    execute_ db "UPDATE scheduled_routines SET value=json_set(value,'$.policySelection',json('{\"kind\":\"awaiting_selection\"}')) WHERE CASE WHEN json_valid(value) THEN json_type(value)='object' AND json_type(value,'$.policySelection') IS NULL ELSE 0 END"
-   -- Schema 8 treated absent/null paused as False. Store that legacy meaning
-   -- once; current Routine decoding requires an explicit lifecycle boolean.
+   -- Schema 8 treated absent/null paused as False.
    execute_ db "UPDATE scheduled_routines SET value=json_set(value,'$.paused',json('false')) WHERE CASE WHEN json_valid(value) THEN json_type(value)='object' AND (json_type(value,'$.paused') IS NULL OR json_type(value,'$.paused')='null') ELSE 0 END"
    execute_ db "PRAGMA user_version=9"
   execute_ db "CREATE INDEX IF NOT EXISTS routine_occurrences_open_routine ON routine_occurrences(CASE WHEN json_valid(value) THEN json_extract(value,'$.routine.id') ELSE NULL END) WHERE status<>'closed'"

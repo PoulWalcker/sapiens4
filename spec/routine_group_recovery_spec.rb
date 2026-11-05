@@ -44,8 +44,6 @@ RSpec.describe 'Group routine routing after recovery', :desktop, :slow do
     end
     @routine_id = routine.fetch('id')
     expect(routine.fetch('policySelection')).to eq('kind' => 'awaiting_selection')
-    # External model decision input copies the public saved CAS fields. Only the
-    # real provider process submits routine_policy using fresh host-control.json.
     Contract.atomic_json(policy_file, {op: 'routine_policy', id: @routine_id, expectedPrompt: routine.fetch('prompt'),
       expectedSelection: routine.fetch('policySelection'), missedPolicy: 'skip_missed'})
     host.release('group-policy-ready')
@@ -60,7 +58,6 @@ RSpec.describe 'Group routine routing after recovery', :desktop, :slow do
     desktop.click('Sapi settings')
     lead = desktop.find('Lead', role: %w[AXPopUpButton AXComboBox])
     desktop.click_node(lead)
-    # The three active choices are Chief, OldLead, CurrentLead in creation order.
     desktop.key('home')
     2.times { desktop.key('down') }
     desktop.key('return')
@@ -81,7 +78,6 @@ RSpec.describe 'Group routine routing after recovery', :desktop, :slow do
     host.stop
     fixture = install_group_recovery_fixture(routine, old_lead)
     host.start
-    # A fresh window opens Chief; the saved mention still reaches the archived Group.
     @desktop = Gem.win_platform? ? Desktop.new(process: host.process) : Desktop.new(host.url)
     desktop.click('Open chat with Recovery Group')
     desktop.see('Archived · history is preserved.')
@@ -97,8 +93,6 @@ RSpec.describe 'Group routine routing after recovery', :desktop, :slow do
     desktop.click('Sapi settings')
     desktop.click('Restore Group')
     desktop.click('Chat')
-    # Schedule pause does not revoke a previously admitted Run. Launch and
-    # publication use consecutive real minute pulses after this host restart.
     recovered = await_group_result(@admitted_id, description: 'paused admitted Group run executes and publishes at the current Lead')
     desktop.see('Group recovery result: one current Lead observation recorded.')
     expect(group_routine).to include('paused' => true, 'runCount' => 1)
@@ -112,9 +106,7 @@ RSpec.describe 'Group routine routing after recovery', :desktop, :slow do
     group_message("Resume Scheduled Routine\n@#{@routine_id}")
     resumed = Contract.wait(description: 'Group schedule resumed in UI') { row = group_routine; row unless row['paused'] }
     next_due = resumed.fetch('nextDue')
-    # The two-minute interval gives Pause a full minute of margin after the
-    # fresh admission. Dispatch precedes publication, so pause before awaiting
-    # that publication to avoid admitting another deadline on its pulse.
+    # Pause before publication's pulse can admit the next deadline.
     fresh = Contract.wait(timeout: 200, description: 'old deferred range closes without effects and exactly one fresh deadline is admitted') do
       rows = group_record.fetch('requests').select { |row| row.dig('origin', 'routine') == @routine_id }
       rows.find { |row| row['id'] != @admitted_id }

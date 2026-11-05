@@ -10,7 +10,6 @@ RSpec.describe 'Routine policy setup after Group leadership changes', :host do
       prompt: 'Prepare a periodic comparison.', missedPolicy: 'run_latest').fetch('routine')
     host.stop
     @routine.merge!('owner' => @group.fetch('id'), 'policySelection' => {'kind' => 'awaiting_selection'})
-    # UUIDv5 is the persisted setup identity encoding, not a scheduler oracle.
     namespace = ['6ba7b8119dad11d180b400c04fd430c8'].pack('H*')
     bytes = Digest::SHA1.digest(namespace + "routine-policy:#{@routine['id']}:#{@routine['prompt']}").bytes.first(16)
     bytes[6], bytes[8] = (bytes[6] & 15) | 80, (bytes[8] & 63) | 128
@@ -28,8 +27,7 @@ RSpec.describe 'Routine policy setup after Group leadership changes', :host do
       expectedSelection: {kind: 'awaiting_selection'}, missedPolicy: 'skip_missed'}
   end
 
-  # Saved installation input: these cases describe a pending setup accepted
-  # before a leadership transfer. Startup and execution use the real service.
+  # Saved setup accepted before a leadership transfer.
   def install_setup(status:, materialized:, lead: @new_lead)
     raise 'Fixture requires a stopped host' if host.process
     @original = {'id' => @identity, 'target' => @old_lead, 'status' => status,
@@ -138,8 +136,6 @@ RSpec.describe 'Routine policy setup after Group leadership changes', :host do
       request if request['status'] == 'running' && host.calls.size == 1
     end
     host.api('PUT', path, {revision: group.fetch('revision'), lead: @old_lead})
-    # Re-saving the same instructions invokes normal setup preparation now,
-    # proving it does not depend on waiting for another minute tick.
     host.api('POST', path + '/messages', {text: "Edit @#{@routine['id']} ( #{@routine['title']} )\n" \
       "Edit Frequency (prev every 30 minutes): new every 30 minutes\n" \
       "Edit Execution Prompt as: #{@routine['prompt']}"}, status: 202)
