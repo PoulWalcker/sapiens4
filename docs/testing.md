@@ -56,6 +56,21 @@ the test instead of silently skipping it. Unsupported platforms and Windows-only
 contracts remain pending on macOS.
 Failed desktop scenarios write accessible content to `tmp/desktop-failure.txt`.
 
+The four slow routine E2E cases cover independent work and coalescing, historical
+Personal recovery, Group routing with skipped deadlines, and a real process crash
+after an external effect. Run them serially on an unlocked desktop. On macOS,
+keep the display awake for the real minute pulses:
+
+```sh
+caffeinate -di ruby submodules/libs4/ruby/bundle.rb exec rspec \
+  spec/routine_responsiveness_spec.rb spec/routine_personal_recovery_spec.rb \
+  spec/routine_group_recovery_spec.rb spec/routine_crash_recovery_spec.rb
+```
+
+Allow about 25–30 minutes; run only the affected scenario while iterating.
+The model is a controlled executable, so these cases do not use paid calls or
+establish real-model reasoning quality. The SIGKILL case is pending on Windows.
+
 Use mouse clicks to establish that controls are reachable; accessibility
 invocation alone can activate offscreen controls. Rediscover moving targets and
 verify editor focus and exact values. Retry only observations or rejections known
