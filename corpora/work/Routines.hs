@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Routines
- ( Minutes, Routine(..), routineSummaries, storeRoutine, initializeRoutines
+ ( Minutes, Routine, routineSummaries, storeRoutine, initializeRoutines
  , MissedDuePolicy(..), RoutineEdit(..), save, setPolicy, setPaused, command, receipt, acknowledge, dispatch, restoreOccurrences
  , verifyPolicyPreparation
  ) where
@@ -300,8 +300,8 @@ initializeRoutines s = do
   routine <- decodeValue 500 r
   unless (routinePaused routine) (ensurePolicyPreparation s routine)
 data RoutineEdit = AddRoutine (Maybe Text) | EditRoutine Text (Maybe Int)
-data RoutineWrite = NewRoutine (Maybe Text) | ReviseRoutine Value
-data RoutineSelection = RoutineReplay Value | RoutineChange RoutineWrite
+data RoutineWrite = NewRoutine (Maybe Text) | ReviseRoutine Routine
+data RoutineSelection = RoutineReplay Routine | RoutineChange RoutineWrite
 
 routineInput :: Value -> Value -> Validation (Text,Minutes)
 routineInput minutes execution = do
@@ -309,23 +309,35 @@ routineInput minutes execution = do
  interval <- validateValue 400 parseJSON minutes
  check (body `notElem` ["PROMPT","TODO"]) 400 "Replace PROMPT with the work to execute"
  pure (body,interval)
-selectRoutine :: RoutineEdit -> Value -> Text -> [Value] -> Validation RoutineSelection
-selectRoutine edit minutes body routines = case edit of
- EditRoutine identity previous -> do
-  existing <- maybe (Left (APIError 404 "Unknown Scheduled Routine in this conversation")) Right (findId identity routines)
-  forM_ previous $ \old -> check (int (get existing "minutes")==old) 409 "Frequency changed; open Edit again for the current routine"
+-- Match persisted rows before decoding so an unrelated corrupt Routine does not
+-- block this write. Domain decisions receive only the decoded candidate.
+decodeRoutineCandidate :: RoutineEdit -> Minutes -> Text -> [Value] -> Validation (Maybe Routine)
+decodeRoutineCandidate edit interval body routines = traverse (validateValue 500 parseJSON) candidate
+ where
+ candidate = case edit of
+  EditRoutine identity _ -> findId identity routines
+  AddRoutine source -> source >>= \call -> find (\r -> get r "sourceCall" == str call && get r "minutes" == toJSON interval && at r "prompt" == body) routines
+
+selectRoutine :: RoutineEdit -> Maybe Routine -> Validation RoutineSelection
+selectRoutine edit candidate = case edit of
+ EditRoutine _ previous -> do
+  existing <- maybe (Left (APIError 404 "Unknown Scheduled Routine in this conversation")) Right candidate
+  forM_ previous $ \old -> check (minuteCount (routineMinutes existing)==old) 409 "Frequency changed; open Edit again for the current routine"
   pure (RoutineChange (ReviseRoutine existing))
- AddRoutine source -> case source >>= \call -> find (\r -> get r "sourceCall" == str call && get r "minutes" == minutes && at r "prompt" == body) routines of
+ AddRoutine source -> case candidate of
   Just existing -> Right (RoutineReplay existing)
   Nothing -> Right (RoutineChange (NewRoutine source))
 routineValue :: UTCTime -> Text -> Minutes -> Text -> Maybe MissedDuePolicy -> RoutineWrite -> Value
 routineValue time owner interval body policy change = merge initial (obj
  [("owner",str owner),("title",str (T.unwords (take 7 (T.words body)))),("minutes",toJSON interval)
  ,("prompt",str body),("updated",str (timestamp time)),("nextDue",str (timestamp (addUTCTime (intervalSeconds interval) time)))
- ,("policySelection",maybe (get initial "policySelection") (toJSON . PolicySelected) policy)])
+ ,("policySelection",toJSON (maybe initialPolicy PolicySelected policy))])
  where
+ initialPolicy = case change of
+  ReviseRoutine existing -> routinePolicy existing
+  NewRoutine _ -> AwaitingSelection
  initial = case change of
-  ReviseRoutine existing -> existing
+  ReviseRoutine existing -> toJSON existing
   NewRoutine source -> obj ([("created",str (timestamp time)),("runCount",num 0),("paused",Bool False),("policySelection",toJSON AwaitingSelection)] ++ [("sourceCall",str call) | call <- maybeToList source])
 
 save :: Service -> Text -> Value -> Value -> Maybe MissedDuePolicy -> RoutineEdit -> IO Value
@@ -337,23 +349,22 @@ save s owner minutes execution policy edit = do
   require (not (boolean (get g "archived"))) 409 "Restore this Group before changing its work"
  else requireActive s owner
  routines <- filter ((==owner) . (`at` "owner")) <$> DB.values s DB.ScheduledRoutines
- selected <- validated (selectRoutine edit minutes body routines)
+ selected <- validated (decodeRoutineCandidate edit interval body routines >>= selectRoutine edit)
  case selected of
   RoutineReplay existing -> do
-   forM_ policy $ \chosen -> require (get existing "policySelection" == toJSON (PolicySelected chosen))
+   forM_ policy $ \chosen -> require (routinePolicy existing == PolicySelected chosen)
     409 "This creation already has a different policy; update the existing routine"
-   pure existing
+   pure (toJSON existing)
   RoutineChange change -> do
    destination <- case change of
     NewRoutine _ -> pure Nothing
-    ReviseRoutine existing -> decodeValue 500 existing >>= scheduledTarget s
+    ReviseRoutine existing -> scheduledTarget s existing
    time <- getCurrentTime
    result <- DB.connection s $ \db -> SQL.withTransaction db $ do
     captured <- case change of
      NewRoutine _ -> pure change
      ReviseRoutine existing -> do
-      previous <- decodeValue 500 existing
-      sequenceId <- routineSequence previous
+      sequenceId <- routineSequence existing
       latest <- readRoutineOn db sequenceId
       -- Preserve the elapsed old grid before Edit replaces nextDue. Deliberate
       -- paused time is excluded, just as it is when the schedule resumes.
@@ -366,7 +377,7 @@ save s owner minutes execution policy edit = do
        let reason=deferralReason (routinePolicy latest) active
        mapM_ (insertDeferredOn db reason) elapsed
        recordDeferralOn s db latest reason elapsed
-      pure (ReviseRoutine (toJSON latest))
+      pure (ReviseRoutine latest)
     saved <- DB.saveRoutineOn db (routineValue time owner interval body policy captured)
     let action = case change of NewRoutine _ -> "routine.created"; ReviseRoutine _ -> "routine.updated"
     DB.recordOn s db [owner] (at saved "id") action saved "admin" Nothing
