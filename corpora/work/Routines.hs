@@ -267,13 +267,16 @@ routineSummaries s = do
  routines <- DB.values s DB.ScheduledRoutines
  rows <- DB.queryRows s "SELECT id,value,status FROM routine_occurrences WHERE status='deferred' ORDER BY rowid" ["id","value","status"] []
  dues <- catMaybes <$> traverse readSummaryDue rows
- let deferred=sortOn (routineDue . dueRoutine . spanFirst) [range | Deferred range _ <- dues]
-     pending routine = filter ((==at routine "id") . routineId . dueRoutine . spanFirst) deferred
-     summarize routine = case pending routine of
-      [] -> routine
-      due:rest -> merge routine (obj
-       [("deferredCount",toJSON (sum (map spanCount (due:rest))))
-       ,("oldestDeferredDue",get (toJSON (dueRoutine (spanFirst due))) "nextDue")])
+ let deferred=M.fromListWith combine
+      [(routineId (dueRoutine (spanFirst range)),(spanCount range,spanFirst range))
+      | Deferred range _ <- dues]
+     combine (count,oldest) (otherCount,otherOldest) =
+      (count+otherCount,if routineDue (dueRoutine oldest) < routineDue (dueRoutine otherOldest) then oldest else otherOldest)
+     summarize routine = case M.lookup (at routine "id") deferred of
+      Nothing -> routine
+      Just (count,oldest) -> merge routine (obj
+       [("deferredCount",toJSON count)
+       ,("oldestDeferredDue",get (toJSON (dueRoutine oldest)) "nextDue")])
  pure (map summarize routines)
  where
  readSummaryDue row = (Just <$> readStoredDue row) `catch` invalidSummary row
