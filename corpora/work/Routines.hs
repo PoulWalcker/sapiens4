@@ -89,6 +89,8 @@ newtype GroupId = GroupId { groupIdText :: Text } deriving (Eq, Show)
 instance FromJSON GroupId where parseJSON value = GroupId <$> parseJSON value
 instance ToJSON GroupId where toJSON = str . groupIdText
 
+-- Group recipients record admission routing, not permanent membership or access.
+-- Materialization reads the current Group before creating a new request.
 data ScheduledTarget = PersonalTarget AgentId | GroupTarget GroupId AgentId deriving (Eq, Show)
 instance FromJSON ScheduledTarget where
  parseJSON = withObject "Scheduled target" $ \o -> do
@@ -792,11 +794,12 @@ ensurePolicyPreparation s routine = case routinePolicy routine of
 
 materializeOccurrence :: Service -> ScheduledOccurrence -> IO ()
 materializeOccurrence s occurrence = do
- case occurrenceTarget occurrence of
-  PersonalTarget agent -> materializePersonal s agent (occurrenceTurn occurrence)
-  GroupTarget group agent -> materializeGroup s group agent (occurrenceTurn occurrence)
- DB.executeSQL s "UPDATE routine_occurrences SET status='admitted_ready' WHERE id=? AND status='admitted_pending'"
-  [SQL.SQLText (runIdText (occurrenceId occurrence))]
+ materialization <- case occurrenceTarget occurrence of
+  PersonalTarget agent -> materializePersonal s agent (occurrenceTurn occurrence) >> pure Ready
+  GroupTarget group _ -> materializeGroup s group (occurrenceTurn occurrence)
+ when (materialization == Ready) $
+  DB.executeSQL s "UPDATE routine_occurrences SET status='admitted_ready' WHERE id=? AND status='admitted_pending'"
+   [SQL.SQLText (runIdText (occurrenceId occurrence))]
 
 materializePersonal :: Service -> AgentId -> Turn -> IO ()
 materializePersonal s agent turn = do
@@ -821,30 +824,70 @@ materializePersonal s agent turn = do
  when (D.callState call == D.CallRunning && null (D.workItems work "decisions")) $
   D.saveWork s (D.withCall work call { D.callProgress=D.QueuedAt (D.callNode call) })
 
-materializeGroup :: Service -> GroupId -> AgentId -> Turn -> IO ()
-materializeGroup s groupId agent turn = DB.connection s $ \db -> SQL.withTransaction db $ do
+data GroupMaterialization = ExistingRequest | CreateFor AgentId
+data GroupRecoveryError = GroupArchived | LeadUnavailable
+
+groupMaterialization :: G.GroupRecord -> Maybe G.GroupRequest -> Bool -> Either GroupRecoveryError GroupMaterialization
+groupMaterialization group existing leadActive
+ | isJust existing = Right ExistingRequest
+ | G.groupArchived group = Left GroupArchived
+ | not leadActive = Left LeadUnavailable
+ | otherwise = Right (CreateFor (rosterLead (G.groupRoster group)))
+
+groupRecoveryReason :: GroupRecoveryError -> Text
+groupRecoveryReason problem = case problem of
+ GroupArchived -> "Routine recovery is waiting: restore this archived Group to continue the same Run."
+ LeadUnavailable -> "Routine recovery is waiting: choose an active Group Lead to continue the same Run."
+
+-- The admission snapshot stays unchanged. Only a new Group request is routed to
+-- the current Lead; an existing request owns its assignment and execution history.
+-- Callers hold the host lock, including while reading retirement settings.
+materializeGroup :: Service -> GroupId -> Turn -> IO Materialization
+materializeGroup s groupId turn = DB.connection s $ \db -> SQL.withTransaction db $ do
  let owner=groupIdText groupId
      identity=runIdText (turnId turn)
  rows <- DB.queryRowsOn db "SELECT value FROM groups WHERE id=?" ["value"] [SQL.SQLText owner]
  group <- case rows of
   row:_ -> DB.decodeStored (at row "value")
   [] -> failure 409 "Group disappeared before routine materialization"
- forM_ (findId identity (items group "requests")) $ \existing ->
-  require (get (get existing "origin") "routine" == get (turnField turn "origin") "routine")
+ typed <- decodeValue 500 group
+ requests <- G.readRequests group
+ let existing=find ((==turnId turn) . G.requestId) requests
+     lead=rosterLead (G.groupRoster typed)
+ forM_ existing $ \request ->
+  require (get (get (toJSON request) "origin") "routine" == get (turnField turn "origin") "routine")
    409 "Occurrence ID belongs to another Group request"
- unless (isJust (findId identity (items group "requests"))) $ do
-  let origin=turnField turn "origin"
-      created=get (toJSON turn) "created"
-      body=turnInput turn
-      taskId="gtask_"<>identity
-      groupOrigin=merge origin (obj [("group",str owner),("author",str "admin")])
-      message=obj [("id",str identity),("author",str "admin"),("text",str body),("created",created),("routine",get origin "routine")]
-      task=obj [("id",str taskId),("title",get origin "title"),("body",str body),("assignee",toJSON agent),("state",str "in_progress"),("deleted",Bool False),("revision",num 1),("created",created),("author",str "admin"),("updated_by",str "admin"),("history",arr []),("results",arr []),("taskType",str "automated"),("routine",get origin "routine")]
-      request=obj [("id",str identity),("message",str identity),("target",toJSON agent),("root",str identity),("created",created),("status",str "queued"),("settled",Bool False),("task",str taskId),("task_revision",num 1),("origin",groupOrigin)]
-  DB.putValueOn db DB.Groups owner (merge group (obj
-   [("messages",arr (items group "messages"++[message])),("tasks",arr (items group "tasks"++[task]))
-   ,("requests",arr (items group "requests"++[request]))
-   ,("revision",num (int (get group "revision")+1)),("updated",created)]))
+ leadActive <- if isJust existing || G.groupArchived typed then pure False else do
+  profiles <- DB.queryRowsOn db "SELECT id FROM agents WHERE id=?" ["id"] [SQL.SQLText (agentIdText lead)]
+  inactive <- retired s (agentIdText lead)
+  pure (not (null profiles) && not inactive)
+ case groupMaterialization typed existing leadActive of
+  Right ExistingRequest -> pure Ready
+  Left problem -> do
+   let reason=groupRecoveryReason problem
+       detail=obj [("run",toJSON (turnId turn)),("routine",get (turnField turn "origin") "routine"),("reason",str reason)]
+       action="routine recovery blocked"
+       alreadyRecorded event = at event "action" == action && get event "detail" == detail
+   unless (any alreadyRecorded (items group "events")) $ do
+    event <- G.eventRecord "system" action detail
+    DB.putValueOn db DB.Groups owner (merge (G.append "events" event group) (obj
+     [("revision",num (G.groupRevision typed+1)),("updated",get event "created")]))
+    DB.recordOn s db [owner] identity "routine.recovery_blocked" detail "system" Nothing
+   pure Pending
+  Right (CreateFor agent) -> do
+   let origin=turnField turn "origin"
+       created=get (toJSON turn) "created"
+       body=turnInput turn
+       taskId="gtask_"<>identity
+       groupOrigin=merge origin (obj [("group",str owner),("author",str "admin")])
+       message=obj [("id",str identity),("author",str "admin"),("text",str body),("created",created),("routine",get origin "routine")]
+       task=obj [("id",str taskId),("title",get origin "title"),("body",str body),("assignee",toJSON agent),("state",str "in_progress"),("deleted",Bool False),("revision",num 1),("created",created),("author",str "admin"),("updated_by",str "admin"),("history",arr []),("results",arr []),("taskType",str "automated"),("routine",get origin "routine")]
+       request=obj [("id",str identity),("message",str identity),("target",toJSON agent),("root",str identity),("created",created),("status",str "queued"),("settled",Bool False),("task",str taskId),("task_revision",num 1),("origin",groupOrigin)]
+   DB.putValueOn db DB.Groups owner (merge group (obj
+    [("messages",arr (items group "messages"++[message])),("tasks",arr (items group "tasks"++[task]))
+    ,("requests",arr (items group "requests"++[request]))
+    ,("revision",num (G.groupRevision typed+1)),("updated",created)]))
+   pure Ready
 
 restoreOccurrences :: Service -> IO ()
 restoreOccurrences s = do
