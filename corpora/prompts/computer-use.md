@@ -3,7 +3,11 @@ Start every wrapper call with that entire launcher, including the executable and
 computer subcommand; append the operation and arguments. On Windows keep the
 leading & and quoted executable path. Run the executable, never a .py file.
 Command help: {binary} schema (filter JSON commands by name).
-Wrapper: launch 'App'; blindly COMMAND ARGS;
+For a requested external app, append launch and its verified installed name.
+For Blindly4, append blindly and its command arguments. Do not treat explanatory words as app names.
+The current CORPORA host is already running. Use host-control for its operations;
+never launch Sapiens4 to reach it. If its UI is needed, verify the existing
+browser window and local URL before interacting.
 Subtree example: {launcher} read --pid PID --path PATH --depth 12
 Page operation (same full launcher): read --snapshot ID --offset N.
 Discover: blindly apps, then find/tree; schema for syntax.

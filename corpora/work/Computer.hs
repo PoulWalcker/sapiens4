@@ -121,6 +121,9 @@ computerMain root args = do
  require valid 400 "Usage: sapiens4 computer launch Application"
  when (case args of "launch":_->True; _->False) $ require (os `elem` ["darwin","mingw32"]) 400 "App launch requires macOS or Windows"
  managed <- doesFileExist "host-control.json"
+ when managed $ case args of
+  ["launch",name] -> require (not (isHostApplication name)) 403 "Use host-control for the current host; do not launch its desktop app"
+  _ -> pure ()
  when managed $ do
   (code,result) <- control "host-control.json" (obj [("op",str "computer_acquire")])
   require (code>=200 && code<300) code (at result "error")
@@ -147,6 +150,9 @@ computerMain root args = do
     BL.putStrLn (encode (obj [("launched",Bool (code==ExitSuccess)),("app",str (T.pack name)),("error",if null err then Null else str (T.strip (T.pack err)))]))
     pure code
   _ -> failure 400 "Usage: sapiens4 computer launch Application"
+
+isHostApplication :: FilePath -> Bool
+isHostApplication = (=="sapiens4") . map toLower . dropExtension . takeFileName . dropTrailingPathSeparator
 
 data Foreground = Foreground FilePath (Maybe UTCTime) (Maybe Text)
 captureForeground :: FilePath -> FilePath -> IO Foreground
