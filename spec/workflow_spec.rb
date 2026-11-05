@@ -178,19 +178,36 @@ RSpec.describe 'Delegation and completion contracts' do
       status: 'Completed', criterionResults: [], artifacts: []})}})
     id = host.submit(chief)
     host.turn(id, 'failed')
+    decisions = tasks.first.fetch('decisions').map { |entry| entry.fetch('decisionId') }
     host.stop
-    SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
-      saved = JSON.parse(db.get_first_value('SELECT value FROM workloads WHERE id=?', [id]))
-      saved['task']['specification']['completionCriteria'][0].delete('applicability')
-      db.execute('UPDATE workloads SET value=? WHERE id=?', [JSON.generate(saved), id])
+    saved = SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+      JSON.parse(db.get_first_value('SELECT value FROM workloads WHERE id=?', [id]))
     end
-    host.start
-    calls_before_retry = host.calls.size
-    host.api('POST', "/api/agents/#{chief}/turns/#{id}/retry", {})
-    failed = host.turn(id, 'failed')
-    expect(failed['error']).to include('Saved Task specification is malformed')
-    expect(failed['error']).not_to include('create a new Task')
-    expect(host.calls.size).to eq(calls_before_retry)
+    malformed_spec = saved.fetch('task')
+    malformed_spec.fetch('specification').fetch('completionCriteria').first.delete('applicability')
+    {'structured specification' => malformed_spec, 'string task' => 'broken',
+      'numeric task' => 17, 'boolean task' => false, 'array task' => []}.each do |label, raw_task|
+      SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+        db.execute('UPDATE workloads SET value=? WHERE id=?', [JSON.generate(saved.merge('task' => raw_task)), id])
+      end
+      host.start
+      calls_before_retry = host.calls.size
+      host.api('POST', "/api/agents/#{chief}/turns/#{id}/retry", {})
+      failed = host.turn(id, 'failed')
+      history = tasks.first
+      aggregate_failures(label) do
+        expect(failed['error']).to include('Saved Task specification is malformed')
+        expect(failed['error']).not_to include('create a new Task')
+        expect(host.calls.size).to eq(calls_before_retry)
+        expect(history.fetch('task')).to eq(raw_task)
+        expect(history.fetch('decisions').map { |entry| entry.fetch('decisionId') }).to eq(decisions)
+      end
+      host.stop
+      SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+        retained = JSON.parse(db.get_first_value('SELECT value FROM workloads WHERE id=?', [id]))
+        expect(retained.fetch('task')).to eq(raw_task), label
+      end
+    end
   end
 
   it 'keeps completed legacy task history readable after restart' do

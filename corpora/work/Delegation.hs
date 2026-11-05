@@ -119,7 +119,9 @@ decodeTask rawTask = case rawTask of
     Left reason
      | hasStringCriteria value -> (UnsupportedLegacy value,encoding Nothing)
      | otherwise -> (Corrupted value (T.pack reason),encoding Nothing)
- _ -> (Unprepared,TaskEncoding rawTask Nothing)
+ Nothing -> (Unprepared,TaskEncoding Nothing Nothing)
+ Just Null -> (Unprepared,TaskEncoding (Just Null) Nothing)
+ Just value -> (Corrupted value "Task must be an object or null",TaskEncoding (Just value) Nothing)
  where
  hasStringCriteria value = case get value "completionCriteria" of
   Array criteria -> not (null criteria) && all isString criteria
@@ -128,9 +130,11 @@ decodeTask rawTask = case rawTask of
  isString _ = False
 
 encodeTask :: TaskContract -> TaskEncoding -> Maybe Value
-encodeTask contract encoding = case specification of
- Nothing -> taskEnvelope encoding
- Just value -> Just (put "specification" value (fromMaybe Null (taskEnvelope encoding)))
+encodeTask contract encoding = case taskEnvelope encoding of
+ Just envelope@(Object _) -> Just $ case specification of
+  Nothing -> envelope
+  Just value -> put "specification" value envelope
+ envelope -> envelope
  where
  specification = case contract of
   Unprepared -> taskSpecificationEncoding encoding
