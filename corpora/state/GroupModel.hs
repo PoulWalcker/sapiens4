@@ -3,6 +3,7 @@ module GroupModel where
 
 import Control.Monad
 import Data.Aeson hiding (pairs)
+import Data.Aeson.Types (parseEither)
 import qualified Data.Aeson.KeyMap as KM
 import Data.List
 import Data.Maybe
@@ -30,14 +31,68 @@ instance ToJSON GroupRecord where
  toJSON group = mergeFields [("id",toJSON (groupIdentity group)),("lead",toJSON (rosterLead (groupRoster group))),
   ("members",toJSON (rosterMembers (groupRoster group))),("revision",num (groupRevision group)),("archived",Bool (groupArchived group))] (Object (groupFields group))
 
+data TaskRevision = TaskRevision { requestTaskId :: TaskId, requestTaskRevision :: Int } deriving (Eq, Show)
+data RequestLineage = RequestLineage
+ { requestMessage :: MessageId, requestRoot :: MessageId, requestTask :: Maybe TaskRevision
+ } deriving (Eq, Show)
+data StoredLineage = ValidLineage RequestLineage | InvalidLineage Object Text deriving (Eq, Show)
+
+lineageKeys :: [Key]
+lineageKeys = ["message","root","task","task_revision"]
+
+decodeLineage :: Object -> StoredLineage
+decodeLineage fields = case parseEither parse (Object fields) of
+ Right lineage -> ValidLineage lineage
+ Left reason -> InvalidLineage (KM.filterWithKey (\key _ -> key `elem` lineageKeys) fields) (T.pack reason)
+ where
+ parse = withObject "Group request lineage" $ \value -> do
+  task <- case (KM.lookup "task" value,KM.lookup "task_revision" value) of
+   (Nothing,Nothing) -> pure Nothing
+   (Just rawTask,Just rawRevision) -> do
+    identity <- parseJSON rawTask
+    unless (not (T.null (T.strip (taskIdText identity)))) (fail "Group task ID cannot be empty")
+    Just . TaskRevision identity <$> parseJSON rawRevision
+   _ -> fail "Group task and revision must be present together"
+  RequestLineage <$> value .: "message" <*> value .: "root" <*> pure task
+
+lineageValue :: StoredLineage -> Value
+lineageValue stored = case stored of
+ InvalidLineage raw _ -> Object raw
+ ValidLineage lineage -> obj ([("message",toJSON (requestMessage lineage)),("root",toJSON (requestRoot lineage))]
+  ++ concat [[("task",toJSON (requestTaskId task)),("task_revision",num (requestTaskRevision task))] | task <- maybeToList (requestTask lineage)])
+
+checkedRequestLineage :: GroupRequest -> Either Text RequestLineage
+checkedRequestLineage request = case requestLineage request of
+ ValidLineage lineage -> Right lineage
+ InvalidLineage _ reason -> Left ("Saved Group request lineage is malformed: " <> reason)
+
+requireRequestLineage :: GroupRequest -> IO RequestLineage
+requireRequestLineage = either (failure 500) pure . checkedRequestLineage
+
+-- Raw invalid pointers are used only to quarantine possibly related operations.
+invalidLineageReferences :: MessageId -> GroupRequest -> Bool
+invalidLineageReferences identity request = case requestLineage request of
+ ValidLineage _ -> False
+ InvalidLineage raw _ -> any (==toJSON identity) [get (Object raw) "root",get (Object raw) "message"]
+  || runIdText (requestId request) == messageIdText identity
+
+requestsForRoot :: MessageId -> [GroupRequest] -> Validation [GroupRequest]
+requestsForRoot identity requests = fmap catMaybes $ forM requests $ \request -> case requestLineage request of
+ ValidLineage lineage -> pure (if requestRoot lineage == identity then Just request else Nothing)
+ InvalidLineage _ reason | invalidLineageReferences identity request -> Left (APIError 500 ("Saved Group request lineage is malformed: " <> reason))
+ InvalidLineage _ _ -> pure Nothing
+
+newGroupRequest :: RunId -> AgentId -> StoredOrigin -> RequestLineage -> Text -> GroupRequest
+newGroupRequest identity target origin lineage created = GroupRequest identity target Queued False origin (ValidLineage lineage) (KM.singleton "created" (str created))
+
 data GroupRequest = GroupRequest
  { requestId :: RunId, requestTarget :: AgentId, requestStatus :: TurnStatus
- , requestSettled :: Bool, requestOrigin :: StoredOrigin, requestFields :: Object
+ , requestSettled :: Bool, requestOrigin :: StoredOrigin, requestLineage :: StoredLineage, requestFields :: Object
  } deriving (Eq, Show)
 instance FromJSON GroupRequest where
- parseJSON = withObject "Group request" $ \o -> GroupRequest <$> o .: "id" <*> o .: "target" <*> o .: "status" <*> o .: "settled" <*> pure (storeOrigin (KM.lookup "origin" o)) <*> pure (foldr KM.delete o ["id","target","status","settled","origin"])
+ parseJSON = withObject "Group request" $ \o -> GroupRequest <$> o .: "id" <*> o .: "target" <*> o .: "status" <*> o .: "settled" <*> pure (storeOrigin (KM.lookup "origin" o)) <*> pure (decodeLineage o) <*> pure (foldr KM.delete o (["id","target","status","settled","origin"] ++ lineageKeys))
 instance ToJSON GroupRequest where
- toJSON request = mergeFields ([("id",toJSON (requestId request)),("target",toJSON (requestTarget request)),("status",toJSON (requestStatus request)),("settled",Bool (requestSettled request))] ++ [("origin",toJSON (requestOrigin request)) | requestOrigin request /= MissingOrigin]) (Object (requestFields request))
+ toJSON request = mergeFields ([("id",toJSON (requestId request)),("target",toJSON (requestTarget request)),("status",toJSON (requestStatus request)),("settled",Bool (requestSettled request))] ++ [("origin",toJSON (requestOrigin request)) | requestOrigin request /= MissingOrigin]) (merge (Object (requestFields request)) (lineageValue (requestLineage request)))
 readRequests :: Value -> IO [GroupRequest]
 readRequests group = decodeValue 500 (get group "requests")
 

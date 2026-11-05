@@ -25,6 +25,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
 import qualified Database.SQLite.Simple as SQL
 import qualified GroupModel as G
+import qualified GroupWork as GW
 import System.IO (hPutStrLn, stderr)
 import Types
 import qualified Store as DB
@@ -611,13 +612,17 @@ activeGroup db routine = do
  origins <- forM [request | request <- requests, not (G.requestSettled request)] $ \request -> do
   origin <- executionOrigin (G.requestOrigin request)
   pure (request,origin)
- let belongs origin = originRoutine origin == Just (routineId routine)
-     pending request = not (G.requestSettled request)
-     taskPending request = case findId (at (toJSON request) "task") (items group "tasks") of
-      Just task -> at task "state" == "in_progress"
-      Nothing -> False
  let historical=[(request,origin) | request <- requests, G.requestSettled request, ValidOrigin origin <- [G.requestOrigin request]]
- pure (G.requestId . fst <$> find (\(request,origin) -> belongs origin && (pending request || taskPending request)) (origins ++ historical))
+ related <- filterM (activeRequest group) [(request,origin) | (request,origin) <- origins ++ historical, originRoutine origin == Just (routineId routine)]
+ pure (G.requestId . fst <$> listToMaybe related)
+ where
+ activeRequest group (request,_) = do
+  lineage <- G.requireRequestLineage request
+  if not (G.requestSettled request) then pure True else case G.requestTask lineage of
+   Nothing -> pure False
+   Just link -> case findId (taskIdText (G.requestTaskId link)) (items group "tasks") of
+    Nothing -> pure False
+    Just value -> GW.taskInProgress <$> (decodeValue 500 value :: IO GW.GroupTask)
 
 activeRun :: Service -> SQL.Connection -> Routine -> ScheduledTarget -> [StoredDue] -> IO (Maybe RunId)
 activeRun s db routine target dues = case [occurrenceId occurrence | Admitted occurrence Pending <- dues] of
@@ -786,7 +791,7 @@ verifyPolicyPreparation s owner identity parsed =
      (find ((==identity) . G.requestId) requests)
     require (toJSON (G.requestOrigin request) == toJSON parsed)
      409 "Policy setup request origin changed"
-    field 500 (toJSON request) "root"
+    RunId . messageIdText . G.requestRoot <$> G.requireRequestLineage request
    Nothing -> pure identity
   either reject pure (policyPreparationCompletion owner generation routine)
  where
@@ -827,7 +832,8 @@ ensurePolicyPreparation s routine = case routinePolicy routine of
     GroupTarget group agent -> do
      value <- G.getGroup s (groupIdText group) True
      requests <- G.readRequests value
-     related <- forM [request | request <- requests, get (Object (G.requestFields request)) "root" == toJSON identity] $ \request -> do
+     sameRoot <- validated (G.requestsForRoot (MessageId (runIdText identity)) requests)
+     related <- forM sameRoot $ \request -> do
       parsed <- executionOrigin (G.requestOrigin request)
       pure (request,parsed)
      let latestSetup=listToMaybe (reverse [request | (request,parsed) <- related, originPolicyRoutine parsed == Just (routineId routine)])
@@ -839,6 +845,9 @@ ensurePolicyPreparation s routine = case routinePolicy routine of
      case groupPolicyPreparation agent projected of
       KeepGroupPolicyPreparation -> pure ()
       StartGroupPolicyPreparation predecessor -> do
+       let next=maybe identity (\previous -> stableRunId
+            (runIdText (G.requestId previous) <> ":lead:" <> agentIdText agent)) predecessor
+       require (all ((/=next) . G.requestId) requests) 409 "Policy setup request identity is already occupied; repair its saved lineage before retrying"
        -- Persist cancellation before the successor so recovery cannot run both.
        forM_ predecessor $ \previous -> when (G.requestStatus previous == Queued) $ do
         let oldOwner=agentIdText (G.requestTarget previous)
@@ -846,12 +855,10 @@ ensurePolicyPreparation s routine = case routinePolicy routine of
          then saved { turnStatus=Cancelled } else saved
         DB.project s oldOwner
        time <- now
-       let next=maybe identity (\previous -> stableRunId
-            (runIdText (G.requestId previous) <> ":lead:" <> agentIdText agent)) predecessor
-           requestOrigin=newOrigin (originPurpose origin) (Just group) (originMetadata origin)
+       let requestOrigin=newOrigin (originPurpose origin) (Just group) (originMetadata origin)
            entry=obj [("id",toJSON identity),("author",str "system"),("text",str input),("created",str created)]
-           request=G.GroupRequest next agent Queued False (ValidOrigin requestOrigin) (KM.fromList
-            [("message",toJSON identity),("root",toJSON identity),("created",str time)])
+           request=G.newGroupRequest next agent (ValidOrigin requestOrigin)
+            (G.RequestLineage (MessageId (runIdText identity)) (MessageId (runIdText identity)) Nothing) time
            superseded previous = toJSON $ if G.requestStatus previous == Queued
             then previous { G.requestStatus=Cancelled } else previous
        event <- forM predecessor $ \previous -> G.eventRecord "system" "policy setup reassigned"
@@ -960,8 +967,12 @@ materializeGroup s groupId turn = DB.connection s $ \db -> SQL.withTransaction d
  let existing=find ((==turnId turn) . G.requestId) requests
      lead=rosterLead (G.groupRoster typed)
  forM_ existing $ \request -> do
+  lineage <- G.requireRequestLineage request
   previous <- executionOrigin (G.requestOrigin request)
-  require (originRoutine previous == Just routineIdentity)
+  let initialMessage=MessageId identity
+      initialTask=TaskId ("gtask_"<>identity)
+  require (originRoutine previous == Just routineIdentity && G.requestMessage lineage == initialMessage
+   && G.requestRoot lineage == initialMessage && fmap G.requestTaskId (G.requestTask lineage) == Just initialTask)
    409 "Occurrence ID belongs to another Group request"
  leadActive <- if isJust existing || G.groupArchived typed then pure False else do
   profiles <- DB.queryRowsOn db "SELECT id FROM agents WHERE id=?" ["id"] [SQL.SQLText (agentIdText lead)]
@@ -981,18 +992,21 @@ materializeGroup s groupId turn = DB.connection s $ \db -> SQL.withTransaction d
     DB.recordOn s db [owner] identity "routine.recovery_blocked" detail "system" Nothing
    pure Pending
   Right (CreateFor agent) -> do
-   let origin=turnField turn "origin"
-       created=get (toJSON turn) "created"
-       body=turnInput turn
-       taskId="gtask_"<>identity
-       groupOrigin=toJSON (newOrigin (originPurpose parsed) (Just groupId) (KM.insert "author" (str "admin") (originMetadata parsed)))
-       message=obj [("id",str identity),("author",str "admin"),("text",str body),("created",created),("routine",toJSON routineIdentity)]
-       task=obj [("id",str taskId),("title",get origin "title"),("body",str body),("assignee",toJSON agent),("state",str "in_progress"),("deleted",Bool False),("revision",num 1),("created",created),("author",str "admin"),("updated_by",str "admin"),("history",arr []),("results",arr []),("taskType",str "automated"),("routine",toJSON routineIdentity)]
-       request=obj [("id",str identity),("message",str identity),("target",toJSON agent),("root",str identity),("created",created),("status",str "queued"),("settled",Bool False),("task",str taskId),("task_revision",num 1),("origin",groupOrigin)]
+   created <- field 500 (toJSON turn) "created"
+   title <- field 500 (Object (originMetadata parsed)) "title"
+   createdTime <- maybe (failure 500 "Invalid scheduled occurrence creation time") pure (parseTime created)
+   let body=turnInput turn
+       taskId=TaskId ("gtask_"<>identity)
+       messageId=MessageId identity
+       groupOrigin=newOrigin (originPurpose parsed) (Just groupId) (KM.insert "author" (str "admin") (originMetadata parsed))
+       message=obj [("id",toJSON messageId),("author",str "admin"),("text",str body),("created",str created),("routine",toJSON routineIdentity)]
+       task=GW.newScheduledTask taskId createdTime title body agent routineIdentity
+       request=G.newGroupRequest (turnId turn) agent (ValidOrigin groupOrigin)
+        (G.RequestLineage messageId messageId (Just (GW.taskLink task))) created
    DB.putValueOn db DB.Groups owner (merge group (obj
-    [("messages",arr (items group "messages"++[message])),("tasks",arr (items group "tasks"++[task]))
-    ,("requests",arr (items group "requests"++[request]))
-    ,("revision",num (G.groupRevision typed+1)),("updated",created)]))
+    [("messages",arr (items group "messages"++[message])),("tasks",arr (items group "tasks"++[toJSON task]))
+    ,("requests",arr (items group "requests"++[toJSON request]))
+    ,("revision",num (G.groupRevision typed+1)),("updated",str created)]))
    pure Ready
 
 restoreOccurrences :: Service -> IO ()

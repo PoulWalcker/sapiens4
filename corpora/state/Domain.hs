@@ -3,7 +3,7 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 -- Pure domain data and codecs shared by the host and native shells.
 module Domain
- ( Wire(..), AgentId(..), GroupId, groupIdText, RoutineId, routineIdText, routineIdSequence, parseRoutineId
+ ( Wire(..), AgentId(..), MessageId(..), GroupId, groupIdText, RoutineId, routineIdText, routineIdSequence, parseRoutineId
  , RoutineOwner(..), ownerText, personalAgentP, Deadline, deadlineTime, deadlineText, newDeadline, rescheduleDeadline
  , timestamp, parseTime, ExecutionPurpose(..), ScheduledProvenance(..), ExecutionOrigin, newOrigin, StoredOrigin(..)
  , originPurpose, originGroup, originMetadata, originIsScheduled, originRoutine, originPolicyRoutine
@@ -43,6 +43,12 @@ import Text.Read (readMaybe)
 import Data.Time (UTCTime, defaultTimeLocale, formatTime, parseTimeM)
 
 newtype AgentId = AgentId { agentIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
+newtype MessageId = MessageId { messageIdText :: Text } deriving (Eq, Ord, Show)
+instance FromJSON MessageId where
+ parseJSON = withText "Group message ID" $ \identity -> do
+  unless (not (T.null (T.strip identity))) (fail "Group message ID cannot be empty")
+  pure (MessageId identity)
+instance ToJSON MessageId where toJSON = str . messageIdText
 newtype TaskId = TaskId { taskIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
 newtype RunId = RunId { runIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
 

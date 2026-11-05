@@ -48,11 +48,13 @@ findRequest s rid = do
  groups <- DB.values s DB.Groups
  requests <- forM groups $ \g -> map (g,) <$> readRequests g
  pure (listToMaybe [(g,r) | (g,r) <- concat requests,requestId r == rid])
-activeRoot :: Service -> Text -> Text -> IO Text
-activeRoot s gid actor = if actor == "admin" then pure "" else do
+activeRoot :: Service -> Text -> Text -> IO (Maybe MessageId)
+activeRoot s gid actor = if actor == "admin" then pure Nothing else do
  runs <- Map.elems <$> readMVar (serviceRuns s)
  requests <- mapM (findRequest s . runId) (filter ((== AgentId actor) . runOwner) runs)
- pure (fromMaybe "" (listToMaybe [at (toJSON r) "root" | Just (g,r) <- requests,at g "id" == gid]))
+ roots <- forM [(g,r) | Just (g,r) <- requests,at g "id" == gid] $ \(_,request) -> requestRoot <$> requireRequestLineage request
+ pure (listToMaybe roots)
+
 submitGroup :: Service -> Text -> Value -> Text -> IO Value
 submitGroup s gid input actor = do
  group <- getGroup s gid True; authorizeGroup s group actor Member
@@ -74,17 +76,26 @@ submitGroup s gid input actor = do
    let entry = merge initial (obj ([("attachments",arr attachments)] ++ [("memo_pending",Bool True) | actor == "admin"]))
        addressed = if actor == "admin" && null targets then [at group "lead"] else targets
    root <- activeRoot s gid actor
-   calls <- mapM (\target -> newRequest entry target root) (filter (/= actor) (nub addressed))
-   void (saveGroup s (put "requests" (arr (items group "requests" ++ calls)) (append "messages" entry group)) actor "message" (get entry "id"))
+   calls <- mapM (\target -> newRequest entry (AgentId target) root) (filter (/= actor) (nub addressed))
+   void (saveGroup s (put "requests" (arr (items group "requests" ++ map toJSON calls)) (append "messages" entry group)) actor "message" (get entry "id"))
    dispatchGroups s
    pure entry
 
 checkedRequestOrigin :: Value -> GroupRequest -> Either Text ExecutionOrigin
 checkedRequestOrigin group request = do
+ lineage <- checkedRequestLineage request
+ unless (isJust (findId (messageIdText (requestMessage lineage)) (items group "messages"))) (Left "Group request message is missing")
+ unless (isJust (findId (messageIdText (requestRoot lineage)) (items group "messages"))) (Left "Group request root message is missing")
+ forM_ (requestTask lineage) $ \link ->
+  unless (isJust (findId (taskIdText (requestTaskId link)) (items group "tasks"))) (Left "Unknown Group task")
  expected <- either (Left . T.pack) Right (parseEither parseJSON (get group "id"))
  origin <- checkedOrigin (requestOrigin request)
+ case originPurpose origin of
+  ScheduledExecution _ -> unless (isJust (requestTask lineage)) (Left "Scheduled Group request has no task revision")
+  OrdinaryWork -> Right ()
+  RoutinePolicySetup _ -> Right ()
  if toJSON (requestOrigin request) == Null then do
-  let entry=findId (at (toJSON request) "message") (items group "messages")
+  let entry=findId (messageIdText (requestMessage lineage)) (items group "messages")
       author=maybe Null (`get` "author") entry
   pure (newOrigin OrdinaryWork (Just expected) (KM.singleton "author" author))
  else do
@@ -127,7 +138,7 @@ requestExecutionOrigin group = either (failure 500) pure . checkedRequestOrigin 
 rejectGroupOrigin :: Value -> GroupRequest -> Text -> IO Value
 rejectGroupOrigin group request reason = do
  let failed=request { requestStatus=Failed, requestSettled=True }
- result <- try (settleTask group (toJSON failed) (obj [("status",str "failed"),("error",str reason)]))
+ result <- try (settleTask group failed (obj [("status",str "failed"),("error",str reason)]))
  let (changed,detail)=case result of
       Right (updated,_) -> (updated,reason)
       Left (APIError _ problem) -> (group,reason <> "; Task settlement is blocked: " <> problem)
@@ -158,7 +169,8 @@ dispatchGroups s = do
   runs <- Map.elems <$> readMVar (serviceRuns s)
   workloads <- DB.values s DB.Workloads
   when (requestReady (AgentId target) (requestId typed) (map runOwner runs) state workloads projected) $ do
-   entry <- maybe (failure 409 "Group request message is missing") pure (findId (at request "message") (items group "messages"))
+   lineage <- requireRequestLineage typed
+   entry <- maybe (failure 409 "Group request message is missing") pure (findId (messageIdText (requestMessage lineage)) (items group "messages"))
    suffix <- Workspace.attachmentPrompt s (items entry "attachments")
    t <- now
    origin <- requestExecutionOrigin group typed
@@ -214,39 +226,43 @@ runGroup s run turn = do
 
 data GroupSettlement
  = KeepGroup Value
- | SettleArchived Value Value
- | SettleMemo Value Value Value
- | SettleMessage Value Value Value
+ | SettleArchived Value GroupRequest
+ | SettleMemo Value GroupRequest Value
+ | SettleMessage Value GroupRequest Value
 settlementPlan :: [Value] -> Value -> GroupRequest -> Validation GroupSettlement
-settlementPlan projected group initial = case findId (at request "id") projected of
- Nothing
-  | requestStatus initial == Cancelled && not (requestSettled initial) -> Right (SettleArchived group request)
-  | otherwise -> Right (KeepGroup group)
- Just turn -> do
-  status <- validateValue 500 parseJSON (get turn "status")
-  let current = toJSON initial { requestStatus=status }
-      changed = replace "requests" current group
-      settled = merge current (obj ([("settled",Bool True)] ++ [("error",get turn "error") | get turn "error" /= Null]))
-      base = replace "requests" settled changed
-  pure $ if activeStatus status || requestSettled initial then KeepGroup changed
-   else if boolean (get request "memo") then SettleMemo base request turn
-   else SettleMessage base request turn
- where request = fromMaybe (toJSON initial) (findId (runIdText (requestId initial)) (items group "requests"))
+settlementPlan projected group initial = do
+ request <- maybe (Right initial) (validateValue 500 parseJSON) (findId (runIdText (requestId initial)) (items group "requests"))
+ case findId (runIdText (requestId request)) projected of
+  Nothing
+   | requestStatus initial == Cancelled && not (requestSettled initial) -> Right (SettleArchived group request)
+   | otherwise -> Right (KeepGroup group)
+  Just turn -> do
+   status <- validateValue 500 parseJSON (get turn "status")
+   let current=request { requestStatus=status }
+       changed=replace "requests" (toJSON current) group
+       settled=current { requestSettled=True, requestFields=KM.fromList [("error",get turn "error") | get turn "error" /= Null] <> requestFields current }
+       base=replace "requests" (toJSON settled) changed
+   pure $ if activeStatus status || requestSettled initial then KeepGroup changed
+    else if boolean (get (Object (requestFields request)) "memo") then SettleMemo base request turn
+    else SettleMessage base request turn
 
-forwardingTargets :: ExecutionOrigin -> Value -> Value -> [Text] -> Validation [Text]
-forwardingTargets origin group request mentioned
- | routine && not (null targets) = do
-    task <- maybe (Left (APIError 404 "Unknown Group task")) Right (findId (at request "task") (items group "tasks"))
-    pure (if not (boolean (get task "deleted")) && get task "revision" == get request "task_revision" then take 1 targets else [])
- | otherwise = Right targets
- where
- routine = originIsScheduled origin
- called = [at r "target" | r <- items group "requests",get r "root" == get request "root"]
- targets = filter (`notElem` called) mentioned
+forwardingTargets :: ExecutionOrigin -> Value -> GroupRequest -> [Text] -> Validation [Text]
+forwardingTargets origin group request mentioned = do
+ lineage <- either (Left . APIError 500) Right (checkedRequestLineage request)
+ requests <- validateValue 500 parseJSON (get group "requests")
+ related <- requestsForRoot (requestRoot lineage) requests
+ let called=map (agentIdText . requestTarget) related
+     targets=filter (`notElem` called) mentioned
+ if originIsScheduled origin && not (null targets) then do
+  link <- maybe (Left (APIError 500 "Scheduled Group request has no task revision")) Right (requestTask lineage)
+  value <- maybe (Left (APIError 404 "Unknown Group task")) Right (findId (taskIdText (requestTaskId link)) (items group "tasks"))
+  task <- validateValue 500 parseJSON value
+  pure (if currentTaskRevision link task then take 1 targets else [])
+ else pure targets
 
-memoReady :: Value -> Value -> Bool
-memoReady group entry = boolean (get entry "memo_pending") && not (null related) && all (boolean . (`get` "settled")) related
- where related = filter ((==get entry "id") . (`get` "root")) (items group "requests")
+memoReady :: [GroupRequest] -> MessageId -> Bool
+memoReady requests identity = not (any (invalidLineageReferences identity) requests) && not (null related) && all requestSettled related
+ where related=[request | request <- requests, ValidLineage lineage <- [requestLineage request], requestRoot lineage == identity]
 
 reconcileGroups :: Service -> IO ()
 reconcileGroups s = DB.values s DB.Groups >>= mapM_ reconcile
@@ -269,43 +285,55 @@ reconcileGroups s = DB.values s DB.Groups >>= mapM_ reconcile
    KeepGroup changed -> pure changed
    SettleArchived base request -> do
     (changed,_) <- settleTask base request (obj [("status",str "cancelled"),("error",str "Group archived")])
-    pure (replace "requests" (put "settled" (Bool True) request) changed)
+    pure (replace "requests" (toJSON request { requestSettled=True }) changed)
    SettleMemo base request turn -> do
-    event <- eventRecord (at request "target") ("memo " <> at turn "status") (get request "id")
+    event <- eventRecord (agentIdText (requestTarget request)) ("memo " <> at turn "status") (toJSON (requestId request))
     pure (append "events" event base)
    SettleMessage base request turn -> do
-    let routine = originIsScheduled origin
-    mentioned <- if get request "target" == get group "lead" && not (boolean (get group "archived")) && not (T.null (at turn "output")) then mentions s group (at turn "output") `catch` (\(_::APIError) -> pure []) else pure []
-    recipients <- validated (forwardingTargets origin group request mentioned)
+    mentioned <- if toJSON (requestTarget request) == get group "lead" && not (boolean (get group "archived")) && not (T.null (at turn "output")) then mentions s group (at turn "output") `catch` (\(_::APIError) -> pure []) else pure []
+    case forwardingTargets origin group request mentioned of
+     Left (APIError _ reason) -> rejectGroupOrigin base request reason
+     Right recipients -> settleRecipients origin base request turn recipients
+ settleRecipients origin base request turn recipients = do
+    let routine=originIsScheduled origin
     (finished,stale) <- if routine && not (null recipients) then pure (base,TaskForwarded) else settleTask base request turn
     output <- if get turn "output" == Null then pure finished else do
-     initialMessage <- message (at request "target") (at turn "output")
-     let entry = merge initialMessage (obj [("turn",get request "id"),("stale",Bool (stale == StaleResultRecorded))])
+     lineage <- requireRequestLineage request
+     initialMessage <- message (agentIdText (requestTarget request)) (at turn "output")
+     let entry = merge initialMessage (obj [("turn",toJSON (requestId request)),("stale",Bool (stale == StaleResultRecorded))])
      foldM (\g target -> do
-       initialCall <- newRequest entry target (at request "root")
+       initialCall <- newRequest entry (AgentId target) (Just (requestRoot lineage))
        if routine then do
-        task <- findTask g (at request "task")
-        let revised = merge task (obj [("assignee",str target),("revision",num (int (get task "revision")+1))])
-            call = merge initialCall (obj [("origin",get request "origin"),("task",get task "id"),("task_revision",get revised "revision")])
-        pure (append "requests" call (replace "tasks" revised g))
-       else pure (append "requests" initialCall g)) (append "messages" entry finished) recipients
-    event <- eventRecord (at request "target") (if stale == StaleResultRecorded then "result needs review" else "call " <> at turn "status") (get request "id")
+        link <- maybe (failure 500 "Scheduled Group request has no task revision") pure (requestTask lineage)
+        task <- readTask g (taskIdText (requestTaskId link))
+        childLineage <- requireRequestLineage initialCall
+        let revised=forwardTask (AgentId target) task
+            call=initialCall { requestOrigin=requestOrigin request, requestLineage=ValidLineage childLineage { requestTask=Just (taskLink revised) } }
+        pure (append "requests" (toJSON call) (replace "tasks" (toJSON revised) g))
+       else pure (append "requests" (toJSON initialCall) g)) (append "messages" entry finished) recipients
+    event <- eventRecord (agentIdText (requestTarget request)) (if stale == StaleResultRecorded then "result needs review" else "call " <> at turn "status") (toJSON (requestId request))
     pure (append "events" event output)
  addMemo group entry
-  | not (memoReady group entry) = pure group
-  | otherwise = do
-   initial <- newRequest entry (at group "lead") ""
-   groupId <- field 500 group "id"
-   let origin=newOrigin OrdinaryWork (Just groupId) (KM.fromList [("author",str "system"),("memo",Bool True)])
-       request = merge initial (obj [("memo",Bool True),("origin",toJSON origin)])
-   pure (append "requests" request (replace "messages" (put "memo_pending" (Bool False) entry) group))
+  | not (boolean (get entry "memo_pending")) = pure group
+  | otherwise = case parseEither parseJSON (get entry "id") of
+     Left _ -> pure group
+     Right identity -> do
+      requests <- readRequests group
+      if not (memoReady requests identity) then pure group else do
+       lead <- field 500 group "lead"
+       initial <- newRequest entry lead Nothing
+       groupId <- field 500 group "id"
+       let origin=newOrigin OrdinaryWork (Just groupId) (KM.fromList [("author",str "system"),("memo",Bool True)])
+           request=initial { requestOrigin=ValidOrigin origin, requestFields=KM.insert "memo" (Bool True) (requestFields initial) }
+       pure (append "requests" (toJSON request) (replace "messages" (put "memo_pending" (Bool False) entry) group))
 
 policySetupRetry :: AgentId -> [GroupRequest] -> GroupRequest -> Validation ()
 policySetupRetry lead requests typed = do
+ lineage <- either (Left . APIError 500) Right (checkedRequestLineage typed)
  origin <- either (Left . APIError 500) Right (checkedOrigin (requestOrigin typed))
  forM_ (originPolicyRoutine origin) $ \identity -> do
   check (requestTarget typed == lead) 409 "Routine policy setup belongs to the current Group Lead"
-  let related=filter (\candidate -> get (toJSON candidate) "root" == get (toJSON typed) "root") requests
+  related <- requestsForRoot (requestRoot lineage) requests
   origins <- traverse (\candidate -> (candidate,) <$> either (Left . APIError 500) Right (checkedOrigin (requestOrigin candidate))) related
   let latest=listToMaybe (reverse [candidate | (candidate,parsed) <- origins, originPolicyRoutine parsed == Just identity])
   check (fmap requestId latest == Just (requestId typed))
@@ -343,7 +371,8 @@ actionGroup s gid rid action = do
     require (get request "target" `elem` items group "members") 409 "The recipient is no longer a Group member"
     lead <- field 500 group "lead"
     validated (policySetupRetry lead requests typed)
-    require (not (has request "task")) 409 "Start the current task revision from Work instead"
+    lineage <- requireRequestLineage typed
+    require (isNothing (requestTask lineage)) 409 "Start the current task revision from Work instead"
     turnResult (validateTurnAction Retry status)
     state <- agentState s owner
     turn <- case find ((==RunId rid) . turnId) (agentTurns state) of
@@ -358,7 +387,7 @@ actionGroup s gid rid action = do
     let restored=if any ((==turnId turn) . turnId) (agentTurns state) then state else state { agentTurns=agentTurns state++[turn] }
     saveState s owner (mapTurns (\t -> if turnId t == RunId rid then retryTurn t else t) restored)
     let updated = replace "requests" (merge (remove ["error"] request) (obj [("settled",Bool False),("status",str "queued")])) group
-        messages = [if get m "id" == get request "root" && at m "author" == "admin" && not (boolean (get request "memo")) then put "memo_pending" (Bool True) m else m | m <- items updated "messages"]
+        messages = [if get m "id" == toJSON (requestRoot lineage) && at m "author" == "admin" && not (boolean (get request "memo")) then put "memo_pending" (Bool True) m else m | m <- items updated "messages"]
     void (saveGroup s (put "messages" (arr messages) updated) "admin" "call retried" (str rid))
    else if action == "cancel" then do
     turnResult (validateTurnAction Cancel status)
