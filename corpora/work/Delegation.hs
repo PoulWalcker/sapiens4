@@ -21,7 +21,6 @@ import qualified Data.Aeson.Key
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.ByteString as BS
-import Data.Foldable (toList)
 import Data.IORef
 import Data.List (find,nub,sort)
 import Data.Maybe
@@ -143,17 +142,16 @@ instance ToJSON CompletionCriterion where
   Conditional identity condition requirement -> fields identity requirement (obj [("kind",str "Conditional"),("condition",str (conditionText condition))])
   where fields identity requirement applicability = obj [("id",toJSON identity),("requirement",str (requirementText requirement)),("applicability",applicability)]
 data TaskSpec = TaskSpec { specObjective :: Text, specInputs :: [Text], specOutputs :: NonEmpty Text, specCriteria :: NonEmpty CompletionCriterion } deriving (Eq, Show)
-parseTaskSpec :: (Value -> Parser [CompletionCriterion]) -> Value -> Parser TaskSpec
-parseTaskSpec parseCriteria value = do
- onlyFields ["objective","inputs","expectedOutputs","completionCriteria"] value
- objective <- textFieldP "objective" 16000 value
- inputs <- stringsP "inputs" False (get value "inputs")
- outputs <- stringsP "expectedOutputs" True (get value "expectedOutputs") >>= maybe (fail "Expected at least one output") pure . NE.nonEmpty
- criteria <- parseCriteria (get value "completionCriteria") >>= maybe (fail "Expected at least one criterion") pure . NE.nonEmpty
- let ids=map criterionId (NE.toList criteria)
- unless (length ids <= 50 && length ids == length (nub ids)) (fail "Completion criteria require unique IDs and at most 50 entries")
- pure (TaskSpec objective inputs outputs criteria)
-instance FromJSON TaskSpec where parseJSON = parseTaskSpec parseJSON
+instance FromJSON TaskSpec where
+ parseJSON value = do
+  onlyFields ["objective","inputs","expectedOutputs","completionCriteria"] value
+  objective <- textFieldP "objective" 16000 value
+  inputs <- stringsP "inputs" False (get value "inputs")
+  outputs <- stringsP "expectedOutputs" True (get value "expectedOutputs") >>= maybe (fail "Expected at least one output") pure . NE.nonEmpty
+  criteria <- parseJSON (get value "completionCriteria") >>= maybe (fail "Expected at least one criterion") pure . NE.nonEmpty
+  let ids=map criterionId (NE.toList criteria)
+  unless (length ids <= 50 && length ids == length (nub ids)) (fail "Completion criteria require unique IDs and at most 50 entries")
+  pure (TaskSpec objective inputs outputs criteria)
 instance ToJSON TaskSpec where
  toJSON spec = obj [("objective",str (specObjective spec)),("inputs",toJSON (specInputs spec)),("expectedOutputs",toJSON (NE.toList (specOutputs spec))),("completionCriteria",toJSON (NE.toList (specCriteria spec)))]
 data OutcomeStatus = Completed | Unresolved deriving (Eq, Ord, Show, Enum, Bounded)
@@ -187,7 +185,7 @@ instance ToJSON Outcome where
 
 data Decision
  = ReplyNow Text | ExecuteTask | OutsideSpecialization | SelectSpecialist Text
- | NeedSpecialist | AskAdmin Text | SpecifySapi Text Text | PrepareTask Text TaskSpec | TaskUnresolved Text
+ | NeedSpecialist | AskAdmin Text | SpecifySapi Text Text | PrepareTask Text TaskSpec
  | Handoff Text | ReportOutcome Text Outcome
  deriving (Eq, Show)
 data DecisionResponse = DecisionResponse { decisionBody :: Decision, decisionReason :: Text, decisionEvidence :: [Text], decisionRaw :: Value } deriving (Eq, Show)
@@ -210,7 +208,6 @@ parseDecision node value = do
   "RequestUnclear" -> variant ["question"] (AskAdmin <$> textAt "question" 4000)
   "SapiSpecified" -> variant ["name","role"] (SpecifySapi <$> nameP value <*> textAt "role" 60)
   "TaskPrepared" -> variant ["taskType","specification"] (PrepareTask <$> textAt "taskType" 60 <*> parseJSON (get value "specification"))
-  "TaskUnresolved" -> variant ["reply"] (TaskUnresolved <$> textAt "reply" 64000)
   "HandoffPrepared" -> variant ["request"] (Handoff <$> textAt "request" 16000)
   "Outcome" -> variant ["reply","outcome"] (ReportOutcome <$> textAt "reply" 64000 <*> parseJSON (get value "outcome"))
   _ -> fail "Unknown decision event"
@@ -223,7 +220,7 @@ eventsFor node = case node of
  Assessing -> ["FitsSpecialization","OutsideSpecialization"]
  ChiefTriage -> ["FitsSpecialization","SpecialistSelected","NewSpecialistNeeded","RequestUnclear"]
  CreatingSapi -> ["SapiSpecified"]
- ReadyToWork -> ["TaskPrepared","TaskUnresolved"]
+ ReadyToWork -> ["TaskPrepared"]
  Delegation -> ["HandoffPrepared"]
  Execution -> ["Outcome","OutsideSpecialization"]
  OutcomeNode -> []
@@ -297,8 +294,7 @@ begin s a turn = do
      first=newCall (turnId turn) a Nothing (RunningAt (if routine then ReadyToWork else Assessing)) (turnInput turn)
      initial=Workload (runIdText (turnId turn)) routine (first :| []) (KM.fromList [("originalIntent",str (turnInput turn)),("task",obj [("taskId",str ("task_"<>runIdText (turnId turn))),("taskType",str (if routine then "automated" else "work")),("specification",Null)]),("origin",merge (obj [("agent",toJSON a),("call",toJSON (turnId turn))]) (turnField turn "origin")),("decisions",arr []),("outcome",Null)])
      (w,c)=fromMaybe (initial,first) found
-     nextNode=if isJust (legacySpecification w) then ReadyToWork else callNode c
-     running=if isNothing (callOutput c) then c { callProgress=RunningAt nextNode, callFields=KM.delete "error" (callFields c) } else c
+     running=if isNothing (callOutput c) then c { callProgress=RunningAt (callNode c), callFields=KM.delete "error" (callFields c) } else c
      updated=setCallFields [("attempt",num (fromMaybe 1 (turnAttempt turn)))] running
  saveWork s (withCall w updated)
 conversation :: Service -> AgentId -> Turn -> AgentState -> IO Value
@@ -326,7 +322,7 @@ decide s run turn state node logs = do
  (rendered,record) <- locked s $ do
   source <- templates s >>= maybe (failure 400 "Unknown decision node") pure . find ((==toJSON node) . (`get` "node"))
   (w,c) <- getWork s (turnId turn)
-  accepted <- either decisionFailure pure (acceptedTaskSpec w)
+  void (either decisionFailure pure (acceptedTaskSpec w))
   conv <- conversation s (runOwner run) turn state
   chief <- DB.mainAgent s
   members <- team s
@@ -335,8 +331,7 @@ decide s run turn state node logs = do
   wiki <- prompt s "notes-wiki"
   envelope <- prompt s "decision-envelope"
   let instruction = at source "content" <> extra <> scheduled
-      task=maybe (workField w "task") (\spec -> put "specification" (toJSON spec) (workField w "task")) accepted
-      context = obj [("originalIntent",workField w "originalIntent"),("task",task),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
+      context = obj [("originalIntent",workField w "originalIntent"),("task",workField w "task"),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
       rendered = render envelope [("node",wireName node),("instruction",instruction),("notes_wiki",render wiki [("notes_example",T.pack (repositoryRoot s </> "corpora/prompts/examples/jarvis-notes.html"))]),("context",jsonText context),("events",T.intercalate ", " (sort (eventsFor node)))]
   (model,effort) <- modelDefaults
   policy <- executionSettings s (agentIdText (runOwner run))
@@ -451,13 +446,8 @@ advanceDecision chief response work call = case decisionBody response of
    accepted <- acceptedTaskSpec work
    let inherited=maybe [] (NE.toList . specCriteria) accepted
    unless (all (`elem` NE.toList (specCriteria spec)) inherited) (Left CriteriaRemoved)
-   let original=workField work "task"
-       audited=maybe original (\legacy -> put "legacySpecification" legacy original) (legacySpecification work)
-       task=mergeFields [("taskType",str (if has (workField work "origin") "routine" then "automated" else taskType)),("specification",toJSON spec)] audited
+   let task=mergeFields [("taskType",str (if has (workField work "origin") "routine" then "automated" else taskType)),("specification",toJSON spec)] (workField work "task")
    Right (finish (setWorkField "task" task work) (RunningAt Execution))
- TaskUnresolved reply
-  | isJust (legacySpecification work) -> Right (finish work (FinishedCall (UnresolvedResult reply)))
-  | otherwise -> Left (InvalidAcceptedTask "TaskUnresolved is reserved for legacy task re-preparation")
  Handoff request -> Right (DelegateRequest request)
  ReportOutcome reply outcome -> do
   spec <- acceptedTaskSpec work >>= maybe (Left (InvalidAcceptedTask "Task has no accepted specification")) Right
@@ -470,17 +460,7 @@ advanceDecision chief response work call = case decisionBody response of
 acceptedTaskSpec :: Workload -> Either DecisionError (Maybe TaskSpec)
 acceptedTaskSpec work = case get (workField work "task") "specification" of
  Null -> Right Nothing
- _ | isJust (legacySpecification work) -> Right Nothing
- value -> Just <$> B.first (InvalidAcceptedTask . T.pack) (parseEither parseJSON value)
--- Legacy strings have no reliable applicability metadata, even when they start with "If".
--- Keep the original specification for audit and ask ReadyToWork to write a new typed one.
-legacySpecification :: Workload -> Maybe Value
-legacySpecification work = case get (get (workField work "task") "specification") "completionCriteria" of
- Array criteria | all isLegacyText (toList criteria) -> Just (get (workField work "task") "specification")
- _ -> Nothing
- where
- isLegacyText (String _) = True
- isLegacyText _ = False
+ value -> Just <$> B.first (InvalidAcceptedTask . ("Saved Task specification must use structured completion criteria; create a new Task. " <>) . T.pack) (parseEither parseJSON value)
 
 decisionFailure :: DecisionError -> IO a
 decisionFailure problem = case problem of
@@ -488,7 +468,7 @@ decisionFailure problem = case problem of
  OnlyChiefCreates -> failure 403 "Only Chief can create a Sapi"
  CriteriaRemoved -> failure 400 "A handoff cannot remove accepted completion criteria"
  InvalidOutcome reason -> failure 400 (outcomeError reason)
- InvalidAcceptedTask reason -> failure 500 reason
+ InvalidAcceptedTask reason -> failure 409 reason
 
 runDecision :: (AgentId -> IO PreparedSpecialist) -> Service -> Run -> Turn -> AgentState -> IO (Text,[Value])
 runDecision prepareSpecialist s run turn state = do

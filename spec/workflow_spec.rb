@@ -150,7 +150,7 @@ RSpec.describe 'Delegation and completion contracts' do
     expect(task['decisions'].map { |d| d['node'] }).to include('Delegation', 'ReadyToWork')
   end
 
-  it 're-prepares a legacy task on retry and keeps the original decision audit' do
+  it 'rejects an unfinished legacy task on retry without changing its saved specification or audit' do
     host.configure(rules: {'Execution' => {response: decision('Outcome', reply: 'Incomplete', outcome: {
       status: 'Completed', criterionResults: [], artifacts: []})}})
     id = host.submit(chief)
@@ -163,44 +163,33 @@ RSpec.describe 'Delegation and completion contracts' do
       db.execute('UPDATE workloads SET value=? WHERE id=?', [JSON.generate(saved), id])
     end
     host.start
-    replacement = [conditional('review', 'A source is available.', 'Review it.')]
-    host.configure(rules: {
-      'ReadyToWork' => {response: decision('TaskPrepared', taskType: 'research', specification: {
-        objective: 'Review a source', inputs: [], expectedOutputs: ['Report'], completionCriteria: replacement})},
-      'Execution' => {response: decision('Outcome', reply: 'Source unavailable', outcome: {
-        status: 'Completed', criterionResults: [result('review', 'NotApplicable', 'No source is available.')], artifacts: []})}})
+    calls_before_retry = host.calls.size
     host.api('POST', "/api/agents/#{chief}/turns/#{id}/retry", {})
-    host.turn(id, 'done')
+    failed = host.turn(id, 'failed')
     task = tasks.first
-    expect(task['task']['specification']['completionCriteria']).to eq(JSON.parse(JSON.generate(replacement)))
-    expect(task['task']['legacySpecification']['completionCriteria']).to eq(['If a source is available, review it.'])
-    expect(task['decisions'].first(before.size).map { |entry| entry['decisionId'] }).to eq(before)
-    expect(task['decisions'].last(2).map { |entry| entry['node'] }).to eq(%w[ReadyToWork Execution])
-    expect(host.calls.last(2).map { |call| call['node'] }).to eq(%w[ReadyToWork Execution])
+    expect(failed['error']).to include('Saved Task specification must use structured completion criteria')
+    expect(task['task']['specification']['completionCriteria']).to eq(['If a source is available, review it.'])
+    expect(task['decisions'].map { |entry| entry['decisionId'] }).to eq(before)
+    expect(host.calls.size).to eq(calls_before_retry)
   end
 
-  it 'reports an ambiguous legacy task as unresolved without retrying the old execution' do
-    host.configure(rules: {'Execution' => {response: decision('Outcome', reply: 'Incomplete', outcome: {
-      status: 'Completed', criterionResults: [], artifacts: []})}})
+  it 'keeps completed legacy task history readable after restart' do
     id = host.submit(chief)
-    host.turn(id, 'failed')
+    host.turn(id, 'done')
+    before = tasks.first['decisions'].map { |entry| entry['decisionId'] }
     host.stop
-    legacy = 'Si une source existe, examine-la; sinon demande une précision.'
+    legacy = 'If a source exists, inspect it.'
     SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
       saved = JSON.parse(db.get_first_value('SELECT value FROM workloads WHERE id=?', [id]))
       saved['task']['specification']['completionCriteria'] = [legacy]
       db.execute('UPDATE workloads SET value=? WHERE id=?', [JSON.generate(saved), id])
     end
     host.start
-    host.configure(rules: {'ReadyToWork' => {response: decision('TaskUnresolved', reply: 'Please restate the legacy condition.')}})
-    host.api('POST', "/api/agents/#{chief}/turns/#{id}/retry", {})
-    host.turn(id, 'done')
     task = tasks.first
-    expect(task['execution']['state']).to eq('Unresolved')
+    expect(task['execution']['state']).to eq('Completed')
     expect(task['task']['specification']['completionCriteria']).to eq([legacy])
-    expect(task['calls'].size).to eq(1)
-    expect(host.calls.last['node']).to eq('ReadyToWork')
-    expect(task['decisions'].last).to include('accepted' => true, 'node' => 'ReadyToWork')
+    expect(task['decisions'].map { |entry| entry['decisionId'] }).to eq(before)
+    expect(task['outcome']).to include('reply' => 'Verified comparison')
   end
 
   it 'prevents a delegated recipient from reporting completion without an accepted task' do
