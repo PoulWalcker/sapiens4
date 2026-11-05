@@ -83,6 +83,7 @@ openService path = do
       cfg <- corporaSettings s
       writeIORef pulse (obj [("id",str identityPulse),("running",Bool (corporaStatus cfg==Active)),("numbers",merge (obj [(k,num 0) | k<-["bpm120","bpm60","bph60"]]) (get savedPulse "numbers"))])
       R.initializeRoutines s
+      R.restoreOccurrences s
       D.reconcileWorks s
       D.pendingWorks s
       GC.reconcileGroups s

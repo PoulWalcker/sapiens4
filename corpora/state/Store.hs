@@ -81,9 +81,10 @@ initialize :: Service -> IO ()
 initialize s = connection s $ \db -> do
  execute_ db "PRAGMA journal_mode=WAL"
  [Only version] <- query_ db "PRAGMA user_version" :: IO [Only Int]
- require (version `elem` [0..8]) 500 ("Unsupported CORPORA schema: " <> T.pack (show version))
+ require (version `elem` [0..9]) 500 ("Unsupported CORPORA schema: " <> T.pack (show version))
  mapM_ (execute_ db) [
   "CREATE TABLE IF NOT EXISTS scheduled_routines (sequence INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS routine_occurrences (id TEXT PRIMARY KEY, value TEXT NOT NULL, materialized INTEGER NOT NULL DEFAULT 0 CHECK(materialized IN (0,1)))",
   "CREATE TABLE IF NOT EXISTS system_pulse (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS pulse_calls (sequence INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS turn_details (id TEXT PRIMARY KEY, value TEXT NOT NULL)",
@@ -99,7 +100,7 @@ initialize s = connection s $ \db -> do
   "CREATE TABLE IF NOT EXISTS activity_events (id INTEGER PRIMARY KEY, owner TEXT NOT NULL, timestamp TEXT NOT NULL, actor TEXT NOT NULL, entity TEXT NOT NULL, event TEXT NOT NULL, agency TEXT, details TEXT NOT NULL)",
   "CREATE INDEX IF NOT EXISTS activity_events_owner ON activity_events(owner,id)"]
  when (version `elem` [1,2]) $ execute_ db "INSERT OR IGNORE INTO turns SELECT * FROM jobs WHERE flow IN ('chat','computer')"
- execute_ db "PRAGMA user_version=8"
+ execute_ db "PRAGMA user_version=9"
 agents :: Service -> IO [Value]
 agents s = map toJSON <$> agentProfiles s
 agentProfiles :: Service -> IO [AgentProfile]
@@ -178,7 +179,9 @@ turns s = do
  pure [let msg=M.findWithDefault empty (at v "id") messagesById; d=M.findWithDefault empty (at v "id") detailsById in merge (merge v d) (obj [("attachments",get msg "attachments" `asJSON` arr []),("input",get msg "text" `fallback` get v "input")]) | v <- rows]
  where asJSON (String t) _ = parseJSONText t; asJSON _ def = def
 saveRoutine :: Service -> Value -> IO Value
-saveRoutine s v = connection s $ \db -> do
+saveRoutine s v = connection s $ \db -> saveRoutineOn db v
+saveRoutineOn :: Connection -> Value -> IO Value
+saveRoutineOn db v = do
  sequenceId <- if has v "id" then maybe (failure 500 "Invalid scheduled routine ID") pure (T.stripPrefix "routine_sch_" (at v "id") >>= readMaybe . T.unpack :: Maybe Int64) else execute_ db "INSERT INTO scheduled_routines(value) VALUES ('{}')" >> lastInsertRowId db
  let i = "routine_sch_" <> T.justifyRight 5 '0' (T.pack (show sequenceId)); value = put "id" (str i) v
  execute db "UPDATE scheduled_routines SET value=? WHERE sequence=?" (jsonText value,sequenceId)

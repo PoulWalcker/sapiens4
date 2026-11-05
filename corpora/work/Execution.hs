@@ -19,6 +19,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Clock
 import System.Directory
+import System.IO (hPutStrLn, stderr)
 import Types
 import qualified Store as DB
 import Population
@@ -272,6 +273,12 @@ onPulse prepareSpecialist s tick = do
     publish s a tick
     admit prepareSpecialist s a tick
     when (pulseFrequency tick==Bph60) $ admit prepareSpecialist s a tick
+runPulse :: (AgentId -> IO D.PreparedSpecialist) -> Service -> Pulse -> IO ()
+runPulse prepareSpecialist s tick = try (onPulse prepareSpecialist s tick) >>= either report pure
+ where report exception
+        | isJust (fromException exception :: Maybe SomeAsyncException) = throwIO exception
+        | isJust (fromException exception :: Maybe AsyncCancelled) = throwIO exception
+        | otherwise = hPutStrLn stderr ("Pulse " <> show tick <> ": " <> show exception)
 advanceDeadline :: Frequency -> Int -> Int -> (Int,Int)
 advanceDeadline frequency time due = (elapsed,due+elapsed*interval)
  where
@@ -307,7 +314,7 @@ startExecution prepareSpecialist s = modifyMVar_ (serviceWorker s) $ \existing -
            let number=int (get (get current "numbers") key)+elapsed; numbers=put key (num number) (get current "numbers"); identity=at current "id"
            writeIORef (servicePulse s) (put "numbers" numbers current)
            DB.saveSingleton s DB.SystemPulse (obj [("pulse",str identity),("numbers",numbers)])
-           onPulse prepareSpecialist s (Pulse identity frequency number)
+           runPulse prepareSpecialist s (Pulse identity frequency number)
         threadDelay 50000
         step
   step
