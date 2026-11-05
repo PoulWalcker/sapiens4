@@ -118,6 +118,9 @@ initialize s = connection s $ \db -> do
   -- snapshots, closure reasons and admitted Runs remain unchanged.
   execute_ db "UPDATE routine_occurrences SET value=json_set(value,'$.through',json_extract(value,'$.routine.nextDue')) WHERE status IN ('deferred','closed') AND CASE WHEN json_valid(value) THEN json_type(value,'$.through') IS NULL AND json_type(value,'$.routine.nextDue')='text' ELSE 0 END"
   execute_ db "PRAGMA user_version=12"
+ -- Older occurrence migrations rebuild the table; create its indexes afterward.
+ execute_ db "CREATE INDEX IF NOT EXISTS routine_occurrences_open_routine ON routine_occurrences(CASE WHEN json_valid(value) THEN json_extract(value,'$.routine.id') ELSE NULL END) WHERE status<>'closed'"
+ execute_ db "CREATE INDEX IF NOT EXISTS routine_occurrences_status ON routine_occurrences(status)"
 
 agents :: Service -> IO [Value]
 agents s = map toJSON <$> agentProfiles s
