@@ -14,6 +14,7 @@ import Data.Aeson.Types (Parser)
 import qualified Data.Aeson.KeyMap as KM
 import Data.List (find, nub, sortOn)
 import qualified Data.List.NonEmpty as NE
+import qualified Data.Map.Strict as M
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -580,16 +581,25 @@ activePersonal s db routine dues = do
      turns = filter matching (agentTurns state)
      admitted = [occurrenceId occurrence | Admitted occurrence _ <- dues]
      identities = nub (admitted ++ map turnId turns)
- active <- filterM (activeIdentity turns) identities
+ workRows <- readRuns "SELECT id,value FROM workloads" ["id","value"] identities
+ turnRows <- readRuns "SELECT id,status FROM turns" ["id","status"] identities
+ let works=M.fromList [(at row "id",row) | row<-workRows]
+     projected=M.fromList [(at row "id",row) | row<-turnRows]
+ active <- filterM (activeIdentity turns works projected) identities
  pure (case active of i:_ -> Just i; [] -> Nothing)
  where
- activeIdentity turns identity = do
+ -- Bound placeholders across SQLite builds and batch historic Run lookups.
+ readRuns _ _ [] = pure []
+ readRuns query columns identities = do
+  let (batch,remaining)=splitAt 128 identities
+      placeholders=T.intercalate "," (replicate (length batch) "?")
+  rows <- DB.queryRowsOn db (query<>" WHERE id IN ("<>placeholders<>")") columns
+   [SQL.SQLText (runIdText identity) | identity<-batch]
+  (rows++) <$> readRuns query columns remaining
+ activeIdentity turns works projected identity = do
   let inState = find ((==identity) . turnId) turns
-      key = [SQL.SQLText (runIdText identity)]
-  workRows <- DB.queryRowsOn db "SELECT value FROM workloads WHERE id=?" ["value"] key
-  turnRows <- DB.queryRowsOn db "SELECT status FROM turns WHERE id=?" ["status"] key
-  work <- traverse (DB.decodeStored . (`at` "value")) (listToMaybe workRows) :: IO (Maybe D.Workload)
-  status <- traverse (\row -> decodeValue 500 (get row "status")) (listToMaybe turnRows) :: IO (Maybe TurnStatus)
+  work <- traverse (DB.decodeStored . (`at` "value")) (M.lookup (runIdText identity) works) :: IO (Maybe D.Workload)
+  status <- traverse (\row -> decodeValue 500 (get row "status")) (M.lookup (runIdText identity) projected) :: IO (Maybe TurnStatus)
   let liveCall = case work of
        Just w -> D.callState (NE.last (D.workCalls w)) `elem`
         [D.CallQueued,D.CallRunning,D.CallDelegated,D.CallWaiting]
