@@ -107,7 +107,8 @@ routines m period = V.node "section" [V.cls "task-browser"] [V.node "div" [V.cls
     let frequency = "Every " <> show (I.floor r.minutes) <> " minutes"
         next = if r.paused then "" else " · " <> B.formatDate "" D.empty r.nextDue
         waiting = if r.deferredCount > 0.0 then " · " <> show (I.floor r.deferredCount) <> " due waiting since " <> B.formatDate "" D.empty r.oldestDeferredDue else ""
-    in {id:r.id,title:r.title,owner:r.owner,sender:r.owner,state:if r.paused then X.WorkPaused else X.WorkPlanned,routine:true,minutes:show $ I.floor r.minutes,prompt:r.prompt,runCount:I.floor r.runCount,meta:frequency <> next <> waiting,body:"Frequency: every " <> show (I.floor r.minutes) <> " minutes\nExecute: " <> r.prompt,result:"",error:"",taskType:""}
+        policy = X.routinePolicyLabel r.policy
+    in {id:r.id,title:r.title,owner:r.owner,sender:r.owner,state:if r.paused then X.WorkPaused else X.WorkPlanned,routine:true,minutes:show $ I.floor r.minutes,prompt:r.prompt,runCount:I.floor r.runCount,meta:frequency <> next <> waiting <> " · " <> policy,body:"Frequency: every " <> show (I.floor r.minutes) <> " minutes\n" <> policy <> "\nExecute: " <> r.prompt,result:"",error:"",taskType:""}
 
 events :: M.Model -> V.Html
 events m = V.node "section" [V.cls "event-log"] [V.div "event-columns event-head" $ map (\s -> V.span [] (s)) ["Timestamp","Actor","Entity","Event","Agency",""],V.div "event-rows" $ if A.null rows then [V.p "empty" "No events yet."] else map event rows]

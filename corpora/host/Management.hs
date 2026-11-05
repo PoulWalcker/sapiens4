@@ -50,7 +50,7 @@ prepare s a = do
  let context= obj [("currentSapi",str a),("chief",get facts "main_agent_id"),("groups",get facts "groups"),("team",get facts "team"),("workspace",obj [("path",str (T.pack (workspaceRoot s a)))])]
  writeText (agentRoot s a </> "manifests/corpora-state.md") (jsonText context)
 data WorkspaceOperation = OpenWorkspace | ZoomWorkspace | CloseWorkspace | FocusWorkspace | ReloadWorkspace | BackWorkspace | ForwardWorkspace | BookmarkWorkspace | UnbookmarkWorkspace deriving (Eq, Show)
-data Operation = ReadCorpora | UpdateCorpora | Batch | ReadStatus | Delegate | ReadRoutines | CreateRoutine | UpdateRoutine | PauseRoutine | ResumeRoutine | CreateAgent | RetireAgent | RehireAgent | AcquireComputer | ChangeManager | ReadWorkspace | GroupCommand G.GroupOperation | WorkspaceCommand WorkspaceOperation deriving (Eq, Show)
+data Operation = ReadCorpora | UpdateCorpora | Batch | ReadStatus | Delegate | ReadRoutines | CreateRoutine | UpdateRoutine | SelectRoutinePolicy | PauseRoutine | ResumeRoutine | CreateAgent | RetireAgent | RehireAgent | AcquireComputer | ChangeManager | ReadWorkspace | GroupCommand G.GroupOperation | WorkspaceCommand WorkspaceOperation deriving (Eq, Show)
 operationSchema :: [(Text,Operation,[Text])]
 operationSchema =
  [ ("corpora_get", ReadCorpora, [])
@@ -58,9 +58,10 @@ operationSchema =
  , ("batch", Batch, ["operations"])
  , ("status", ReadStatus, ["target"])
  , ("delegate", Delegate, ["decision"])
- , ("routines", ReadRoutines, [])
- , ("routine_create", CreateRoutine, ["minutes","prompt"])
- , ("routine_update", UpdateRoutine, ["id","minutes","prompt"])
+ , ("routines", ReadRoutines, ["group"])
+ , ("routine_create", CreateRoutine, ["minutes","prompt","missedPolicy"])
+ , ("routine_update", UpdateRoutine, ["id","minutes","prompt","missedPolicy"])
+ , ("routine_policy", SelectRoutinePolicy, ["id","expectedPrompt","expectedSelection","missedPolicy"])
  , ("routine_pause", PauseRoutine, ["id"])
  , ("routine_resume", ResumeRoutine, ["id"])
  , ("group_create", GroupCommand G.GroupCreate, ["name","description","lead","members"])
@@ -166,9 +167,22 @@ control s a payload = do
    require (maybe True ((==RunId identity) . snd) lease) 409 "Shared computer is busy with another AgencyRun"
    writeIORef (serviceLease s) (Just (AgentId a,RunId identity))
    pure (obj [("owner",str a)])
-  ReadRoutines -> obj . (:[]) . ("routines",) . arr . filter ((==a) . (`at` "owner")) <$> R.routineSummaries s
-  CreateRoutine -> receipt . obj . (:[]) . ("routine",) <$> R.save s a (get d "minutes") (get d "prompt") (R.AddRoutine current)
-  UpdateRoutine -> do i<-textField d "id" 80; receipt . obj . (:[]) . ("routine",) <$> R.save s a (get d "minutes") (get d "prompt") (R.EditRoutine i Nothing)
+  ReadRoutines -> do
+   owner <- workspaceOwner
+   obj . (:[]) . ("routines",) . arr . filter ((==owner) . (`at` "owner")) <$> R.routineSummaries s
+  CreateRoutine -> do
+   policy <- decodeValue 400 (get d "missedPolicy")
+   receipt . obj . (:[]) . ("routine",) <$> R.save s a (get d "minutes") (get d "prompt") (Just policy) (R.AddRoutine current)
+  UpdateRoutine -> do
+   i <- textField d "id" 80
+   policy <- if has d "missedPolicy" then Just <$> decodeValue 400 (get d "missedPolicy") else pure Nothing
+   receipt . obj . (:[]) . ("routine",) <$> R.save s a (get d "minutes") (get d "prompt") policy (R.EditRoutine i Nothing)
+  SelectRoutinePolicy -> do
+   i <- textField d "id" 80
+   expected <- textField d "expectedPrompt" 16000
+   selection <- decodeValue 400 (get d "expectedSelection")
+   policy <- decodeValue 400 (get d "missedPolicy")
+   receipt . obj . (:[]) . ("routine",) <$> R.setPolicy s a i expected selection policy
   PauseRoutine -> pause receipt True
   ResumeRoutine -> pause receipt False
   Delegate -> D.applyDecision s a current (at d "decision")

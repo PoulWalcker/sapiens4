@@ -61,8 +61,9 @@ submitGroup s gid input actor = do
  routine <- if actor == "admin" then Routine.command s gid content (not (null attachments)) else pure Nothing
  case routine of
   Just r -> do
-   entry <- message actor content; acknowledgment <- message (at group "lead") (Routine.receipt r content)
-   void (saveGroup s (append "messages" acknowledgment (append "messages" entry group)) actor "routine saved" (get r "id"))
+   latest <- getGroup s gid True
+   entry <- message actor content; acknowledgment <- message (at latest "lead") (Routine.receipt r content)
+   void (saveGroup s (append "messages" acknowledgment (append "messages" entry latest)) actor "routine saved" (get r "id"))
    pure entry
   Nothing -> do
    targets <- if has input "target" then pure [at input "target"] else mentions s group content

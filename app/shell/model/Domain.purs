@@ -247,8 +247,29 @@ orchestration value =
   , timeout: D.num $ D.at ["execution","timeout_seconds"] value
   }
 
+data RoutinePolicy = AwaitingPolicySelection | RecoverEachDeadline | RunLatestDeadline | SkipMissedDeadlines
+derive instance eqRoutinePolicy :: Eq RoutinePolicy
+
+routinePolicy :: Json -> Either String RoutinePolicy
+routinePolicy value = case D.s "kind" value of
+  "awaiting_selection" -> Right AwaitingPolicySelection
+  "selected" -> case D.s "policy" value of
+    "recover_each" -> Right RecoverEachDeadline
+    "run_latest" -> Right RunLatestDeadline
+    "skip_missed" -> Right SkipMissedDeadlines
+    _ -> Left "Invalid missed-deadline policy"
+  _ -> Left "Invalid routine policy selection"
+
+routinePolicyLabel :: Either String RoutinePolicy -> String
+routinePolicyLabel = case _ of
+  Left _ -> "Policy unavailable"
+  Right AwaitingPolicySelection -> "Waiting for Sapi to configure missed runs"
+  Right RecoverEachDeadline -> "Missed runs: recover each"
+  Right RunLatestDeadline -> "Missed runs: one current run"
+  Right SkipMissedDeadlines -> "Missed runs: skip"
+
 type Routine =
-  { id :: String, owner :: String, title :: String, prompt :: String, minutes :: Number, nextDue :: String, runCount :: Number, paused :: Boolean, deferredCount :: Number, oldestDeferredDue :: String }
+  { id :: String, owner :: String, title :: String, prompt :: String, minutes :: Number, nextDue :: String, runCount :: Number, paused :: Boolean, deferredCount :: Number, oldestDeferredDue :: String, policy :: Either String RoutinePolicy }
 
 routine :: Json -> Routine
 routine value =
@@ -262,6 +283,7 @@ routine value =
   , paused: D.b "paused" value
   , deferredCount: D.n "deferredCount" value
   , oldestDeferredDue: D.s "oldestDeferredDue" value
+  , policy: routinePolicy $ D.get "policySelection" value
   }
 
 type Event =
@@ -586,7 +608,7 @@ checkOrchestration :: Check
 checkOrchestration = record [optional "manager" stringValue, optional "notes" checkNotes]
 
 checkRoutine :: Check
-checkRoutine = record [optional "id" stringValue, optional "owner" stringValue, optional "title" stringValue, optional "prompt" stringValue, optional "minutes" numberValue, optional "nextDue" stringValue, optional "runCount" numberValue, optional "paused" booleanValue, optional "deferredCount" numberValue, optional "oldestDeferredDue" stringValue]
+checkRoutine = record [optional "id" stringValue, optional "owner" stringValue, optional "title" stringValue, optional "prompt" stringValue, optional "minutes" numberValue, optional "nextDue" stringValue, optional "runCount" numberValue, optional "paused" booleanValue, optional "deferredCount" numberValue, optional "oldestDeferredDue" stringValue, field "policySelection" (void <<< routinePolicy)]
 
 checkEvent :: Check
 checkEvent = record [optional "timestamp" stringValue, optional "actor" stringValue, optional "entity" stringValue, optional "event" stringValue, optional "agency" stringValue]
