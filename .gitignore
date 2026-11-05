@@ -11,6 +11,9 @@ Package.resolved
 *.xcworkspace
 DerivedData/
 
+# JetBrains IDEs
+.idea/
+
 # Logs
 *.log
 
