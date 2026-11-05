@@ -24,7 +24,7 @@ RSpec.describe 'Haskell command-line contracts', :host do
     config = File.join(host.workspace(owner), 'host-control.json')
     message = 'Résumé 中文 😎 — quoted "text"'
     out, error, code = Contract.capture(Contract::BINARY, 'control', config,
-      JSON.generate(op: 'routine_create', minutes: 2, prompt: message), env: host.environment)
+      JSON.generate(op: 'routine_create', minutes: 2, prompt: message, missedPolicy: 'run_latest'), env: host.environment)
     expect(code).to eq(0), error
     expect(JSON.parse(out)['routine']['prompt']).to eq(message)
     out, _, code = Contract.capture(Contract::BINARY, 'control', config, '{', env: host.environment)

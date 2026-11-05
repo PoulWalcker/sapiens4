@@ -3,13 +3,12 @@ require 'time'
 
 RSpec.describe 'Scheduled work and pulse contracts' do
   def routine(owner = chief, minutes = 1, prompt = 'Return a sourced comparison.')
-    host.submit(owner, "Add New Scheduled Routine:\nFrequency: every #{minutes} minutes\nExecute: #{prompt}")
-    host.state['routines'].last
+    host.control(owner, 'routine_create', minutes: minutes, prompt: prompt, missedPolicy: 'run_latest').fetch('routine')
   end
 
   [0, 525601, '2', 1.5].each do |minutes|
     it "rejects invalid API interval #{minutes.inspect} without saving a schedule" do
-      expect(host.request('POST', "/api/agents/#{chief}/control", {op: 'routine_create', minutes: minutes, prompt: 'Compare products'}).first).to eq(400)
+      expect(host.request('POST', "/api/agents/#{chief}/control", {op: 'routine_create', minutes: minutes, prompt: 'Compare products', missedPolicy: 'run_latest'}).first).to eq(400)
       expect(host.state['routines']).to be_empty
       expect(host.calls).to be_empty
     end
