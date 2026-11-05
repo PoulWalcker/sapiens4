@@ -14,7 +14,6 @@ import qualified Data.Aeson.KeyMap as KM
 import Data.List (find, nub, sortOn)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as M
-import qualified Data.Set as Set
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -154,6 +153,49 @@ instance ToJSON Due where
   [("id",toJSON (dueId due)),("routine",toJSON (dueRoutine due)),("target",toJSON (dueTarget due))
   ,("created",str (timestamp (dueObserved due)))]
 
+-- A contiguous grid of deadlines with one immutable instruction/interval snapshot.
+-- The constructor stays private; persisted ranges must be ordered and aligned.
+data DueSpan = DueSpan { spanFirst :: Due, spanThrough :: UTCTime } deriving (Eq, Show)
+instance FromJSON DueSpan where
+ parseJSON value = withObject "Routine due range" (\o -> do
+  first <- parseJSON value
+  through <- o .: "through" >>= maybe (fail "Invalid due range end") pure . parseTime
+  let distance=diffUTCTime through (routineDue (dueRoutine first))
+      interval=intervalSeconds (routineMinutes (dueRoutine first))
+      steps=floor (distance / interval) :: Integer
+  unless (distance >= 0 && through <= dueObserved first && fromInteger steps * interval == distance)
+   (fail "Due range must end on its observed deadline grid")
+  pure (DueSpan first through)) value
+instance ToJSON DueSpan where
+ toJSON range = merge (toJSON (spanFirst range)) (obj [("through",str (timestamp (spanThrough range)))])
+
+spanCount :: DueSpan -> Integer
+spanCount range = 1 + floor (diffUTCTime (spanThrough range) (routineDue routine) / intervalSeconds (routineMinutes routine))
+ where routine=dueRoutine (spanFirst range)
+
+spanDueAt :: DueSpan -> UTCTime -> Due
+spanDueAt range time
+ | time == routineDue original = first
+ | otherwise = first { dueId=dueIdFor updated, dueRoutine=updated }
+ where
+ first=spanFirst range
+ original=dueRoutine first
+ updated=original { routineDue=time }
+
+spanLast :: DueSpan -> Due
+spanLast range = spanDueAt range (spanThrough range)
+
+-- Splitting retains the captured observation, target and instruction snapshot.
+spanTail :: DueSpan -> Maybe DueSpan
+spanTail range
+ | spanCount range == 1 = Nothing
+ | otherwise = Just (range { spanFirst=spanDueAt range (routineDue (advanceDeadline (dueRoutine (spanFirst range)))) })
+
+spanPrefix :: DueSpan -> Maybe DueSpan
+spanPrefix range
+ | spanCount range == 1 = Nothing
+ | otherwise = Just (range { spanThrough=addUTCTime (negate (intervalSeconds (routineMinutes (dueRoutine (spanFirst range))))) (spanThrough range) })
+
 data ClosureReason = SkippedByPolicy | SupersededBy RunId deriving (Eq, Show)
 instance FromJSON ClosureReason where
  parseJSON = withObject "Due closure" $ \o -> do
@@ -169,14 +211,15 @@ instance ToJSON ClosureReason where
 
 data Materialization = Pending | Ready deriving (Eq, Show)
 data StoredDue
- = Deferred Due DeferredReason
+ = Deferred DueSpan DeferredReason
  | Admitted ScheduledOccurrence Materialization
- | Closed Due ClosureReason
+ | Closed DueSpan ClosureReason
  deriving (Eq, Show)
 
--- This plan never authorizes more than one run. Unmentioned deadlines stay queued.
-data DuePlan = KeepDues | ResolveDues (Maybe Due) [(Due,ClosureReason)] deriving (Eq, Show)
-resolveDues :: UTCTime -> PolicySelection -> Maybe RunId -> [(Due,DeferredReason)] -> DuePlan
+-- At most one admission, compact closures, and unconsumed ranges.
+-- Unmentioned spans remain queued. All replacements commit together.
+data DuePlan = KeepDues | ResolveDues (Maybe Due) [(DueSpan,ClosureReason)] [(DueSpan,DeferredReason)] deriving (Eq, Show)
+resolveDues :: UTCTime -> PolicySelection -> Maybe RunId -> [(DueSpan,DeferredReason)] -> DuePlan
 resolveDues time selection active pending
  | isJust active = KeepDues
  | otherwise = case selection of
@@ -184,18 +227,28 @@ resolveDues time selection active pending
     PolicySelected policy -> case policy of
      RecoverEach -> case ordered of
       [] -> KeepDues
-      (due,_):_ -> ResolveDues (Just due) []
-     RunLatest -> case reverse ordered of
+      (range,reason):_ -> ResolveDues (Just (spanFirst range)) [] [(remainder,reason) | remainder <- maybeToList (spanTail range)]
+     RunLatest -> case latest of
       [] -> KeepDues
-      (latest,_):rest -> ResolveDues (Just latest)
-       [(due,SupersededBy (occurrenceIdFor (dueRoutine latest))) | (due,_) <- rest]
-     SkipMissed -> ResolveDues (listToMaybe [due | entry@(due,_) <- ordered, current entry])
-       [(due,SkippedByPolicy) | entry@(due,_) <- ordered, not (current entry)]
+      (range,_):rest -> selectLast range rest (SupersededBy (occurrenceIdFor (dueRoutine (spanLast range))))
+     SkipMissed ->
+      let eligible=sortOn (spanThrough . fst) (filter current pending)
+          admitted=spanLast . fst <$> listToMaybe eligible
+          closed=[(range,SkippedByPolicy) | entry@(range,_) <- ordered, not (current entry)]
+           ++ [(prefix,SkippedByPolicy) | (range,_) <- eligible, prefix <- maybeToList (spanPrefix range)]
+          -- Other current slots remain queued. If a range's stale prefix was
+          -- closed above, retain its current singleton under that deadline's ID.
+          remaining=[(DueSpan (spanLast range) (spanThrough range),reason)
+           | (range,reason) <- drop 1 eligible, spanCount range > 1]
+      in ResolveDues admitted closed remaining
  where
- ordered = sortOn (routineDue . dueRoutine . fst) pending
- current (due,reason) = case reason of
+ ordered = sortOn (routineDue . dueRoutine . spanFirst . fst) pending
+ latest = reverse (sortOn (spanThrough . fst) pending)
+ selectLast range rest reason = ResolveDues (Just (spanLast range))
+  ([(other,reason) | (other,_) <- rest] ++ [(prefix,reason) | prefix <- maybeToList (spanPrefix range)]) []
+ current (range,reason) = case reason of
   BlockedBy _ -> False
-  _ -> addUTCTime (intervalSeconds (routineMinutes (dueRoutine due))) (routineDue (dueRoutine due)) > time
+  _ -> addUTCTime (intervalSeconds (routineMinutes (dueRoutine (spanFirst range)))) (spanThrough range) > time
 
 validDueTarget :: Due -> Bool
 validDueTarget due = case dueTarget due of
@@ -211,13 +264,13 @@ routineSummaries s = do
  routines <- DB.values s DB.ScheduledRoutines
  rows <- DB.queryRows s "SELECT id,value,status FROM routine_occurrences WHERE status='deferred' ORDER BY rowid" ["id","value","status"] []
  dues <- catMaybes <$> traverse readSummaryDue rows
- let deferred=sortOn (routineDue . dueRoutine) [due | Deferred due _ <- dues]
-     pending routine = filter ((==at routine "id") . routineId . dueRoutine) deferred
+ let deferred=sortOn (routineDue . dueRoutine . spanFirst) [range | Deferred range _ <- dues]
+     pending routine = filter ((==at routine "id") . routineId . dueRoutine . spanFirst) deferred
      summarize routine = case pending routine of
       [] -> routine
       due:rest -> merge routine (obj
-       [("deferredCount",num (1+length rest))
-       ,("oldestDeferredDue",get (toJSON (dueRoutine due)) "nextDue")])
+       [("deferredCount",toJSON (sum (map spanCount (due:rest))))
+       ,("oldestDeferredDue",get (toJSON (dueRoutine (spanFirst due))) "nextDue")])
  pure (map summarize routines)
  where
  readSummaryDue row = (Just <$> readStoredDue row) `catch` invalidSummary row
@@ -371,13 +424,16 @@ advanceDeadline :: Routine -> Routine
 advanceDeadline routine = routine
  { routineDue=addUTCTime (intervalSeconds (routineMinutes routine)) (routineDue routine) }
 
--- Capture the complete elapsed grid before selecting the latest deadline.
-captureDues :: UTCTime -> Routine -> ScheduledTarget -> ([Due],Routine)
-captureDues time routine target = (map observed elapsed,advanced)
+-- Capture an arbitrarily long downtime without enumerating its deadlines.
+captureDues :: UTCTime -> Routine -> ScheduledTarget -> ([DueSpan],Routine)
+captureDues time routine target
+ | routineDue routine > time = ([],routine)
+ | otherwise = ([DueSpan first through],routine { routineDue=addUTCTime interval through })
  where
- elapsed=takeWhile ((<=time) . routineDue) (iterate advanceDeadline routine)
- advanced=case reverse elapsed of [] -> routine; latest:_ -> advanceDeadline latest
- observed r=Due (dueIdFor r) r target time
+ interval=intervalSeconds (routineMinutes routine)
+ steps=floor (diffUTCTime time (routineDue routine) / interval) :: Integer
+ through=addUTCTime (fromInteger steps * interval) (routineDue routine)
+ first=Due (dueIdFor routine) routine target time
 
 pauseRoutine :: UTCTime -> Bool -> Routine -> Routine
 pauseRoutine time paused routine = routine
@@ -459,14 +515,14 @@ readStoredDue row = do
    Closed <$> decodeValue 500 value <*> decodeValue 500 (get value "closure")
   _ -> failure 500 "Invalid stored due status"
  let storedId = case stored of
-      Deferred due _ -> toJSON (dueId due)
+      Deferred range _ -> toJSON (dueId (spanFirst range))
       Admitted occurrence _ -> toJSON (occurrenceId occurrence)
-      Closed due _ -> toJSON (dueId due)
+      Closed range _ -> toJSON (dueId (spanFirst range))
  require (storedId == get row "id") 500 "Stored due ID mismatch"
  pure stored
  where
  admitted materialization value = do
-  require (not (has value "reason") && not (has value "closure")) 500 "Due cannot be admitted without resolution"
+  require (not (has value "reason") && not (has value "closure") && not (has value "through")) 500 "Due cannot be admitted without resolution"
   Admitted <$> decodeValue 500 value <*> pure materialization
 
 readDuesOn :: SQL.Connection -> Routine -> IO [StoredDue]
@@ -563,53 +619,63 @@ admitDue s time candidate target = do
     mapM_ (insertDeferredOn db waitingReason) newDues
     result <- case plan of
      KeepDues -> pure Nothing
-     ResolveDues admitted closed -> do
+     ResolveDues admitted closed remaining -> do
       forM_ closed $ \(due,reason) -> do
        DB.executeOn db "UPDATE routine_occurrences SET value=?,status='closed' WHERE id=? AND status='deferred'"
-        [SQL.SQLText (jsonText (merge (toJSON due) (obj [("closure",toJSON reason)]))),SQL.SQLText (dueIdText (dueId due))]
+        [SQL.SQLText (jsonText (merge (toJSON due) (obj [("closure",toJSON reason)]))),SQL.SQLText (dueIdText (dueId (spanFirst due)))]
+       changed <- SQL.changes db
+       require (changed == 1) 409 "Deferred range changed before closure"
       -- Each durable row retains its own closure. Summarize the batch in the
       -- bounded activity feed instead of replacing that feed thousands of times.
       case closed of
        [] -> pure ()
        (first,reason):rest -> do
-        let firstTime=routineDue (dueRoutine first)
-            otherTimes=map (routineDue . dueRoutine . fst) rest
+        let spans=first:map fst rest
+            firstTime=foldr (min . routineDue . dueRoutine . spanFirst . fst) (routineDue (dueRoutine (spanFirst first))) rest
+            lastTime=foldr (max . spanThrough . fst) (spanThrough first) rest
         DB.recordOn s db [routineOwner routine] (routineId routine) "routine.dues_closed"
-         (obj [("count",num (1+length rest)),("reason",toJSON reason)
-         ,("earliest",str (timestamp (foldr min firstTime otherTimes)))
-         ,("latest",str (timestamp (foldr max firstTime otherTimes)))]) "system" Nothing
+         (obj [("count",toJSON (sum (map spanCount spans))),("reason",toJSON reason)
+         ,("earliest",str (timestamp firstTime))
+         ,("latest",str (timestamp lastTime))]) "system" Nothing
+      forM_ remaining $ \(range,reason) -> insertDeferredOn db reason range
       forM admitted $ \due -> do
        let snapshot=(dueRoutine due) { routinePolicy=routinePolicy routine }
            -- The owner stays fixed; a Group's current Lead owns its routing.
            occurrence=ScheduledOccurrence (occurrenceIdFor snapshot) snapshot target time
        require (validTarget occurrence) 409 "Routine owner changed before admission"
-       DB.executeOn db "UPDATE routine_occurrences SET value=?,status='admitted_pending' WHERE id=? AND status='deferred'"
-        [SQL.SQLText (jsonText (toJSON occurrence)),SQL.SQLText (runIdText (occurrenceId occurrence))]
+       DB.executeOn db "INSERT INTO routine_occurrences(id,value,status) VALUES (?,?,'admitted_pending') ON CONFLICT(id) DO UPDATE SET value=excluded.value,status=excluded.status WHERE routine_occurrences.status='deferred'"
+        [SQL.SQLText (runIdText (occurrenceId occurrence)),SQL.SQLText (jsonText (toJSON occurrence))]
+       changed <- SQL.changes db
+       require (changed == 1) 409 "Due already resolved before admission"
        DB.recordOn s db [routineOwner routine] (routineId routine) "routine.triggered"
         (obj [("turn",toJSON (occurrenceId occurrence)),("runCount",num (routineCount routine+1))
         ,("due",get (toJSON snapshot) "nextDue"),("nextDue",str (timestamp (routineDue advanced)))]) "system" Nothing
        pure occurrence
     let count=routineCount routine + if isJust result then 1 else 0
         updated=advanced { routineCount=count, routinePaused=count>=1000 }
-        resolved=Set.fromList $ case plan of
-         KeepDues -> []
-         ResolveDues admitted closed -> map (dueId . fst) closed ++ maybeToList (dueId <$> admitted)
-    recordDeferralOn s db routine waitingReason [due | due <- newDues, Set.notMember (dueId due) resolved]
+        stillDeferred=case plan of
+         KeepDues -> newDues
+         ResolveDues admitted closed remaining ->
+          let resolved=map (dueId . spanFirst . fst) closed ++ maybeToList (dueId <$> admitted)
+              untouched=[range | range <- newDues, dueId (spanFirst range) `notElem` resolved]
+              tails=[remainder | (remainder,_) <- remaining, captured <- newDues, spanThrough captured == spanThrough remainder, dueObserved (spanFirst captured) == dueObserved (spanFirst remainder)]
+          in untouched++tails
+    recordDeferralOn s db routine waitingReason stillDeferred
     when (updated /= routine) (void (DB.saveRoutineOn db (toJSON updated)))
     when (routinePaused updated) $ DB.recordOn s db [routineOwner routine] (routineId routine) "routine.paused"
      (obj [("reason",str "run limit"),("runCount",num count)]) "system" Nothing
     pure result
 
-insertDeferredOn :: SQL.Connection -> DeferredReason -> Due -> IO ()
+insertDeferredOn :: SQL.Connection -> DeferredReason -> DueSpan -> IO ()
 insertDeferredOn db reason due =
  DB.executeOn db "INSERT INTO routine_occurrences(id,value,status) VALUES (?,?,'deferred')"
-  [SQL.SQLText (dueIdText (dueId due)),SQL.SQLText (jsonText (merge (toJSON due) (obj [("reason",toJSON reason)])))]
+  [SQL.SQLText (dueIdText (dueId (spanFirst due))),SQL.SQLText (jsonText (merge (toJSON due) (obj [("reason",toJSON reason)])))]
 
-recordDeferralOn :: Service -> SQL.Connection -> Routine -> DeferredReason -> [Due] -> IO ()
+recordDeferralOn :: Service -> SQL.Connection -> Routine -> DeferredReason -> [DueSpan] -> IO ()
 recordDeferralOn s db routine reason dues = case dues of
  [] -> pure ()
  first:rest -> DB.recordOn s db [routineOwner routine] (routineId routine) "routine.deferred"
-  (obj [("due",get (toJSON (dueRoutine first)) "nextDue"),("count",num (1+length rest)),("reason",toJSON reason)]) "system" Nothing
+  (obj [("due",get (toJSON (dueRoutine (spanFirst first))) "nextDue"),("through",str (timestamp (foldr (max . spanThrough) (spanThrough first) rest))),("count",toJSON (sum (map spanCount (first:rest)))),("reason",toJSON reason)]) "system" Nothing
 
 validateTargetOn :: SQL.Connection -> ScheduledTarget -> IO ()
 validateTargetOn db target = case target of

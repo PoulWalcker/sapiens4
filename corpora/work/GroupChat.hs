@@ -245,7 +245,16 @@ actionGroup s gid rid action = do
     require (get request "target" `elem` items group "members") 409 "The recipient is no longer a Group member"
     require (not (has request "task")) 409 "Start the current task revision from Work instead"
     turnResult (validateTurnAction Retry status)
-    modifyTurns s owner (\t -> if turnId t == RunId rid then retryTurn t else t)
+    state <- agentState s owner
+    turn <- case find ((==RunId rid) . turnId) (agentTurns state) of
+     Just active -> pure active
+     Nothing -> do
+      require (at value "agent" == owner && has (get value "origin") "policyRoutine") 409 "Group call is no longer in the active conversation"
+      archived <- retainedTurn s owner (RunId rid) >>= maybe (failure 409 "Retained setup turn is unavailable; ask the Group Lead to finish routine setup in chat") pure
+      require (turnStatus archived == status && isJust (turnAttempt archived) && turnField archived "origin" == get value "origin") 409 "Retained setup turn does not match its saved history; ask the Group Lead to finish routine setup in chat"
+      pure archived
+    let restored=if any ((==turnId turn) . turnId) (agentTurns state) then state else state { agentTurns=agentTurns state++[turn] }
+    saveState s owner (mapTurns (\t -> if turnId t == RunId rid then retryTurn t else t) restored)
     let updated = replace "requests" (merge (remove ["error"] request) (obj [("settled",Bool False),("status",str "queued")])) group
         messages = [if get m "id" == get request "root" && at m "author" == "admin" && not (boolean (get request "memo")) then put "memo_pending" (Bool True) m else m | m <- items updated "messages"]
     void (saveGroup s (put "messages" (arr messages) updated) "admin" "call retried" (str rid))

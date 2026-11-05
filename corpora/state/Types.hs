@@ -138,6 +138,21 @@ modifyTurns :: Service -> Text -> (Turn -> Turn) -> IO ()
 modifyTurns s a f = agentState s a >>= saveState s a . mapTurns f
 archivePath :: Service -> Text -> Text -> FilePath
 archivePath s a k = serviceRoot s </> "agentpy/corpora/archive" </> T.unpack a </> T.unpack k <.> "json"
+retainedTurn :: Service -> Text -> RunId -> IO (Maybe Turn)
+retainedTurn s owner identity = do
+ let directory=takeDirectory (archivePath s owner "turns/retained")
+ exists <- doesDirectoryExist directory
+ if not exists then pure Nothing else do
+  files <- listDirectory directory
+  foldM (readLatest directory) Nothing [file | file<-files,takeExtension file==".json"]
+ where
+ -- A turn can be retained again after an explicit retry; older attempts must
+ -- not replace its most recent retry metadata. This scan runs only on request.
+ readLatest directory current file = do
+  turns <- readJSON (directory </> file) []
+  pure $ foldl newer current (filter ((==identity) . turnId) turns)
+ newer Nothing turn = Just turn
+ newer (Just previous) turn = Just (if turnAttempt turn > turnAttempt previous then turn else previous)
 findId :: Text -> [Value] -> Maybe Value
 findId i = find ((== i) . (`at` "id"))
 readText :: FilePath -> IO Text

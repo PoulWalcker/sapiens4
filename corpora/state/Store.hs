@@ -81,7 +81,7 @@ initialize :: Service -> IO ()
 initialize s = connection s $ \db -> do
  execute_ db "PRAGMA journal_mode=WAL"
  [Only version] <- query_ db "PRAGMA user_version" :: IO [Only Int]
- require (version `elem` [0..11]) 500 ("Unsupported CORPORA schema: " <> T.pack (show version))
+ require (version `elem` [0..12]) 500 ("Unsupported CORPORA schema: " <> T.pack (show version))
  mapM_ (execute_ db) [
   "CREATE TABLE IF NOT EXISTS scheduled_routines (sequence INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS routine_occurrences (id TEXT PRIMARY KEY, value TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('deferred','admitted_pending','admitted_ready','closed')))",
@@ -113,6 +113,12 @@ initialize s = connection s $ \db -> do
   execute_ db "UPDATE scheduled_routines SET value=json_set(value,'$.policySelection',json('{\"kind\":\"awaiting_selection\"}')) WHERE CASE WHEN json_valid(value) THEN json_type(value)='object' AND json_type(value,'$.policySelection') IS NULL ELSE 0 END"
   execute_ db "UPDATE routine_occurrences SET value=json_set(value,'$.routine.policySelection',json('{\"kind\":\"awaiting_selection\"}')) WHERE CASE WHEN json_valid(value) THEN json_type(value,'$.routine')='object' AND json_type(value,'$.routine.policySelection') IS NULL ELSE 0 END"
   execute_ db "PRAGMA user_version=11"
+ when (version < 12) $ SQLite.withTransaction db $ do
+  -- Existing individual deferred/closed deadlines are singleton spans. IDs,
+  -- snapshots, closure reasons and admitted Runs remain unchanged.
+  execute_ db "UPDATE routine_occurrences SET value=json_set(value,'$.through',json_extract(value,'$.routine.nextDue')) WHERE status IN ('deferred','closed') AND CASE WHEN json_valid(value) THEN json_type(value,'$.through') IS NULL AND json_type(value,'$.routine.nextDue')='text' ELSE 0 END"
+  execute_ db "PRAGMA user_version=12"
+
 agents :: Service -> IO [Value]
 agents s = map toJSON <$> agentProfiles s
 agentProfiles :: Service -> IO [AgentProfile]

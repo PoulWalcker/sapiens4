@@ -99,11 +99,22 @@ turnAction s a identity rawAction = do
  requireActive s a
  action <- decodeValue 404 (str rawAction)
  state <- agentState s a
- turn <- maybe (failure 404 "Unknown active turn") pure (find ((==RunId identity) . turnId) (agentTurns state))
+ turn <- case find ((==RunId identity) . turnId) (agentTurns state) of
+  Just active -> pure active
+  Nothing -> do
+   require (action == Retry) 404 "Unknown active turn"
+   stored <- maybe (failure 404 "Unknown turn") pure . findId identity =<< DB.turns s
+   require (at stored "agent" == a && has (get stored "origin") "policyRoutine") 404 "Unknown active turn"
+   status <- field 500 stored "status"
+   turnResult (validateTurnAction Retry status)
+   archived <- retainedTurn s a (RunId identity) >>= maybe (failure 409 "Retained setup turn is unavailable; ask Sapi to finish routine setup in chat") pure
+   require (turnStatus archived == status && isJust (turnAttempt archived) && turnField archived "origin" == get stored "origin") 409 "Retained setup turn does not match its saved history; ask Sapi to finish routine setup in chat"
+   pure archived
+ let restored=if any ((==turnId turn) . turnId) (agentTurns state) then state else state { agentTurns=agentTurns state++[turn] }
  work <- D.findWork s (RunId identity)
  require (not (maybe False (any ((==Just (RunId identity)) . D.callParent) . D.workCalls . fst) work)) 409 "This request was delegated; use the recipient call controls"
  runs <- readMVar (serviceRuns s)
- change <- turnResult (controlTurn action (M.member (batchLeader turn) runs) turn state)
+ change <- turnResult (controlTurn action (M.member (batchLeader turn) runs) turn restored)
  case change of
   SaveTurns changed -> saveState s a changed
   StopTurn identity -> forM_ (M.lookup identity runs) $ \run -> writeIORef (runCancel run) True
