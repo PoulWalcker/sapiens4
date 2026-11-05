@@ -81,46 +81,33 @@ initialize :: Service -> IO ()
 initialize s = connection s $ \db -> do
  execute_ db "PRAGMA journal_mode=WAL"
  [Only version] <- query_ db "PRAGMA user_version" :: IO [Only Int]
- require (version `elem` [0..12]) 500 ("Unsupported CORPORA schema: " <> T.pack (show version))
- mapM_ (execute_ db) [
-  "CREATE TABLE IF NOT EXISTS scheduled_routines (sequence INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS routine_occurrences (id TEXT PRIMARY KEY, value TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('deferred','admitted_pending','admitted_ready','closed')))",
-  "CREATE TABLE IF NOT EXISTS system_pulse (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS pulse_calls (sequence INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS turn_details (id TEXT PRIMARY KEY, value TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, color TEXT NOT NULL, face TEXT NOT NULL, created TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS turns (id TEXT PRIMARY KEY, agent TEXT NOT NULL REFERENCES agents(id), flow TEXT NOT NULL, input TEXT NOT NULL, status TEXT NOT NULL, output TEXT, error TEXT, tokens INTEGER NOT NULL, created TEXT NOT NULL)",
-  "CREATE INDEX IF NOT EXISTS turns_agent ON turns(agent,created)",
-  "CREATE TABLE IF NOT EXISTS preferences (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, agent TEXT NOT NULL REFERENCES agents(id), value TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS message_inputs (job TEXT PRIMARY KEY, text TEXT NOT NULL, attachments TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS workloads (id TEXT PRIMARY KEY, value TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS groups (id TEXT PRIMARY KEY, value TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS group_attachments (id TEXT PRIMARY KEY, agent TEXT NOT NULL REFERENCES groups(id), value TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS activity_events (id INTEGER PRIMARY KEY, owner TEXT NOT NULL, timestamp TEXT NOT NULL, actor TEXT NOT NULL, entity TEXT NOT NULL, event TEXT NOT NULL, agency TEXT, details TEXT NOT NULL)",
-  "CREATE INDEX IF NOT EXISTS activity_events_owner ON activity_events(owner,id)"]
- when (version `elem` [1,2]) $ execute_ db "INSERT OR IGNORE INTO turns SELECT * FROM jobs WHERE flow IN ('chat','computer')"
- when (version < 11) $ SQLite.withTransaction db $ do
-  when (version `elem` [9,10]) $ do
-   execute_ db "CREATE TABLE routine_occurrences_next (id TEXT PRIMARY KEY, value TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('deferred','admitted_pending','admitted_ready','closed')))"
-   if version == 9 then
-    execute_ db "INSERT INTO routine_occurrences_next SELECT id,value,CASE materialized WHEN 0 THEN 'admitted_pending' ELSE 'admitted_ready' END FROM routine_occurrences"
-   else execute_ db "INSERT INTO routine_occurrences_next SELECT id,value,status FROM routine_occurrences"
-   execute_ db "DROP TABLE routine_occurrences"
-   execute_ db "ALTER TABLE routine_occurrences_next RENAME TO routine_occurrences"
-  -- Absence of a policy is explicit; migration never guesses the user's intent.
-  -- Leave corrupt JSON untouched for the existing per-record error reporting.
-  execute_ db "UPDATE scheduled_routines SET value=json_set(value,'$.policySelection',json('{\"kind\":\"awaiting_selection\"}')) WHERE CASE WHEN json_valid(value) THEN json_type(value)='object' AND json_type(value,'$.policySelection') IS NULL ELSE 0 END"
-  execute_ db "UPDATE routine_occurrences SET value=json_set(value,'$.routine.policySelection',json('{\"kind\":\"awaiting_selection\"}')) WHERE CASE WHEN json_valid(value) THEN json_type(value,'$.routine')='object' AND json_type(value,'$.routine.policySelection') IS NULL ELSE 0 END"
-  execute_ db "PRAGMA user_version=11"
- when (version < 12) $ SQLite.withTransaction db $ do
-  -- Existing individual deferred/closed deadlines are singleton spans. IDs,
-  -- snapshots, closure reasons and admitted Runs remain unchanged.
-  execute_ db "UPDATE routine_occurrences SET value=json_set(value,'$.through',json_extract(value,'$.routine.nextDue')) WHERE status IN ('deferred','closed') AND CASE WHEN json_valid(value) THEN json_type(value,'$.through') IS NULL AND json_type(value,'$.routine.nextDue')='text' ELSE 0 END"
-  execute_ db "PRAGMA user_version=12"
- -- Older occurrence migrations rebuild the table; create its indexes afterward.
- execute_ db "CREATE INDEX IF NOT EXISTS routine_occurrences_open_routine ON routine_occurrences(CASE WHEN json_valid(value) THEN json_extract(value,'$.routine.id') ELSE NULL END) WHERE status<>'closed'"
- execute_ db "CREATE INDEX IF NOT EXISTS routine_occurrences_status ON routine_occurrences(status)"
+ require (version `elem` [0..8] || version == 12) 500 ("Unsupported CORPORA schema: " <> T.pack (show version))
+ SQLite.withTransaction db $ do
+  mapM_ (execute_ db) [
+   "CREATE TABLE IF NOT EXISTS scheduled_routines (sequence INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL)",
+   "CREATE TABLE IF NOT EXISTS routine_occurrences (id TEXT PRIMARY KEY, value TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('deferred','admitted_pending','admitted_ready','closed')))",
+   "CREATE TABLE IF NOT EXISTS system_pulse (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)",
+   "CREATE TABLE IF NOT EXISTS pulse_calls (sequence INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL)",
+   "CREATE TABLE IF NOT EXISTS turn_details (id TEXT PRIMARY KEY, value TEXT NOT NULL)",
+   "CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, color TEXT NOT NULL, face TEXT NOT NULL, created TEXT NOT NULL)",
+   "CREATE TABLE IF NOT EXISTS turns (id TEXT PRIMARY KEY, agent TEXT NOT NULL REFERENCES agents(id), flow TEXT NOT NULL, input TEXT NOT NULL, status TEXT NOT NULL, output TEXT, error TEXT, tokens INTEGER NOT NULL, created TEXT NOT NULL)",
+   "CREATE INDEX IF NOT EXISTS turns_agent ON turns(agent,created)",
+   "CREATE TABLE IF NOT EXISTS preferences (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)",
+   "CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, agent TEXT NOT NULL REFERENCES agents(id), value TEXT NOT NULL)",
+   "CREATE TABLE IF NOT EXISTS message_inputs (job TEXT PRIMARY KEY, text TEXT NOT NULL, attachments TEXT NOT NULL)",
+   "CREATE TABLE IF NOT EXISTS workloads (id TEXT PRIMARY KEY, value TEXT NOT NULL)",
+   "CREATE TABLE IF NOT EXISTS groups (id TEXT PRIMARY KEY, value TEXT NOT NULL)",
+   "CREATE TABLE IF NOT EXISTS group_attachments (id TEXT PRIMARY KEY, agent TEXT NOT NULL REFERENCES groups(id), value TEXT NOT NULL)",
+   "CREATE TABLE IF NOT EXISTS activity_events (id INTEGER PRIMARY KEY, owner TEXT NOT NULL, timestamp TEXT NOT NULL, actor TEXT NOT NULL, entity TEXT NOT NULL, event TEXT NOT NULL, agency TEXT, details TEXT NOT NULL)",
+   "CREATE INDEX IF NOT EXISTS activity_events_owner ON activity_events(owner,id)"]
+  when (version `elem` [1,2]) $ execute_ db "INSERT OR IGNORE INTO turns SELECT * FROM jobs WHERE flow IN ('chat','computer')"
+  -- Main used schema 8; intermediate branch schemas 9–11 were never released.
+  when (version < 12) $ do
+   -- Absence of a policy is explicit; preserve existing choices and corrupt rows.
+   execute_ db "UPDATE scheduled_routines SET value=json_set(value,'$.policySelection',json('{\"kind\":\"awaiting_selection\"}')) WHERE CASE WHEN json_valid(value) THEN json_type(value)='object' AND json_type(value,'$.policySelection') IS NULL ELSE 0 END"
+   execute_ db "PRAGMA user_version=12"
+  execute_ db "CREATE INDEX IF NOT EXISTS routine_occurrences_open_routine ON routine_occurrences(CASE WHEN json_valid(value) THEN json_extract(value,'$.routine.id') ELSE NULL END) WHERE status<>'closed'"
+  execute_ db "CREATE INDEX IF NOT EXISTS routine_occurrences_status ON routine_occurrences(status)"
 
 agents :: Service -> IO [Value]
 agents s = map toJSON <$> agentProfiles s
