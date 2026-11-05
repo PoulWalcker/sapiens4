@@ -801,6 +801,22 @@ materializeOccurrence s occurrence = do
   DB.executeSQL s "UPDATE routine_occurrences SET status='admitted_ready' WHERE id=? AND status='admitted_pending'"
    [SQL.SQLText (runIdText (occurrenceId occurrence))]
 
+data PersonalMaterialization = CreateTurn | KeepLiveTurn | KeepRetainedHistory deriving (Eq)
+data PersonalRecoveryError = MissingLiveActiveTurn
+
+personalMaterialization :: Maybe Turn -> Maybe TurnStatus -> Either PersonalRecoveryError PersonalMaterialization
+personalMaterialization (Just _) _ = Right KeepLiveTurn
+personalMaterialization Nothing Nothing = Right CreateTurn
+personalMaterialization Nothing (Just status) = case status of
+ Queued -> Left MissingLiveActiveTurn
+ Running -> Left MissingLiveActiveTurn
+ OutputPending -> Left MissingLiveActiveTurn
+ Done -> Right KeepRetainedHistory
+ Warning -> Right KeepRetainedHistory
+ Failed -> Right KeepRetainedHistory
+ Interrupted -> Right KeepRetainedHistory
+ Cancelled -> Right KeepRetainedHistory
+
 materializePersonal :: Service -> AgentId -> Turn -> IO ()
 materializePersonal s agent turn = do
  let owner=agentIdText agent
@@ -808,21 +824,36 @@ materializePersonal s agent turn = do
      created=get (toJSON turn) "created"
      origin=turnField turn "origin"
  existingState <- agentState s owner
- forM_ (find ((==turnId turn) . turnId) (agentTurns existingState)) $ \existing ->
-  require (turnField existing "origin" == origin) 409 "Occurrence ID belongs to another Turn"
- modifyState s owner $ \currentState ->
-  if isJust (findId identity (items currentState "turns")) then currentState
-  else merge currentState (obj
+ let existing=find ((==turnId turn) . turnId) (agentTurns existingState)
+ forM_ existing $ \saved ->
+  require (turnField saved "origin" == origin) 409 "Occurrence ID belongs to another Turn"
+ history <- listToMaybe <$> DB.queryRows s
+  "SELECT turns.agent,turns.status,turn_details.value FROM turns LEFT JOIN turn_details ON turn_details.id=turns.id WHERE turns.id=?"
+  ["agent","status","details"] [SQL.SQLText identity]
+ status <- traverse (\stored -> field 500 stored "status") history
+ materialization <- either reject pure (personalMaterialization existing status)
+ case materialization of
+  KeepLiveTurn -> pure ()
+  KeepRetainedHistory -> forM_ history $ \stored -> do
+   details <- DB.decodeStored (at stored "details")
+   require (at stored "agent" == owner && get details "origin" == origin)
+    409 "Occurrence ID belongs to another retained Turn"
+  CreateTurn -> modifyState s owner $ \currentState -> merge currentState (obj
    [("turns",arr (items currentState "turns"++[toJSON turn]))
    ,("chat",arr (items currentState "chat"++[obj
      [("role",str "user"),("content",str (turnInput turn)),("turn",str identity)
      ,("time",created),("origin",origin)]]))])
- DB.project s owner
- found <- D.findWork s (turnId turn)
- when (isNothing found) (D.begin s agent turn)
- (work,call) <- D.getWork s (turnId turn)
- when (D.callState call == D.CallRunning && null (D.workItems work "decisions")) $
-  D.saveWork s (D.withCall work call { D.callProgress=D.QueuedAt (D.callNode call) })
+ -- Retention leaves durable terminal history. Recreating its admission snapshot
+ -- would queue the old Run again and regress its projected terminal status.
+ unless (materialization == KeepRetainedHistory) $ do
+  DB.project s owner
+  found <- D.findWork s (turnId turn)
+  when (isNothing found) (D.begin s agent turn)
+  (work,call) <- D.getWork s (turnId turn)
+  when (D.callState call == D.CallRunning && null (D.workItems work "decisions")) $
+   D.saveWork s (D.withCall work call { D.callProgress=D.QueuedAt (D.callNode call) })
+ where
+ reject MissingLiveActiveTurn = failure 409 "Routine recovery is blocked: active Turn history has no live state. Restore the Sapi state before continuing this Run."
 
 data GroupMaterialization = ExistingRequest | CreateFor AgentId
 data GroupRecoveryError = GroupArchived | LeadUnavailable
