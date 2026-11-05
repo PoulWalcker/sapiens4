@@ -81,6 +81,17 @@ submitGroup s gid input actor = do
    dispatchGroups s
    pure entry
 
+checkedOperationalOrigin :: StoredOrigin -> Either Text ExecutionOrigin
+checkedOperationalOrigin stored = do
+ origin <- checkedOrigin stored
+ case originPurpose origin of
+  ScheduledExecution scheduled -> case scheduledOwner scheduled of
+   GroupOwner group -> unless (originGroup origin == Just group) (Left "Scheduled execution Group context does not match its routine owner")
+   PersonalOwner _ -> Right ()
+  OrdinaryWork -> Right ()
+  RoutinePolicySetup _ -> Right ()
+ pure origin
+
 checkedRequestOrigin :: Value -> GroupRequest -> Either Text ExecutionOrigin
 checkedRequestOrigin group request = do
  lineage <- checkedRequestLineage request
@@ -89,7 +100,7 @@ checkedRequestOrigin group request = do
  forM_ (requestTask lineage) $ \link ->
   unless (isJust (findId (taskIdText (requestTaskId link)) (items group "tasks"))) (Left "Unknown Group task")
  expected <- either (Left . T.pack) Right (parseEither parseJSON (get group "id"))
- origin <- checkedOrigin (requestOrigin request)
+ origin <- checkedOperationalOrigin (requestOrigin request)
  case originPurpose origin of
   ScheduledExecution _ -> unless (isJust (requestTask lineage)) (Left "Scheduled Group request has no task revision")
   OrdinaryWork -> Right ()
@@ -123,7 +134,7 @@ checkedTurnContext requests turn = checkedOriginContext requests (turnId turn) (
 
 checkedOriginContext :: GroupRequestIndex -> RunId -> StoredOrigin -> Either Text ExecutionOrigin
 checkedOriginContext requests identity stored = do
- actual <- checkedOrigin stored
+ actual <- checkedOperationalOrigin stored
  case Map.lookup identity requests of
   Nothing -> Right actual
   Just (group,request) -> do

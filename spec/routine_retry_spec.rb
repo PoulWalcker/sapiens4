@@ -86,6 +86,8 @@ RSpec.describe 'Routine retry admission', :host do
     owner, member = chief, host.agent('GroupMember')
     group = host.api('POST', '/api/groups', {name: 'Retry Group', description: 'Recover scheduled group work.',
       lead: owner, members: [owner, member]}, status: 201)
+    other_group = host.api('POST', '/api/groups', {name: 'Other Retry Group', description: 'Separate routine owner.',
+      lead: owner, members: [owner, member]}, status: 201)
     host.stop
 
     # Saved terminal Group Run with a settled request and failure result.
@@ -138,5 +140,42 @@ RSpec.describe 'Routine retry admission', :host do
     expect(host.state.fetch('events')).to eq(saved_events)
     expect(host.state.fetch('routines')).to eq([routine])
     expect(host.calls).to be_empty
+
+    aggregate_failures('invalid Group provenance') do
+      [
+        ['different Group owner', true],
+        ['missing Group context and request', false]
+      ].each do |name, change_owner|
+        host.stop
+        damaged_group = JSON.parse(JSON.generate(saved_group))
+        damaged_turn = JSON.parse(JSON.generate(saved_turn))
+        if change_owner
+          damaged_turn.fetch('origin')['routineOwner'] = other_group.fetch('id')
+          damaged_group.fetch('requests').find { |item| item['id'] == id }.fetch('origin')['routineOwner'] = other_group.fetch('id')
+        else
+          damaged_turn.fetch('origin').delete('group')
+          damaged_group.fetch('requests').reject! { |item| item['id'] == id }
+        end
+        state = JSON.parse(File.read(state_path))
+        state['turns'] = state.fetch('turns').map { |item| item['id'] == id ? damaged_turn : item }
+        Contract.atomic_json(state_path, state)
+        SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+          db.execute('UPDATE groups SET value=? WHERE id=?', [JSON.generate(damaged_group), group.fetch('id')])
+        end
+        host.start
+        before_group = host.api('GET', "/api/groups/#{group.fetch('id')}")
+        before_state = JSON.parse(File.read(state_path))
+        before_events = host.state.fetch('events')
+        before_calls = host.calls
+        aggregate_failures(name) do
+          expect(host.request('POST', "/api/agents/#{owner}/turns/#{id}/retry", {}).first).to eq(500)
+          expect(JSON.parse(File.read(state_path))).to eq(before_state)
+          expect(host.api('GET', "/api/groups/#{group.fetch('id')}")).to eq(before_group)
+          expect(host.state.fetch('events')).to eq(before_events)
+          expect(host.state.fetch('routines')).to eq([routine])
+          expect(host.calls).to eq(before_calls)
+        end
+      end
+    end
   end
 end
