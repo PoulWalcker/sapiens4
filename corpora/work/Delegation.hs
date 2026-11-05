@@ -2,7 +2,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Delegation
- ( WorkCall(..), Workload(..), CallState(..), CallProgress(..)
+ ( WorkCall(..), Workload, workloadId, workCalls, CallState(..), CallProgress(..)
  , callState, callNode, begin, getWork, findWork, readWorks, saveWork, withCall, workItems
  , exceptionText, reconcileWorks, pendingWorks, runDecision, applyDecision, clarify
  , templates, editTemplate, workTasks, taskList, workSummaries
@@ -22,7 +22,7 @@ import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.ByteString as BS
 import Data.IORef
-import Data.List (find,nub,sort)
+import Data.List (find,nub,sort,(\\))
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -97,11 +97,70 @@ setCallFields fields call = call { callFields = KM.fromList [(Data.Aeson.Key.fro
 newCall :: RunId -> AgentId -> Maybe RunId -> CallProgress -> Text -> WorkCall
 newCall identity owner parent progress request = WorkCall identity owner progress request parent (KM.singleton "attempt" (num 1))
 
-data Workload = Workload { workloadId :: Text, workTracked :: Bool, workCalls :: NonEmpty WorkCall, workFields :: Object } deriving (Eq, Show)
+data TaskContract
+ = Unprepared | Accepted TaskSpec | UnsupportedLegacy Value | Corrupted Value Text
+ deriving (Eq, Show)
+
+-- Preserve wire shape and spelling without making them the accepted contract.
+data TaskEncoding = TaskEncoding
+ { taskEnvelope :: Maybe Value, taskSpecificationEncoding :: Maybe Value
+ } deriving (Eq, Show)
+
+decodeTask :: Maybe Value -> (TaskContract,TaskEncoding)
+decodeTask rawTask = case rawTask of
+ Just (Object fields) ->
+  let envelope=Just (Object (KM.delete "specification" fields))
+      encoding=TaskEncoding envelope
+  in case KM.lookup "specification" fields of
+   Nothing -> (Unprepared,encoding Nothing)
+   Just Null -> (Unprepared,encoding (Just Null))
+   Just value -> case parseEither parseJSON value of
+    Right spec -> (Accepted spec,encoding (Just value))
+    Left reason
+     | hasStringCriteria value -> (UnsupportedLegacy value,encoding Nothing)
+     | otherwise -> (Corrupted value (T.pack reason),encoding Nothing)
+ _ -> (Unprepared,TaskEncoding rawTask Nothing)
+ where
+ hasStringCriteria value = case get value "completionCriteria" of
+  Array criteria -> not (null criteria) && all isString criteria
+  _ -> False
+ isString (String _) = True
+ isString _ = False
+
+encodeTask :: TaskContract -> TaskEncoding -> Maybe Value
+encodeTask contract encoding = case specification of
+ Nothing -> taskEnvelope encoding
+ Just value -> Just (put "specification" value (fromMaybe Null (taskEnvelope encoding)))
+ where
+ specification = case contract of
+  Unprepared -> taskSpecificationEncoding encoding
+  Accepted spec -> Just $ case taskSpecificationEncoding encoding of
+   Just value | parseEither parseJSON value == Right spec -> value
+   _ -> toJSON spec
+  UnsupportedLegacy value -> Just value
+  Corrupted value _ -> Just value
+
+data Workload = Workload
+ { workloadId :: Text, workTracked :: Bool, workCalls :: NonEmpty WorkCall
+ , workTaskContract :: TaskContract, workTaskEncoding :: TaskEncoding, workFields :: Object
+ } deriving (Eq, Show)
 instance FromJSON Workload where
- parseJSON = withObject "Workload" $ \o -> Workload <$> o .: "workloadId" <*> o .: "tracked" <*> o .: "calls" <*> pure (foldr KM.delete o ["workloadId","tracked","calls"])
+ parseJSON = withObject "Workload" $ \o -> do
+  let (contract,encoding)=decodeTask (KM.lookup "task" o)
+  Workload <$> o .: "workloadId" <*> o .: "tracked" <*> o .: "calls" <*> pure contract <*> pure encoding
+   <*> pure (foldr KM.delete o ["workloadId","tracked","calls","task"])
 instance ToJSON Workload where
- toJSON work = mergeFields [("workloadId",str (workloadId work)),("tracked",Bool (workTracked work)),("calls",toJSON (workCalls work))] (Object (workFields work))
+ toJSON work = mergeFields
+  ([("workloadId",str (workloadId work)),("tracked",Bool (workTracked work)),("calls",toJSON (workCalls work))]
+   ++ [("task",value) | value <- maybeToList (encodeTask (workTaskContract work) (workTaskEncoding work))])
+  (Object (workFields work))
+taskValue :: Workload -> Value
+taskValue work = fromMaybe Null (encodeTask (workTaskContract work) (workTaskEncoding work))
+acceptTaskSpec :: Text -> TaskSpec -> Workload -> Workload
+acceptTaskSpec taskType spec work = work
+ { workTaskContract=Accepted spec
+ , workTaskEncoding=TaskEncoding
+    (Just (put "taskType" (str taskType) (fromMaybe Null (taskEnvelope (workTaskEncoding work))))) Nothing }
 workField :: Workload -> Text -> Value
 workField work = get (Object (workFields work))
 workItems :: Workload -> Text -> [Value]
@@ -257,26 +316,35 @@ saveWork s w = do
   (source,agency) <- currentActor s
   let state=callState call
       actor=if isJust agency || state==CallCancelled then source else if state==CallQueued then "system" else agentIdText (callOwner call)
-      detail=obj [("owner",toJSON (callOwner call)),("task",workField w "task"),("previous",maybe Null (toJSON . callState) before),("call",toJSON (callIdentity call)),("error",callField call "error")]
-  DB.record s (map (agentIdText . callOwner) (NE.toList (workCalls w))) (at (workField w "task") "taskId") ("task."<>T.toLower (wireName state)) detail actor (if state `elem` [CallQueued,CallCancelled] then Nothing else Just "chatInput")
+      detail=obj [("owner",toJSON (callOwner call)),("task",taskValue w),("previous",maybe Null (toJSON . callState) before),("call",toJSON (callIdentity call)),("error",callField call "error")]
+  DB.record s (map (agentIdText . callOwner) (NE.toList (workCalls w))) (at (taskValue w) "taskId") ("task."<>T.toLower (wireName state)) detail actor (if state `elem` [CallQueued,CallCancelled] then Nothing else Just "chatInput")
  DB.putValue s DB.Workloads (workloadId w) (toJSON w)
 withCall :: Workload -> WorkCall -> Workload
 withCall w c = w { workCalls = fmap (\x -> if callIdentity x == callIdentity c then c else x) (workCalls w) }
-data OutcomeError = UnknownCriterion | DuplicateCriterionResult | InvalidSkippedCriterion | MissingCompletionEvidence deriving (Eq, Show)
+data OutcomeError
+ = UnknownCriterion (NonEmpty CriterionId)
+ | DuplicateCriterionResult (NonEmpty CriterionId)
+ | InvalidSkippedCriterion (NonEmpty CriterionId)
+ | MissingCompletionCoverage (NonEmpty CriterionId)
+ | MissingDecisionEvidence
+ deriving (Eq, Show)
 outcomeError :: OutcomeError -> Text
 outcomeError problem = case problem of
- UnknownCriterion -> "Outcome references a criterion outside the accepted Task"
- DuplicateCriterionResult -> "Outcome reports the same criterion more than once"
- InvalidSkippedCriterion -> "Only an unsatisfied, explicitly conditional criterion can be not applicable"
- MissingCompletionEvidence -> "Completed outcome requires evidence for all applicable completion criteria"
+ UnknownCriterion _ -> "Outcome references a criterion outside the accepted Task"
+ DuplicateCriterionResult _ -> "Outcome reports the same criterion more than once"
+ InvalidSkippedCriterion _ -> "Only an unsatisfied, explicitly conditional criterion can be not applicable"
+ MissingCompletionCoverage _ -> completionEvidenceMessage
+ MissingDecisionEvidence -> completionEvidenceMessage
+ where completionEvidenceMessage = "Completed outcome requires evidence for all applicable completion criteria"
 -- Structural coverage and evidence presence only; the host cannot prove an LLM's claims.
 newtype StructurallyValidOutcome = StructurallyValidOutcome Outcome deriving (Eq, Show)
 validateOutcome :: DecisionResponse -> Outcome -> TaskSpec -> Either OutcomeError StructurallyValidOutcome
 validateOutcome response outcome spec
- | any (`notElem` acceptedIds) reportedIds = Left UnknownCriterion
- | length reportedIds /= length (nub reportedIds) = Left DuplicateCriterionResult
- | any invalidSkip (outcomeResults outcome) = Left InvalidSkippedCriterion
- | outcomeStatus outcome == Completed && (null (decisionEvidence response) || any (`notElem` reportedIds) acceptedIds) = Left MissingCompletionEvidence
+ | Just identities <- NE.nonEmpty (filter (`notElem` acceptedIds) reportedIds) = Left (UnknownCriterion identities)
+ | Just identities <- NE.nonEmpty (nub (reportedIds \\ nub reportedIds)) = Left (DuplicateCriterionResult identities)
+ | Just identities <- NE.nonEmpty (map resultId (filter invalidSkip (outcomeResults outcome))) = Left (InvalidSkippedCriterion identities)
+ | outcomeStatus outcome == Completed, null (decisionEvidence response) = Left MissingDecisionEvidence
+ | outcomeStatus outcome == Completed, Just identities <- NE.nonEmpty (filter (`notElem` reportedIds) acceptedIds) = Left (MissingCompletionCoverage identities)
  | otherwise = Right (StructurallyValidOutcome outcome)
  where
  criteria=NE.toList (specCriteria spec)
@@ -292,7 +360,9 @@ begin s a turn = do
  found <- findWork s (turnId turn)
  let routine=has (turnField turn "origin") "routine"
      first=newCall (turnId turn) a Nothing (RunningAt (if routine then ReadyToWork else Assessing)) (turnInput turn)
-     initial=Workload (runIdText (turnId turn)) routine (first :| []) (KM.fromList [("originalIntent",str (turnInput turn)),("task",obj [("taskId",str ("task_"<>runIdText (turnId turn))),("taskType",str (if routine then "automated" else "work")),("specification",Null)]),("origin",merge (obj [("agent",toJSON a),("call",toJSON (turnId turn))]) (turnField turn "origin")),("decisions",arr []),("outcome",Null)])
+     task=TaskEncoding (Just (obj [("taskId",str ("task_"<>runIdText (turnId turn))),("taskType",str (if routine then "automated" else "work"))])) (Just Null)
+     initial=Workload (runIdText (turnId turn)) routine (first :| []) Unprepared task
+      (KM.fromList [("originalIntent",str (turnInput turn)),("origin",merge (obj [("agent",toJSON a),("call",toJSON (turnId turn))]) (turnField turn "origin")),("decisions",arr []),("outcome",Null)])
      (w,c)=fromMaybe (initial,first) found
      running=if isNothing (callOutput c) then c { callProgress=RunningAt (callNode c), callFields=KM.delete "error" (callFields c) } else c
      updated=setCallFields [("attempt",num (fromMaybe 1 (turnAttempt turn)))] running
@@ -331,7 +401,7 @@ decide s run turn state node logs = do
   wiki <- prompt s "notes-wiki"
   envelope <- prompt s "decision-envelope"
   let instruction = at source "content" <> extra <> scheduled
-      context = obj [("originalIntent",workField w "originalIntent"),("origin",workField w "origin"),("task",workField w "task"),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
+      context = obj [("originalIntent",workField w "originalIntent"),("origin",workField w "origin"),("task",taskValue w),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
       rendered = render envelope [("node",wireName node),("instruction",instruction),("notes_wiki",render wiki [("notes_example",T.pack (repositoryRoot s </> "corpora/prompts/examples/jarvis-notes.html"))]),("context",jsonText context),("events",T.intercalate ", " (sort (eventsFor node)))]
   (model,effort) <- modelDefaults
   policy <- executionSettings s (agentIdText (runOwner run))
@@ -447,8 +517,8 @@ advanceDecision chief response work call = case decisionBody response of
    accepted <- acceptedTaskSpec work
    let inherited=maybe [] (NE.toList . specCriteria) accepted
    unless (all (`elem` NE.toList (specCriteria spec)) inherited) (Left CriteriaRemoved)
-   let task=mergeFields [("taskType",str (if has (workField work "origin") "routine" then "automated" else taskType)),("specification",toJSON spec)] (workField work "task")
-   Right (finish (setWorkField "task" task work) (RunningAt Execution))
+   let savedType=if has (workField work "origin") "routine" then "automated" else taskType
+   Right (finish (acceptTaskSpec savedType spec work) (RunningAt Execution))
  Handoff request -> policyDelegation work >> Right (DelegateRequest request)
  ReportOutcome reply outcome -> do
   spec <- acceptedTaskSpec work >>= maybe (Left (InvalidAcceptedTask "Task has no accepted specification")) Right
@@ -466,18 +536,11 @@ policyDelegation work
  where origin=workField work "origin"
 
 acceptedTaskSpec :: Workload -> Either DecisionError (Maybe TaskSpec)
-acceptedTaskSpec work = case get (workField work "task") "specification" of
- Null -> Right Nothing
- value -> case parseEither parseJSON value of
-  Right spec -> Right (Just spec)
-  Left reason | hasStringCriteria value -> Left UnsupportedSavedTaskSpec
-              | otherwise -> Left (InvalidAcceptedTask (T.pack reason))
- where
- hasStringCriteria value = case get value "completionCriteria" of
-  Array criteria -> not (null criteria) && all isString criteria
-  _ -> False
- isString (String _) = True
- isString _ = False
+acceptedTaskSpec work = case workTaskContract work of
+ Unprepared -> Right Nothing
+ Accepted spec -> Right (Just spec)
+ UnsupportedLegacy _ -> Left UnsupportedSavedTaskSpec
+ Corrupted _ reason -> Left (InvalidAcceptedTask reason)
 
 decisionFailure :: DecisionError -> IO a
 decisionFailure problem = case problem of
@@ -571,7 +634,7 @@ pendingWorks s = do
  forM_ works $ \w -> forM_ (workCalls w) $ \c -> when (callState c == CallQueued && isJust (callParent c) && isNothing (findId (runIdText (callIdentity c)) existing)) $ do
   let a=agentIdText (callOwner c)
       parent=find ((==callParent c) . Just . callIdentity) (workCalls w)
-      origin=mergeFields [("workloadId",str (workloadId w)),("taskId",get (workField w "task") "taskId"),("caller",maybe Null (toJSON . callOwner) parent),("parentCall",toJSON (callParent c))] (remove ["agent","call"] (workField w "origin"))
+      origin=mergeFields [("workloadId",str (workloadId w)),("taskId",get (taskValue w) "taskId"),("caller",maybe Null (toJSON . callOwner) parent),("parentCall",toJSON (callParent c))] (remove ["agent","call"] (workField w "origin"))
   time <- now
   let turn=toJSON (newTurn (callIdentity c) Chat (callRequest c) time origin (has origin "routine"))
       message=obj [("role",str "user"),("content",str (callRequest c)),("turn",toJSON (callIdentity c)),("time",str time),("origin",origin)]
@@ -602,4 +665,4 @@ taskList s a = do
  tasks <- items <$> workTasks s a False <*> pure "tasks"
  pure $ obj [("tasks",arr (reverse [let body=get (get t "task") "specification" `fallback` obj [("objective",get t "originalIntent")]; execution=get t "execution"; calls=items t "calls" in obj [("id",get t "workloadId"),("title",get body "objective"),("taskType",get (get t "task") "taskType"),("state",get execution "state"),("owner",get execution "owner"),("sender",maybe Null (`get` "addressedTo") (listToMaybe calls)),("body",str (jsonText body <> "\n")),("result",get (get t "outcome") "reply"),("error",maybe Null (`get` "error") (listToMaybe (reverse calls)))] | t <- tasks]))]
 workSummaries :: [Workload] -> [Value]
-workSummaries works = [let c=NE.last (workCalls w) in obj [("taskType",get (workField w "task") "taskType"),("id",str (workloadId w)),("taskId",get (workField w "task") "taskId"),("origin",workField w "origin"),("callId",toJSON (callIdentity c)),("owner",toJSON (callOwner c)),("state",toJSON (callState c)),("participants",toJSON (nub (map callOwner (NE.toList (workCalls w))))),("output",toJSON (callOutput c)),("error",callField c "error"),("decisions",num (length (workItems w "decisions"))),("calls",num (length (workCalls w)))] | w <- works,workTracked w]
+workSummaries works = [let c=NE.last (workCalls w) in obj [("taskType",get (taskValue w) "taskType"),("id",str (workloadId w)),("taskId",get (taskValue w) "taskId"),("origin",workField w "origin"),("callId",toJSON (callIdentity c)),("owner",toJSON (callOwner c)),("state",toJSON (callState c)),("participants",toJSON (nub (map callOwner (NE.toList (workCalls w))))),("output",toJSON (callOutput c)),("error",callField c "error"),("decisions",num (length (workItems w "decisions"))),("calls",num (length (workCalls w)))] | w <- works,workTracked w]
