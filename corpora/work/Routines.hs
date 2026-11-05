@@ -812,11 +812,12 @@ materializeOccurrence s occurrence = do
   DB.executeSQL s "UPDATE routine_occurrences SET status='admitted_ready' WHERE id=? AND status='admitted_pending'"
    [SQL.SQLText (runIdText (occurrenceId occurrence))]
 
-data PersonalMaterialization = CreateTurn | KeepLiveTurn | KeepRetainedHistory deriving (Eq)
+data PersonalMaterialization = CreateTurn | KeepActiveTurn | KeepTerminalTurn | KeepRetainedHistory deriving (Eq)
 data PersonalRecoveryError = MissingLiveActiveTurn
 
 personalMaterialization :: Maybe Turn -> Maybe TurnStatus -> Either PersonalRecoveryError PersonalMaterialization
-personalMaterialization (Just _) _ = Right KeepLiveTurn
+personalMaterialization (Just turn) _ = Right $
+ if activeStatus (turnStatus turn) then KeepActiveTurn else KeepTerminalTurn
 personalMaterialization Nothing Nothing = Right CreateTurn
 personalMaterialization Nothing (Just status) = case status of
  Queued -> Left MissingLiveActiveTurn
@@ -844,7 +845,8 @@ materializePersonal s agent turn = do
  status <- traverse (\stored -> field 500 stored "status") history
  materialization <- either reject pure (personalMaterialization existing status)
  case materialization of
-  KeepLiveTurn -> pure ()
+  KeepActiveTurn -> pure ()
+  KeepTerminalTurn -> pure ()
   KeepRetainedHistory -> forM_ history $ \stored -> do
    details <- DB.decodeStored (at stored "details")
    require (at stored "agent" == owner && get details "origin" == origin)
@@ -856,8 +858,10 @@ materializePersonal s agent turn = do
      ,("time",created),("origin",origin)]]))])
  -- Retention leaves durable terminal history. Recreating its admission snapshot
  -- would queue the old Run again and regress its projected terminal status.
- unless (materialization == KeepRetainedHistory) $ do
-  DB.project s owner
+ unless (materialization == KeepRetainedHistory) (DB.project s owner)
+ -- A live terminal Turn can still need its final projection after interruption,
+ -- but its Run must not gain or restart execution work during recovery.
+ when (materialization `elem` [CreateTurn,KeepActiveTurn]) $ do
   found <- D.findWork s (turnId turn)
   when (isNothing found) (D.begin s agent turn)
   (work,call) <- D.getWork s (turnId turn)
