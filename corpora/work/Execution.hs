@@ -194,8 +194,8 @@ reserveBatch batch tick slot batching state = (marked,snapshot,execution)
  snapshot=mapStateFields (mergeFields ([("current_turn",toJSON i)] ++ [("agency_batch",arr [obj [("id",toJSON (turnId t)),("content",str (turnInput t))] | t <- NE.toList batch]) | batching])) marked
  execution=(reserve first) { turnInput = T.intercalate "\n\n" (map turnInput (NE.toList batch)) }
 
-launch :: Service -> Text -> NonEmpty Turn -> Pulse -> Int -> Bool -> IO ()
-launch s a batch tick slot batching = do
+launch :: (AgentId -> IO D.PreparedSpecialist) -> Service -> Text -> NonEmpty Turn -> Pulse -> Int -> Bool -> IO ()
+launch prepareSpecialist s a batch tick slot batching = do
  state <- agentState s a
  let (marked,snapshot,execution) = reserveBatch batch tick slot batching state
      i=turnId (NE.head batch)
@@ -209,7 +209,7 @@ launch s a batch tick slot batching = do
  DB.pulseCall s tick a "chatInput" slot (nub [at (turnField t "origin") "group" | t <- NE.toList batch,has (turnField t "origin") "group"])
  DB.project s a
  void $ forkIO $ do
-  result <- try (withActor s a (Just "chatInput") (if has (turnField execution "origin") "group" then G.runGroup s run execution else D.runDecision s run execution snapshot))
+  result <- try (withActor s a (Just "chatInput") (if has (turnField execution "origin") "group" then G.runGroup s run execution else D.runDecision prepareSpecialist s run execution snapshot))
   locked s $ finish s run execution result `finally` do
    lease <- readIORef (serviceLease s)
    when (lease==Just (AgentId a,i)) $ writeIORef (serviceLease s) Nothing
@@ -236,11 +236,11 @@ publish s a tick = forM_ [1,2] $ \slot -> do
    DB.pulseCall s tick a "chatOutput" slot [at origin "group" | has origin "group"]
    DB.project s a
    trimConversation s a
-admit :: Service -> Text -> Pulse -> IO ()
-admit s a tick = do
+admit :: (AgentId -> IO D.PreparedSpecialist) -> Service -> Text -> Pulse -> IO ()
+admit prepareSpecialist s a tick = do
  runs <- readMVar (serviceRuns s)
  state <- agentState s a
- mapM_ (\(Admission batch slot batching) -> launch s a batch tick slot batching)
+ mapM_ (\(Admission batch slot batching) -> launch prepareSpecialist s a batch tick slot batching)
   (admission (AgentId a) [(runOwner run,runSlot run) | run <- M.elems runs] state tick)
 
 data Admission = Admission (NonEmpty Turn) Int Bool
@@ -257,8 +257,8 @@ admission owner runs state tick
  scheduled=pulseFrequency tick==Bph60
  queued=[t | t<-agentTurns state,turnStatus t==Queued,boolean (turnField t "batchable"),has (turnField t "origin") "routine"==scheduled]
  legacy=[t | t<-agentTurns state,turnStatus t==Queued,not (boolean (turnField t "batchable"))]
-onPulse :: Service -> Pulse -> IO ()
-onPulse s tick = do
+onPulse :: (AgentId -> IO D.PreparedSpecialist) -> Service -> Pulse -> IO ()
+onPulse prepareSpecialist s tick = do
  R.dispatch s tick
  when (pulseFrequency tick==Bph60 || (pulseFrequency tick==Bpm60 && even (pulseNumber tick))) $ do
   D.pendingWorks s
@@ -270,8 +270,8 @@ onPulse s tick = do
    inactive <- retired s a
    unless inactive $ do
     publish s a tick
-    admit s a tick
-    when (pulseFrequency tick==Bph60) $ admit s a tick
+    admit prepareSpecialist s a tick
+    when (pulseFrequency tick==Bph60) $ admit prepareSpecialist s a tick
 advanceDeadline :: Frequency -> Int -> Int -> (Int,Int)
 advanceDeadline frequency time due = (elapsed,due+elapsed*interval)
  where
@@ -280,8 +280,8 @@ advanceDeadline frequency time due = (elapsed,due+elapsed*interval)
 
 milliseconds :: IO Int
 milliseconds = fromIntegral . (`div` 1000000) <$> getMonotonicTimeNSec
-startExecution :: Service -> IO ()
-startExecution s = modifyMVar_ (serviceWorker s) $ \existing -> case existing of
+startExecution :: (AgentId -> IO D.PreparedSpecialist) -> Service -> IO ()
+startExecution prepareSpecialist s = modifyMVar_ (serviceWorker s) $ \existing -> case existing of
  Just _ -> pure existing
  Nothing -> Just <$> async loop
  where
@@ -307,7 +307,7 @@ startExecution s = modifyMVar_ (serviceWorker s) $ \existing -> case existing of
            let number=int (get (get current "numbers") key)+elapsed; numbers=put key (num number) (get current "numbers"); identity=at current "id"
            writeIORef (servicePulse s) (put "numbers" numbers current)
            DB.saveSingleton s DB.SystemPulse (obj [("pulse",str identity),("numbers",numbers)])
-           onPulse s (Pulse identity frequency number)
+           onPulse prepareSpecialist s (Pulse identity frequency number)
         threadDelay 50000
         step
   step

@@ -354,6 +354,9 @@ data DecisionStep
  | EnsureSpecialist Text Text
  | DelegateRequest Text
  deriving (Eq, Show)
+data SpecialistResolution = ExistingSpecialist AgentProfile | CreatedSpecialist AgentProfile deriving (Eq, Show)
+newtype PreparedSpecialist = PreparedSpecialist { preparedSpecialistId :: AgentId }
+ deriving (Eq, Show)
 
 -- Decide from an immutable snapshot. The runtime interprets only the resulting work.
 advanceDecision :: AgentId -> DecisionResponse -> Workload -> WorkCall -> Either DecisionError DecisionStep
@@ -395,8 +398,8 @@ decisionFailure problem = case problem of
  InvalidOutcome reason -> failure 400 (outcomeError reason)
  InvalidAcceptedTask reason -> failure 500 reason
 
-runDecision :: Service -> Run -> Turn -> AgentState -> IO (Text,[Value])
-runDecision s run turn state = do
+runDecision :: (AgentId -> IO PreparedSpecialist) -> Service -> Run -> Turn -> AgentState -> IO (Text,[Value])
+runDecision prepareSpecialist s run turn state = do
  locked s (begin s (runOwner run) turn)
  logs <- newIORef []
  let loop n = do
@@ -428,10 +431,17 @@ runDecision s run turn state = do
            finish current ((setCallFields [("target",str target)] call) { callProgress=RunningAt Delegation })
           EnsureSpecialist name role -> do
            rows <- DB.agents s
-           created <- case find ((==T.toCaseFold name) . T.toCaseFold . (`at` "name")) rows of
-            Just row -> require (at row "role" == role) 409 "Name already exists with a different role" >> pure row
-            Nothing -> createAgent s (obj [("name",str name),("role",str role),("manager",str owner)])
-           finish current ((setCallFields [("target",get created "id"),("creation",obj [("name",str name),("role",str role)]),("creationReceipt",obj [("agent",created),("created",Bool True)])] call) { callProgress=RunningAt Delegation })
+           resolution <- case find ((==T.toCaseFold name) . T.toCaseFold . (`at` "name")) rows of
+            Just row -> do
+             require (at row "role" == role) 409 "Name already exists with a different role"
+             ExistingSpecialist <$> decodeValue 500 row
+            Nothing -> CreatedSpecialist <$> (decodeValue 500 =<< createAgent s (obj [("name",str name),("role",str role),("manager",str owner)]))
+           let (profile,created) = case resolution of
+                ExistingSpecialist existing -> (existing,False)
+                CreatedSpecialist new -> (new,True)
+           prepared <- prepareSpecialist (profileId profile)
+           require (preparedSpecialistId prepared == profileId profile) 500 "Prepared specialist does not match the selected Sapi"
+           finish current ((setCallFields [("target",toJSON (preparedSpecialistId prepared)),("creation",obj [("name",str name),("role",str role)]),("creationReceipt",obj [("agent",toJSON profile),("created",Bool created)])] call) { callProgress=RunningAt Delegation })
           DelegateRequest request -> Just <$> transfer s run request (decisionReason response) record
         maybe (loop (n+1)) pure result
  output <- loop (0::Int) `catch` (\(e::SomeException) -> do
