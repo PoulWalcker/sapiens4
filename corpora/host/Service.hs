@@ -122,7 +122,7 @@ snapshotUnlocked s = do
  prefs <- DB.singleton s DB.Preferences
  corpora <- corporaIdentity s
  groups <- G.snapshotGroups s
- routines <- DB.values s DB.ScheduledRoutines
+ routines <- R.routineSummaries s
  creation <- prompt s "creation-request"
  agentRows <- forM rows $ \row -> put "retired" . Bool <$> retired s (at row "id") <*> pure row
  owner <- maybe Null (toJSON . fst) <$> readIORef (serviceLease s)

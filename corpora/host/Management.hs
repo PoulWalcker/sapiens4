@@ -166,7 +166,7 @@ control s a payload = do
    require (maybe True ((==RunId identity) . snd) lease) 409 "Shared computer is busy with another AgencyRun"
    writeIORef (serviceLease s) (Just (AgentId a,RunId identity))
    pure (obj [("owner",str a)])
-  ReadRoutines -> obj . (:[]) . ("routines",) . arr . filter ((==a) . (`at` "owner")) <$> DB.values s DB.ScheduledRoutines
+  ReadRoutines -> obj . (:[]) . ("routines",) . arr . filter ((==a) . (`at` "owner")) <$> R.routineSummaries s
   CreateRoutine -> receipt . obj . (:[]) . ("routine",) <$> R.save s a (get d "minutes") (get d "prompt") (R.AddRoutine current)
   UpdateRoutine -> do i<-textField d "id" 80; receipt . obj . (:[]) . ("routine",) <$> R.save s a (get d "minutes") (get d "prompt") (R.EditRoutine i Nothing)
   PauseRoutine -> pause receipt True

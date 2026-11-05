@@ -248,7 +248,7 @@ orchestration value =
   }
 
 type Routine =
-  { id :: String, owner :: String, title :: String, prompt :: String, minutes :: Number, nextDue :: String, runCount :: Number, paused :: Boolean }
+  { id :: String, owner :: String, title :: String, prompt :: String, minutes :: Number, nextDue :: String, runCount :: Number, paused :: Boolean, deferredCount :: Number, oldestDeferredDue :: String }
 
 routine :: Json -> Routine
 routine value =
@@ -260,6 +260,8 @@ routine value =
   , nextDue: D.s "nextDue" value
   , runCount: D.n "runCount" value
   , paused: D.b "paused" value
+  , deferredCount: D.n "deferredCount" value
+  , oldestDeferredDue: D.s "oldestDeferredDue" value
   }
 
 type Event =
@@ -584,7 +586,7 @@ checkOrchestration :: Check
 checkOrchestration = record [optional "manager" stringValue, optional "notes" checkNotes]
 
 checkRoutine :: Check
-checkRoutine = record [optional "id" stringValue, optional "owner" stringValue, optional "title" stringValue, optional "prompt" stringValue, optional "minutes" numberValue, optional "nextDue" stringValue, optional "runCount" numberValue, optional "paused" booleanValue]
+checkRoutine = record [optional "id" stringValue, optional "owner" stringValue, optional "title" stringValue, optional "prompt" stringValue, optional "minutes" numberValue, optional "nextDue" stringValue, optional "runCount" numberValue, optional "paused" booleanValue, optional "deferredCount" numberValue, optional "oldestDeferredDue" stringValue]
 
 checkEvent :: Check
 checkEvent = record [optional "timestamp" stringValue, optional "actor" stringValue, optional "entity" stringValue, optional "event" stringValue, optional "agency" stringValue]
