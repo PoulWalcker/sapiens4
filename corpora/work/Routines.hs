@@ -5,7 +5,7 @@ module Routines
  ) where
 
 import Control.Monad
-import Control.Exception (SomeException, SomeAsyncException, fromException, throwIO, try)
+import Control.Exception (SomeException, SomeAsyncException, fromException, throwIO, try, catch)
 import Control.Concurrent.Async (AsyncCancelled)
 import qualified Command as C
 import Data.Aeson hiding (pairs)
@@ -131,6 +131,7 @@ data DueChoice = AdmitRun | DeferRun DeferredReason deriving (Eq, Show)
 dueChoice :: Maybe RunId -> Bool -> DueChoice
 dueChoice active hasDeferred = case active of
  Just run -> DeferRun (BlockedBy run)
+ -- Deferred work requires the Routine's missed-due policy before admission.
  Nothing | hasDeferred -> DeferRun AwaitingPolicy
  Nothing -> AdmitRun
 
@@ -150,7 +151,7 @@ routineSummaries :: Service -> IO [Value]
 routineSummaries s = do
  routines <- DB.values s DB.ScheduledRoutines
  rows <- DB.queryRows s "SELECT id,value,status FROM routine_occurrences WHERE status='deferred' ORDER BY rowid" ["id","value","status"] []
- dues <- traverse readStoredDue rows
+ dues <- catMaybes <$> traverse readSummaryDue rows
  let deferred=[due | Deferred due <- dues]
      pending routine = filter ((==at routine "id") . routineId . deferredRoutine) deferred
      summarize routine = case pending routine of
@@ -159,6 +160,13 @@ routineSummaries s = do
        [("deferredCount",num (1+length rest))
        ,("oldestDeferredDue",get (toJSON (deferredRoutine due)) "nextDue")])
  pure (map summarize routines)
+ where
+ readSummaryDue row = (Just <$> readStoredDue row) `catch` invalidSummary row
+ invalidSummary :: Value -> APIError -> IO (Maybe StoredDue)
+ invalidSummary row problem = do
+  hPutStrLn stderr ("Deferred due " <> T.unpack (at row "id")
+   <> " omitted from routine summaries: " <> show problem)
+  pure Nothing
 storeRoutine :: Service -> Routine -> IO Value
 storeRoutine s = DB.saveRoutine s . toJSON
 
