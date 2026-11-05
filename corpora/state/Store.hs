@@ -81,7 +81,10 @@ initialize :: Service -> IO ()
 initialize s = connection s $ \db -> do
  execute_ db "PRAGMA journal_mode=WAL"
  [Only version] <- query_ db "PRAGMA user_version" :: IO [Only Int]
- require (version `elem` [0..8] || version == 12) 500 ("Unsupported CORPORA schema: " <> T.pack (show version))
+ require (version `elem` [0..9]) 500 ("Unsupported CORPORA schema: " <> T.pack (show version))
+ when (version == 9) $ do
+  columns <- query_ db "SELECT name FROM pragma_table_info('routine_occurrences') ORDER BY cid" :: IO [Only Text]
+  require (map fromOnly columns == ["id","value","status"]) 500 "Unsupported CORPORA schema 9 layout"
  SQLite.withTransaction db $ do
   mapM_ (execute_ db) [
    "CREATE TABLE IF NOT EXISTS scheduled_routines (sequence INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL)",
@@ -101,11 +104,11 @@ initialize s = connection s $ \db -> do
    "CREATE TABLE IF NOT EXISTS activity_events (id INTEGER PRIMARY KEY, owner TEXT NOT NULL, timestamp TEXT NOT NULL, actor TEXT NOT NULL, entity TEXT NOT NULL, event TEXT NOT NULL, agency TEXT, details TEXT NOT NULL)",
    "CREATE INDEX IF NOT EXISTS activity_events_owner ON activity_events(owner,id)"]
   when (version `elem` [1,2]) $ execute_ db "INSERT OR IGNORE INTO turns SELECT * FROM jobs WHERE flow IN ('chat','computer')"
-  -- Main used schema 8; intermediate branch schemas 9–11 were never released.
-  when (version < 12) $ do
+  -- All unreleased Routine changes form a single upgrade from main's schema 8.
+  when (version < 9) $ do
    -- Absence of a policy is explicit; preserve existing choices and corrupt rows.
    execute_ db "UPDATE scheduled_routines SET value=json_set(value,'$.policySelection',json('{\"kind\":\"awaiting_selection\"}')) WHERE CASE WHEN json_valid(value) THEN json_type(value)='object' AND json_type(value,'$.policySelection') IS NULL ELSE 0 END"
-   execute_ db "PRAGMA user_version=12"
+   execute_ db "PRAGMA user_version=9"
   execute_ db "CREATE INDEX IF NOT EXISTS routine_occurrences_open_routine ON routine_occurrences(CASE WHEN json_valid(value) THEN json_extract(value,'$.routine.id') ELSE NULL END) WHERE status<>'closed'"
   execute_ db "CREATE INDEX IF NOT EXISTS routine_occurrences_status ON routine_occurrences(status)"
 

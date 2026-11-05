@@ -52,7 +52,7 @@ RSpec.describe 'Personal routine historical recovery', :desktop, :slow do
     desktop.click('Open PersonalHistorian')
   end
 
-  # Schema12 installation input, not evidence of an actual process crash.
+  # Schema9 installation input, not evidence of an actual process crash.
   # UUIDv5 is the persisted identity encoding; deadlines below are independent
   # fixture data, not an implementation of the scheduler's admission algorithm.
   def recovery_identity(routine_id, due)
@@ -67,7 +67,7 @@ RSpec.describe 'Personal routine historical recovery', :desktop, :slow do
     raise 'Recovery installation fixture requires a stopped host' if host.process
     identities = deadlines.map { |due| recovery_identity(routine.fetch('id'), due) }
     SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
-      raise 'Recovery fixture only supports current schema12' unless db.get_first_value('PRAGMA user_version') == 12
+      raise 'Recovery fixture only supports current schema9' unless db.get_first_value('PRAGMA user_version') == 9
       db.transaction do
         current = routine.merge('nextDue' => next_due, 'runCount' => 1)
         db.execute('UPDATE scheduled_routines SET value=? WHERE sequence=?',

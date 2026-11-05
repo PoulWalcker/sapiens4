@@ -64,7 +64,7 @@ module RoutineGroupRecovery
     # message/task/request transaction is invented. The compact deferred row
     # represents exactly three two-minute historical deadlines.
     SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
-      raise 'Only current schema 12 is supported' unless db.get_first_value('PRAGMA user_version') == 12
+      raise 'Only current schema 9 is supported' unless db.get_first_value('PRAGMA user_version') == 9
       db.transaction do
         db.execute('UPDATE scheduled_routines SET value=? WHERE sequence=?',
           [JSON.generate(current), routine.fetch('id').split('_').last.to_i])
