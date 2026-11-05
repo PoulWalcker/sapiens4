@@ -87,21 +87,44 @@ personalAgentP = withText "Personal Sapi ID" $ \identity -> case T.stripPrefix "
  Just suffix | not (T.null suffix) -> pure (AgentId identity)
  _ -> fail "Invalid Personal Sapi ID"
 
+-- A deadline's original spelling is part of its persistent occurrence identity.
+data Deadline = Deadline UTCTime Text deriving (Eq, Show)
+
+deadlineTime :: Deadline -> UTCTime
+deadlineTime (Deadline time _) = time
+
+deadlineText :: Deadline -> Text
+deadlineText (Deadline _ spelling) = spelling
+
+instance FromJSON Deadline where
+ parseJSON = withText "Routine deadline" $ \spelling ->
+  maybe (fail "Invalid routine due time") (\time -> pure (Deadline time spelling)) (parseTime spelling)
+instance ToJSON Deadline where toJSON = str . deadlineText
+
+newDeadline :: UTCTime -> Deadline
+newDeadline time = Deadline time (timestamp time)
+
+rescheduleDeadline :: UTCTime -> Deadline -> Deadline
+rescheduleDeadline time previous
+ | time == deadlineTime previous = previous
+ | otherwise = newDeadline time
+
 data Routine = Routine
  { routineId :: RoutineId, routineOwner :: RoutineOwner, routinePrompt :: Text, routineMinutes :: Minutes
- , routineDue :: UTCTime, routineCount :: Int, routinePaused :: Bool
+ , routineDeadline :: Deadline, routineCount :: Int, routinePaused :: Bool
  , routinePolicy :: PolicySelection, routineFields :: Object
  } deriving (Eq, Show)
 instance FromJSON Routine where
  parseJSON = withObject "Scheduled Routine" $ \o -> do
-  due <- o .: "nextDue" >>= maybe (fail "Invalid routine due time") pure . parseTime
+  due <- o .: "nextDue"
   count <- o .:? "runCount" .!= 0
   unless (count >= 0) (fail "Invalid routine run count")
-  Routine <$> o .: "id" <*> o .: "owner" <*> o .: "prompt" <*> o .: "minutes" <*> pure due <*> pure count <*> o .: "paused" <*> o .: "policySelection" <*> pure (foldr KM.delete o ["id","owner","prompt","minutes","runCount","paused","policySelection"])
--- The persisted due-time spelling participates in deterministic occurrence IDs.
--- Retain it until the deadline changes, including legacy fractional precision.
+  Routine <$> o .: "id" <*> o .: "owner" <*> o .: "prompt" <*> o .: "minutes" <*> pure due <*> pure count <*> o .: "paused" <*> o .: "policySelection" <*> pure (foldr KM.delete o ["id","owner","prompt","minutes","nextDue","runCount","paused","policySelection"])
 instance ToJSON Routine where
- toJSON r = mergeFields [("id",toJSON (routineId r)),("owner",toJSON (routineOwner r)),("prompt",str (routinePrompt r)),("minutes",toJSON (routineMinutes r)),("nextDue",if parseTime (at (Object (routineFields r)) "nextDue") == Just (routineDue r) then get (Object (routineFields r)) "nextDue" else str (timestamp (routineDue r))),("runCount",num (routineCount r)),("paused",Bool (routinePaused r)),("policySelection",toJSON (routinePolicy r))] (Object (routineFields r))
+ toJSON r = mergeFields [("id",toJSON (routineId r)),("owner",toJSON (routineOwner r)),("prompt",str (routinePrompt r)),("minutes",toJSON (routineMinutes r)),("nextDue",toJSON (routineDeadline r)),("runCount",num (routineCount r)),("paused",Bool (routinePaused r)),("policySelection",toJSON (routinePolicy r))] (Object (routineFields r))
+
+routineDue :: Routine -> UTCTime
+routineDue = deadlineTime . routineDeadline
 
 data ScheduledTarget = PersonalTarget AgentId | GroupTarget GroupId AgentId deriving (Eq, Show)
 instance FromJSON ScheduledTarget where
@@ -192,7 +215,7 @@ spanDueAt range time
  where
  first=spanFirst range
  original=dueRoutine first
- updated=original { routineDue=time }
+ updated=original { routineDeadline=newDeadline time }
 
 spanLast :: DueSpan -> Due
 spanLast range = spanDueAt range (spanThrough range)
@@ -227,7 +250,12 @@ data StoredDue
  | Closed DueSpan ClosureReason
  deriving (Eq, Show)
 
-data DuePlan = KeepDues | ResolveDues (Maybe Due) [(DueSpan,ClosureReason)] [(DueSpan,DeferredReason)] deriving (Eq, Show)
+data DueResolution = DueResolution
+ { admittedDue :: Maybe Due
+ , closedRanges :: [(DueSpan,ClosureReason)]
+ , deferredRanges :: [(DueSpan,DeferredReason)]
+ } deriving (Eq, Show)
+data DuePlan = KeepDues | ResolveDues DueResolution deriving (Eq, Show)
 resolveDues :: UTCTime -> PolicySelection -> Maybe RunId -> [(DueSpan,DeferredReason)] -> DuePlan
 resolveDues time selection active pending
  | isJust active = KeepDues
@@ -236,7 +264,9 @@ resolveDues time selection active pending
     PolicySelected policy -> case policy of
      RecoverEach -> case ordered of
       [] -> KeepDues
-      (range,reason):_ -> ResolveDues (Just (spanFirst range)) [] [(remainder,reason) | remainder <- maybeToList (spanTail range)]
+      (range,reason):_ -> ResolveDues (DueResolution
+       { admittedDue=Just (spanFirst range), closedRanges=[]
+       , deferredRanges=[(remainder,reason) | remainder <- maybeToList (spanTail range)] })
      RunLatest -> case latest of
       [] -> KeepDues
       (range,_):rest -> selectLast range rest (SupersededBy (occurrenceIdFor (dueRoutine (spanLast range))))
@@ -247,12 +277,14 @@ resolveDues time selection active pending
            ++ [(prefix,SkippedByPolicy) | (range,_) <- eligible, prefix <- maybeToList (spanPrefix range)]
           remaining=[(DueSpan (spanLast range) (spanThrough range),reason)
            | (range,reason) <- drop 1 eligible, spanCount range > 1]
-      in ResolveDues admitted closed remaining
+      in ResolveDues (DueResolution { admittedDue=admitted, closedRanges=closed, deferredRanges=remaining })
  where
  ordered = sortOn (routineDue . dueRoutine . spanFirst . fst) pending
  latest = reverse (sortOn (spanThrough . fst) pending)
- selectLast range rest reason = ResolveDues (Just (spanLast range))
-  ([(other,reason) | (other,_) <- rest] ++ [(prefix,reason) | prefix <- maybeToList (spanPrefix range)]) []
+ selectLast range rest reason = ResolveDues (DueResolution
+  { admittedDue=Just (spanLast range)
+  , closedRanges=[(other,reason) | (other,_) <- rest] ++ [(prefix,reason) | prefix <- maybeToList (spanPrefix range)]
+  , deferredRanges=[] })
  current (range,reason) = case reason of
   BlockedBy _ -> False
   _ -> addUTCTime (intervalSeconds (routineMinutes (dueRoutine (spanFirst range)))) (spanThrough range) > time
@@ -464,12 +496,12 @@ acknowledge s owner input r = do
  pure (obj [("id",str i),("agent",str owner),("status",str "done"),("flow",str "chat")])
 advanceDeadline :: Routine -> Routine
 advanceDeadline routine = routine
- { routineDue=addUTCTime (intervalSeconds (routineMinutes routine)) (routineDue routine) }
+ { routineDeadline=newDeadline (addUTCTime (intervalSeconds (routineMinutes routine)) (routineDue routine)) }
 
 captureDues :: UTCTime -> Routine -> ScheduledTarget -> ([DueSpan],Routine)
 captureDues time routine target
  | routineDue routine > time = ([],routine)
- | otherwise = ([DueSpan first through],routine { routineDue=addUTCTime interval through })
+ | otherwise = ([DueSpan first through],routine { routineDeadline=newDeadline (addUTCTime interval through) })
  where
  interval=intervalSeconds (routineMinutes routine)
  steps=floor (diffUTCTime time (routineDue routine) / interval) :: Integer
@@ -486,7 +518,7 @@ deferralReason selection active = case active of
 pauseRoutine :: UTCTime -> Bool -> Routine -> Routine
 pauseRoutine time paused routine = routine
  { routinePaused=paused
- , routineDue=if paused then routineDue routine else addUTCTime (intervalSeconds (routineMinutes routine)) time
+ , routineDeadline=if paused then routineDeadline routine else rescheduleDeadline (addUTCTime (intervalSeconds (routineMinutes routine)) time) (routineDeadline routine)
  , routineCount=if not paused && routineCount routine>=1000 then 0 else routineCount routine
  , routineFields=KM.insert "updated" (str (timestamp time)) (routineFields routine) }
 
@@ -540,7 +572,7 @@ stableRunId key = RunId (T.filter (/='-') (UUID.toText
  (UUID5.generateNamed UUID5.namespaceURL (BS.unpack (TE.encodeUtf8 key)))))
 
 occurrenceIdFor :: Routine -> RunId
-occurrenceIdFor routine = stableRunId (routineIdText (routineId routine) <> ":" <> at (toJSON routine) "nextDue")
+occurrenceIdFor routine = stableRunId (routineIdText (routineId routine) <> ":" <> deadlineText (routineDeadline routine))
 
 dueIdFor :: Routine -> DueId
 dueIdFor = DueId . runIdText . occurrenceIdFor
@@ -696,7 +728,8 @@ admitDue s time candidate target = do
     mapM_ (insertDeferredOn db waitingReason) newDues
     result <- case plan of
      KeepDues -> pure Nothing
-     ResolveDues admitted closed remaining -> do
+     ResolveDues resolution -> do
+      let admitted=admittedDue resolution; closed=closedRanges resolution; remaining=deferredRanges resolution
       forM_ closed $ \(due,reason) -> do
        DB.executeOn db "UPDATE routine_occurrences SET value=?,status='closed' WHERE id=? AND status='deferred'"
         [SQL.SQLText (jsonText (merge (toJSON due) (obj [("closure",toJSON reason)]))),SQL.SQLText (dueIdText (dueId (spanFirst due)))]
@@ -729,8 +762,9 @@ admitDue s time candidate target = do
         updated=advanced { routineCount=count, routinePaused=count>=1000 }
         stillDeferred=case plan of
          KeepDues -> newDues
-         ResolveDues admitted closed remaining ->
-          let resolved=map (dueId . spanFirst . fst) closed ++ maybeToList (dueId <$> admitted)
+         ResolveDues resolution ->
+          let admitted=admittedDue resolution; closed=closedRanges resolution; remaining=deferredRanges resolution
+              resolved=map (dueId . spanFirst . fst) closed ++ maybeToList (dueId <$> admitted)
               untouched=[range | range <- newDues, dueId (spanFirst range) `notElem` resolved]
               tails=[remainder | (remainder,_) <- remaining, captured <- newDues, spanThrough captured == spanThrough remainder, dueObserved (spanFirst captured) == dueObserved (spanFirst remainder)]
           in untouched++tails
