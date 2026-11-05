@@ -57,7 +57,11 @@ routineIdText (RoutineId identity _) = identity
 routineIdSequence :: RoutineId -> Int64
 routineIdSequence (RoutineId _ sequenceId) = sequenceId
 parseRoutineId :: Text -> Maybe RoutineId
-parseRoutineId identity = RoutineId identity <$> (T.stripPrefix "routine_sch_" identity >>= readMaybe . T.unpack)
+parseRoutineId identity = do
+ suffix <- T.stripPrefix "routine_sch_" identity
+ sequenceNumber <- readMaybe (T.unpack suffix) :: Maybe Integer
+ guard (sequenceNumber >= toInteger (minBound :: Int64) && sequenceNumber <= toInteger (maxBound :: Int64))
+ pure (RoutineId identity (fromInteger sequenceNumber))
 instance FromJSON RoutineId where
  parseJSON = withText "Scheduled Routine ID" $ maybe (fail "Invalid scheduled routine ID") pure . parseRoutineId
 instance ToJSON RoutineId where toJSON = String . routineIdText

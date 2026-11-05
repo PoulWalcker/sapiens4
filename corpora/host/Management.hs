@@ -167,11 +167,11 @@ control s a payload = do
    policy <- decodeValue 400 (get d "missedPolicy")
    receipt . obj . (:[]) . ("routine",) <$> R.save s a (get d "minutes") (get d "prompt") (Just policy) (R.AddRoutine current)
   UpdateRoutine -> do
-   i <- textField d "id" 80 >>= decodeValue 400 . str
+   i <- routineIdentity
    policy <- if has d "missedPolicy" then Just <$> decodeValue 400 (get d "missedPolicy") else pure Nothing
    receipt . obj . (:[]) . ("routine",) <$> R.save s a (get d "minutes") (get d "prompt") policy (R.EditRoutine i Nothing)
   SelectRoutinePolicy -> do
-   i <- textField d "id" 80 >>= decodeValue 400 . str
+   i <- routineIdentity
    expected <- textField d "expectedPrompt" 16000
    selection <- decodeValue 400 (get d "expectedSelection")
    policy <- decodeValue 400 (get d "missedPolicy")
@@ -195,7 +195,10 @@ control s a payload = do
   require (a==chief) 403 "Only the main Sapi can retire or rehire Sapis through host-control"
   target <- resolve s (at d "target") True
   receipt <$> changeRetirement s target retire (at d "reason")
- pause receipt paused=do i<-textField d "id" 80 >>= decodeValue 400 . str; receipt . obj . (:[]) . ("routine",) <$> R.setPaused s a i paused
+ routineIdentity = do
+  void (textField d "id" 80)
+  decodeValue 400 (get d "id")
+ pause receipt paused=do i<-routineIdentity; receipt . obj . (:[]) . ("routine",) <$> R.setPaused s a i paused
 reviseCorpora :: Value -> CorporaConfig -> Validation CorporaConfig
 reviseCorpora d cfg = do
  check (get d "revision"==num (corporaRevision cfg)) 409 "Corpora changed. Read its settings again."

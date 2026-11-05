@@ -190,11 +190,22 @@ turns s = do
 saveRoutine :: Service -> Value -> IO Value
 saveRoutine s v = connection s $ \db -> saveRoutineOn db v
 saveRoutineOn :: Connection -> Value -> IO Value
-saveRoutineOn db v = do
- sequenceId <- if has v "id" then maybe (failure 500 "Invalid scheduled routine ID") (pure . routineIdSequence) (parseRoutineId (at v "id")) else execute_ db "INSERT INTO scheduled_routines(value) VALUES ('{}')" >> lastInsertRowId db
- let i = "routine_sch_" <> T.justifyRight 5 '0' (T.pack (show sequenceId)); value = put "id" (str i) v
- execute db "UPDATE scheduled_routines SET value=? WHERE sequence=?" (jsonText value,sequenceId)
+saveRoutineOn db v = if has v "id" then do
+ identity <- maybe (failure 500 "Invalid scheduled routine ID") pure (parseRoutineId (at v "id"))
+ let value=put "id" (toJSON identity) v
+ execute db "UPDATE scheduled_routines SET value=? WHERE sequence=? AND CASE WHEN json_valid(value) THEN json_extract(value,'$.id') END=?"
+  (jsonText value,routineIdSequence identity,routineIdText identity)
+ changed <- changes db
+ require (changed == 1) 409 "Scheduled routine identity changed before saving"
  pure value
+ else do
+  execute_ db "INSERT INTO scheduled_routines(value) VALUES ('{}')"
+  sequenceId <- lastInsertRowId db
+  let identity="routine_sch_" <> T.justifyRight 5 '0' (T.pack (show sequenceId))
+      value=put "id" (str identity) v
+  execute db "UPDATE scheduled_routines SET value=? WHERE sequence=?" (jsonText value,sequenceId)
+  pure value
+
 pulseCall :: Service -> Pulse -> Text -> Text -> Int -> [Text] -> IO ()
 pulseCall s tick a kind slot groups = do
  t <- now

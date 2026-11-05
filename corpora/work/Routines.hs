@@ -708,7 +708,10 @@ readRoutineOn :: SQL.Connection -> RoutineId -> IO Routine
 readRoutineOn db identity = do
  rows <- DB.queryRowsOn db "SELECT value FROM scheduled_routines WHERE sequence=?" ["value"] [SQL.SQLInteger (routineIdSequence identity)]
  case rows of
-  row:_ -> DB.decodeStored (at row "value")
+  row:_ -> do
+   routine <- DB.decodeStored (at row "value")
+   require (routineId routine == identity) 409 "Stored routine identity does not match the requested routine"
+   pure routine
   [] -> failure 409 "Routine disappeared before admission"
 
 admitDue :: Service -> UTCTime -> Routine -> ScheduledTarget -> IO (Maybe ScheduledOccurrence)
@@ -1028,9 +1031,9 @@ materializeGroup s groupId turn = DB.connection s $ \db -> SQL.withTransaction d
 
 restoreOccurrences :: Service -> IO ()
 restoreOccurrences s = do
- rows <- DB.queryRows s "SELECT id,value FROM routine_occurrences WHERE status='admitted_pending' ORDER BY rowid" ["id","value"] []
+ rows <- DB.queryRows s "SELECT id,value,status FROM routine_occurrences WHERE status='admitted_pending' ORDER BY rowid" ["id","value","status"] []
  forM_ rows $ \row -> tryRoutine ("scheduled occurrence " <> at row "id") $ do
-  value <- DB.decodeStored (at row "value")
-  occurrence <- decodeValue 500 value
-  require (toJSON (occurrenceId occurrence) == get row "id") 500 "Stored occurrence ID mismatch"
-  materializeOccurrence s occurrence
+  stored <- readStoredDue row
+  case stored of
+   Admitted occurrence Pending -> materializeOccurrence s occurrence
+   _ -> failure 500 "Expected a pending scheduled occurrence"
