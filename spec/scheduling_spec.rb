@@ -28,6 +28,61 @@ RSpec.describe 'Scheduled work and pulse contracts' do
     expect(host.calls).to be_empty
   end
 
+  {'missing' => ->(item) { item.delete('paused') },
+   'null' => ->(item) { item['paused'] = nil }}.each do |state, corrupt|
+    it "rejects a #{state} lifecycle flag in a current-schema routine without repairing or activating it" do
+      owner = chief
+      item = routine
+      item['nextDue'] = '2030-01-01T12:00:00.000000+00:00'
+      corrupt.call(item)
+      host.stop
+      SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+        expect(db.get_first_value('PRAGMA user_version')).to eq(9)
+        db.execute('UPDATE scheduled_routines SET value=? WHERE sequence=?', [JSON.generate(item), item['id'].split('_').last.to_i])
+      end
+      host.start
+      code, error = host.request('POST', "/api/agents/#{owner}/control", {op: 'routine_resume', id: item['id']})
+      expect(code).to eq(500)
+      expect(error['error']).to include('paused')
+      expect(host.state['routines']).to eq([item])
+      expect(host.calls).to be_empty
+    end
+  end
+
+  it 'migrates schema 8 lifecycle defaults once while preserving explicit flags, instructions and history' do
+    owner = chief
+    originals = 4.times.map { |index| routine(owner, 60, "Keep migration instructions #{index}.") }
+    audit = host.state['events'][owner].select { |entry| entry['event'].start_with?('routine.') }
+    legacy = originals.map(&:dup)
+    legacy.each do |item|
+      item.delete('policySelection')
+      item['nextDue'] = '2030-01-01T12:00:00.000000+00:00'
+    end
+    legacy[0].delete('paused')
+    legacy[1]['paused'] = nil
+    legacy[2]['paused'] = true
+    legacy[3]['paused'] = false
+    host.stop
+    SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+      db.execute('DROP TABLE routine_occurrences')
+      db.execute('PRAGMA user_version=8')
+      legacy.each do |item|
+        db.execute('UPDATE scheduled_routines SET value=? WHERE sequence=?', [JSON.generate(item), item['id'].split('_').last.to_i])
+      end
+    end
+    host.start
+    expected = legacy.each_with_index.map do |item, index|
+      item.merge('paused' => index == 2, 'policySelection' => {'kind' => 'awaiting_selection'})
+    end
+    expect(host.state['routines']).to eq(expected)
+    expect(host.state['events'][owner].select { |entry| entry['event'].start_with?('routine.') }).to eq(audit)
+    host.restart
+    expect(host.state['routines']).to eq(expected)
+    SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+      expect(db.get_first_value('PRAGMA user_version')).to eq(9)
+    end
+  end
+
   it 'creates, edits, pauses and resumes a persistent routine without calling the model' do
     owner = chief
     item = routine

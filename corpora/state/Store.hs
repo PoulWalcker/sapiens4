@@ -108,6 +108,9 @@ initialize s = connection s $ \db -> do
   when (version < 9) $ do
    -- Absence of a policy is explicit; preserve existing choices and corrupt rows.
    execute_ db "UPDATE scheduled_routines SET value=json_set(value,'$.policySelection',json('{\"kind\":\"awaiting_selection\"}')) WHERE CASE WHEN json_valid(value) THEN json_type(value)='object' AND json_type(value,'$.policySelection') IS NULL ELSE 0 END"
+   -- Schema 8 treated absent/null paused as False. Store that legacy meaning
+   -- once; current Routine decoding requires an explicit lifecycle boolean.
+   execute_ db "UPDATE scheduled_routines SET value=json_set(value,'$.paused',json('false')) WHERE CASE WHEN json_valid(value) THEN json_type(value)='object' AND (json_type(value,'$.paused') IS NULL OR json_type(value,'$.paused')='null') ELSE 0 END"
    execute_ db "PRAGMA user_version=9"
   execute_ db "CREATE INDEX IF NOT EXISTS routine_occurrences_open_routine ON routine_occurrences(CASE WHEN json_valid(value) THEN json_extract(value,'$.routine.id') ELSE NULL END) WHERE status<>'closed'"
   execute_ db "CREATE INDEX IF NOT EXISTS routine_occurrences_status ON routine_occurrences(status)"

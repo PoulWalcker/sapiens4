@@ -79,7 +79,7 @@ instance FromJSON Routine where
   due <- o .: "nextDue" >>= maybe (fail "Invalid routine due time") pure . parseTime
   count <- o .:? "runCount" .!= 0
   unless (count >= 0) (fail "Invalid routine run count")
-  Routine <$> o .: "id" <*> o .: "owner" <*> o .: "prompt" <*> o .: "minutes" <*> pure due <*> pure count <*> o .:? "paused" .!= False <*> o .: "policySelection" <*> pure (foldr KM.delete o ["id","owner","prompt","minutes","runCount","paused","policySelection"])
+  Routine <$> o .: "id" <*> o .: "owner" <*> o .: "prompt" <*> o .: "minutes" <*> pure due <*> pure count <*> o .: "paused" <*> o .: "policySelection" <*> pure (foldr KM.delete o ["id","owner","prompt","minutes","runCount","paused","policySelection"])
 -- The persisted due-time spelling participates in deterministic occurrence IDs.
 -- Retain it until the deadline changes, including legacy fractional precision.
 instance ToJSON Routine where
