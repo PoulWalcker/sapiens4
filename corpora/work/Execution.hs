@@ -182,8 +182,18 @@ settleRun outcome time ids turn state = result
 finish :: Service -> Run -> Turn -> Either SomeException (Text,[Value]) -> IO ()
 finish s run turn outcome = do
  stop <- readIORef (runCancel run)
+ checked <- case outcome of
+  Right (output,logs) | not stop && has (turnField turn "origin") "group" -> do
+   verification <- try (R.verifyPolicyPreparation s (at (turnField turn "origin") "group") (turnId turn) (turnField turn "origin"))
+   case verification of
+    Right () -> pure (Right (output,logs))
+    Left (problem :: SomeException)
+     | isJust (fromException problem :: Maybe SomeAsyncException) -> throwIO problem
+     | isJust (fromException problem :: Maybe AsyncCancelled) -> throwIO problem
+     | otherwise -> pure (Left (toException (RunFailure (D.exceptionText problem) logs)))
+  _ -> pure outcome
  let a=agentIdText (runOwner run); i=runIdText (runId run)
-     completed=runOutcome stop outcome
+     completed=runOutcome stop checked
      (output,logs,failureText)=outcomeFields completed
  writeJSON (archivePath s a ("runs/"<>i)) (obj [("output",str output),("logs",arr logs),("error",maybe Null str failureText)])
  state <- agentState s a
@@ -221,7 +231,10 @@ launch prepareSpecialist s a batch tick slot batching = do
  DB.pulseCall s tick a "chatInput" slot (nub [at (turnField t "origin") "group" | t <- NE.toList batch,has (turnField t "origin") "group"])
  DB.project s a
  void $ forkIO $ do
-  result <- try (withActor s a (Just "chatInput") (if has (turnField execution "origin") "group" then G.runGroup s run execution else D.runDecision prepareSpecialist s run execution snapshot))
+  let verifyCompletion work = do
+       let origin=get (toJSON work) "origin"
+       R.verifyPolicyPreparation s (at origin "agent") (RunId (D.workloadId work)) origin
+  result <- try (withActor s a (Just "chatInput") (if has (turnField execution "origin") "group" then G.runGroup s run execution else D.runDecision prepareSpecialist verifyCompletion s run execution snapshot))
   locked s $ finish s run execution result `finally` do
    lease <- readIORef (serviceLease s)
    when (lease==Just (AgentId a,i)) $ writeIORef (serviceLease s) Nothing

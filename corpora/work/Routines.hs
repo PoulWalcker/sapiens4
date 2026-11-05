@@ -2,6 +2,7 @@
 module Routines
  ( Minutes, Routine(..), routineSummaries, storeRoutine, initializeRoutines
  , MissedDuePolicy(..), RoutineEdit(..), save, setPolicy, setPaused, command, receipt, acknowledge, dispatch, restoreOccurrences
+ , verifyPolicyPreparation
  ) where
 
 import Control.Monad
@@ -690,6 +691,32 @@ validateTargetOn db target = case target of
 
 -- The pending Routine is the durable intent; the existing Task owns execution,
 -- failure and retry. Stable identity repairs partial creation without new calls.
+policyPreparationId :: Routine -> RunId
+policyPreparationId routine = stableRunId ("routine-policy:" <> routineId routine <> ":" <> routinePrompt routine)
+
+data PolicyPreparationError = PolicyNotSaved | PolicyInstructionsChanged | PolicyOwnerChanged
+
+policyPreparationCompletion :: Text -> RunId -> Routine -> Either PolicyPreparationError ()
+policyPreparationCompletion owner identity routine
+ | routineOwner routine /= owner = Left PolicyOwnerChanged
+ | PolicySelected _ <- routinePolicy routine = Right ()
+ | identity /= policyPreparationId routine = Left PolicyInstructionsChanged
+ | otherwise = Left PolicyNotSaved
+
+-- Callers hold the host lock through completion. Read the authoritative Routine
+-- after execution; a newer valid selection satisfies setup without another write.
+verifyPolicyPreparation :: Service -> Text -> RunId -> Value -> IO ()
+verifyPolicyPreparation s owner identity origin = when (has origin "policyRoutine") $ do
+ sequenceId <- parseRoutineSequence (at origin "policyRoutine")
+ routine <- DB.connection s $ \db -> readRoutineOn db sequenceId
+ require (routineId routine == at origin "policyRoutine") 409 "Stored routine identity does not match policy setup"
+ either reject pure (policyPreparationCompletion owner identity routine)
+ where
+ reject problem = failure 409 $ case problem of
+  PolicyNotSaved -> "Routine policy was not saved. Retry this setup or ask the owner to finish routine setup in chat."
+  PolicyInstructionsChanged -> "Routine instructions changed before policy setup completed. Ask the owner to finish the current routine setup in chat."
+  PolicyOwnerChanged -> "Routine owner changed before policy setup completed. Ask the current owner to finish routine setup in chat."
+
 ensurePolicyPreparation :: Service -> Routine -> IO ()
 ensurePolicyPreparation s routine = case routinePolicy routine of
  PolicySelected _ -> pure ()
@@ -697,7 +724,7 @@ ensurePolicyPreparation s routine = case routinePolicy routine of
   destination <- scheduledTarget s routine
   forM_ destination $ \target -> do
    template <- prompt s "routine-policy"
-   let identity=stableRunId ("routine-policy:" <> routineId routine <> ":" <> routinePrompt routine)
+   let identity=policyPreparationId routine
        created=at (toJSON routine) "created"
        input=render template [("routine",jsonText (toJSON routine))]
        origin=obj [("policyRoutine",str (routineId routine)),("author",str "system")]

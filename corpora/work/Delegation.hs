@@ -480,15 +480,17 @@ decisionFailure problem = case problem of
  UnsupportedSavedTaskSpec -> failure 409 "Saved Task specification must use structured completion criteria; create a new Task."
  InvalidAcceptedTask reason -> failure 500 ("Saved Task specification is malformed: "<>reason)
 
-runDecision :: (AgentId -> IO PreparedSpecialist) -> Service -> Run -> Turn -> AgentState -> IO (Text,[Value])
-runDecision prepareSpecialist s run turn state = do
+runDecision :: (AgentId -> IO PreparedSpecialist) -> (Workload -> IO ()) -> Service -> Run -> Turn -> AgentState -> IO (Text,[Value])
+runDecision prepareSpecialist verifyCompletion s run turn state = do
  locked s (begin s (runOwner run) turn)
  logs <- newIORef []
  let loop n = do
       require (n < 12) 409 "Decision transition limit reached; Admin must resolve the request"
-      (_,c) <- locked s (getWork s (turnId turn))
+      (existing,c) <- locked s (getWork s (turnId turn))
       case callOutput c of
-       Just output -> pure output
+       Just output -> do
+        when (callState c `elem` [CallCompleted,CallUnresolved]) (locked s (verifyCompletion existing))
+        pure output
        Nothing -> do
         let node=callNode c
         (response,record) <- decide s run turn state node logs
@@ -501,6 +503,7 @@ runDecision prepareSpecialist s run turn state = do
              finish work updated = do
               let following=setCallFields [("observation",decisionRaw response)] updated
                   next=callNode following
+              when (callState following `elem` [CallCompleted,CallUnresolved]) (verifyCompletion work)
               saveWork s (withCall work following)
               accept s owner record (wireName node) (wireName next)
               pure (callOutput following)
