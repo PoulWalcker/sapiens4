@@ -368,6 +368,7 @@ exceptionText :: SomeException -> Text
 exceptionText e = case fromException e of Just (APIError _ m) -> m; _ -> T.pack (displayException e)
 validateTarget :: Service -> Workload -> Text -> Text -> IO ()
 validateTarget s w source target = do
+ either decisionFailure pure (policyDelegation w)
  chief <- DB.mainAgent s
  require (target /= source && (source == chief || target == chief)) 400 "Routes are Chief → Sapi or Sapi → Chief"
  void (resolve s target False)
@@ -414,6 +415,7 @@ applyDecision s owner current decision = do
  pure (obj [("saved",Bool True),("callId",toJSON (callIdentity existing)),("target",toJSON (callOwner existing))])
 data DecisionError
  = AcceptedTaskNeedsExecution | OnlyChiefCreates | CriteriaRemoved
+ | OwnerOnlyPolicySetup
  | InvalidOutcome OutcomeError | UnsupportedSavedTaskSpec | InvalidAcceptedTask Text
  deriving (Eq, Show)
 data DecisionStep
@@ -430,22 +432,24 @@ advanceDecision chief response work call = case decisionBody response of
   | workTracked work -> Left AcceptedTaskNeedsExecution
   | otherwise -> Right (finish work (FinishedCall (Answered reply)))
  ExecuteTask -> Right (finish (work { workTracked=True }) (RunningAt ReadyToWork))
- OutsideSpecialization -> Right $ SaveDecision work $
-  if callOwner call == chief then call { callProgress=RunningAt ChiefTriage }
-  else (setCallFields [("target",toJSON chief)] call) { callProgress=RunningAt Delegation }
- SelectSpecialist name -> Right (ResolveSpecialist name)
- NeedSpecialist -> Right (finish work (RunningAt CreatingSapi))
+ OutsideSpecialization -> do
+  when (callOwner call /= chief) (policyDelegation work)
+  Right $ SaveDecision work $
+   if callOwner call == chief then call { callProgress=RunningAt ChiefTriage }
+   else (setCallFields [("target",toJSON chief)] call) { callProgress=RunningAt Delegation }
+ SelectSpecialist name -> policyDelegation work >> Right (ResolveSpecialist name)
+ NeedSpecialist -> policyDelegation work >> Right (finish work (RunningAt CreatingSapi))
  AskAdmin question -> Right (finish (work { workTracked=True }) (FinishedCall (NeedsClarification question)))
  SpecifySapi name role
   | callOwner call /= chief -> Left OnlyChiefCreates
-  | otherwise -> Right (EnsureSpecialist name role)
+  | otherwise -> policyDelegation work >> Right (EnsureSpecialist name role)
  PrepareTask taskType spec -> do
    accepted <- acceptedTaskSpec work
    let inherited=maybe [] (NE.toList . specCriteria) accepted
    unless (all (`elem` NE.toList (specCriteria spec)) inherited) (Left CriteriaRemoved)
    let task=mergeFields [("taskType",str (if has (workField work "origin") "routine" then "automated" else taskType)),("specification",toJSON spec)] (workField work "task")
    Right (finish (setWorkField "task" task work) (RunningAt Execution))
- Handoff request -> Right (DelegateRequest request)
+ Handoff request -> policyDelegation work >> Right (DelegateRequest request)
  ReportOutcome reply outcome -> do
   spec <- acceptedTaskSpec work >>= maybe (Left (InvalidAcceptedTask "Task has no accepted specification")) Right
   StructurallyValidOutcome checked <- B.first InvalidOutcome (validateOutcome response outcome spec)
@@ -454,6 +458,13 @@ advanceDecision chief response work call = case decisionBody response of
   pure (finish (setWorkField "outcome" saved work) (FinishedCall result))
  where
  finish changed progress = SaveDecision changed (call { callProgress=progress })
+
+policyDelegation :: Workload -> Either DecisionError ()
+policyDelegation work
+ | has origin "policyRoutine" && not (has origin "group") = Left OwnerOnlyPolicySetup
+ | otherwise = Right ()
+ where origin=workField work "origin"
+
 acceptedTaskSpec :: Workload -> Either DecisionError (Maybe TaskSpec)
 acceptedTaskSpec work = case get (workField work "task") "specification" of
  Null -> Right Nothing
@@ -473,6 +484,7 @@ decisionFailure problem = case problem of
  AcceptedTaskNeedsExecution -> failure 409 "An accepted Task must execute and report its completion criteria"
  OnlyChiefCreates -> failure 403 "Only Chief can create a Sapi"
  CriteriaRemoved -> failure 400 "A handoff cannot remove accepted completion criteria"
+ OwnerOnlyPolicySetup -> failure 409 "Personal routine policy setup must stay with its owner. Save a policy here, or retry this setup with its owner."
  InvalidOutcome reason -> failure 400 (outcomeError reason)
  UnsupportedSavedTaskSpec -> failure 409 "Saved Task specification must use structured completion criteria; create a new Task."
  InvalidAcceptedTask reason -> failure 500 ("Saved Task specification is malformed: "<>reason)
