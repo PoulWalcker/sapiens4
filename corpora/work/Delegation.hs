@@ -414,7 +414,7 @@ applyDecision s owner current decision = do
  pure (obj [("saved",Bool True),("callId",toJSON (callIdentity existing)),("target",toJSON (callOwner existing))])
 data DecisionError
  = AcceptedTaskNeedsExecution | OnlyChiefCreates | CriteriaRemoved
- | InvalidOutcome OutcomeError | InvalidAcceptedTask Text
+ | InvalidOutcome OutcomeError | UnsupportedSavedTaskSpec | InvalidAcceptedTask Text
  deriving (Eq, Show)
 data DecisionStep
  = SaveDecision Workload WorkCall
@@ -460,7 +460,16 @@ advanceDecision chief response work call = case decisionBody response of
 acceptedTaskSpec :: Workload -> Either DecisionError (Maybe TaskSpec)
 acceptedTaskSpec work = case get (workField work "task") "specification" of
  Null -> Right Nothing
- value -> Just <$> B.first (InvalidAcceptedTask . ("Saved Task specification must use structured completion criteria; create a new Task. " <>) . T.pack) (parseEither parseJSON value)
+ value -> case parseEither parseJSON value of
+  Right spec -> Right (Just spec)
+  Left reason | hasStringCriteria value -> Left UnsupportedSavedTaskSpec
+              | otherwise -> Left (InvalidAcceptedTask (T.pack reason))
+ where
+ hasStringCriteria value = case get value "completionCriteria" of
+  Array criteria -> not (null criteria) && all isString criteria
+  _ -> False
+ isString (String _) = True
+ isString _ = False
 
 decisionFailure :: DecisionError -> IO a
 decisionFailure problem = case problem of
@@ -468,7 +477,8 @@ decisionFailure problem = case problem of
  OnlyChiefCreates -> failure 403 "Only Chief can create a Sapi"
  CriteriaRemoved -> failure 400 "A handoff cannot remove accepted completion criteria"
  InvalidOutcome reason -> failure 400 (outcomeError reason)
- InvalidAcceptedTask reason -> failure 409 reason
+ UnsupportedSavedTaskSpec -> failure 409 "Saved Task specification must use structured completion criteria; create a new Task."
+ InvalidAcceptedTask reason -> failure 500 ("Saved Task specification is malformed: "<>reason)
 
 runDecision :: (AgentId -> IO PreparedSpecialist) -> Service -> Run -> Turn -> AgentState -> IO (Text,[Value])
 runDecision prepareSpecialist s run turn state = do

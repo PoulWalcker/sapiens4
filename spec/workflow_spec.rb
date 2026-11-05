@@ -173,6 +173,26 @@ RSpec.describe 'Delegation and completion contracts' do
     expect(host.calls.size).to eq(calls_before_retry)
   end
 
+  it 'reports malformed current task data as corruption rather than an unsupported old format' do
+    host.configure(rules: {'Execution' => {response: decision('Outcome', reply: 'Incomplete', outcome: {
+      status: 'Completed', criterionResults: [], artifacts: []})}})
+    id = host.submit(chief)
+    host.turn(id, 'failed')
+    host.stop
+    SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+      saved = JSON.parse(db.get_first_value('SELECT value FROM workloads WHERE id=?', [id]))
+      saved['task']['specification']['completionCriteria'][0].delete('applicability')
+      db.execute('UPDATE workloads SET value=? WHERE id=?', [JSON.generate(saved), id])
+    end
+    host.start
+    calls_before_retry = host.calls.size
+    host.api('POST', "/api/agents/#{chief}/turns/#{id}/retry", {})
+    failed = host.turn(id, 'failed')
+    expect(failed['error']).to include('Saved Task specification is malformed')
+    expect(failed['error']).not_to include('create a new Task')
+    expect(host.calls.size).to eq(calls_before_retry)
+  end
+
   it 'keeps completed legacy task history readable after restart' do
     id = host.submit(chief)
     host.turn(id, 'done')
