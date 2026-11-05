@@ -42,6 +42,30 @@ RSpec.describe 'Haskell command-line contracts', :host do
     expect(host.state['computer']['owner']).to be_nil
   end
 
+  it 'rejects host app launch spellings before acquiring or marking the computer' do
+    skip 'App launch requires macOS or Windows' unless Gem.win_platform? || RUBY_PLATFORM.include?('darwin')
+    workspace = host.workspace(host.state['main_agent_id'])
+    %w[Sapiens4 sapiens4.exe Sapiens4.app SAPIENS4 sApIeNs4.ApP].each do |name|
+      out, _, code = Contract.capture(Contract::BINARY, 'computer', 'launch', name, chdir: workspace, env: host.environment)
+      expect(code).to eq(1), name
+      expect(JSON.parse(out)['error']).to include('Use host-control'), name
+      expect(File.exist?(File.join(workspace, '.computer-used'))).to eq(false), name
+      expect(host.state['computer']['owner']).to be_nil, name
+    end
+  end
+
+  it 'keeps unmanaged computer launch on the ordinary app lookup path' do
+    skip 'App launch requires macOS or Windows' unless Gem.win_platform? || RUBY_PLATFORM.include?('darwin')
+    Dir.mktmpdir('sapiens-unmanaged-computer-') do |workspace|
+      name = "Sapiens4-uninstalled-#{Process.pid}"
+      out, _, code = Contract.capture(Contract::BINARY, 'computer', 'launch', name, chdir: workspace, env: host.environment)
+      expect(code).to eq(1)
+      expect(JSON.parse(out).fetch('error').to_s).not_to include('Use host-control')
+      expect(File.exist?(File.join(workspace, '.computer-used'))).to eq(true)
+      expect(host.state['computer']['owner']).to be_nil
+    end
+  end
+
   it 'validates read options and preserves unrelated cache files while paginating exact paths' do
     skip 'Executable fixture uses a Unix shebang' if Gem.win_platform?
     Dir.mktmpdir('sapiens-reader-') do |folder|
