@@ -216,7 +216,7 @@ reserveBatch batch tick slot batching state = (marked,snapshot,execution)
  snapshot=mapStateFields (mergeFields ([("current_turn",toJSON i)] ++ [("agency_batch",arr [obj [("id",toJSON (turnId t)),("content",str (turnInput t))] | t <- NE.toList batch]) | batching])) marked
  execution=(reserve first) { turnInput = T.intercalate "\n\n" (map turnInput (NE.toList batch)) }
 
-launch :: (AgentId -> IO D.PreparedSpecialist) -> Service -> Text -> NonEmpty Turn -> Pulse -> Int -> Bool -> IO ()
+launch :: (AgentId -> IO ()) -> Service -> Text -> NonEmpty Turn -> Pulse -> Int -> Bool -> IO ()
 launch prepareSpecialist s a batch tick slot batching = do
  state <- agentState s a
  let (marked,snapshot,execution) = reserveBatch batch tick slot batching state
@@ -261,7 +261,7 @@ publish s a tick = forM_ [1,2] $ \slot -> do
    DB.pulseCall s tick a "chatOutput" slot [at origin "group" | has origin "group"]
    DB.project s a
    trimConversation s a
-admit :: (AgentId -> IO D.PreparedSpecialist) -> Service -> Text -> Pulse -> IO ()
+admit :: (AgentId -> IO ()) -> Service -> Text -> Pulse -> IO ()
 admit prepareSpecialist s a tick = do
  runs <- readMVar (serviceRuns s)
  state <- agentState s a
@@ -282,7 +282,7 @@ admission owner runs state tick
  scheduled=pulseFrequency tick==Bph60
  queued=[t | t<-agentTurns state,turnStatus t==Queued,boolean (turnField t "batchable"),has (turnField t "origin") "routine"==scheduled]
  legacy=[t | t<-agentTurns state,turnStatus t==Queued,not (boolean (turnField t "batchable"))]
-onPulse :: (AgentId -> IO D.PreparedSpecialist) -> Service -> Pulse -> IO ()
+onPulse :: (AgentId -> IO ()) -> Service -> Pulse -> IO ()
 onPulse prepareSpecialist s tick = do
  R.dispatch s tick
  when (pulseFrequency tick==Bph60 || (pulseFrequency tick==Bpm60 && even (pulseNumber tick))) $ do
@@ -297,7 +297,7 @@ onPulse prepareSpecialist s tick = do
     publish s a tick
     admit prepareSpecialist s a tick
     when (pulseFrequency tick==Bph60) $ admit prepareSpecialist s a tick
-runPulse :: (AgentId -> IO D.PreparedSpecialist) -> Service -> Pulse -> IO ()
+runPulse :: (AgentId -> IO ()) -> Service -> Pulse -> IO ()
 runPulse prepareSpecialist s tick = try (onPulse prepareSpecialist s tick) >>= either report pure
  where report exception
         | isJust (fromException exception :: Maybe SomeAsyncException) = throwIO exception
@@ -311,7 +311,7 @@ advanceDeadline frequency time due = (elapsed,due+elapsed*interval)
 
 milliseconds :: IO Int
 milliseconds = fromIntegral . (`div` 1000000) <$> getMonotonicTimeNSec
-startExecution :: (AgentId -> IO D.PreparedSpecialist) -> Service -> IO ()
+startExecution :: (AgentId -> IO ()) -> Service -> IO ()
 startExecution prepareSpecialist s = modifyMVar_ (serviceWorker s) $ \existing -> case existing of
  Just _ -> pure existing
  Nothing -> Just <$> async loop

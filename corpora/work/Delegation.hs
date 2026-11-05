@@ -2,7 +2,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Delegation
- ( WorkCall(..), Workload(..), CallState(..), CallProgress(..), PreparedSpecialist(..)
+ ( WorkCall(..), Workload(..), CallState(..), CallProgress(..)
  , callState, callNode, begin, getWork, findWork, readWorks, saveWork, withCall, workItems
  , exceptionText, reconcileWorks, pendingWorks, runDecision, applyDecision, clarify
  , templates, editTemplate, workTasks, taskList, workSummaries
@@ -422,9 +422,6 @@ data DecisionStep
  | EnsureSpecialist Text Text
  | DelegateRequest Text
  deriving (Eq, Show)
-data SpecialistResolution = ExistingSpecialist AgentProfile | CreatedSpecialist AgentProfile deriving (Eq, Show)
-newtype PreparedSpecialist = PreparedSpecialist { preparedSpecialistId :: AgentId }
- deriving (Eq, Show)
 
 -- Decide from an immutable snapshot. The runtime interprets only the resulting work.
 advanceDecision :: AgentId -> DecisionResponse -> Workload -> WorkCall -> Either DecisionError DecisionStep
@@ -480,7 +477,7 @@ decisionFailure problem = case problem of
  UnsupportedSavedTaskSpec -> failure 409 "Saved Task specification must use structured completion criteria; create a new Task."
  InvalidAcceptedTask reason -> failure 500 ("Saved Task specification is malformed: "<>reason)
 
-runDecision :: (AgentId -> IO PreparedSpecialist) -> (Workload -> IO ()) -> Service -> Run -> Turn -> AgentState -> IO (Text,[Value])
+runDecision :: (AgentId -> IO ()) -> (Workload -> IO ()) -> Service -> Run -> Turn -> AgentState -> IO (Text,[Value])
 runDecision prepareSpecialist verifyCompletion s run turn state = do
  locked s (begin s (runOwner run) turn)
  logs <- newIORef []
@@ -515,18 +512,12 @@ runDecision prepareSpecialist verifyCompletion s run turn state = do
            validateTarget s current owner target
            finish current ((setCallFields [("target",str target)] call) { callProgress=RunningAt Delegation })
           EnsureSpecialist name role -> do
-           rows <- DB.agents s
-           resolution <- case find ((==T.toCaseFold name) . T.toCaseFold . (`at` "name")) rows of
-            Just row -> do
-             require (at row "role" == role) 409 "Name already exists with a different role"
-             ExistingSpecialist <$> decodeValue 500 row
-            Nothing -> CreatedSpecialist <$> (decodeValue 500 =<< createAgent s (obj [("name",str name),("role",str role),("manager",str owner)]))
+           resolution <- ensureSpecialist s name role owner
            let (profile,created) = case resolution of
                 ExistingSpecialist existing -> (existing,False)
                 CreatedSpecialist new -> (new,True)
-           prepared <- prepareSpecialist (profileId profile)
-           require (preparedSpecialistId prepared == profileId profile) 500 "Prepared specialist does not match the selected Sapi"
-           finish current ((setCallFields [("target",toJSON (preparedSpecialistId prepared)),("creation",obj [("name",str name),("role",str role)]),("creationReceipt",obj [("agent",toJSON profile),("created",Bool created)])] call) { callProgress=RunningAt Delegation })
+           prepareSpecialist (profileId profile)
+           finish current ((setCallFields [("target",toJSON (profileId profile)),("creation",obj [("name",str name),("role",str role)]),("creationReceipt",obj [("agent",toJSON profile),("created",Bool created)])] call) { callProgress=RunningAt Delegation })
           DelegateRequest request -> Just <$> transfer s run request (decisionReason response) record
         maybe (loop (n+1)) pure result
  output <- loop (0::Int) `catch` (\(e::SomeException) -> do

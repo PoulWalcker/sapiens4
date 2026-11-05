@@ -98,7 +98,7 @@ attachEndpoint s url = locked s $ do
 startService :: Service -> IO ()
 startService s = E.startExecution prepareSpecialist s
  where
- prepareSpecialist agent = Mgt.prepare s (agentIdText agent) >> pure (D.PreparedSpecialist agent)
+ prepareSpecialist agent = Mgt.prepare s (agentIdText agent)
 closeService :: Service -> IO ()
 closeService s = do
  already <- atomicModifyIORef' (serviceStopping s) (\old -> (True,old))

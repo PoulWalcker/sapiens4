@@ -171,6 +171,26 @@ createAgent s d = do
  ensureAgent s row
  DB.record s [a] a "sapi.created" (put "manager" parent row) "admin" Nothing
  pure row
+
+data SpecialistResolution = ExistingSpecialist AgentProfile | CreatedSpecialist AgentProfile deriving (Eq, Show)
+
+-- The caller holds the service lock across resolution and preparation.
+ensureSpecialist :: Service -> Text -> Text -> Text -> IO SpecialistResolution
+ensureSpecialist s name role parent = do
+ profiles <- DB.agents s >>= mapM (decodeValue 500)
+ let matches = filter ((==T.toCaseFold name) . T.toCaseFold . profileName) profiles
+ case matches of
+  [] -> CreatedSpecialist <$> (decodeValue 500 =<< createAgent s (obj [("name",str name),("role",str role),("manager",str parent)]))
+  [profile] -> do
+   chief <- DB.mainAgent s
+   require (profileRole profile == role && profileId profile /= AgentId chief) 409 "Name already exists with a different role; use status to inspect it"
+   let child = agentIdText (profileId profile)
+   requireActive s child
+   dir <- directory s
+   require (at (get dir child) "parent" == parent) 409 "Name already exists with a different manager"
+   pure (ExistingSpecialist profile)
+  _ -> failure 409 "Name identifies multiple Sapi; use status to inspect them"
+
 identityEdit :: Value -> Validation (Text,Text)
 identityEdit d = do
  check (all (`elem` ["name","role","manager","execution"]) (keys d)) 400 "Unknown or inactive setting"

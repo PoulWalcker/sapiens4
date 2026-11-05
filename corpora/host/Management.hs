@@ -139,19 +139,12 @@ control s a payload = do
    name <- validName d
    role <- textField d "role" 60
    parent <- if get d "manager"==Null then pure a else resolve s (at d "manager") False
-   rows <- DB.agents s
-   let matches=filter ((==T.toCaseFold name) . T.toCaseFold . (`at` "name")) rows
-   (row,created) <- if null matches then (,True) <$> createAgent s (obj [("name",str name),("role",str role),("manager",str parent)]) else do
-    row <- case matches of
-     [candidate] | at candidate "role"==role && at candidate "id"/=a -> pure candidate
-     _ -> failure 409 "Name already exists with a different role; use status to inspect it"
-    let child=at row "id"
-    requireActive s child
-    dir <- directory s
-    require (at (get dir child) "parent"==parent) 409 "Name already exists with a different manager"
-    pure (row,False)
-   prepare s (at row "id")
-   pure (receipt (obj [("agent",row),("created",Bool created)]))
+   resolution <- ensureSpecialist s name role parent
+   let (profile,created) = case resolution of
+        ExistingSpecialist existing -> (existing,False)
+        CreatedSpecialist new -> (new,True)
+   prepare s (agentIdText (profileId profile))
+   pure (receipt (obj [("agent",toJSON profile),("created",Bool created)]))
   RetireAgent -> change chief receipt True
   RehireAgent -> change chief receipt False
   ChangeManager -> do
