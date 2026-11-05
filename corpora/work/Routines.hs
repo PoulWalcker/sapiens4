@@ -342,9 +342,30 @@ save s owner minutes execution policy edit = do
     409 "This creation already has a different policy; update the existing routine"
    pure existing
   RoutineChange change -> do
+   destination <- case change of
+    NewRoutine _ -> pure Nothing
+    ReviseRoutine existing -> decodeValue 500 existing >>= scheduledTarget s
    time <- getCurrentTime
    result <- DB.connection s $ \db -> SQL.withTransaction db $ do
-    saved <- DB.saveRoutineOn db (routineValue time owner interval body policy change)
+    captured <- case change of
+     NewRoutine _ -> pure change
+     ReviseRoutine existing -> do
+      previous <- decodeValue 500 existing
+      sequenceId <- routineSequence previous
+      latest <- readRoutineOn db sequenceId
+      -- Preserve the elapsed old grid before Edit replaces nextDue. Deliberate
+      -- paused time is excluded, just as it is when the schedule resumes.
+      unless (routinePaused latest || routineDue latest > time) $ do
+       target <- maybe (failure 409 "Routine target is unavailable before editing elapsed deadlines") pure destination
+       validateTargetOn db target
+       let (elapsed,_)=captureDues time latest target
+       stored <- readDuesOn db latest
+       active <- activeRun s db latest target stored
+       let reason=deferralReason (routinePolicy latest) active
+       mapM_ (insertDeferredOn db reason) elapsed
+       recordDeferralOn s db latest reason elapsed
+      pure (ReviseRoutine (toJSON latest))
+    saved <- DB.saveRoutineOn db (routineValue time owner interval body policy captured)
     let action = case change of NewRoutine _ -> "routine.created"; ReviseRoutine _ -> "routine.updated"
     DB.recordOn s db [owner] (at saved "id") action saved "admin" Nothing
     pure saved
@@ -435,6 +456,13 @@ captureDues time routine target
  steps=floor (diffUTCTime time (routineDue routine) / interval) :: Integer
  through=addUTCTime (fromInteger steps * interval) (routineDue routine)
  first=Due (dueIdFor routine) routine target time
+
+deferralReason :: PolicySelection -> Maybe RunId -> DeferredReason
+deferralReason selection active = case active of
+ Just run -> BlockedBy run
+ Nothing -> case selection of
+  AwaitingSelection -> AwaitingPolicy
+  PolicySelected _ -> AwaitingRecovery
 
 pauseRoutine :: UTCTime -> Bool -> Routine -> Routine
 pauseRoutine time paused routine = routine
@@ -591,6 +619,21 @@ occurrenceTurn occurrence = newTurn (occurrenceId occurrence) Chat
   ,("due",get value "nextDue"),("title",get value "title"),("minutes",toJSON (routineMinutes routine))
   ,("taskType",str "automated"),("executionPrompt",str (routinePrompt routine))]
 
+-- Admission fixes the current instructions; the original deadline owns identity
+-- and interval. Never replace its nextDue with the edited schedule's nextDue.
+prepareOccurrence :: UTCTime -> Routine -> ScheduledTarget -> Due -> Validation ScheduledOccurrence
+prepareOccurrence time current target due = do
+ let original=dueRoutine due
+ check (routineId current == routineId original && routineOwner current == routineOwner original)
+  409 "Routine identity or owner changed before admission"
+ let fields=case KM.lookup "title" (routineFields current) of
+      Nothing -> KM.delete "title" (routineFields original)
+      Just title -> KM.insert "title" title (routineFields original)
+     snapshot=original { routinePrompt=routinePrompt current, routinePolicy=routinePolicy current, routineFields=fields }
+     occurrence=ScheduledOccurrence (occurrenceIdFor snapshot) snapshot target time
+ check (dueId due == dueIdFor snapshot && validTarget occurrence) 409 "Due identity or target changed before admission"
+ pure occurrence
+
 readRoutineOn :: SQL.Connection -> Int64 -> IO Routine
 readRoutineOn db sequenceId = do
  rows <- DB.queryRowsOn db "SELECT value FROM scheduled_routines WHERE sequence=?" ["value"] [SQL.SQLInteger sequenceId]
@@ -610,11 +653,7 @@ admitDue s time candidate target = do
        waiting=[() | Deferred _ _ <- stored]
    if null newDues && null waiting then pure Nothing else do
     active <- activeRun s db routine target stored
-    let waitingReason=case active of
-         Just run -> BlockedBy run
-         Nothing -> case routinePolicy routine of
-          AwaitingSelection -> AwaitingPolicy
-          PolicySelected _ -> AwaitingRecovery
+    let waitingReason=deferralReason (routinePolicy routine) active
         pending=[(due,reason) | Deferred due reason <- stored] ++ [(due,waitingReason) | due <- newDues]
         plan=resolveDues time (routinePolicy routine) active pending
     mapM_ (insertDeferredOn db waitingReason) newDues
@@ -640,10 +679,8 @@ admitDue s time candidate target = do
          ,("latest",str (timestamp lastTime))]) "system" Nothing
       forM_ remaining $ \(range,reason) -> insertDeferredOn db reason range
       forM admitted $ \due -> do
-       let snapshot=(dueRoutine due) { routinePolicy=routinePolicy routine }
-           -- The owner stays fixed; a Group's current Lead owns its routing.
-           occurrence=ScheduledOccurrence (occurrenceIdFor snapshot) snapshot target time
-       require (validTarget occurrence) 409 "Routine owner changed before admission"
+       occurrence <- validated (prepareOccurrence time routine target due)
+       let snapshot=occurrenceRoutine occurrence
        DB.executeOn db "INSERT INTO routine_occurrences(id,value,status) VALUES (?,?,'admitted_pending') ON CONFLICT(id) DO UPDATE SET value=excluded.value,status=excluded.status WHERE routine_occurrences.status='deferred'"
         [SQL.SQLText (runIdText (occurrenceId occurrence)),SQL.SQLText (jsonText (toJSON occurrence))]
        changed <- SQL.changes db

@@ -265,7 +265,7 @@ routinePolicyLabel = case _ of
   Left _ -> "Policy unavailable"
   Right AwaitingPolicySelection -> "Waiting for Sapi to configure missed runs"
   Right RecoverEachDeadline -> "Missed runs: recover each"
-  Right RunLatestDeadline -> "Missed runs: one current run"
+  Right RunLatestDeadline -> "Missed runs: run latest due"
   Right SkipMissedDeadlines -> "Missed runs: skip"
 
 type Routine =
