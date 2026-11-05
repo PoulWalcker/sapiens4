@@ -85,10 +85,12 @@ textField :: Value -> Text -> Int -> IO Text
 textField v k n = parseValue 400 (textFieldP k n) v
 now :: IO Text
 now = timestamp <$> getCurrentTime
-timestamp :: UTCTime -> Text
-timestamp = T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S%Q+00:00"
-parseTime :: Text -> Maybe UTCTime
-parseTime s = parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%Q%Ez" (T.unpack s)
+executionOrigin :: StoredOrigin -> IO ExecutionOrigin
+executionOrigin = either (failure 500) pure . checkedOrigin
+
+readExecutionOrigin :: Value -> IO ExecutionOrigin
+readExecutionOrigin = executionOrigin . storeOrigin . Just
+
 newId :: IO Text
 newId = T.filter (/= '-') . UUID.toText <$> UUID.nextRandom
 fresh :: Text -> IO Text

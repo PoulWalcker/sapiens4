@@ -148,7 +148,7 @@ startTask s gid tid revision actor root = do
 newRequest :: Value -> Text -> Text -> IO Value
 newRequest entry target root = do
  i <- newId; t <- now
- pure (toJSON (GroupRequest (RunId i) (AgentId target) Queued False (KM.fromList [("message",get entry "id"),("root",if T.null root then get entry "id" else str root),("created",str t)])))
+ pure (toJSON (GroupRequest (RunId i) (AgentId target) Queued False MissingOrigin (KM.fromList [("message",get entry "id"),("root",if T.null root then get entry "id" else str root),("created",str t)])))
 settleTask :: Value -> Value -> Value -> IO (Value, Settlement)
 settleTask group request turn = if not (has request "task") then pure (group,NoTask) else do
  task <- readTask group (at request "task"); time <- getCurrentTime

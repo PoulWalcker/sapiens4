@@ -4,6 +4,10 @@
 -- Pure domain data and codecs shared by the host and native shells.
 module Domain
  ( Wire(..), AgentId(..), GroupId, groupIdText, RoutineId, routineIdText, routineIdSequence, parseRoutineId
+ , RoutineOwner(..), ownerText, personalAgentP, Deadline, deadlineTime, deadlineText, newDeadline, rescheduleDeadline
+ , timestamp, parseTime, ExecutionPurpose(..), ScheduledProvenance(..), ExecutionOrigin, newOrigin, StoredOrigin(..)
+ , originPurpose, originGroup, originMetadata, originIsScheduled, originRoutine, originPolicyRoutine
+ , storeOrigin, checkedOrigin, originErrorMessage
  , TaskId(..), RunId(..), parseWire, TurnStatus(..), Flow(..)
  , ExecutionMode(..), ExecutionSettings(..), CorporaStatus(..), CorporaConfig(..), Frequency(..)
  , periodMillis, Pulse(..), pulseIdentity, TaskState(..), GroupAccess(..), BrowserAction(..)
@@ -19,7 +23,7 @@ module Domain
 
 import Control.Monad
 import Data.Aeson hiding (pairs)
-import Data.Aeson.Types (Parser)
+import Data.Aeson.Types (Parser, parseEither)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
@@ -36,6 +40,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
 import Text.Read (readMaybe)
+import Data.Time (UTCTime, defaultTimeLocale, formatTime, parseTimeM)
 
 newtype AgentId = AgentId { agentIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
 newtype TaskId = TaskId { taskIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
@@ -65,6 +70,147 @@ parseRoutineId identity = do
 instance FromJSON RoutineId where
  parseJSON = withText "Scheduled Routine ID" $ maybe (fail "Invalid scheduled routine ID") pure . parseRoutineId
 instance ToJSON RoutineId where toJSON = String . routineIdText
+
+data RoutineOwner = PersonalOwner AgentId | GroupOwner GroupId deriving (Eq, Show)
+instance FromJSON RoutineOwner where
+ parseJSON value = withText "Routine owner" (\identity ->
+  if "group_" `T.isPrefixOf` identity then GroupOwner <$> parseJSON value
+  else PersonalOwner <$> personalAgentP value) value
+instance ToJSON RoutineOwner where
+ toJSON owner = case owner of
+  PersonalOwner agent -> toJSON agent
+  GroupOwner group -> toJSON group
+
+ownerText :: RoutineOwner -> Text
+ownerText owner = case owner of
+ PersonalOwner agent -> agentIdText agent
+ GroupOwner group -> groupIdText group
+
+personalAgentP :: Value -> Parser AgentId
+personalAgentP = withText "Personal Sapi ID" $ \identity -> case T.stripPrefix "sapi_" identity of
+ Just suffix | not (T.null suffix) -> pure (AgentId identity)
+ _ -> fail "Invalid Personal Sapi ID"
+
+-- A deadline's original spelling is part of its persistent occurrence identity.
+data Deadline = Deadline UTCTime Text deriving (Eq, Show)
+
+deadlineTime :: Deadline -> UTCTime
+deadlineTime (Deadline time _) = time
+
+deadlineText :: Deadline -> Text
+deadlineText (Deadline _ spelling) = spelling
+
+instance FromJSON Deadline where
+ parseJSON = withText "Routine deadline" $ \spelling ->
+  maybe (fail "Invalid routine due time") (\time -> pure (Deadline time spelling)) (parseTime spelling)
+instance ToJSON Deadline where toJSON = str . deadlineText
+
+newDeadline :: UTCTime -> Deadline
+newDeadline time = Deadline time (timestamp time)
+
+rescheduleDeadline :: UTCTime -> Deadline -> Deadline
+rescheduleDeadline time previous
+ | time == deadlineTime previous = previous
+ | otherwise = newDeadline time
+
+timestamp :: UTCTime -> Text
+timestamp = T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S%Q+00:00"
+parseTime :: Text -> Maybe UTCTime
+parseTime spelling = parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%Q%Ez" (T.unpack spelling)
+
+data ScheduledProvenance = ScheduledProvenance
+ { scheduledRoutine :: RoutineId, scheduledOwner :: RoutineOwner, scheduledDeadline :: Maybe Deadline
+ } deriving (Eq, Show)
+data ExecutionPurpose = OrdinaryWork | ScheduledExecution ScheduledProvenance | RoutinePolicySetup RoutineId deriving (Eq, Show)
+data ExecutionOrigin
+ = ExecutionOrigin ExecutionPurpose (Maybe GroupId) Object
+ | OpaqueOrdinaryOrigin Value
+ deriving (Eq, Show)
+
+newOrigin :: ExecutionPurpose -> Maybe GroupId -> Object -> ExecutionOrigin
+newOrigin purpose group metadata = ExecutionOrigin purpose group (foldr KM.delete metadata reserved)
+ where
+ reserved = ["routine","routineOwner","policyRoutine","group"] ++ case purpose of
+  ScheduledExecution _ -> ["due"]
+  OrdinaryWork -> []
+  RoutinePolicySetup _ -> []
+
+originPurpose :: ExecutionOrigin -> ExecutionPurpose
+originPurpose origin = case origin of
+ ExecutionOrigin purpose _ _ -> purpose
+ OpaqueOrdinaryOrigin _ -> OrdinaryWork
+originGroup :: ExecutionOrigin -> Maybe GroupId
+originGroup origin = case origin of
+ ExecutionOrigin _ group _ -> group
+ OpaqueOrdinaryOrigin _ -> Nothing
+originMetadata :: ExecutionOrigin -> Object
+originMetadata origin = case origin of
+ ExecutionOrigin _ _ metadata -> metadata
+ OpaqueOrdinaryOrigin _ -> KM.empty
+originIsScheduled :: ExecutionOrigin -> Bool
+originIsScheduled origin = case originPurpose origin of
+ ScheduledExecution _ -> True
+ OrdinaryWork -> False
+ RoutinePolicySetup _ -> False
+originRoutine :: ExecutionOrigin -> Maybe RoutineId
+originRoutine origin = case originPurpose origin of
+ ScheduledExecution scheduled -> Just (scheduledRoutine scheduled)
+ OrdinaryWork -> Nothing
+ RoutinePolicySetup _ -> Nothing
+originPolicyRoutine :: ExecutionOrigin -> Maybe RoutineId
+originPolicyRoutine origin = case originPurpose origin of
+ RoutinePolicySetup identity -> Just identity
+ OrdinaryWork -> Nothing
+ ScheduledExecution _ -> Nothing
+
+instance FromJSON ExecutionOrigin where
+ parseJSON (Object fields) = do
+  let present key = KM.member key fields
+  when (present "routine" && present "policyRoutine") (fail "Origin cannot be both scheduled execution and policy setup")
+  purpose <- if present "routine" then do
+   identity <- fields .: "routine"
+   owner <- fields .: "routineOwner"
+   due <- if present "due" then Just <$> fields .: "due" else pure Nothing
+   pure (ScheduledExecution (ScheduledProvenance identity owner due))
+   else do
+    when (present "routineOwner") (fail "Routine owner requires a routine identity")
+    if present "policyRoutine" then RoutinePolicySetup <$> fields .: "policyRoutine" else pure OrdinaryWork
+  group <- if present "group" then Just <$> fields .: "group" else pure Nothing
+  let reserved = "group" : case purpose of
+       OrdinaryWork -> []
+       RoutinePolicySetup _ -> ["policyRoutine"]
+       ScheduledExecution _ -> ["routine","routineOwner","due"]
+  pure (ExecutionOrigin purpose group (foldr KM.delete fields reserved))
+ parseJSON raw = pure (OpaqueOrdinaryOrigin raw)
+instance ToJSON ExecutionOrigin where
+ toJSON origin = case origin of
+  OpaqueOrdinaryOrigin raw -> raw
+  ExecutionOrigin purpose group metadata -> mergeFields
+   ([("group",toJSON identity) | identity <- maybeToList group] ++ case purpose of
+     OrdinaryWork -> []
+     RoutinePolicySetup identity -> [("policyRoutine",toJSON identity)]
+     ScheduledExecution scheduled -> [("routine",toJSON (scheduledRoutine scheduled)),("routineOwner",toJSON (scheduledOwner scheduled))]
+      ++ [("due",toJSON due) | due <- maybeToList (scheduledDeadline scheduled)]) (Object metadata)
+
+-- Malformed provenance remains readable history; only operational access fails.
+data StoredOrigin = MissingOrigin | ValidOrigin ExecutionOrigin | InvalidOrigin Value Text deriving (Eq, Show)
+storeOrigin :: Maybe Value -> StoredOrigin
+storeOrigin Nothing = MissingOrigin
+storeOrigin (Just raw) = case parseEither parseJSON raw of
+ Right origin -> ValidOrigin origin
+ Left reason -> InvalidOrigin raw (T.pack reason)
+checkedOrigin :: StoredOrigin -> Either Text ExecutionOrigin
+checkedOrigin origin = case origin of
+ MissingOrigin -> Right (OpaqueOrdinaryOrigin Null)
+ ValidOrigin parsed -> Right parsed
+ InvalidOrigin _ reason -> Left (originErrorMessage reason)
+originErrorMessage :: Text -> Text
+originErrorMessage reason = "Saved execution origin is malformed: " <> reason
+instance ToJSON StoredOrigin where
+ toJSON origin = case origin of
+  MissingOrigin -> Null
+  ValidOrigin parsed -> toJSON parsed
+  InvalidOrigin raw _ -> raw
 
 -- Wire spellings live at the codec boundary; domain code matches constructors.
 class (Eq a, Enum a, Bounded a) => Wire a where
@@ -156,18 +302,23 @@ completedStatus status = status `elem` [Done, Warning]
 
 -- Extra fields are retained for storage compatibility, but lifecycle fields have
 -- one authoritative typed representation (they are removed from the extras).
-data Turn = Turn { turnId :: RunId, turnFlow :: Flow, turnInput :: Text, turnStatus :: TurnStatus, turnAttempt :: Maybe Int, turnBatchId :: Maybe RunId, turnFields :: Object } deriving (Eq, Show)
+data Turn = Turn { turnId :: RunId, turnFlow :: Flow, turnInput :: Text, turnStatus :: TurnStatus, turnAttempt :: Maybe Int, turnBatchId :: Maybe RunId, turnOrigin :: StoredOrigin, turnFields :: Object } deriving (Eq, Show)
 instance FromJSON Turn where
  parseJSON = withObject "Turn" $ \o -> do
   attempt <- o .:? "attempt"
   unless (maybe True (>=0) attempt) (fail "Turn attempt cannot be negative")
-  Turn <$> o .: "id" <*> o .: "flow" <*> o .: "input" <*> o .: "status" <*> pure attempt <*> o .:? "batch_id" <*> pure (foldr KM.delete o ["id","flow","input","status","attempt","batch_id"])
+  Turn <$> o .: "id" <*> o .: "flow" <*> o .: "input" <*> o .: "status" <*> pure attempt <*> o .:? "batch_id" <*> pure (storeOrigin (KM.lookup "origin" o)) <*> pure (foldr KM.delete o ["id","flow","input","status","attempt","batch_id","origin"])
 instance ToJSON Turn where
- toJSON t = Object $ KM.fromList ([("id",toJSON (turnId t)),("flow",toJSON (turnFlow t)),("input",toJSON (turnInput t)),("status",toJSON (turnStatus t))] ++ [("attempt",num n) | n <- maybeToList (turnAttempt t)] ++ [("batch_id",toJSON i) | i <- maybeToList (turnBatchId t)]) <> turnFields t
+ toJSON t = Object $ KM.fromList ([("id",toJSON (turnId t)),("flow",toJSON (turnFlow t)),("input",toJSON (turnInput t)),("status",toJSON (turnStatus t))] ++ [("attempt",num n) | n <- maybeToList (turnAttempt t)] ++ [("batch_id",toJSON i) | i <- maybeToList (turnBatchId t)] ++ [("origin",toJSON (turnOrigin t)) | turnOrigin t /= MissingOrigin]) <> turnFields t
 turnField :: Turn -> Text -> Value
+turnField t "origin" = toJSON (turnOrigin t)
 turnField t key = get (Object (turnFields t)) key
 withTurnFields :: (Value -> Value) -> Turn -> Turn
-withTurnFields f t = t { turnFields = case f (Object (turnFields t)) of Object o -> foldr KM.delete o ["id","flow","input","status","attempt","batch_id"]; _ -> turnFields t }
+withTurnFields f t = case f fields of
+ Object updated -> t { turnOrigin=storeOrigin (KM.lookup "origin" updated)
+                     , turnFields=foldr KM.delete updated ["id","flow","input","status","attempt","batch_id","origin"] }
+ _ -> t
+ where fields=mergeFields [("origin",toJSON (turnOrigin t)) | turnOrigin t /= MissingOrigin] (Object (turnFields t))
 batchLeader :: Turn -> RunId
 batchLeader t = fromMaybe (turnId t) (turnBatchId t)
 retryTurn :: Turn -> Turn
@@ -186,7 +337,7 @@ recoverTurn turn
  | otherwise = turn
 
 newTurn :: RunId -> Flow -> Text -> Text -> Value -> Bool -> Turn
-newTurn identity flow input created origin batchable = Turn identity flow input Queued (Just 1) Nothing (KM.fromList [("created",str created),("origin",origin),("batchable",Bool batchable)])
+newTurn identity flow input created origin batchable = Turn identity flow input Queued (Just 1) Nothing (storeOrigin (Just origin)) (KM.fromList [("created",str created),("batchable",Bool batchable)])
 
 data AgentState = AgentState { agentTurns :: [Turn], agentFields :: Object } deriving (Eq, Show)
 instance FromJSON AgentState where

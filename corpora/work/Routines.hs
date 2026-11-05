@@ -67,48 +67,6 @@ instance ToJSON PolicySelection where
   AwaitingSelection -> obj [("kind",str "awaiting_selection")]
   PolicySelected policy -> obj [("kind",str "selected"),("policy",toJSON policy)]
 
-data RoutineOwner = PersonalOwner AgentId | GroupOwner GroupId deriving (Eq, Show)
-instance FromJSON RoutineOwner where
- parseJSON value = withText "Routine owner" (\identity ->
-  if "group_" `T.isPrefixOf` identity then GroupOwner <$> parseJSON value
-  else PersonalOwner <$> personalAgentP value) value
-instance ToJSON RoutineOwner where
- toJSON owner = case owner of
-  PersonalOwner agent -> toJSON agent
-  GroupOwner group -> toJSON group
-
-ownerText :: RoutineOwner -> Text
-ownerText owner = case owner of
- PersonalOwner agent -> agentIdText agent
- GroupOwner group -> groupIdText group
-
-personalAgentP :: Value -> Parser AgentId
-personalAgentP = withText "Personal Sapi ID" $ \identity -> case T.stripPrefix "sapi_" identity of
- Just suffix | not (T.null suffix) -> pure (AgentId identity)
- _ -> fail "Invalid Personal Sapi ID"
-
--- A deadline's original spelling is part of its persistent occurrence identity.
-data Deadline = Deadline UTCTime Text deriving (Eq, Show)
-
-deadlineTime :: Deadline -> UTCTime
-deadlineTime (Deadline time _) = time
-
-deadlineText :: Deadline -> Text
-deadlineText (Deadline _ spelling) = spelling
-
-instance FromJSON Deadline where
- parseJSON = withText "Routine deadline" $ \spelling ->
-  maybe (fail "Invalid routine due time") (\time -> pure (Deadline time spelling)) (parseTime spelling)
-instance ToJSON Deadline where toJSON = str . deadlineText
-
-newDeadline :: UTCTime -> Deadline
-newDeadline time = Deadline time (timestamp time)
-
-rescheduleDeadline :: UTCTime -> Deadline -> Deadline
-rescheduleDeadline time previous
- | time == deadlineTime previous = previous
- | otherwise = newDeadline time
-
 data Routine = Routine
  { routineId :: RoutineId, routineOwner :: RoutineOwner, routinePrompt :: Text, routineMinutes :: Minutes
  , routineDeadline :: Deadline, routineCount :: Int, routinePaused :: Bool
@@ -332,10 +290,10 @@ initializeRoutines s = do
  groups <- DB.values s DB.Groups
  forM_ rows $ \row -> tryRoutine ("scheduled routine " <> jsonText (get row "sequence")) $ do
   r <- DB.decodeStored (at row "value")
-  void (decodeValue 500 r :: IO Routine)
+  initial <- decodeValue 500 r :: IO Routine
   unless (has r "runCount") $ do
    let group=findId (at r "owner") groups
-       count=case group of Just g->length [t | t<-items g "tasks",get t "routine"==get r "id"]; Nothing->length [w | w<-works,get (get w "origin") "routine"==get r "id"]
+       count=case group of Just g->length [t | t<-items g "tasks",get t "routine"==get r "id"]; Nothing->length [w | w<-works, ValidOrigin origin<-[storeOrigin (Just (get w "origin"))], originRoutine origin==Just (routineId initial)]
    void (DB.saveRoutine s (merge r (obj [("runCount",num count),("paused",Bool (count>=1000))])))
   routine <- decodeValue 500 r
   unless (routinePaused routine) (ensurePolicyPreparation s routine)
@@ -611,8 +569,8 @@ readDuesOn db routine = do
 activePersonal :: Service -> SQL.Connection -> Routine -> [StoredDue] -> IO (Maybe RunId)
 activePersonal s db routine dues = do
  state <- agentState s (ownerText (routineOwner routine))
- let matching turn = get (turnField turn "origin") "routine" == toJSON (routineId routine)
-     turns = filter matching (agentTurns state)
+ forM_ [turn | turn <- agentTurns state, activeStatus (turnStatus turn)] $ \turn -> void (executionOrigin (turnOrigin turn))
+ let turns = [turn | turn <- agentTurns state, ValidOrigin origin <- [turnOrigin turn], originRoutine origin == Just (routineId routine)]
      admitted = [occurrenceId occurrence | Admitted occurrence _ <- dues]
      identities = nub (admitted ++ map turnId turns)
  workRows <- readRuns "SELECT id,value FROM workloads" ["id","value"] identities
@@ -650,12 +608,16 @@ activeGroup db routine = do
   row:_ -> DB.decodeStored (at row "value")
   [] -> failure 409 "Routine Group disappeared before admission"
  requests <- G.readRequests group
- let belongs request = get (get (Object (G.requestFields request)) "origin") "routine" == toJSON (routineId routine)
+ origins <- forM [request | request <- requests, not (G.requestSettled request)] $ \request -> do
+  origin <- executionOrigin (G.requestOrigin request)
+  pure (request,origin)
+ let belongs origin = originRoutine origin == Just (routineId routine)
      pending request = not (G.requestSettled request)
      taskPending request = case findId (at (toJSON request) "task") (items group "tasks") of
       Just task -> at task "state" == "in_progress"
       Nothing -> False
- pure (G.requestId <$> find (\request -> belongs request && (pending request || taskPending request)) requests)
+ let historical=[(request,origin) | request <- requests, G.requestSettled request, ValidOrigin origin <- [G.requestOrigin request]]
+ pure (G.requestId . fst <$> find (\(request,origin) -> belongs origin && (pending request || taskPending request)) (origins ++ historical))
 
 activeRun :: Service -> SQL.Connection -> Routine -> ScheduledTarget -> [StoredDue] -> IO (Maybe RunId)
 activeRun s db routine target dues = case [occurrenceId occurrence | Admitted occurrence Pending <- dues] of
@@ -666,19 +628,19 @@ activeRun s db routine target dues = case [occurrenceId occurrence | Admitted oc
 
 -- Caller must hold the host lock through requeueing.
 ensureRetryAvailable :: Service -> Turn -> IO ()
-ensureRetryAvailable s turn = when (has origin "routine") $ do
- identity <- field 400 origin "routine"
- DB.connection s $ \db -> do
-  routine <- readRoutineOn db identity
-  stored <- readDuesOn db routine
-  target <- maybe (failure 409 "Routine Run has no recorded admission") pure
-   (listToMaybe [occurrenceTarget occurrence | Admitted occurrence _ <- stored])
-  case target of
-   GroupTarget _ _ -> failure 409 "Start the current task revision from Work instead"
-   PersonalTarget _ -> do
-    active <- activeRun s db routine target stored
-    require (isNothing active) 409 "Another Run of this Routine is active; finish or stop it before retrying"
- where origin=turnField turn "origin"
+ensureRetryAvailable s turn = do
+ origin <- executionOrigin (turnOrigin turn)
+ forM_ (originRoutine origin) $ \identity -> do
+  DB.connection s $ \db -> do
+   routine <- readRoutineOn db identity
+   stored <- readDuesOn db routine
+   target <- maybe (failure 409 "Routine Run has no recorded admission") pure
+    (listToMaybe [occurrenceTarget occurrence | Admitted occurrence _ <- stored])
+   case target of
+    GroupTarget _ _ -> failure 409 "Start the current task revision from Work instead"
+    PersonalTarget _ -> do
+     active <- activeRun s db routine target stored
+     require (isNothing active) 409 "Another Run of this Routine is active; finish or stop it before retrying"
 
 occurrenceTurn :: ScheduledOccurrence -> Turn
 occurrenceTurn occurrence = newTurn (occurrenceId occurrence) Chat
@@ -686,9 +648,9 @@ occurrenceTurn occurrence = newTurn (occurrenceId occurrence) Chat
  where
  routine=occurrenceRoutine occurrence
  value=toJSON routine
- origin=obj [("routine",toJSON (routineId routine)),("routineOwner",toJSON (routineOwner routine))
-  ,("due",get value "nextDue"),("title",get value "title"),("minutes",toJSON (routineMinutes routine))
-  ,("taskType",str "automated"),("executionPrompt",str (routinePrompt routine))]
+ origin=toJSON (newOrigin (ScheduledExecution (ScheduledProvenance (routineId routine) (routineOwner routine) (Just (routineDeadline routine)))) Nothing
+  (KM.fromList [("title",get value "title"),("minutes",toJSON (routineMinutes routine))
+   ,("taskType",str "automated"),("executionPrompt",str (routinePrompt routine))]))
 
 -- Run identity uses the original deadline, even after instruction edits.
 prepareOccurrence :: UTCTime -> Routine -> ScheduledTarget -> Due -> Validation ScheduledOccurrence
@@ -811,22 +773,22 @@ policyPreparationCompletion owner identity routine
  | identity /= policyPreparationId routine = Left PolicyInstructionsChanged
  | otherwise = Left PolicyNotSaved
 
-verifyPolicyPreparation :: Service -> Text -> RunId -> Value -> IO ()
-verifyPolicyPreparation s rawOwner identity origin = when (has origin "policyRoutine") $ do
- owner <- decodeValue 400 (str rawOwner)
- routineIdentity <- field 400 origin "policyRoutine"
- routine <- DB.connection s $ \db -> readRoutineOn db routineIdentity
- require (routineId routine == routineIdentity) 409 "Stored routine identity does not match policy setup"
- generation <- if has origin "group" then do
-  group <- G.getGroup s (ownerText owner) False
-  requests <- G.readRequests group
-  request <- maybe (failure 409 "Policy setup request is missing") pure
-   (find ((==identity) . G.requestId) requests)
-  require (get (Object (G.requestFields request)) "origin" == origin)
-   409 "Policy setup request origin changed"
-  field 500 (toJSON request) "root"
-  else pure identity
- either reject pure (policyPreparationCompletion owner generation routine)
+verifyPolicyPreparation :: Service -> RoutineOwner -> RunId -> ExecutionOrigin -> IO ()
+verifyPolicyPreparation s owner identity parsed =
+ forM_ (originPolicyRoutine parsed) $ \routineIdentity -> do
+  routine <- DB.connection s $ \db -> readRoutineOn db routineIdentity
+  require (routineId routine == routineIdentity) 409 "Stored routine identity does not match policy setup"
+  generation <- case originGroup parsed of
+   Just _ -> do
+    group <- G.getGroup s (ownerText owner) False
+    requests <- G.readRequests group
+    request <- maybe (failure 409 "Policy setup request is missing") pure
+     (find ((==identity) . G.requestId) requests)
+    require (toJSON (G.requestOrigin request) == toJSON parsed)
+     409 "Policy setup request origin changed"
+    field 500 (toJSON request) "root"
+   Nothing -> pure identity
+  either reject pure (policyPreparationCompletion owner generation routine)
  where
  reject problem = failure 409 $ case problem of
   PolicyNotSaved -> "Routine policy was not saved. Retry this setup or ask the owner to finish routine setup in chat."
@@ -853,8 +815,8 @@ ensurePolicyPreparation s routine = case routinePolicy routine of
    let identity=policyPreparationId routine
        created=at (toJSON routine) "created"
        input=render template [("routine",jsonText (toJSON routine))]
-       origin=obj [("policyRoutine",toJSON (routineId routine)),("author",str "system")]
-       turn=newTurn identity Chat input created origin False
+       origin=newOrigin (RoutinePolicySetup (routineId routine)) Nothing (KM.singleton "author" (str "system"))
+       turn=newTurn identity Chat input created (toJSON origin) False
    case target of
     PersonalTarget agent -> do
      state <- agentState s (agentIdText agent)
@@ -865,9 +827,10 @@ ensurePolicyPreparation s routine = case routinePolicy routine of
     GroupTarget group agent -> do
      value <- G.getGroup s (groupIdText group) True
      requests <- G.readRequests value
-     let matching request = get (Object (G.requestFields request)) "root" == toJSON identity
-          && get (get (Object (G.requestFields request)) "origin") "policyRoutine" == toJSON (routineId routine)
-         latestSetup=listToMaybe (reverse (filter matching requests))
+     related <- forM [request | request <- requests, get (Object (G.requestFields request)) "root" == toJSON identity] $ \request -> do
+      parsed <- executionOrigin (G.requestOrigin request)
+      pure (request,parsed)
+     let latestSetup=listToMaybe (reverse [request | (request,parsed) <- related, originPolicyRoutine parsed == Just (routineId routine)])
      projected <- forM latestSetup $ \request -> do
       rows <- DB.queryRows s "SELECT status FROM turns WHERE id=?" ["status"]
        [SQL.SQLText (runIdText (G.requestId request))]
@@ -885,10 +848,10 @@ ensurePolicyPreparation s routine = case routinePolicy routine of
        time <- now
        let next=maybe identity (\previous -> stableRunId
             (runIdText (G.requestId previous) <> ":lead:" <> agentIdText agent)) predecessor
-           requestOrigin=merge origin (obj [("group",toJSON group)])
+           requestOrigin=newOrigin (originPurpose origin) (Just group) (originMetadata origin)
            entry=obj [("id",toJSON identity),("author",str "system"),("text",str input),("created",str created)]
-           request=G.GroupRequest next agent Queued False (KM.fromList
-            [("message",toJSON identity),("root",toJSON identity),("created",str time),("origin",requestOrigin)])
+           request=G.GroupRequest next agent Queued False (ValidOrigin requestOrigin) (KM.fromList
+            [("message",toJSON identity),("root",toJSON identity),("created",str time)])
            superseded previous = toJSON $ if G.requestStatus previous == Queued
             then previous { G.requestStatus=Cancelled } else previous
        event <- forM predecessor $ \previous -> G.eventRecord "system" "policy setup reassigned"
@@ -984,6 +947,8 @@ groupRecoveryReason problem = case problem of
 -- Existing requests keep their assignee; new requests use the current Lead.
 materializeGroup :: Service -> GroupId -> Turn -> IO Materialization
 materializeGroup s groupId turn = DB.connection s $ \db -> SQL.withTransaction db $ do
+ parsed <- executionOrigin (turnOrigin turn)
+ routineIdentity <- maybe (failure 500 "Routine materialization requires scheduled provenance") pure (originRoutine parsed)
  let owner=groupIdText groupId
      identity=runIdText (turnId turn)
  rows <- DB.queryRowsOn db "SELECT value FROM groups WHERE id=?" ["value"] [SQL.SQLText owner]
@@ -994,8 +959,9 @@ materializeGroup s groupId turn = DB.connection s $ \db -> SQL.withTransaction d
  requests <- G.readRequests group
  let existing=find ((==turnId turn) . G.requestId) requests
      lead=rosterLead (G.groupRoster typed)
- forM_ existing $ \request ->
-  require (get (get (toJSON request) "origin") "routine" == get (turnField turn "origin") "routine")
+ forM_ existing $ \request -> do
+  previous <- executionOrigin (G.requestOrigin request)
+  require (originRoutine previous == Just routineIdentity)
    409 "Occurrence ID belongs to another Group request"
  leadActive <- if isJust existing || G.groupArchived typed then pure False else do
   profiles <- DB.queryRowsOn db "SELECT id FROM agents WHERE id=?" ["id"] [SQL.SQLText (agentIdText lead)]
@@ -1005,7 +971,7 @@ materializeGroup s groupId turn = DB.connection s $ \db -> SQL.withTransaction d
   Right ExistingRequest -> pure Ready
   Left problem -> do
    let reason=groupRecoveryReason problem
-       detail=obj [("run",toJSON (turnId turn)),("routine",get (turnField turn "origin") "routine"),("reason",str reason)]
+       detail=obj [("run",toJSON (turnId turn)),("routine",toJSON routineIdentity),("reason",str reason)]
        action="routine recovery blocked"
        alreadyRecorded event = at event "action" == action && get event "detail" == detail
    unless (any alreadyRecorded (items group "events")) $ do
@@ -1019,9 +985,9 @@ materializeGroup s groupId turn = DB.connection s $ \db -> SQL.withTransaction d
        created=get (toJSON turn) "created"
        body=turnInput turn
        taskId="gtask_"<>identity
-       groupOrigin=merge origin (obj [("group",str owner),("author",str "admin")])
-       message=obj [("id",str identity),("author",str "admin"),("text",str body),("created",created),("routine",get origin "routine")]
-       task=obj [("id",str taskId),("title",get origin "title"),("body",str body),("assignee",toJSON agent),("state",str "in_progress"),("deleted",Bool False),("revision",num 1),("created",created),("author",str "admin"),("updated_by",str "admin"),("history",arr []),("results",arr []),("taskType",str "automated"),("routine",get origin "routine")]
+       groupOrigin=toJSON (newOrigin (originPurpose parsed) (Just groupId) (KM.insert "author" (str "admin") (originMetadata parsed)))
+       message=obj [("id",str identity),("author",str "admin"),("text",str body),("created",created),("routine",toJSON routineIdentity)]
+       task=obj [("id",str taskId),("title",get origin "title"),("body",str body),("assignee",toJSON agent),("state",str "in_progress"),("deleted",Bool False),("revision",num 1),("created",created),("author",str "admin"),("updated_by",str "admin"),("history",arr []),("results",arr []),("taskType",str "automated"),("routine",toJSON routineIdentity)]
        request=obj [("id",str identity),("message",str identity),("target",toJSON agent),("root",str identity),("created",created),("status",str "queued"),("settled",Bool False),("task",str taskId),("task_revision",num 1),("origin",groupOrigin)]
    DB.putValueOn db DB.Groups owner (merge group (obj
     [("messages",arr (items group "messages"++[message])),("tasks",arr (items group "tasks"++[task]))

@@ -156,8 +156,15 @@ projectTurn owner state turn = TurnProjection status origin owners actor output
  where
  status=if turnStatus turn==Done && turnField turn "warning"/=Null then Warning else turnStatus turn
  origin=turnField turn "origin" `fallback` empty
- owners=owner:[at origin "group" | has origin "group"]
- actor=if status==Queued then if has origin "routine" then "system" else text (get origin "author" `fallback` str "admin") else owner
+ owners=owner:case turnOrigin turn of
+  ValidOrigin parsed -> map groupIdText (maybeToList (originGroup parsed))
+  MissingOrigin -> []
+  InvalidOrigin _ _ -> []
+ actor=if status/=Queued then owner else case turnOrigin turn of
+  ValidOrigin parsed | originIsScheduled parsed -> "system"
+                     | otherwise -> text (get (Object (originMetadata parsed)) "author" `fallback` str "admin")
+  MissingOrigin -> "admin"
+  InvalidOrigin _ _ -> owner
  output=listToMaybe [get m "content" | m<-items (stateJSON state) "chat",get m "turn"==toJSON (turnId turn),at m "role"=="agent"]
 
 project :: Service -> Text -> IO ()

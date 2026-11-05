@@ -2,7 +2,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Delegation
- ( WorkCall(..), Workload, workloadId, workCalls, CallState(..), CallProgress(..)
+ ( WorkCall(..), Workload, workloadId, workCalls, workOrigin, CallState(..), CallProgress(..)
  , callState, callNode, begin, getWork, findWork, readWorks, saveWork, withCall, workItems
  , exceptionText, reconcileWorks, pendingWorks, runDecision, applyDecision, clarify
  , templates, editTemplate, workTasks, taskList, workSummaries
@@ -146,17 +146,18 @@ encodeTask contract encoding = case taskEnvelope encoding of
 
 data Workload = Workload
  { workloadId :: Text, workTracked :: Bool, workCalls :: NonEmpty WorkCall
- , workTaskContract :: TaskContract, workTaskEncoding :: TaskEncoding, workFields :: Object
+ , workTaskContract :: TaskContract, workTaskEncoding :: TaskEncoding, workOrigin :: StoredOrigin, workFields :: Object
  } deriving (Eq, Show)
 instance FromJSON Workload where
  parseJSON = withObject "Workload" $ \o -> do
   let (contract,encoding)=decodeTask (KM.lookup "task" o)
-  Workload <$> o .: "workloadId" <*> o .: "tracked" <*> o .: "calls" <*> pure contract <*> pure encoding
-   <*> pure (foldr KM.delete o ["workloadId","tracked","calls","task"])
+  Workload <$> o .: "workloadId" <*> o .: "tracked" <*> o .: "calls" <*> pure contract <*> pure encoding <*> pure (storeOrigin (KM.lookup "origin" o))
+   <*> pure (foldr KM.delete o ["workloadId","tracked","calls","task","origin"])
 instance ToJSON Workload where
  toJSON work = mergeFields
   ([("workloadId",str (workloadId work)),("tracked",Bool (workTracked work)),("calls",toJSON (workCalls work))]
-   ++ [("task",value) | value <- maybeToList (encodeTask (workTaskContract work) (workTaskEncoding work))])
+   ++ [("task",value) | value <- maybeToList (encodeTask (workTaskContract work) (workTaskEncoding work))]
+   ++ [("origin",toJSON (workOrigin work)) | workOrigin work /= MissingOrigin])
   (Object (workFields work))
 taskValue :: Workload -> Value
 taskValue work = fromMaybe Null (encodeTask (workTaskContract work) (workTaskEncoding work))
@@ -166,7 +167,8 @@ acceptTaskSpec taskType spec work = work
  , workTaskEncoding=TaskEncoding
     (Just (put "taskType" (str taskType) (fromMaybe Null (taskEnvelope (workTaskEncoding work))))) Nothing }
 workField :: Workload -> Text -> Value
-workField work = get (Object (workFields work))
+workField work "origin" = toJSON (workOrigin work)
+workField work key = get (Object (workFields work)) key
 workItems :: Workload -> Text -> [Value]
 workItems work = list . workField work
 setWorkField :: Text -> Value -> Workload -> Workload
@@ -362,14 +364,20 @@ validateOutcome response outcome spec
 begin :: Service -> AgentId -> Turn -> IO ()
 begin s a turn = do
  found <- findWork s (turnId turn)
- let routine=has (turnField turn "origin") "routine"
+ origin <- executionOrigin (turnOrigin turn)
+ let routine=originIsScheduled origin
      first=newCall (turnId turn) a Nothing (RunningAt (if routine then ReadyToWork else Assessing)) (turnInput turn)
      task=TaskEncoding (Just (obj [("taskId",str ("task_"<>runIdText (turnId turn))),("taskType",str (if routine then "automated" else "work"))])) (Just Null)
      initial=Workload (runIdText (turnId turn)) routine (first :| []) Unprepared task
-      (KM.fromList [("originalIntent",str (turnInput turn)),("origin",merge (obj [("agent",toJSON a),("call",toJSON (turnId turn))]) (turnField turn "origin")),("decisions",arr []),("outcome",Null)])
+      (ValidOrigin (newOrigin (originPurpose origin) (originGroup origin)
+       (originMetadata origin <> KM.fromList [("agent",toJSON a),("call",toJSON (turnId turn))])))
+      (KM.fromList [("originalIntent",str (turnInput turn)),("decisions",arr []),("outcome",Null)])
      (w,c)=fromMaybe (initial,first) found
      running=if isNothing (callOutput c) then c { callProgress=RunningAt (callNode c), callFields=KM.delete "error" (callFields c) } else c
      updated=setCallFields [("attempt",num (fromMaybe 1 (turnAttempt turn)))] running
+ acceptedOrigin <- executionOrigin (workOrigin w)
+ require (originPurpose origin == originPurpose acceptedOrigin && originGroup origin == originGroup acceptedOrigin)
+  500 "Saved Workload provenance does not match its Turn"
  saveWork s (withCall w updated)
 conversation :: Service -> AgentId -> Turn -> AgentState -> IO Value
 conversation s a turn state = do
@@ -379,9 +387,14 @@ conversation s a turn state = do
   if exists then Just . (name,) . str <$> readText p else pure Nothing
  memo <- (get <$> readMemo (workspaceRoot s (agentIdText a)) <*> pure "content") `catch` (\(APIError _ e) -> pure (obj [("error",str e)]))
  let reviewing t = batchLeader t /= turnId turn && turnStatus t `elem` [Running,Failed,Interrupted]
-     chat = takeLast 20 [let matching = find ((==get m "turn") . toJSON . turnId) (agentTurns state) in if at m "role" == "user" && maybe False reviewing matching then put "underPrevAgencyReview" (Bool True) m else m | m <- list (stateField state "chat"), not (has (get m "origin") "group")]
+     chat = takeLast 20 [let matching = find ((==get m "turn") . toJSON . turnId) (agentTurns state) in if at m "role" == "user" && maybe False reviewing matching then put "underPrevAgencyReview" (Bool True) m else m | m <- list (stateField state "chat"), personalMessage m]
  pure $ obj [("manifests",remove ["corpora-state"] manifests),("staticContext",get manifests "corpora-state" `fallback` str ""),("instantContext",obj [("chat",arr chat),("memo",memo)]),("inputs",stateField state "agency_batch" `fallback` arr [obj [("content",str (turnInput turn))]])]
- where takeLast n xs = drop (length xs-n) xs
+ where
+ takeLast n xs = drop (length xs-n) xs
+ personalMessage entry = case storeOrigin (Just (get entry "origin")) of
+  InvalidOrigin _ _ -> False
+  MissingOrigin -> True
+  ValidOrigin origin -> isNothing (originGroup origin)
 recordDecision :: Service -> Text -> Value -> IO ()
 recordDecision s a record = do
  writeJSON (archivePath s a ("decisions/"<>at record "decisionId")) record
@@ -397,11 +410,12 @@ decide s run turn state node logs = do
   source <- templates s >>= maybe (failure 400 "Unknown decision node") pure . find ((==toJSON node) . (`get` "node"))
   (w,c) <- getWork s (turnId turn)
   void (either decisionFailure pure (acceptedTaskSpec w))
+  origin <- either decisionFailure pure (checkedWorkOrigin w)
   conv <- conversation s (runOwner run) turn state
   chief <- DB.mainAgent s
   members <- team s
   extra <- if KM.member "agency_batch" (agentFields state) then ("\n\n" <>) <$> prompt s "agency-chat" else pure ""
-  scheduled <- if has (workField w "origin") "routine" then ("\n\n" <>) <$> prompt s "scheduled-execution" else pure ""
+  scheduled <- if originIsScheduled origin then ("\n\n" <>) <$> prompt s "scheduled-execution" else pure ""
   wiki <- prompt s "notes-wiki"
   envelope <- prompt s "decision-envelope"
   let instruction = at source "content" <> extra <> scheduled
@@ -490,7 +504,7 @@ applyDecision s owner current decision = do
 data DecisionError
  = AcceptedTaskNeedsExecution | OnlyChiefCreates | CriteriaRemoved
  | OwnerOnlyPolicySetup
- | InvalidOutcome OutcomeError | UnsupportedSavedTaskSpec | InvalidAcceptedTask Text
+ | InvalidOutcome OutcomeError | UnsupportedSavedTaskSpec | InvalidAcceptedTask Text | InvalidWorkOrigin Text
  deriving (Eq, Show)
 data DecisionStep
  = SaveDecision Workload WorkCall
@@ -521,7 +535,8 @@ advanceDecision chief response work call = case decisionBody response of
    accepted <- acceptedTaskSpec work
    let inherited=maybe [] (NE.toList . specCriteria) accepted
    unless (all (`elem` NE.toList (specCriteria spec)) inherited) (Left CriteriaRemoved)
-   let savedType=if has (workField work "origin") "routine" then "automated" else taskType
+   origin <- checkedWorkOrigin work
+   let savedType=if originIsScheduled origin then "automated" else taskType
    Right (finish (acceptTaskSpec savedType spec work) (RunningAt Execution))
  Handoff request -> policyDelegation work >> Right (DelegateRequest request)
  ReportOutcome reply outcome -> do
@@ -533,11 +548,15 @@ advanceDecision chief response work call = case decisionBody response of
  where
  finish changed progress = SaveDecision changed (call { callProgress=progress })
 
+checkedWorkOrigin :: Workload -> Either DecisionError ExecutionOrigin
+checkedWorkOrigin = B.first InvalidWorkOrigin . checkedOrigin . workOrigin
+
 policyDelegation :: Workload -> Either DecisionError ()
-policyDelegation work
- | has origin "policyRoutine" && not (has origin "group") = Left OwnerOnlyPolicySetup
- | otherwise = Right ()
- where origin=workField work "origin"
+policyDelegation work = do
+ origin <- checkedWorkOrigin work
+ case (originPurpose origin,originGroup origin) of
+  (RoutinePolicySetup _,Nothing) -> Left OwnerOnlyPolicySetup
+  _ -> Right ()
 
 acceptedTaskSpec :: Workload -> Either DecisionError (Maybe TaskSpec)
 acceptedTaskSpec work = case workTaskContract work of
@@ -555,6 +574,7 @@ decisionFailure problem = case problem of
  InvalidOutcome reason -> failure 400 (outcomeError reason)
  UnsupportedSavedTaskSpec -> failure 409 "Saved Task specification must use structured completion criteria; create a new Task."
  InvalidAcceptedTask reason -> failure 500 ("Saved Task specification is malformed: "<>reason)
+ InvalidWorkOrigin reason -> failure 500 reason
 
 runDecision :: (AgentId -> IO ()) -> (Workload -> IO ()) -> Service -> Run -> Turn -> AgentState -> IO (Text,[Value])
 runDecision prepareSpecialist verifyCompletion s run turn state = do
@@ -635,15 +655,21 @@ pendingWorks :: Service -> IO ()
 pendingWorks s = do
  works <- readWorks s
  existing <- DB.turns s
- forM_ works $ \w -> forM_ (workCalls w) $ \c -> when (callState c == CallQueued && isJust (callParent c) && isNothing (findId (runIdText (callIdentity c)) existing)) $ do
-  let a=agentIdText (callOwner c)
-      parent=find ((==callParent c) . Just . callIdentity) (workCalls w)
-      origin=mergeFields [("workloadId",str (workloadId w)),("taskId",get (taskValue w) "taskId"),("caller",maybe Null (toJSON . callOwner) parent),("parentCall",toJSON (callParent c))] (remove ["agent","call"] (workField w "origin"))
-  time <- now
-  let turn=toJSON (newTurn (callIdentity c) Chat (callRequest c) time origin (has origin "routine"))
-      message=obj [("role",str "user"),("content",str (callRequest c)),("turn",toJSON (callIdentity c)),("time",str time),("origin",origin)]
-  modifyState s a $ \state -> if isJust (findId (runIdText (callIdentity c)) (items state "turns")) then state else appendItems "chat" [message] (appendItems "turns" [turn] state)
-  DB.project s a
+ forM_ works $ \w -> forM_ (workCalls w) $ \c -> when (callState c == CallQueued && isJust (callParent c) && isNothing (findId (runIdText (callIdentity c)) existing)) $
+  case checkedOrigin (workOrigin w) of
+   Left reason -> saveWork s (withCall w (setCallFields [("error",str reason)] c { callProgress=FailedAt (callNode c) }))
+   Right parentOrigin -> do
+    let a=agentIdText (callOwner c)
+        parent=find ((==callParent c) . Just . callIdentity) (workCalls w)
+        metadata=KM.fromList [("workloadId",str (workloadId w)),("taskId",get (taskValue w) "taskId"),("caller",maybe Null (toJSON . callOwner) parent),("parentCall",toJSON (callParent c))]
+         <> KM.delete "agent" (KM.delete "call" (originMetadata parentOrigin))
+        origin=newOrigin (originPurpose parentOrigin) (originGroup parentOrigin) metadata
+    time <- now
+    let turn=toJSON (newTurn (callIdentity c) Chat (callRequest c) time (toJSON origin) (originIsScheduled origin))
+        message=obj [("role",str "user"),("content",str (callRequest c)),("turn",toJSON (callIdentity c)),("time",str time),("origin",toJSON origin)]
+    modifyState s a $ \state -> if isJust (findId (runIdText (callIdentity c)) (items state "turns")) then state else appendItems "chat" [message] (appendItems "turns" [turn] state)
+    DB.project s a
+
 clarify :: Service -> Text -> Text -> Text -> IO Text
 clarify s a wid message = do
  works <- readWorks s
