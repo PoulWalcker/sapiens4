@@ -172,11 +172,17 @@ createAgent s d = do
  DB.record s [a] a "sapi.created" (put "manager" parent row) "admin" Nothing
  pure row
 
+data SpecialistRequest = SpecialistRequest
+ { specialistName :: Text, specialistRole :: Text, specialistManager :: AgentId
+ } deriving (Eq, Show)
 data SpecialistResolution = ExistingSpecialist AgentProfile | CreatedSpecialist AgentProfile deriving (Eq, Show)
 
 -- The caller holds the service lock across resolution and preparation.
-ensureSpecialist :: Service -> Text -> Text -> Text -> IO SpecialistResolution
-ensureSpecialist s name role parent = do
+ensureSpecialist :: Service -> SpecialistRequest -> IO SpecialistResolution
+ensureSpecialist s request = do
+ let name=specialistName request
+     role=specialistRole request
+     parent=agentIdText (specialistManager request)
  profiles <- DB.agents s >>= mapM (decodeValue 500)
  let matches = filter ((==T.toCaseFold name) . T.toCaseFold . profileName) profiles
  case matches of

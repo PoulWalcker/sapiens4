@@ -105,7 +105,7 @@ turnAction s a identity rawAction = do
   Nothing -> do
    require (action == Retry) 404 "Unknown active turn"
    stored <- maybe (failure 404 "Unknown turn") pure . findId identity =<< DB.turns s
-   origin <- readExecutionOrigin (get stored "origin")
+   origin <- decodeExecutionOrigin (get stored "origin")
    require (at stored "agent" == a && isJust (originPolicyRoutine origin)) 404 "Unknown active turn"
    status <- field 500 stored "status"
    turnResult (validateTurnAction Retry status)
@@ -114,14 +114,14 @@ turnAction s a identity rawAction = do
    pure archived
  let restored=if any ((==turnId turn) . turnId) (agentTurns state) then state else state { agentTurns=agentTurns state++[turn] }
  when (action == Retry) $ do
-  void (executionOrigin (turnOrigin turn))
+  void (requireExecutionOrigin (turnOrigin turn))
   G.checkPolicyRetry s turn
  work <- D.findWork s (RunId identity)
  require (not (maybe False (any ((==Just (RunId identity)) . D.callParent) . D.workCalls . fst) work)) 409 "This request was delegated; use the recipient call controls"
  runs <- readMVar (serviceRuns s)
  change <- turnResult (controlTurn action (M.member (batchLeader turn) runs) turn restored)
  when (action == Retry) $ do
-  contexts <- G.requestOrigins s
+  contexts <- G.loadGroupRequestIndex s
   forM_ [member | member <- agentTurns restored, batchLeader member == batchLeader turn] $ \member -> do
    void (either (failure 500) pure (G.checkedTurnContext contexts member))
    R.ensureRetryAvailable s member
@@ -192,10 +192,10 @@ settleRun parsed outcome time ids turn state = result
 finish :: Service -> Run -> Turn -> Either SomeException (Text,[Value]) -> IO ()
 finish s run turn outcome = do
  stop <- readIORef (runCancel run)
- parsed <- executionOrigin (turnOrigin turn)
+ parsed <- requireExecutionOrigin (turnOrigin turn)
  checked <- case outcome of
   Right (output,logs) | not stop, Just group <- originGroup parsed -> do
-   verification <- try (R.verifyPolicyPreparation s (GroupOwner group) (turnId turn) parsed)
+   verification <- try (R.verifyPolicyPreparationCompletion s (GroupOwner group) (turnId turn) parsed)
    case verification of
     Right () -> pure (Right (output,logs))
     Left (problem :: SomeException)
@@ -227,7 +227,7 @@ reserveBatch batch tick slot batching state = (marked,snapshot,execution)
  snapshot=mapStateFields (mergeFields ([("current_turn",toJSON i)] ++ [("agency_batch",arr [obj [("id",toJSON (turnId t)),("content",str (turnInput t))] | t <- NE.toList batch]) | batching])) marked
  execution=(reserve first) { turnInput = T.intercalate "\n\n" (map turnInput (NE.toList batch)) }
 
-launch :: (AgentId -> IO ()) -> Service -> Text -> G.GroupOrigins -> NonEmpty Turn -> Pulse -> Int -> Bool -> IO ()
+launch :: (AgentId -> IO ()) -> Service -> Text -> G.GroupRequestIndex -> NonEmpty Turn -> Pulse -> Int -> Bool -> IO ()
 launch prepareSpecialist s a contexts batch tick slot batching = do
  origins <- traverse (either (failure 500) pure . G.checkedTurnContext contexts) batch
  let parsed=NE.head origins
@@ -245,9 +245,9 @@ launch prepareSpecialist s a contexts batch tick slot batching = do
  DB.project s a
  void $ forkIO $ do
   let verifyCompletion work = do
-       origin <- executionOrigin (D.workOrigin work)
-       let owner=PersonalOwner (D.callOwner (NE.head (D.workCalls work)))
-       R.verifyPolicyPreparation s owner (RunId (D.workloadId work)) origin
+       origin <- requireExecutionOrigin (D.workOrigin work)
+       let owner=PersonalOwner (D.callRecipient (NE.head (D.workCalls work)))
+       R.verifyPolicyPreparationCompletion s owner (RunId (D.workloadId work)) origin
   result <- try (withActor s a (Just "chatInput") (if isJust (originGroup parsed) then G.runGroup s run execution else D.runDecision prepareSpecialist verifyCompletion s run execution snapshot))
   locked s $ finish s run execution result `finally` do
    lease <- readIORef (serviceLease s)
@@ -262,17 +262,17 @@ bufferIdentity item = do
  unless (not (T.null (T.strip (runIdText identity)))) (Left "Buffered output requires a Turn identity")
  pure identity
 
-checkedBufferedOrigin :: G.GroupOrigins -> AgentState -> Value -> Either Text ExecutionOrigin
+checkedBufferedOrigin :: G.GroupRequestIndex -> AgentState -> Value -> Either Text ExecutionOrigin
 checkedBufferedOrigin contexts state item = do
  identity <- bufferIdentity item
- actual <- G.checkedOriginContext contexts identity (storeOrigin (Just (get item "origin")))
+ actual <- G.checkedOriginContext contexts identity (decodeStoredOrigin (Just (get item "origin")))
  forM_ (find ((==identity) . turnId) (agentTurns state)) $ \turn -> do
   expected <- G.checkedTurnContext contexts turn
   unless (originPurpose actual == originPurpose expected && originGroup actual == originGroup expected)
    (Left "Buffered output provenance does not match its Turn")
  pure actual
 
-rejectInvalidOutputs :: Service -> Text -> G.GroupOrigins -> IO ()
+rejectInvalidOutputs :: Service -> Text -> G.GroupRequestIndex -> IO ()
 rejectInvalidOutputs s owner contexts = do
  state <- agentState s owner
  forM_ (items (stateJSON state) "output_buffer") $ \item -> case checkedBufferedOrigin contexts state item of
@@ -289,7 +289,7 @@ rejectInvalidOutputs s owner contexts = do
    saveState s owner (mapStateFields (put "output_buffer" (arr (filter (/=item) (items (stateJSON changed) "output_buffer")))) changed)
    DB.project s owner
 
-publish :: Service -> Text -> G.GroupOrigins -> Pulse -> IO ()
+publish :: Service -> Text -> G.GroupRequestIndex -> Pulse -> IO ()
 publish s a contexts tick = do
  rejectInvalidOutputs s a contexts
  forM_ [1,2] $ \slot -> do
@@ -314,7 +314,7 @@ publish s a contexts tick = do
     DB.project s a
     trimConversation s a
 
-admit :: (AgentId -> IO ()) -> Service -> Text -> G.GroupOrigins -> Pulse -> IO ()
+admit :: (AgentId -> IO ()) -> Service -> Text -> G.GroupRequestIndex -> Pulse -> IO ()
 admit prepareSpecialist s a contexts tick = do
  runs <- readMVar (serviceRuns s)
  state <- agentState s a
@@ -353,7 +353,7 @@ onPulse prepareSpecialist s tick = do
   D.pendingWorks s
   G.reconcileGroups s
   G.dispatchGroups s
-  contexts <- G.requestOrigins s
+  contexts <- G.loadGroupRequestIndex s
   rows <- DB.agents s
   forM_ rows $ \row -> do
    let a=at row "id"

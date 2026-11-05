@@ -90,7 +90,7 @@ data GroupRequest = GroupRequest
  , requestSettled :: Bool, requestOrigin :: StoredOrigin, requestLineage :: StoredLineage, requestFields :: Object
  } deriving (Eq, Show)
 instance FromJSON GroupRequest where
- parseJSON = withObject "Group request" $ \o -> GroupRequest <$> o .: "id" <*> o .: "target" <*> o .: "status" <*> o .: "settled" <*> pure (storeOrigin (KM.lookup "origin" o)) <*> pure (decodeLineage o) <*> pure (foldr KM.delete o (["id","target","status","settled","origin"] ++ lineageKeys))
+ parseJSON = withObject "Group request" $ \o -> GroupRequest <$> o .: "id" <*> o .: "target" <*> o .: "status" <*> o .: "settled" <*> pure (decodeStoredOrigin (KM.lookup "origin" o)) <*> pure (decodeLineage o) <*> pure (foldr KM.delete o (["id","target","status","settled","origin"] ++ lineageKeys))
 instance ToJSON GroupRequest where
  toJSON request = mergeFields ([("id",toJSON (requestId request)),("target",toJSON (requestTarget request)),("status",toJSON (requestStatus request)),("settled",Bool (requestSettled request))] ++ [("origin",toJSON (requestOrigin request)) | requestOrigin request /= MissingOrigin]) (merge (Object (requestFields request)) (lineageValue (requestLineage request)))
 readRequests :: Value -> IO [GroupRequest]

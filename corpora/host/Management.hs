@@ -139,7 +139,8 @@ control s a payload = do
    name <- validName d
    role <- textField d "role" 60
    parent <- if get d "manager"==Null then pure a else resolve s (at d "manager") False
-   resolution <- ensureSpecialist s name role parent
+   resolution <- ensureSpecialist s SpecialistRequest
+    { specialistName=name, specialistRole=role, specialistManager=AgentId parent }
    let (profile,created) = case resolution of
         ExistingSpecialist existing -> (existing,False)
         CreatedSpecialist new -> (new,True)

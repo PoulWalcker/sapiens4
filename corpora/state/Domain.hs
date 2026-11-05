@@ -4,10 +4,10 @@
 -- Pure domain data and codecs shared by the host and native shells.
 module Domain
  ( Wire(..), AgentId(..), MessageId(..), GroupId, groupIdText, RoutineId, routineIdText, routineIdSequence, parseRoutineId
- , RoutineOwner(..), ownerText, personalAgentP, Deadline, deadlineTime, deadlineText, newDeadline, rescheduleDeadline
+ , RoutineOwner(..), routineOwnerText, personalAgentP, Deadline, deadlineTime, deadlineText, newDeadline, rescheduleDeadline
  , timestamp, parseTime, ExecutionPurpose(..), ScheduledProvenance(..), ExecutionOrigin, newOrigin, StoredOrigin(..)
  , originPurpose, originGroup, originMetadata, originIsScheduled, originRoutine, originPolicyRoutine
- , storeOrigin, checkedOrigin, originErrorMessage
+ , decodeStoredOrigin, checkedOrigin, originErrorMessage
  , TaskId(..), RunId(..), parseWire, TurnStatus(..), Flow(..)
  , ExecutionMode(..), ExecutionSettings(..), CorporaStatus(..), CorporaConfig(..), Frequency(..)
  , periodMillis, Pulse(..), pulseIdentity, TaskState(..), GroupAccess(..), BrowserAction(..)
@@ -87,8 +87,8 @@ instance ToJSON RoutineOwner where
   PersonalOwner agent -> toJSON agent
   GroupOwner group -> toJSON group
 
-ownerText :: RoutineOwner -> Text
-ownerText owner = case owner of
+routineOwnerText :: RoutineOwner -> Text
+routineOwnerText owner = case owner of
  PersonalOwner agent -> agentIdText agent
  GroupOwner group -> groupIdText group
 
@@ -200,9 +200,9 @@ instance ToJSON ExecutionOrigin where
 
 -- Malformed provenance remains readable history; only operational access fails.
 data StoredOrigin = MissingOrigin | ValidOrigin ExecutionOrigin | InvalidOrigin Value Text deriving (Eq, Show)
-storeOrigin :: Maybe Value -> StoredOrigin
-storeOrigin Nothing = MissingOrigin
-storeOrigin (Just raw) = case parseEither parseJSON raw of
+decodeStoredOrigin :: Maybe Value -> StoredOrigin
+decodeStoredOrigin Nothing = MissingOrigin
+decodeStoredOrigin (Just raw) = case parseEither parseJSON raw of
  Right origin -> ValidOrigin origin
  Left reason -> InvalidOrigin raw (T.pack reason)
 checkedOrigin :: StoredOrigin -> Either Text ExecutionOrigin
@@ -313,7 +313,7 @@ instance FromJSON Turn where
  parseJSON = withObject "Turn" $ \o -> do
   attempt <- o .:? "attempt"
   unless (maybe True (>=0) attempt) (fail "Turn attempt cannot be negative")
-  Turn <$> o .: "id" <*> o .: "flow" <*> o .: "input" <*> o .: "status" <*> pure attempt <*> o .:? "batch_id" <*> pure (storeOrigin (KM.lookup "origin" o)) <*> pure (foldr KM.delete o ["id","flow","input","status","attempt","batch_id","origin"])
+  Turn <$> o .: "id" <*> o .: "flow" <*> o .: "input" <*> o .: "status" <*> pure attempt <*> o .:? "batch_id" <*> pure (decodeStoredOrigin (KM.lookup "origin" o)) <*> pure (foldr KM.delete o ["id","flow","input","status","attempt","batch_id","origin"])
 instance ToJSON Turn where
  toJSON t = Object $ KM.fromList ([("id",toJSON (turnId t)),("flow",toJSON (turnFlow t)),("input",toJSON (turnInput t)),("status",toJSON (turnStatus t))] ++ [("attempt",num n) | n <- maybeToList (turnAttempt t)] ++ [("batch_id",toJSON i) | i <- maybeToList (turnBatchId t)] ++ [("origin",toJSON (turnOrigin t)) | turnOrigin t /= MissingOrigin]) <> turnFields t
 turnField :: Turn -> Text -> Value
@@ -321,7 +321,7 @@ turnField t "origin" = toJSON (turnOrigin t)
 turnField t key = get (Object (turnFields t)) key
 withTurnFields :: (Value -> Value) -> Turn -> Turn
 withTurnFields f t = case f fields of
- Object updated -> t { turnOrigin=storeOrigin (KM.lookup "origin" updated)
+ Object updated -> t { turnOrigin=decodeStoredOrigin (KM.lookup "origin" updated)
                      , turnFields=foldr KM.delete updated ["id","flow","input","status","attempt","batch_id","origin"] }
  _ -> t
  where fields=mergeFields [("origin",toJSON (turnOrigin t)) | turnOrigin t /= MissingOrigin] (Object (turnFields t))
@@ -343,7 +343,7 @@ recoverTurn turn
  | otherwise = turn
 
 newTurn :: RunId -> Flow -> Text -> Text -> Value -> Bool -> Turn
-newTurn identity flow input created origin batchable = Turn identity flow input Queued (Just 1) Nothing (storeOrigin (Just origin)) (KM.fromList [("created",str created),("batchable",Bool batchable)])
+newTurn identity flow input created origin batchable = Turn identity flow input Queued (Just 1) Nothing (decodeStoredOrigin (Just origin)) (KM.fromList [("created",str created),("batchable",Bool batchable)])
 
 data AgentState = AgentState { agentTurns :: [Turn], agentFields :: Object } deriving (Eq, Show)
 instance FromJSON AgentState where

@@ -53,7 +53,7 @@ instance ToJSON CallState where toJSON = str . wireName
 data CallResult = Answered Text | UnresolvedResult Text | HandedOff Text | NeedsClarification Text deriving (Eq, Show)
 data CallProgress = QueuedAt Node | RunningAt Node | FailedAt Node | InterruptedAt Node | CancelledAt Node | FinishedCall CallResult deriving (Eq, Show)
 data WorkCall = WorkCall
- { callIdentity :: RunId, callOwner :: AgentId, callProgress :: CallProgress
+ { callIdentity :: RunId, callRecipient :: AgentId, callProgress :: CallProgress
  , callRequest :: Text, callParent :: Maybe RunId, callFields :: Object
  } deriving (Eq, Show)
 callState :: WorkCall -> CallState
@@ -89,7 +89,7 @@ instance FromJSON WorkCall where
    CallDelegated -> finished HandedOff Delegation; CallWaiting -> finished NeedsClarification WaitingForAdmin
   WorkCall <$> o .: "callId" <*> o .: "addressedTo" <*> pure progress <*> o .: "request" <*> o .:? "causedBy" <*> pure (foldr KM.delete o ["callId","addressedTo","node","state","request","causedBy","output"])
 instance ToJSON WorkCall where
- toJSON call = mergeFields ([("callId",toJSON (callIdentity call)),("addressedTo",toJSON (callOwner call)),("node",toJSON (callNode call)),("state",toJSON (callState call)),("request",str (callRequest call)),("causedBy",toJSON (callParent call))] ++ [("output",str output) | output <- maybeToList (callOutput call)]) (Object (callFields call))
+ toJSON call = mergeFields ([("callId",toJSON (callIdentity call)),("addressedTo",toJSON (callRecipient call)),("node",toJSON (callNode call)),("state",toJSON (callState call)),("request",str (callRequest call)),("causedBy",toJSON (callParent call))] ++ [("output",str output) | output <- maybeToList (callOutput call)]) (Object (callFields call))
 callField :: WorkCall -> Text -> Value
 callField call = get (Object (callFields call))
 setCallFields :: [(Text,Value)] -> WorkCall -> WorkCall
@@ -145,17 +145,17 @@ encodeTask contract encoding = case taskEnvelope encoding of
   Corrupted value _ -> Just value
 
 data Workload = Workload
- { workloadId :: Text, workTracked :: Bool, workCalls :: NonEmpty WorkCall
+ { workloadId :: Text, workTracksTask :: Bool, workCalls :: NonEmpty WorkCall
  , workTaskContract :: TaskContract, workTaskEncoding :: TaskEncoding, workOrigin :: StoredOrigin, workFields :: Object
  } deriving (Eq, Show)
 instance FromJSON Workload where
  parseJSON = withObject "Workload" $ \o -> do
   let (contract,encoding)=decodeTask (KM.lookup "task" o)
-  Workload <$> o .: "workloadId" <*> o .: "tracked" <*> o .: "calls" <*> pure contract <*> pure encoding <*> pure (storeOrigin (KM.lookup "origin" o))
+  Workload <$> o .: "workloadId" <*> o .: "tracked" <*> o .: "calls" <*> pure contract <*> pure encoding <*> pure (decodeStoredOrigin (KM.lookup "origin" o))
    <*> pure (foldr KM.delete o ["workloadId","tracked","calls","task","origin"])
 instance ToJSON Workload where
  toJSON work = mergeFields
-  ([("workloadId",str (workloadId work)),("tracked",Bool (workTracked work)),("calls",toJSON (workCalls work))]
+  ([("workloadId",str (workloadId work)),("tracked",Bool (workTracksTask work)),("calls",toJSON (workCalls work))]
    ++ [("task",value) | value <- maybeToList (encodeTask (workTaskContract work) (workTaskEncoding work))]
    ++ [("origin",toJSON (workOrigin work)) | workOrigin work /= MissingOrigin])
   (Object (workFields work))
@@ -317,20 +317,20 @@ saveWork s w = do
  previous <- find ((==workloadId w) . workloadId) <$> readWorks s
  let call=NE.last (workCalls w)
      before=NE.last . workCalls <$> previous
-     changed=maybe False (\old -> workTracked w && (not (workTracked old) || fmap (\c -> (callState c,callOwner c)) before /= Just (callState call,callOwner call))) previous
+     changed=maybe False (\old -> workTracksTask w && (not (workTracksTask old) || fmap (\c -> (callState c,callRecipient c)) before /= Just (callState call,callRecipient call))) previous
  when changed $ do
   (source,agency) <- currentActor s
   let state=callState call
-      actor=if isJust agency || state==CallCancelled then source else if state==CallQueued then "system" else agentIdText (callOwner call)
-      detail=obj [("owner",toJSON (callOwner call)),("task",taskValue w),("previous",maybe Null (toJSON . callState) before),("call",toJSON (callIdentity call)),("error",callField call "error")]
-  DB.record s (map (agentIdText . callOwner) (NE.toList (workCalls w))) (at (taskValue w) "taskId") ("task."<>T.toLower (wireName state)) detail actor (if state `elem` [CallQueued,CallCancelled] then Nothing else Just "chatInput")
+      actor=if isJust agency || state==CallCancelled then source else if state==CallQueued then "system" else agentIdText (callRecipient call)
+      detail=obj [("owner",toJSON (callRecipient call)),("task",taskValue w),("previous",maybe Null (toJSON . callState) before),("call",toJSON (callIdentity call)),("error",callField call "error")]
+  DB.record s (map (agentIdText . callRecipient) (NE.toList (workCalls w))) (at (taskValue w) "taskId") ("task."<>T.toLower (wireName state)) detail actor (if state `elem` [CallQueued,CallCancelled] then Nothing else Just "chatInput")
  DB.putValue s DB.Workloads (workloadId w) (toJSON w)
 withCall :: Workload -> WorkCall -> Workload
 withCall w c = w { workCalls = fmap (\x -> if callIdentity x == callIdentity c then c else x) (workCalls w) }
 data OutcomeError
  = UnknownCriterion (NonEmpty CriterionId)
  | DuplicateCriterionResult (NonEmpty CriterionId)
- | InvalidSkippedCriterion (NonEmpty CriterionId)
+ | InvalidNotApplicableResult (NonEmpty CriterionId)
  | MissingCompletionCoverage (NonEmpty CriterionId)
  | MissingDecisionEvidence
  deriving (Eq, Show)
@@ -338,7 +338,7 @@ outcomeError :: OutcomeError -> Text
 outcomeError problem = case problem of
  UnknownCriterion _ -> "Outcome references a criterion outside the accepted Task"
  DuplicateCriterionResult _ -> "Outcome reports the same criterion more than once"
- InvalidSkippedCriterion _ -> "Only an unsatisfied, explicitly conditional criterion can be not applicable"
+ InvalidNotApplicableResult _ -> "Only an unsatisfied, explicitly conditional criterion can be not applicable"
  MissingCompletionCoverage _ -> completionEvidenceMessage
  MissingDecisionEvidence -> completionEvidenceMessage
  where completionEvidenceMessage = "Completed outcome requires evidence for all applicable completion criteria"
@@ -348,7 +348,7 @@ validateOutcome :: DecisionResponse -> Outcome -> TaskSpec -> Either OutcomeErro
 validateOutcome response outcome spec
  | Just identities <- NE.nonEmpty (filter (`notElem` acceptedIds) reportedIds) = Left (UnknownCriterion identities)
  | Just identities <- NE.nonEmpty (nub (reportedIds \\ nub reportedIds)) = Left (DuplicateCriterionResult identities)
- | Just identities <- NE.nonEmpty (map resultId (filter invalidSkip (outcomeResults outcome))) = Left (InvalidSkippedCriterion identities)
+ | Just identities <- NE.nonEmpty (map resultId (filter invalidNotApplicable (outcomeResults outcome))) = Left (InvalidNotApplicableResult identities)
  | outcomeStatus outcome == Completed, null (decisionEvidence response) = Left MissingDecisionEvidence
  | outcomeStatus outcome == Completed, Just identities <- NE.nonEmpty (filter (`notElem` reportedIds) acceptedIds) = Left (MissingCompletionCoverage identities)
  | otherwise = Right (StructurallyValidOutcome outcome)
@@ -356,7 +356,7 @@ validateOutcome response outcome spec
  criteria=NE.toList (specCriteria spec)
  acceptedIds=map criterionId criteria
  reportedIds=map resultId (outcomeResults outcome)
- invalidSkip result = case result of
+ invalidNotApplicable result = case result of
   Satisfied _ _ -> False
   NotApplicable identity _ -> case find ((==identity) . criterionId) criteria of
    Just (Conditional _ _ _) -> False
@@ -364,7 +364,7 @@ validateOutcome response outcome spec
 begin :: Service -> AgentId -> Turn -> IO ()
 begin s a turn = do
  found <- findWork s (turnId turn)
- origin <- executionOrigin (turnOrigin turn)
+ origin <- requireExecutionOrigin (turnOrigin turn)
  let routine=originIsScheduled origin
      first=newCall (turnId turn) a Nothing (RunningAt (if routine then ReadyToWork else Assessing)) (turnInput turn)
      task=TaskEncoding (Just (obj [("taskId",str ("task_"<>runIdText (turnId turn))),("taskType",str (if routine then "automated" else "work"))])) (Just Null)
@@ -375,7 +375,7 @@ begin s a turn = do
      (w,c)=fromMaybe (initial,first) found
      running=if isNothing (callOutput c) then c { callProgress=RunningAt (callNode c), callFields=KM.delete "error" (callFields c) } else c
      updated=setCallFields [("attempt",num (fromMaybe 1 (turnAttempt turn)))] running
- acceptedOrigin <- executionOrigin (workOrigin w)
+ acceptedOrigin <- requireExecutionOrigin (workOrigin w)
  require (originPurpose origin == originPurpose acceptedOrigin && originGroup origin == originGroup acceptedOrigin)
   500 "Saved Workload provenance does not match its Turn"
  saveWork s (withCall w updated)
@@ -391,7 +391,7 @@ conversation s a turn state = do
  pure $ obj [("manifests",remove ["corpora-state"] manifests),("staticContext",get manifests "corpora-state" `fallback` str ""),("instantContext",obj [("chat",arr chat),("memo",memo)]),("inputs",stateField state "agency_batch" `fallback` arr [obj [("content",str (turnInput turn))]])]
  where
  takeLast n xs = drop (length xs-n) xs
- personalMessage entry = case storeOrigin (Just (get entry "origin")) of
+ personalMessage entry = case decodeStoredOrigin (Just (get entry "origin")) of
   InvalidOrigin _ _ -> False
   MissingOrigin -> True
   ValidOrigin origin -> isNothing (originGroup origin)
@@ -419,7 +419,7 @@ decide s run turn state node logs = do
   wiki <- prompt s "notes-wiki"
   envelope <- prompt s "decision-envelope"
   let instruction = at source "content" <> extra <> scheduled
-      context = obj [("originalIntent",workField w "originalIntent"),("origin",workField w "origin"),("task",taskValue w),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
+      context = obj [("originalIntent",workField w "originalIntent"),("origin",workField w "origin"),("task",taskValue w),("tracked",Bool (workTracksTask w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
       rendered = render envelope [("node",wireName node),("instruction",instruction),("notes_wiki",render wiki [("notes_example",T.pack (repositoryRoot s </> "corpora/prompts/examples/jarvis-notes.html"))]),("context",jsonText context),("events",T.intercalate ", " (sort (eventsFor node)))]
   (model,effort) <- modelDefaults
   policy <- executionSettings s (agentIdText (runOwner run))
@@ -463,9 +463,9 @@ validateTarget s w source target = do
  state <- agentState s target
  require (not (any ((`elem` [Queued,Running]) . turnStatus) (agentTurns state))) 409 "Recipient is busy; responsibility remains with the sender"
  works <- readWorks s
- require (not (any (\c -> callState c == CallQueued && callOwner c == AgentId target) (concatMap (NE.toList . workCalls) works))) 409 "Recipient already has an accepted call"
+ require (not (any (\c -> callState c == CallQueued && callRecipient c == AgentId target) (concatMap (NE.toList . workCalls) works))) 409 "Recipient already has an accepted call"
  require (length (workCalls w) <= 8) 409 "Routing limit reached; Admin must resolve the request"
- require (target == chief || not (any ((==AgentId target) . callOwner) (workCalls w))) 409 "This specialist already assessed the request; ask Admin to resolve routing"
+ require (target == chief || not (any ((==AgentId target) . callRecipient) (workCalls w))) 409 "This specialist already assessed the request; ask Admin to resolve routing"
 transfer :: Service -> Run -> Text -> Text -> Value -> IO Text
 transfer s run request reason record = do
  (w,c) <- getWork s (runId run)
@@ -479,7 +479,7 @@ transfer s run request reason record = do
      reply="Delegated to "<>target<>"."
      updated=c { callProgress=FinishedCall (HandedOff reply) }
      accepted=withCall w updated
- saveWork s accepted { workTracked=True, workCalls=workCalls accepted <> (child :| []) }
+ saveWork s accepted { workTracksTask=True, workCalls=workCalls accepted <> (child :| []) }
  accept s (agentIdText (runOwner run)) record "Delegation" (wireName (callNode child))
  pure reply
 applyDecision :: Service -> Text -> Maybe Text -> Text -> IO Value
@@ -500,11 +500,11 @@ applyDecision s owner current decision = do
     _ -> failure 409 "Delegation requires a handoff decision"
    (updated,_) <- getWork s (RunId identity)
    maybe (failure 409 "Delegation acceptance was not saved") pure (find ((==Just (RunId identity)) . callParent) (workCalls updated))
- pure (obj [("saved",Bool True),("callId",toJSON (callIdentity existing)),("target",toJSON (callOwner existing))])
+ pure (obj [("saved",Bool True),("callId",toJSON (callIdentity existing)),("target",toJSON (callRecipient existing))])
 data DecisionError
- = AcceptedTaskNeedsExecution | OnlyChiefCreates | CriteriaRemoved
+ = TrackedTaskNeedsExecution | OnlyChiefCreates | CriteriaRemoved
  | OwnerOnlyPolicySetup
- | InvalidOutcome OutcomeError | UnsupportedSavedTaskSpec | InvalidAcceptedTask Text | InvalidWorkOrigin Text
+ | InvalidOutcome OutcomeError | UnsupportedSavedTaskSpec | InvalidTaskContract Text | InvalidWorkOrigin Text
  deriving (Eq, Show)
 data DecisionStep
  = SaveDecision Workload WorkCall
@@ -517,19 +517,19 @@ data DecisionStep
 advanceDecision :: AgentId -> DecisionResponse -> Workload -> WorkCall -> Either DecisionError DecisionStep
 advanceDecision chief response work call = case decisionBody response of
  ReplyNow reply
-  | workTracked work -> Left AcceptedTaskNeedsExecution
+  | workTracksTask work -> Left TrackedTaskNeedsExecution
   | otherwise -> Right (finish work (FinishedCall (Answered reply)))
- ExecuteTask -> Right (finish (work { workTracked=True }) (RunningAt ReadyToWork))
+ ExecuteTask -> Right (finish (work { workTracksTask=True }) (RunningAt ReadyToWork))
  OutsideSpecialization -> do
-  when (callOwner call /= chief) (policyDelegation work)
+  when (callRecipient call /= chief) (policyDelegation work)
   Right $ SaveDecision work $
-   if callOwner call == chief then call { callProgress=RunningAt ChiefTriage }
+   if callRecipient call == chief then call { callProgress=RunningAt ChiefTriage }
    else (setCallFields [("target",toJSON chief)] call) { callProgress=RunningAt Delegation }
  SelectSpecialist name -> policyDelegation work >> Right (ResolveSpecialist name)
  NeedSpecialist -> policyDelegation work >> Right (finish work (RunningAt CreatingSapi))
- AskAdmin question -> Right (finish (work { workTracked=True }) (FinishedCall (NeedsClarification question)))
+ AskAdmin question -> Right (finish (work { workTracksTask=True }) (FinishedCall (NeedsClarification question)))
  SpecifySapi name role
-  | callOwner call /= chief -> Left OnlyChiefCreates
+  | callRecipient call /= chief -> Left OnlyChiefCreates
   | otherwise -> policyDelegation work >> Right (EnsureSpecialist name role)
  PrepareTask taskType spec -> do
    accepted <- acceptedTaskSpec work
@@ -540,9 +540,9 @@ advanceDecision chief response work call = case decisionBody response of
    Right (finish (acceptTaskSpec savedType spec work) (RunningAt Execution))
  Handoff request -> policyDelegation work >> Right (DelegateRequest request)
  ReportOutcome reply outcome -> do
-  spec <- acceptedTaskSpec work >>= maybe (Left (InvalidAcceptedTask "Task has no accepted specification")) Right
+  spec <- acceptedTaskSpec work >>= maybe (Left (InvalidTaskContract "Task has no accepted specification")) Right
   StructurallyValidOutcome checked <- B.first InvalidOutcome (validateOutcome response outcome spec)
-  let saved=mergeFields [("reply",str reply),("evidence",toJSON (decisionEvidence response)),("author",toJSON (callOwner call))] (toJSON checked)
+  let saved=mergeFields [("reply",str reply),("evidence",toJSON (decisionEvidence response)),("author",toJSON (callRecipient call))] (toJSON checked)
       result=case outcomeStatus outcome of Completed -> Answered reply; Unresolved -> UnresolvedResult reply
   pure (finish (setWorkField "outcome" saved work) (FinishedCall result))
  where
@@ -563,17 +563,17 @@ acceptedTaskSpec work = case workTaskContract work of
  Unprepared -> Right Nothing
  Accepted spec -> Right (Just spec)
  UnsupportedLegacy _ -> Left UnsupportedSavedTaskSpec
- Corrupted _ reason -> Left (InvalidAcceptedTask reason)
+ Corrupted _ reason -> Left (InvalidTaskContract reason)
 
 decisionFailure :: DecisionError -> IO a
 decisionFailure problem = case problem of
- AcceptedTaskNeedsExecution -> failure 409 "An accepted Task must execute and report its completion criteria"
+ TrackedTaskNeedsExecution -> failure 409 "An accepted Task must execute and report its completion criteria"
  OnlyChiefCreates -> failure 403 "Only Chief can create a Sapi"
  CriteriaRemoved -> failure 400 "A handoff cannot remove accepted completion criteria"
  OwnerOnlyPolicySetup -> failure 409 "Personal routine policy setup must stay with its owner. Save a policy here, or retry this setup with its owner."
  InvalidOutcome reason -> failure 400 (outcomeError reason)
  UnsupportedSavedTaskSpec -> failure 409 "Saved Task specification must use structured completion criteria; create a new Task."
- InvalidAcceptedTask reason -> failure 500 ("Saved Task specification is malformed: "<>reason)
+ InvalidTaskContract reason -> failure 500 ("Saved Task specification is malformed: "<>reason)
  InvalidWorkOrigin reason -> failure 500 reason
 
 runDecision :: (AgentId -> IO ()) -> (Workload -> IO ()) -> Service -> Run -> Turn -> AgentState -> IO (Text,[Value])
@@ -611,7 +611,8 @@ runDecision prepareSpecialist verifyCompletion s run turn state = do
            validateTarget s current owner target
            finish current ((setCallFields [("target",str target)] call) { callProgress=RunningAt Delegation })
           EnsureSpecialist name role -> do
-           resolution <- ensureSpecialist s name role owner
+           resolution <- ensureSpecialist s SpecialistRequest
+            { specialistName=name, specialistRole=role, specialistManager=runOwner run }
            let (profile,created) = case resolution of
                 ExistingSpecialist existing -> (existing,False)
                 CreatedSpecialist new -> (new,True)
@@ -659,9 +660,9 @@ pendingWorks s = do
   case checkedOrigin (workOrigin w) of
    Left reason -> saveWork s (withCall w (setCallFields [("error",str reason)] c { callProgress=FailedAt (callNode c) }))
    Right parentOrigin -> do
-    let a=agentIdText (callOwner c)
+    let a=agentIdText (callRecipient c)
         parent=find ((==callParent c) . Just . callIdentity) (workCalls w)
-        metadata=KM.fromList [("workloadId",str (workloadId w)),("taskId",get (taskValue w) "taskId"),("caller",maybe Null (toJSON . callOwner) parent),("parentCall",toJSON (callParent c))]
+        metadata=KM.fromList [("workloadId",str (workloadId w)),("taskId",get (taskValue w) "taskId"),("caller",maybe Null (toJSON . callRecipient) parent),("parentCall",toJSON (callParent c))]
          <> KM.delete "agent" (KM.delete "call" (originMetadata parentOrigin))
         origin=newOrigin (originPurpose parentOrigin) (originGroup parentOrigin) metadata
     time <- now
@@ -685,14 +686,14 @@ clarify s a wid message = do
 workTasks :: Service -> Text -> Bool -> IO Value
 workTasks s a full = do
  works <- readWorks s
- rows <- forM [w | w <- works,workTracked w,any ((==AgentId a) . callOwner) (workCalls w)] $ \w -> do
+ rows <- forM [w | w <- works,workTracksTask w,any ((==AgentId a) . callRecipient) (workCalls w)] $ \w -> do
   let lastCall=NE.last (workCalls w)
   decisions <- forM (workItems w "decisions") $ \d -> if full then merge d <$> readJSON (archivePath s (at d "agent") ("decisions/"<>at d "decisionId")) empty else pure d
-  pure $ mergeFields [("execution",obj [("state",toJSON (callState lastCall)),("owner",toJSON (callOwner lastCall)),("currentCall",toJSON (callIdentity lastCall)),("attempt",callField lastCall "attempt")]),("decisions",arr decisions)] (select ["task","workloadId","originalIntent","calls","outcome"] (toJSON w))
+  pure $ mergeFields [("execution",obj [("state",toJSON (callState lastCall)),("owner",toJSON (callRecipient lastCall)),("currentCall",toJSON (callIdentity lastCall)),("attempt",callField lastCall "attempt")]),("decisions",arr decisions)] (select ["task","workloadId","originalIntent","calls","outcome"] (toJSON w))
  pure (obj [("tasks",arr rows)])
 taskList :: Service -> Text -> IO Value
 taskList s a = do
  tasks <- items <$> workTasks s a False <*> pure "tasks"
  pure $ obj [("tasks",arr (reverse [let body=get (get t "task") "specification" `fallback` obj [("objective",get t "originalIntent")]; execution=get t "execution"; calls=items t "calls" in obj [("id",get t "workloadId"),("title",get body "objective"),("taskType",get (get t "task") "taskType"),("state",get execution "state"),("owner",get execution "owner"),("sender",maybe Null (`get` "addressedTo") (listToMaybe calls)),("body",str (jsonText body <> "\n")),("result",get (get t "outcome") "reply"),("error",maybe Null (`get` "error") (listToMaybe (reverse calls)))] | t <- tasks]))]
 workSummaries :: [Workload] -> [Value]
-workSummaries works = [let c=NE.last (workCalls w) in obj [("taskType",get (taskValue w) "taskType"),("id",str (workloadId w)),("taskId",get (taskValue w) "taskId"),("origin",workField w "origin"),("callId",toJSON (callIdentity c)),("owner",toJSON (callOwner c)),("state",toJSON (callState c)),("participants",toJSON (nub (map callOwner (NE.toList (workCalls w))))),("output",toJSON (callOutput c)),("error",callField c "error"),("decisions",num (length (workItems w "decisions"))),("calls",num (length (workCalls w)))] | w <- works,workTracked w]
+workSummaries works = [let c=NE.last (workCalls w) in obj [("taskType",get (taskValue w) "taskType"),("id",str (workloadId w)),("taskId",get (taskValue w) "taskId"),("origin",workField w "origin"),("callId",toJSON (callIdentity c)),("owner",toJSON (callRecipient c)),("state",toJSON (callState c)),("participants",toJSON (nub (map callRecipient (NE.toList (workCalls w))))),("output",toJSON (callOutput c)),("error",callField c "error"),("decisions",num (length (workItems w "decisions"))),("calls",num (length (workCalls w)))] | w <- works,workTracksTask w]

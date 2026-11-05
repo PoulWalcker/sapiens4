@@ -108,20 +108,20 @@ checkedRequestOrigin group request = do
    Just _ -> Right ()
   pure origin
 
-type GroupOrigins = Map.Map RunId (Value,GroupRequest)
+type GroupRequestIndex = Map.Map RunId (Value,GroupRequest)
 
-requestOrigins :: Service -> IO GroupOrigins
-requestOrigins s = do
+loadGroupRequestIndex :: Service -> IO GroupRequestIndex
+loadGroupRequestIndex s = do
  groups <- DB.values s DB.Groups
  requests <- forM groups $ \group -> do
   records <- readRequests group
   pure [(requestId request,(group,request)) | request <- records]
  pure (Map.fromListWith (\_ previous -> previous) (concat requests))
 
-checkedTurnContext :: GroupOrigins -> Turn -> Either Text ExecutionOrigin
+checkedTurnContext :: GroupRequestIndex -> Turn -> Either Text ExecutionOrigin
 checkedTurnContext requests turn = checkedOriginContext requests (turnId turn) (turnOrigin turn)
 
-checkedOriginContext :: GroupOrigins -> RunId -> StoredOrigin -> Either Text ExecutionOrigin
+checkedOriginContext :: GroupRequestIndex -> RunId -> StoredOrigin -> Either Text ExecutionOrigin
 checkedOriginContext requests identity stored = do
  actual <- checkedOrigin stored
  case Map.lookup identity requests of
@@ -188,7 +188,7 @@ requestReady target identity running state workloads projected =
 
 runGroup :: Service -> Run -> Turn -> IO (Text,[Value])
 runGroup s run turn = do
- parsed <- executionOrigin (turnOrigin turn)
+ parsed <- requireExecutionOrigin (turnOrigin turn)
  (context,isMemo) <- locked s $ do
   found <- findRequest s (turnId turn)
   (group,typed) <- maybe (failure 409 "Unknown Group call") pure found
@@ -341,7 +341,7 @@ policySetupRetry lead requests typed = do
 
 checkPolicyRetry :: Service -> Turn -> IO ()
 checkPolicyRetry s turn = do
- origin <- executionOrigin (turnOrigin turn)
+ origin <- requireExecutionOrigin (turnOrigin turn)
  forM_ ((,) <$> originGroup origin <*> originPolicyRoutine origin) $ \(groupId,_) -> do
   groupValue <- getGroup s (groupIdText groupId) True
   requests <- readRequests groupValue
@@ -378,7 +378,7 @@ actionGroup s gid rid action = do
     turn <- case find ((==RunId rid) . turnId) (agentTurns state) of
      Just active -> pure active
      Nothing -> do
-      origin <- readExecutionOrigin (get value "origin")
+      origin <- decodeExecutionOrigin (get value "origin")
       require (at value "agent" == owner && isJust (originPolicyRoutine origin)) 409 "Group call is no longer in the active conversation"
       archived <- retainedTurn s owner (RunId rid) >>= maybe (failure 409 "Retained setup turn is unavailable; ask the Group Lead to finish routine setup in chat") pure
       require (turnStatus archived == status && isJust (turnAttempt archived) && turnField archived "origin" == get value "origin") 409 "Retained setup turn does not match its saved history; ask the Group Lead to finish routine setup in chat"
