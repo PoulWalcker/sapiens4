@@ -2,7 +2,7 @@
 module Routines
  ( Minutes, Routine, routineSummaries, storeRoutine, initializeRoutines
  , MissedDuePolicy(..), RoutineEdit(..), save, setPolicy, setPaused, command, receipt, acknowledge, dispatch, restoreOccurrences
- , verifyPolicyPreparation
+ , verifyPolicyPreparation, ensureRetryAvailable
  ) where
 
 import Control.Monad
@@ -632,6 +632,23 @@ activeRun s db routine target dues = case [occurrenceId occurrence | Admitted oc
  [] -> case target of
   PersonalTarget _ -> activePersonal s db routine dues
   GroupTarget _ _ -> activeGroup db routine
+
+-- The caller holds the host lock through requeueing. A manual retry reserves
+-- the same Routine admission as an automatic occurrence, even while paused.
+ensureRetryAvailable :: Service -> Turn -> IO ()
+ensureRetryAvailable s turn = when (has origin "routine") $ do
+ sequenceId <- parseRoutineSequence (at origin "routine")
+ DB.connection s $ \db -> do
+  routine <- readRoutineOn db sequenceId
+  stored <- readDuesOn db routine
+  target <- maybe (failure 409 "Routine Run has no recorded admission") pure
+   (listToMaybe [occurrenceTarget occurrence | Admitted occurrence _ <- stored])
+  case target of
+   GroupTarget _ _ -> failure 409 "Start the current task revision from Work instead"
+   PersonalTarget _ -> do
+    active <- activeRun s db routine target stored
+    require (isNothing active) 409 "Another Run of this Routine is active; finish or stop it before retrying"
+ where origin=turnField turn "origin"
 
 occurrenceTurn :: ScheduledOccurrence -> Turn
 occurrenceTurn occurrence = newTurn (occurrenceId occurrence) Chat

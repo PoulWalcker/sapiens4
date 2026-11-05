@@ -115,6 +115,8 @@ turnAction s a identity rawAction = do
  require (not (maybe False (any ((==Just (RunId identity)) . D.callParent) . D.workCalls . fst) work)) 409 "This request was delegated; use the recipient call controls"
  runs <- readMVar (serviceRuns s)
  change <- turnResult (controlTurn action (M.member (batchLeader turn) runs) turn restored)
+ when (action == Retry) $ mapM_ (R.ensureRetryAvailable s)
+  [member | member <- agentTurns restored, batchLeader member == batchLeader turn]
  case change of
   SaveTurns changed -> saveState s a changed
   StopTurn identity -> forM_ (M.lookup identity runs) $ \run -> writeIORef (runCancel run) True
