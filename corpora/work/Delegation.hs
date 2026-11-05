@@ -106,26 +106,90 @@ setWorkField key value work = work { workFields = KM.insert (Data.Aeson.Key.from
 readWorks :: Service -> IO [Workload]
 readWorks s = DB.values s DB.Workloads >>= traverse (decodeValue 500)
 
-data TaskSpec = TaskSpec { specObjective :: Text, specInputs :: [Text], specOutputs :: NonEmpty Text, specCriteria :: NonEmpty Text } deriving (Eq, Show)
-instance FromJSON TaskSpec where
+newtype CriterionId = CriterionId { criterionIdText :: Text } deriving (Eq, Ord, Show)
+instance FromJSON CriterionId where
  parseJSON value = do
-  onlyFields ["objective","inputs","expectedOutputs","completionCriteria"] value
-  void (textFieldP "objective" 16000 value)
-  let nonempty key = stringsP key True (get value key) >>= maybe (fail "Expected at least one item") pure . NE.nonEmpty
-  TaskSpec <$> parseJSON (get value "objective") <*> stringsP "inputs" False (get value "inputs") <*> nonempty "expectedOutputs" <*> nonempty "completionCriteria"
+  identity <- parseJSON value
+  unless (not (T.null identity) && T.length identity <= 64 && T.all (\c -> c `elem` ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" :: String)) identity) (fail "Criterion ID must contain 1–64 letters, digits, _ or -")
+  pure (CriterionId identity)
+instance ToJSON CriterionId where toJSON = str . criterionIdText
+newtype Requirement = Requirement { requirementText :: Text } deriving (Eq, Show)
+newtype Condition = Condition { conditionText :: Text } deriving (Eq, Show)
+data CompletionCriterion = Required CriterionId Requirement | Conditional CriterionId Condition Requirement deriving (Eq, Show)
+criterionId :: CompletionCriterion -> CriterionId
+criterionId criterion = case criterion of Required identity _ -> identity; Conditional identity _ _ -> identity
+instance FromJSON CompletionCriterion where
+ parseJSON value = do
+  onlyFields ["id","requirement","applicability"] value
+  identity <- parseJSON (get value "id")
+  requirement <- Requirement <$> textFieldP "requirement" 16000 value
+  let applicability=get value "applicability"
+  case at applicability "kind" of
+   "Required" -> onlyFields ["kind"] applicability >> pure (Required identity requirement)
+   "Conditional" -> do
+    onlyFields ["kind","condition"] applicability
+    condition <- Condition <$> textFieldP "condition" 16000 applicability
+    pure (Conditional identity condition requirement)
+   _ -> fail "Applicability must be Required or Conditional"
+instance ToJSON CompletionCriterion where
+ toJSON criterion = case criterion of
+  Required identity requirement -> fields identity requirement (obj [("kind",str "Required")])
+  Conditional identity condition requirement -> fields identity requirement (obj [("kind",str "Conditional"),("condition",str (conditionText condition))])
+  where fields identity requirement applicability = obj [("id",toJSON identity),("requirement",str (requirementText requirement)),("applicability",applicability)]
+data TaskSpec = TaskSpec { specObjective :: Text, specInputs :: [Text], specOutputs :: NonEmpty Text, specCriteria :: NonEmpty CompletionCriterion } deriving (Eq, Show)
+parseTaskSpec :: (Value -> Parser [CompletionCriterion]) -> Value -> Parser TaskSpec
+parseTaskSpec parseCriteria value = do
+ onlyFields ["objective","inputs","expectedOutputs","completionCriteria"] value
+ objective <- textFieldP "objective" 16000 value
+ inputs <- stringsP "inputs" False (get value "inputs")
+ outputs <- stringsP "expectedOutputs" True (get value "expectedOutputs") >>= maybe (fail "Expected at least one output") pure . NE.nonEmpty
+ criteria <- parseCriteria (get value "completionCriteria") >>= maybe (fail "Expected at least one criterion") pure . NE.nonEmpty
+ let ids=map criterionId (NE.toList criteria)
+ unless (length ids <= 50 && length ids == length (nub ids)) (fail "Completion criteria require unique IDs and at most 50 entries")
+ pure (TaskSpec objective inputs outputs criteria)
+instance FromJSON TaskSpec where parseJSON = parseTaskSpec parseJSON
 instance ToJSON TaskSpec where
  toJSON spec = obj [("objective",str (specObjective spec)),("inputs",toJSON (specInputs spec)),("expectedOutputs",toJSON (NE.toList (specOutputs spec))),("completionCriteria",toJSON (NE.toList (specCriteria spec)))]
+parseStoredTaskSpec :: Value -> Parser TaskSpec
+parseStoredTaskSpec value = parseTaskSpec storedCriteria value
+ where
+ storedCriteria raw = do
+  rows <- parseJSON raw :: Parser [Value]
+  case rows of
+   String _ : _ -> do
+    legacy <- stringsP "completionCriteria" True raw
+    pure [let identity=CriterionId ("legacy_"<>T.pack (show index)); requirement=Requirement item; normalized=T.toCaseFold (T.stripStart item)
+          in if any (`T.isPrefixOf` normalized) ["if ","если "] then Conditional identity (Condition item) requirement else Required identity requirement
+         | (index,item)<-zip [(1::Int)..] legacy]
+   _ -> traverse parseJSON rows
 data OutcomeStatus = Completed | Unresolved deriving (Eq, Ord, Show, Enum, Bounded)
 instance Wire OutcomeStatus where wireName status = case status of Completed -> "Completed"; Unresolved -> "Unresolved"
 instance FromJSON OutcomeStatus where parseJSON = parseWire
 instance ToJSON OutcomeStatus where toJSON = str . wireName
-data Outcome = Outcome { outcomeStatus :: OutcomeStatus, satisfiedCriteria :: [Text], outcomeArtifacts :: [Text], notApplicable :: M.Map Text Text } deriving (Eq, Show)
+data CriterionResult = Satisfied CriterionId Text | NotApplicable CriterionId Text deriving (Eq, Show)
+resultId :: CriterionResult -> CriterionId
+resultId result = case result of Satisfied identity _ -> identity; NotApplicable identity _ -> identity
+instance FromJSON CriterionResult where
+ parseJSON value = do
+  onlyFields ["id","result","evidence"] value
+  identity <- parseJSON (get value "id")
+  evidence <- textFieldP "evidence" 4000 value
+  case at value "result" of
+   "Satisfied" -> pure (Satisfied identity evidence)
+   "NotApplicable" -> pure (NotApplicable identity evidence)
+   _ -> fail "Criterion result must be Satisfied or NotApplicable"
+instance ToJSON CriterionResult where
+ toJSON result = case result of
+  Satisfied identity evidence -> fields identity "Satisfied" evidence
+  NotApplicable identity evidence -> fields identity "NotApplicable" evidence
+  where fields identity kind evidence = obj [("id",toJSON identity),("result",str kind),("evidence",str evidence)]
+data Outcome = Outcome { outcomeStatus :: OutcomeStatus, outcomeResults :: [CriterionResult], outcomeArtifacts :: [Text] } deriving (Eq, Show)
 instance FromJSON Outcome where
  parseJSON value = do
-  onlyFields ["status","satisfiedCriteria","artifacts","notApplicableCriteria"] value
-  skipped <- parseJSON (get value "notApplicableCriteria" `fallback` empty)
-  forM_ (M.elems skipped) $ \reason -> void (textFieldP "reason" 4000 (obj [("reason",str reason)]))
-  Outcome <$> parseJSON (get value "status") <*> stringsP "satisfiedCriteria" False (get value "satisfiedCriteria") <*> stringsP "artifacts" False (get value "artifacts") <*> pure skipped
+  onlyFields ["status","criterionResults","artifacts"] value
+  Outcome <$> parseJSON (get value "status") <*> parseJSON (get value "criterionResults") <*> stringsP "artifacts" False (get value "artifacts")
+instance ToJSON Outcome where
+ toJSON outcome = obj [("status",toJSON (outcomeStatus outcome)),("criterionResults",toJSON (outcomeResults outcome)),("artifacts",toJSON (outcomeArtifacts outcome))]
 
 data Decision
  = ReplyNow Text | ExecuteTask | OutsideSpecialization | SelectSpecialist Text
@@ -206,30 +270,30 @@ saveWork s w = do
  DB.putValue s DB.Workloads (workloadId w) (toJSON w)
 withCall :: Workload -> WorkCall -> Workload
 withCall w c = w { workCalls = fmap (\x -> if callIdentity x == callIdentity c then c else x) (workCalls w) }
-data OutcomeError = InvalidSkippedCriterion | MissingCompletionEvidence deriving (Eq, Show)
+data OutcomeError = UnknownCriterion | DuplicateCriterionResult | InvalidSkippedCriterion | MissingCompletionEvidence deriving (Eq, Show)
 outcomeError :: OutcomeError -> Text
 outcomeError problem = case problem of
+ UnknownCriterion -> "Outcome references a criterion outside the accepted Task"
+ DuplicateCriterionResult -> "Outcome reports the same criterion more than once"
  InvalidSkippedCriterion -> "Only an unsatisfied, explicitly conditional criterion can be not applicable"
  MissingCompletionEvidence -> "Completed outcome requires evidence for all applicable completion criteria"
-data CompletionCriterion = RequiredCriterion Text | ConditionalCriterion Text deriving (Eq, Show)
-completionCriterion :: Text -> CompletionCriterion
-completionCriterion criterion
- | any (`T.isPrefixOf` T.toCaseFold (T.stripStart criterion)) ["if ","если "] = ConditionalCriterion criterion
- | otherwise = RequiredCriterion criterion
-validateOutcome :: DecisionResponse -> Outcome -> [Text] -> Either OutcomeError ()
-validateOutcome response outcome criteria
- | any invalidSkip skipped = Left InvalidSkippedCriterion
- | outcomeStatus outcome == Completed && (null (decisionEvidence response) || any (`notElem` covered) criteria) = Left MissingCompletionEvidence
- | otherwise = Right ()
+newtype VerifiedOutcome = VerifiedOutcome Outcome deriving (Eq, Show)
+validateOutcome :: DecisionResponse -> Outcome -> TaskSpec -> Either OutcomeError VerifiedOutcome
+validateOutcome response outcome spec
+ | any (`notElem` acceptedIds) reportedIds = Left UnknownCriterion
+ | length reportedIds /= length (nub reportedIds) = Left DuplicateCriterionResult
+ | any invalidSkip (outcomeResults outcome) = Left InvalidSkippedCriterion
+ | outcomeStatus outcome == Completed && (null (decisionEvidence response) || any (`notElem` reportedIds) acceptedIds) = Left MissingCompletionEvidence
+ | otherwise = Right (VerifiedOutcome outcome)
  where
- skipped = M.keys (notApplicable outcome)
- covered = satisfiedCriteria outcome ++ skipped
- invalidSkip criterion = criterion `elem` satisfiedCriteria outcome || case find ((==criterion) . criterionText) (map completionCriterion criteria) of
-  Just (ConditionalCriterion _) -> False
-  _ -> True
- criterionText form = case form of
-  RequiredCriterion value -> value
-  ConditionalCriterion value -> value
+ criteria=NE.toList (specCriteria spec)
+ acceptedIds=map criterionId criteria
+ reportedIds=map resultId (outcomeResults outcome)
+ invalidSkip result = case result of
+  Satisfied _ _ -> False
+  NotApplicable identity _ -> case find ((==identity) . criterionId) criteria of
+   Just (Conditional _ _ _) -> False
+   _ -> True
 begin :: Service -> AgentId -> Turn -> IO ()
 begin s a turn = do
  found <- findWork s (turnId turn)
@@ -265,6 +329,7 @@ decide s run turn state node logs = do
  (rendered,record) <- locked s $ do
   source <- templates s >>= maybe (failure 400 "Unknown decision node") pure . find ((==toJSON node) . (`get` "node"))
   (w,c) <- getWork s (turnId turn)
+  accepted <- either decisionFailure pure (acceptedTaskSpec w)
   conv <- conversation s (runOwner run) turn state
   chief <- DB.mainAgent s
   members <- team s
@@ -273,7 +338,8 @@ decide s run turn state node logs = do
   wiki <- prompt s "notes-wiki"
   envelope <- prompt s "decision-envelope"
   let instruction = at source "content" <> extra <> scheduled
-      context = obj [("originalIntent",workField w "originalIntent"),("task",workField w "task"),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
+      task=maybe (workField w "task") (\spec -> put "specification" (toJSON spec) (workField w "task")) accepted
+      context = obj [("originalIntent",workField w "originalIntent"),("task",task),("tracked",Bool (workTracked w)),("currentCall",toJSON c),("selfId",str (agentIdText (runOwner run))),("chiefId",str chief),("team",arr members),("routingHistory",arr [select ["callId","addressedTo","node"] (toJSON call) | call <- NE.toList (workCalls w)]),("conversation",conv),("observation",callField c "observation")]
       rendered = render envelope [("node",wireName node),("instruction",instruction),("notes_wiki",render wiki [("notes_example",T.pack (repositoryRoot s </> "corpora/prompts/examples/jarvis-notes.html"))]),("context",jsonText context),("events",T.intercalate ", " (sort (eventsFor node)))]
   (model,effort) <- modelDefaults
   policy <- executionSettings s (agentIdText (runOwner run))
@@ -384,21 +450,25 @@ advanceDecision chief response work call = case decisionBody response of
  SpecifySapi name role
   | callOwner call /= chief -> Left OnlyChiefCreates
   | otherwise -> Right (EnsureSpecialist name role)
- PrepareTask taskType spec
-  | any (`notElem` map str (NE.toList (specCriteria spec))) acceptedCriteria -> Left CriteriaRemoved
-  | otherwise ->
-     let task=mergeFields [("taskType",str (if has (workField work "origin") "routine" then "automated" else taskType)),("specification",toJSON spec)] (workField work "task")
-     in Right (finish (setWorkField "task" task work) (RunningAt Execution))
+ PrepareTask taskType spec -> do
+   accepted <- acceptedTaskSpec work
+   let inherited=maybe [] (NE.toList . specCriteria) accepted
+   unless (all (`elem` NE.toList (specCriteria spec)) inherited) (Left CriteriaRemoved)
+   let task=mergeFields [("taskType",str (if has (workField work "origin") "routine" then "automated" else taskType)),("specification",toJSON spec)] (workField work "task")
+   Right (finish (setWorkField "task" task work) (RunningAt Execution))
  Handoff request -> Right (DelegateRequest request)
  ReportOutcome reply outcome -> do
-  criteria <- B.first (InvalidAcceptedTask . T.pack) (parseEither parseJSON (get (get (workField work "task") "specification") "completionCriteria"))
-  B.first InvalidOutcome (validateOutcome response outcome criteria)
-  let saved=mergeFields [("reply",str reply),("evidence",toJSON (decisionEvidence response)),("author",toJSON (callOwner call))] (get (decisionRaw response) "outcome")
+  spec <- acceptedTaskSpec work >>= maybe (Left (InvalidAcceptedTask "Task has no accepted specification")) Right
+  VerifiedOutcome verified <- B.first InvalidOutcome (validateOutcome response outcome spec)
+  let saved=mergeFields [("reply",str reply),("evidence",toJSON (decisionEvidence response)),("author",toJSON (callOwner call))] (toJSON verified)
       result=case outcomeStatus outcome of Completed -> Answered reply; Unresolved -> UnresolvedResult reply
   pure (finish (setWorkField "outcome" saved work) (FinishedCall result))
  where
  finish changed progress = SaveDecision changed (call { callProgress=progress })
- acceptedCriteria = items (get (workField work "task") "specification") "completionCriteria"
+acceptedTaskSpec :: Workload -> Either DecisionError (Maybe TaskSpec)
+acceptedTaskSpec work = case get (workField work "task") "specification" of
+ Null -> Right Nothing
+ value -> Just <$> B.first (InvalidAcceptedTask . T.pack) (parseEither parseStoredTaskSpec value)
 
 decisionFailure :: DecisionError -> IO a
 decisionFailure problem = case problem of
