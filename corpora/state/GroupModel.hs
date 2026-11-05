@@ -16,7 +16,7 @@ import qualified Population as Population
 import Memo
 
 data GroupRecord = GroupRecord
- { groupIdentity :: Text, groupRoster :: GroupRoster, groupRevision :: Int
+ { groupIdentity :: GroupId, groupRoster :: GroupRoster, groupRevision :: Int
  , groupArchived :: Bool, groupFields :: Object
  }
 instance FromJSON GroupRecord where
@@ -27,7 +27,7 @@ instance FromJSON GroupRecord where
   GroupRecord <$> o .: "id" <*> pure roster <*> o .: "revision" <*> o .: "archived"
     <*> pure (foldr KM.delete o ["id","lead","members","revision","archived"])
 instance ToJSON GroupRecord where
- toJSON group = mergeFields [("id",str (groupIdentity group)),("lead",toJSON (rosterLead (groupRoster group))),
+ toJSON group = mergeFields [("id",toJSON (groupIdentity group)),("lead",toJSON (rosterLead (groupRoster group))),
   ("members",toJSON (rosterMembers (groupRoster group))),("revision",num (groupRevision group)),("archived",Bool (groupArchived group))] (Object (groupFields group))
 
 data GroupRequest = GroupRequest
@@ -49,7 +49,7 @@ getGroup s gid active = do
 storeGroup :: Service -> Value -> IO ()
 storeGroup s raw = do
  group <- decodeValue 500 raw
- DB.putValue s DB.Groups (groupIdentity group) (toJSON group)
+ DB.putValue s DB.Groups (groupIdText (groupIdentity group)) (toJSON group)
 append :: Text -> Value -> Value -> Value
 append key value = appendItems key [value]
 replace :: Text -> Value -> Value -> Value

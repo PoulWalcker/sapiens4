@@ -3,7 +3,8 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 -- Pure domain data and codecs shared by the host and native shells.
 module Domain
- ( Wire(..), AgentId(..), TaskId(..), RunId(..), parseWire, TurnStatus(..), Flow(..)
+ ( Wire(..), AgentId(..), GroupId, groupIdText, RoutineId, routineIdText, routineIdSequence, parseRoutineId
+ , TaskId(..), RunId(..), parseWire, TurnStatus(..), Flow(..)
  , ExecutionMode(..), ExecutionSettings(..), CorporaStatus(..), CorporaConfig(..), Frequency(..)
  , periodMillis, Pulse(..), pulseIdentity, TaskState(..), GroupAccess(..), BrowserAction(..)
  , BrowserCommand(..), BrowserTransition(..), browserTransition, TurnAction(..), Turn(..)
@@ -23,6 +24,7 @@ import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
 import Data.Char (isAscii, isAlphaNum)
+import Data.Int (Int64)
 import Data.List (find, nub)
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.List.NonEmpty as NE
@@ -33,10 +35,32 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
+import Text.Read (readMaybe)
 
 newtype AgentId = AgentId { agentIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
 newtype TaskId = TaskId { taskIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
 newtype RunId = RunId { runIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
+
+newtype GroupId = GroupId Text deriving (Eq, Ord, Show)
+groupIdText :: GroupId -> Text
+groupIdText (GroupId identity) = identity
+instance FromJSON GroupId where
+ parseJSON = withText "Group ID" $ \identity -> case T.stripPrefix "group_" identity of
+  Just suffix | not (T.null suffix) -> pure (GroupId identity)
+  _ -> fail "Invalid Group ID"
+instance ToJSON GroupId where toJSON = String . groupIdText
+
+-- Keep the original spelling: it participates in deterministic occurrence IDs.
+data RoutineId = RoutineId Text Int64 deriving (Eq, Ord, Show)
+routineIdText :: RoutineId -> Text
+routineIdText (RoutineId identity _) = identity
+routineIdSequence :: RoutineId -> Int64
+routineIdSequence (RoutineId _ sequenceId) = sequenceId
+parseRoutineId :: Text -> Maybe RoutineId
+parseRoutineId identity = RoutineId identity <$> (T.stripPrefix "routine_sch_" identity >>= readMaybe . T.unpack)
+instance FromJSON RoutineId where
+ parseJSON = withText "Scheduled Routine ID" $ maybe (fail "Invalid scheduled routine ID") pure . parseRoutineId
+instance ToJSON RoutineId where toJSON = String . routineIdText
 
 -- Wire spellings live at the codec boundary; domain code matches constructors.
 class (Eq a, Enum a, Bounded a) => Wire a where

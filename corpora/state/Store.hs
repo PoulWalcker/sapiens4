@@ -5,7 +5,6 @@ import Control.Exception
 import Control.Concurrent.MVar
 import Control.Monad
 import Data.Aeson hiding (pairs)
-import Data.Int
 import Data.List (nub,find)
 import qualified Data.Map.Strict as M
 import Data.Maybe
@@ -16,7 +15,6 @@ import qualified Data.Text.Encoding
 import Database.SQLite.Simple hiding (withTransaction)
 import qualified Database.SQLite.Simple as SQLite
 import System.FilePath
-import Text.Read (readMaybe)
 import qualified Data.List.NonEmpty as NE
 import Types
 
@@ -193,7 +191,7 @@ saveRoutine :: Service -> Value -> IO Value
 saveRoutine s v = connection s $ \db -> saveRoutineOn db v
 saveRoutineOn :: Connection -> Value -> IO Value
 saveRoutineOn db v = do
- sequenceId <- if has v "id" then maybe (failure 500 "Invalid scheduled routine ID") pure (T.stripPrefix "routine_sch_" (at v "id") >>= readMaybe . T.unpack :: Maybe Int64) else execute_ db "INSERT INTO scheduled_routines(value) VALUES ('{}')" >> lastInsertRowId db
+ sequenceId <- if has v "id" then maybe (failure 500 "Invalid scheduled routine ID") (pure . routineIdSequence) (parseRoutineId (at v "id")) else execute_ db "INSERT INTO scheduled_routines(value) VALUES ('{}')" >> lastInsertRowId db
  let i = "routine_sch_" <> T.justifyRight 5 '0' (T.pack (show sequenceId)); value = put "id" (str i) v
  execute db "UPDATE scheduled_routines SET value=? WHERE sequence=?" (jsonText value,sequenceId)
  pure value
