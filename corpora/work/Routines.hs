@@ -14,7 +14,6 @@ import Data.Aeson.Types (Parser)
 import qualified Data.Aeson.KeyMap as KM
 import Data.List (find, nub, sortOn)
 import qualified Data.List.NonEmpty as NE
-import qualified Data.Map.Strict as M
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -577,21 +576,20 @@ readDuesOn db routine = do
 activePersonal :: Service -> SQL.Connection -> Routine -> [StoredDue] -> IO (Maybe RunId)
 activePersonal s db routine dues = do
  state <- agentState s (routineOwner routine)
- workRows <- DB.queryRowsOn db "SELECT id,value FROM workloads" ["id","value"] []
- turnRows <- DB.queryRowsOn db "SELECT id,status FROM turns" ["id","status"] []
  let matching turn = get (turnField turn "origin") "routine" == str (routineId routine)
      turns = filter matching (agentTurns state)
      admitted = [occurrenceId occurrence | Admitted occurrence _ <- dues]
      identities = nub (admitted ++ map turnId turns)
-     works = M.fromList [(at row "id",row) | row<-workRows]
-     projected = M.fromList [(at row "id",row) | row<-turnRows]
- active <- filterM (activeIdentity turns works projected) identities
+ active <- filterM (activeIdentity turns) identities
  pure (case active of i:_ -> Just i; [] -> Nothing)
  where
- activeIdentity turns works projected identity = do
+ activeIdentity turns identity = do
   let inState = find ((==identity) . turnId) turns
-  work <- traverse (DB.decodeStored . (`at` "value")) (M.lookup (runIdText identity) works) :: IO (Maybe D.Workload)
-  status <- traverse (\row -> decodeValue 500 (get row "status")) (M.lookup (runIdText identity) projected) :: IO (Maybe TurnStatus)
+      key = [SQL.SQLText (runIdText identity)]
+  workRows <- DB.queryRowsOn db "SELECT value FROM workloads WHERE id=?" ["value"] key
+  turnRows <- DB.queryRowsOn db "SELECT status FROM turns WHERE id=?" ["status"] key
+  work <- traverse (DB.decodeStored . (`at` "value")) (listToMaybe workRows) :: IO (Maybe D.Workload)
+  status <- traverse (\row -> decodeValue 500 (get row "status")) (listToMaybe turnRows) :: IO (Maybe TurnStatus)
   let liveCall = case work of
        Just w -> D.callState (NE.last (D.workCalls w)) `elem`
         [D.CallQueued,D.CallRunning,D.CallDelegated,D.CallWaiting]
