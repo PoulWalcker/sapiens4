@@ -1,4 +1,5 @@
 require 'yaml'
+require 'sqlite3'
 
 RSpec.describe 'Delegation and completion contracts' do
   before { host.configure(mode: 'Exec') }
@@ -12,6 +13,18 @@ RSpec.describe 'Delegation and completion contracts' do
       "#{chief}:Assessing" => {response: decision('OutsideSpecialization')},
       'ChiefTriage' => {response: decision('SpecialistSelected', target: target)}
     }.merge(rules))
+  end
+
+  def required(id, requirement)
+    {id: id, requirement: requirement, applicability: {kind: 'Required'}}
+  end
+
+  def conditional(id, condition, requirement)
+    {id: id, requirement: requirement, applicability: {kind: 'Conditional', condition: condition}}
+  end
+
+  def result(id, kind, evidence)
+    {id: id, result: kind, evidence: evidence}
   end
 
   it 'delegates once, attributes the result, and preserves the complete audit after restart' do
@@ -108,6 +121,88 @@ RSpec.describe 'Delegation and completion contracts' do
     expect(host.calls.map { |call| call['node'] }).to eq(%w[Assessing ReadyToWork])
   end
 
+  it 'rejects duplicate criterion IDs before execution' do
+    criteria = [required('same', 'Read the source.'), conditional('same', 'The source exists.', 'Report it.')]
+    host.configure(rules: {'ReadyToWork' => {response: decision('TaskPrepared', taskType: 'research', specification: {
+      objective: 'Read the source', inputs: [], expectedOutputs: ['Report'], completionCriteria: criteria})}})
+    host.turn(host.submit(chief), 'failed')
+    expect(host.calls.map { |call| call['node'] }).to eq(%w[Assessing ReadyToWork])
+    expect(tasks.first['execution']['state']).to eq('Failed')
+  end
+
+  it 'preserves a criterion and its applicability across a handoff' do
+    researcher = host.agent
+    accepted = [conditional('review', 'A source is available.', 'Review that source.')]
+    weakened = [required('review', 'Review that source.')]
+    host.configure(rules: {
+      "#{chief}:ReadyToWork" => {response: decision('TaskPrepared', taskType: 'research', specification: {
+        objective: 'Review a source', inputs: [], expectedOutputs: ['Report'], completionCriteria: accepted})},
+      "#{chief}:Execution" => {response: decision('OutsideSpecialization')},
+      'ChiefTriage' => {response: decision('SpecialistSelected', target: researcher)},
+      "#{researcher}:ReadyToWork" => {response: decision('TaskPrepared', taskType: 'research', specification: {
+        objective: 'Review a source', inputs: [], expectedOutputs: ['Report'], completionCriteria: weakened})}})
+    host.submit(chief)
+    host.idle
+    task = tasks.first
+    expect(task['calls'].last).to include('addressedTo' => researcher, 'state' => 'Failed')
+    expect(task['calls'].last['error']).to include('cannot remove accepted completion criteria')
+    expect(task['task']['specification']['completionCriteria']).to eq(JSON.parse(JSON.generate(accepted)))
+    expect(task['decisions'].map { |d| d['node'] }).to include('Delegation', 'ReadyToWork')
+  end
+
+  it 're-prepares a legacy task on retry and keeps the original decision audit' do
+    host.configure(rules: {'Execution' => {response: decision('Outcome', reply: 'Incomplete', outcome: {
+      status: 'Completed', criterionResults: [], artifacts: []})}})
+    id = host.submit(chief)
+    host.turn(id, 'failed')
+    before = tasks.first['decisions'].map { |entry| entry['decisionId'] }
+    host.stop
+    SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+      saved = JSON.parse(db.get_first_value('SELECT value FROM workloads WHERE id=?', [id]))
+      saved['task']['specification']['completionCriteria'] = ['If a source is available, review it.']
+      db.execute('UPDATE workloads SET value=? WHERE id=?', [JSON.generate(saved), id])
+    end
+    host.start
+    replacement = [conditional('review', 'A source is available.', 'Review it.')]
+    host.configure(rules: {
+      'ReadyToWork' => {response: decision('TaskPrepared', taskType: 'research', specification: {
+        objective: 'Review a source', inputs: [], expectedOutputs: ['Report'], completionCriteria: replacement})},
+      'Execution' => {response: decision('Outcome', reply: 'Source unavailable', outcome: {
+        status: 'Completed', criterionResults: [result('review', 'NotApplicable', 'No source is available.')], artifacts: []})}})
+    host.api('POST', "/api/agents/#{chief}/turns/#{id}/retry", {})
+    host.turn(id, 'done')
+    task = tasks.first
+    expect(task['task']['specification']['completionCriteria']).to eq(JSON.parse(JSON.generate(replacement)))
+    expect(task['task']['legacySpecification']['completionCriteria']).to eq(['If a source is available, review it.'])
+    expect(task['decisions'].first(before.size).map { |entry| entry['decisionId'] }).to eq(before)
+    expect(task['decisions'].last(2).map { |entry| entry['node'] }).to eq(%w[ReadyToWork Execution])
+    expect(host.calls.last(2).map { |call| call['node'] }).to eq(%w[ReadyToWork Execution])
+  end
+
+  it 'reports an ambiguous legacy task as unresolved without retrying the old execution' do
+    host.configure(rules: {'Execution' => {response: decision('Outcome', reply: 'Incomplete', outcome: {
+      status: 'Completed', criterionResults: [], artifacts: []})}})
+    id = host.submit(chief)
+    host.turn(id, 'failed')
+    host.stop
+    legacy = 'Si une source existe, examine-la; sinon demande une précision.'
+    SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+      saved = JSON.parse(db.get_first_value('SELECT value FROM workloads WHERE id=?', [id]))
+      saved['task']['specification']['completionCriteria'] = [legacy]
+      db.execute('UPDATE workloads SET value=? WHERE id=?', [JSON.generate(saved), id])
+    end
+    host.start
+    host.configure(rules: {'ReadyToWork' => {response: decision('TaskUnresolved', reply: 'Please restate the legacy condition.')}})
+    host.api('POST', "/api/agents/#{chief}/turns/#{id}/retry", {})
+    host.turn(id, 'done')
+    task = tasks.first
+    expect(task['execution']['state']).to eq('Unresolved')
+    expect(task['task']['specification']['completionCriteria']).to eq([legacy])
+    expect(task['calls'].size).to eq(1)
+    expect(host.calls.last['node']).to eq('ReadyToWork')
+    expect(task['decisions'].last).to include('accepted' => true, 'node' => 'ReadyToWork')
+  end
+
   it 'prevents a delegated recipient from reporting completion without an accepted task' do
     researcher = host.agent
     route_to(researcher, "#{researcher}:Assessing" => {response: decision('FitsSpecialization', mode: 'Repl', reply: 'Done')})
@@ -159,23 +254,29 @@ RSpec.describe 'Delegation and completion contracts' do
     expect(tasks.first['calls'].size).to eq(2)
   end
 
-  criteria = ['Read the collection.', 'If a joke is found, save it.', 'If no joke is found, report that.', 'Leave Memo unchanged.']
+  criteria = [
+    {id: 'read', requirement: 'Read the collection.', applicability: {kind: 'Required'}},
+    {id: 'save', requirement: 'Save the joke.', applicability: {kind: 'Conditional', condition: 'A joke is found.'}},
+    {id: 'report', requirement: 'Report that no joke was found.', applicability: {kind: 'Conditional', condition: 'No joke is found.'}},
+    {id: 'memo', requirement: 'Leave Memo unchanged.', applicability: {kind: 'Required'}}
+  ]
+  criterion_result = ->(id, kind, evidence) { {id: id, result: kind, evidence: evidence} }
   {
-    'verified positive branch' => [[criteria[0], criteria[1], criteria[3]], {criteria[2] => 'Found a joke'}, ['Saved artifact'], 'done'],
-    'verified fallback branch' => [[criteria[0], criteria[2], criteria[3]], {criteria[1] => 'Nothing found'}, ['Search record'], 'done'],
-    'missing unconditional requirement' => [[criteria[1], criteria[3]], {criteria[2] => 'Found a joke'}, ['Saved artifact'], 'failed'],
-    'missing evidence' => [criteria, {}, [], 'failed'],
-    'skipping unconditional requirement' => [[criteria[1], criteria[2], criteria[3]], {criteria[0] => 'Not needed'}, ['Evidence'], 'failed'],
-    'unknown condition' => [criteria, {'If unknown, skip' => 'Not needed'}, ['Evidence'], 'failed'],
-    'empty skip reason' => [[criteria[0], criteria[1], criteria[3]], {criteria[2] => ''}, ['Evidence'], 'failed'],
-    'both satisfied and skipped' => [criteria, {criteria[2] => 'Not needed'}, ['Evidence'], 'failed']
-  }.each do |behavior, (satisfied, skipped, evidence, status)|
+    'verified positive branch' => [[criterion_result.call('read', 'Satisfied', 'Read the collection.'), criterion_result.call('save', 'Satisfied', 'Saved the joke.'), criterion_result.call('report', 'NotApplicable', 'A joke was found.'), criterion_result.call('memo', 'Satisfied', 'Memo was unchanged.')], ['Saved artifact'], 'done'],
+    'verified fallback branch' => [[criterion_result.call('read', 'Satisfied', 'Read the collection.'), criterion_result.call('save', 'NotApplicable', 'Nothing found.'), criterion_result.call('report', 'Satisfied', 'Reported the empty search.'), criterion_result.call('memo', 'Satisfied', 'Memo was unchanged.')], ['Search record'], 'done'],
+    'missing required result' => [[criterion_result.call('save', 'Satisfied', 'Saved the joke.'), criterion_result.call('report', 'NotApplicable', 'A joke was found.'), criterion_result.call('memo', 'Satisfied', 'Memo was unchanged.')], ['Saved artifact'], 'failed'],
+    'missing overall evidence' => [[criterion_result.call('read', 'Satisfied', 'Read the collection.'), criterion_result.call('save', 'Satisfied', 'Saved the joke.'), criterion_result.call('report', 'NotApplicable', 'A joke was found.'), criterion_result.call('memo', 'Satisfied', 'Memo was unchanged.')], [], 'failed'],
+    'skipping a required result' => [[criterion_result.call('read', 'NotApplicable', 'Not needed.'), criterion_result.call('save', 'Satisfied', 'Saved the joke.'), criterion_result.call('report', 'NotApplicable', 'A joke was found.'), criterion_result.call('memo', 'Satisfied', 'Memo was unchanged.')], ['Evidence'], 'failed'],
+    'unknown result ID' => [[criterion_result.call('read', 'Satisfied', 'Read the collection.'), criterion_result.call('save', 'Satisfied', 'Saved the joke.'), criterion_result.call('report', 'NotApplicable', 'A joke was found.'), criterion_result.call('memo', 'Satisfied', 'Memo was unchanged.'), criterion_result.call('unknown', 'NotApplicable', 'Not needed.')], ['Evidence'], 'failed'],
+    'empty result evidence' => [[criterion_result.call('read', 'Satisfied', 'Read the collection.'), criterion_result.call('save', 'Satisfied', 'Saved the joke.'), criterion_result.call('report', 'NotApplicable', ''), criterion_result.call('memo', 'Satisfied', 'Memo was unchanged.')], ['Evidence'], 'failed'],
+    'duplicate result ID' => [[criterion_result.call('read', 'Satisfied', 'Read the collection.'), criterion_result.call('read', 'NotApplicable', 'Not needed.'), criterion_result.call('save', 'Satisfied', 'Saved the joke.'), criterion_result.call('report', 'NotApplicable', 'A joke was found.'), criterion_result.call('memo', 'Satisfied', 'Memo was unchanged.')], ['Evidence'], 'failed']
+  }.each do |behavior, (results, evidence, status)|
     it "validates completion through the service: #{behavior}" do
       host.configure(rules: {
         'ReadyToWork' => {response: decision('TaskPrepared', taskType: 'research', specification: {
           objective: 'Find a joke 😎\n"quoted"', inputs: [], expectedOutputs: ['Report'], completionCriteria: criteria})},
         'Execution' => {response: decision('Outcome', evidence: evidence, reply: 'Finished', outcome: {
-          status: 'Completed', satisfiedCriteria: satisfied, notApplicableCriteria: skipped, artifacts: []})}})
+          status: 'Completed', criterionResults: results, artifacts: []})}})
       id = host.submit(chief)
       host.turn(id, status)
       task = tasks.first

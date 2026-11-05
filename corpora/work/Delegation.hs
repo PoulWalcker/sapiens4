@@ -1,7 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Delegation where
+module Delegation
+ ( WorkCall(..), Workload(..), CallState(..), CallProgress(..), PreparedSpecialist(..)
+ , callState, callNode, begin, getWork, findWork, readWorks, saveWork, withCall, workItems
+ , exceptionText, reconcileWorks, pendingWorks, runDecision, applyDecision, clarify
+ , templates, editTemplate, workTasks, taskList, workSummaries
+ ) where
 
 import Control.Concurrent
 import qualified Data.Map.Strict as M
@@ -16,6 +21,7 @@ import qualified Data.Aeson.Key
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.ByteString as BS
+import Data.Foldable (toList)
 import Data.IORef
 import Data.List (find,nub,sort)
 import Data.Maybe
@@ -150,18 +156,6 @@ parseTaskSpec parseCriteria value = do
 instance FromJSON TaskSpec where parseJSON = parseTaskSpec parseJSON
 instance ToJSON TaskSpec where
  toJSON spec = obj [("objective",str (specObjective spec)),("inputs",toJSON (specInputs spec)),("expectedOutputs",toJSON (NE.toList (specOutputs spec))),("completionCriteria",toJSON (NE.toList (specCriteria spec)))]
-parseStoredTaskSpec :: Value -> Parser TaskSpec
-parseStoredTaskSpec value = parseTaskSpec storedCriteria value
- where
- storedCriteria raw = do
-  rows <- parseJSON raw :: Parser [Value]
-  case rows of
-   String _ : _ -> do
-    legacy <- stringsP "completionCriteria" True raw
-    pure [let identity=CriterionId ("legacy_"<>T.pack (show index)); requirement=Requirement item; normalized=T.toCaseFold (T.stripStart item)
-          in if any (`T.isPrefixOf` normalized) ["if ","если "] then Conditional identity (Condition item) requirement else Required identity requirement
-         | (index,item)<-zip [(1::Int)..] legacy]
-   _ -> traverse parseJSON rows
 data OutcomeStatus = Completed | Unresolved deriving (Eq, Ord, Show, Enum, Bounded)
 instance Wire OutcomeStatus where wireName status = case status of Completed -> "Completed"; Unresolved -> "Unresolved"
 instance FromJSON OutcomeStatus where parseJSON = parseWire
@@ -193,7 +187,7 @@ instance ToJSON Outcome where
 
 data Decision
  = ReplyNow Text | ExecuteTask | OutsideSpecialization | SelectSpecialist Text
- | NeedSpecialist | AskAdmin Text | SpecifySapi Text Text | PrepareTask Text TaskSpec
+ | NeedSpecialist | AskAdmin Text | SpecifySapi Text Text | PrepareTask Text TaskSpec | TaskUnresolved Text
  | Handoff Text | ReportOutcome Text Outcome
  deriving (Eq, Show)
 data DecisionResponse = DecisionResponse { decisionBody :: Decision, decisionReason :: Text, decisionEvidence :: [Text], decisionRaw :: Value } deriving (Eq, Show)
@@ -216,6 +210,7 @@ parseDecision node value = do
   "RequestUnclear" -> variant ["question"] (AskAdmin <$> textAt "question" 4000)
   "SapiSpecified" -> variant ["name","role"] (SpecifySapi <$> nameP value <*> textAt "role" 60)
   "TaskPrepared" -> variant ["taskType","specification"] (PrepareTask <$> textAt "taskType" 60 <*> parseJSON (get value "specification"))
+  "TaskUnresolved" -> variant ["reply"] (TaskUnresolved <$> textAt "reply" 64000)
   "HandoffPrepared" -> variant ["request"] (Handoff <$> textAt "request" 16000)
   "Outcome" -> variant ["reply","outcome"] (ReportOutcome <$> textAt "reply" 64000 <*> parseJSON (get value "outcome"))
   _ -> fail "Unknown decision event"
@@ -228,7 +223,7 @@ eventsFor node = case node of
  Assessing -> ["FitsSpecialization","OutsideSpecialization"]
  ChiefTriage -> ["FitsSpecialization","SpecialistSelected","NewSpecialistNeeded","RequestUnclear"]
  CreatingSapi -> ["SapiSpecified"]
- ReadyToWork -> ["TaskPrepared"]
+ ReadyToWork -> ["TaskPrepared","TaskUnresolved"]
  Delegation -> ["HandoffPrepared"]
  Execution -> ["Outcome","OutsideSpecialization"]
  OutcomeNode -> []
@@ -277,14 +272,15 @@ outcomeError problem = case problem of
  DuplicateCriterionResult -> "Outcome reports the same criterion more than once"
  InvalidSkippedCriterion -> "Only an unsatisfied, explicitly conditional criterion can be not applicable"
  MissingCompletionEvidence -> "Completed outcome requires evidence for all applicable completion criteria"
-newtype VerifiedOutcome = VerifiedOutcome Outcome deriving (Eq, Show)
-validateOutcome :: DecisionResponse -> Outcome -> TaskSpec -> Either OutcomeError VerifiedOutcome
+-- Structural coverage and evidence presence only; the host cannot prove an LLM's claims.
+newtype StructurallyValidOutcome = StructurallyValidOutcome Outcome deriving (Eq, Show)
+validateOutcome :: DecisionResponse -> Outcome -> TaskSpec -> Either OutcomeError StructurallyValidOutcome
 validateOutcome response outcome spec
  | any (`notElem` acceptedIds) reportedIds = Left UnknownCriterion
  | length reportedIds /= length (nub reportedIds) = Left DuplicateCriterionResult
  | any invalidSkip (outcomeResults outcome) = Left InvalidSkippedCriterion
  | outcomeStatus outcome == Completed && (null (decisionEvidence response) || any (`notElem` reportedIds) acceptedIds) = Left MissingCompletionEvidence
- | otherwise = Right (VerifiedOutcome outcome)
+ | otherwise = Right (StructurallyValidOutcome outcome)
  where
  criteria=NE.toList (specCriteria spec)
  acceptedIds=map criterionId criteria
@@ -301,7 +297,8 @@ begin s a turn = do
      first=newCall (turnId turn) a Nothing (RunningAt (if routine then ReadyToWork else Assessing)) (turnInput turn)
      initial=Workload (runIdText (turnId turn)) routine (first :| []) (KM.fromList [("originalIntent",str (turnInput turn)),("task",obj [("taskId",str ("task_"<>runIdText (turnId turn))),("taskType",str (if routine then "automated" else "work")),("specification",Null)]),("origin",merge (obj [("agent",toJSON a),("call",toJSON (turnId turn))]) (turnField turn "origin")),("decisions",arr []),("outcome",Null)])
      (w,c)=fromMaybe (initial,first) found
-     running=if isNothing (callOutput c) then c { callProgress=RunningAt (callNode c), callFields=KM.delete "error" (callFields c) } else c
+     nextNode=if isJust (legacySpecification w) then ReadyToWork else callNode c
+     running=if isNothing (callOutput c) then c { callProgress=RunningAt nextNode, callFields=KM.delete "error" (callFields c) } else c
      updated=setCallFields [("attempt",num (fromMaybe 1 (turnAttempt turn)))] running
  saveWork s (withCall w updated)
 conversation :: Service -> AgentId -> Turn -> AgentState -> IO Value
@@ -454,13 +451,18 @@ advanceDecision chief response work call = case decisionBody response of
    accepted <- acceptedTaskSpec work
    let inherited=maybe [] (NE.toList . specCriteria) accepted
    unless (all (`elem` NE.toList (specCriteria spec)) inherited) (Left CriteriaRemoved)
-   let task=mergeFields [("taskType",str (if has (workField work "origin") "routine" then "automated" else taskType)),("specification",toJSON spec)] (workField work "task")
+   let original=workField work "task"
+       audited=maybe original (\legacy -> put "legacySpecification" legacy original) (legacySpecification work)
+       task=mergeFields [("taskType",str (if has (workField work "origin") "routine" then "automated" else taskType)),("specification",toJSON spec)] audited
    Right (finish (setWorkField "task" task work) (RunningAt Execution))
+ TaskUnresolved reply
+  | isJust (legacySpecification work) -> Right (finish work (FinishedCall (UnresolvedResult reply)))
+  | otherwise -> Left (InvalidAcceptedTask "TaskUnresolved is reserved for legacy task re-preparation")
  Handoff request -> Right (DelegateRequest request)
  ReportOutcome reply outcome -> do
   spec <- acceptedTaskSpec work >>= maybe (Left (InvalidAcceptedTask "Task has no accepted specification")) Right
-  VerifiedOutcome verified <- B.first InvalidOutcome (validateOutcome response outcome spec)
-  let saved=mergeFields [("reply",str reply),("evidence",toJSON (decisionEvidence response)),("author",toJSON (callOwner call))] (toJSON verified)
+  StructurallyValidOutcome checked <- B.first InvalidOutcome (validateOutcome response outcome spec)
+  let saved=mergeFields [("reply",str reply),("evidence",toJSON (decisionEvidence response)),("author",toJSON (callOwner call))] (toJSON checked)
       result=case outcomeStatus outcome of Completed -> Answered reply; Unresolved -> UnresolvedResult reply
   pure (finish (setWorkField "outcome" saved work) (FinishedCall result))
  where
@@ -468,7 +470,17 @@ advanceDecision chief response work call = case decisionBody response of
 acceptedTaskSpec :: Workload -> Either DecisionError (Maybe TaskSpec)
 acceptedTaskSpec work = case get (workField work "task") "specification" of
  Null -> Right Nothing
- value -> Just <$> B.first (InvalidAcceptedTask . T.pack) (parseEither parseStoredTaskSpec value)
+ _ | isJust (legacySpecification work) -> Right Nothing
+ value -> Just <$> B.first (InvalidAcceptedTask . T.pack) (parseEither parseJSON value)
+-- Legacy strings have no reliable applicability metadata, even when they start with "If".
+-- Keep the original specification for audit and ask ReadyToWork to write a new typed one.
+legacySpecification :: Workload -> Maybe Value
+legacySpecification work = case get (get (workField work "task") "specification") "completionCriteria" of
+ Array criteria | all isLegacyText (toList criteria) -> Just (get (workField work "task") "specification")
+ _ -> Nothing
+ where
+ isLegacyText (String _) = True
+ isLegacyText _ = False
 
 decisionFailure :: DecisionError -> IO a
 decisionFailure problem = case problem of

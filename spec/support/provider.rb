@@ -53,8 +53,10 @@ end
 defaults = {
   'Assessing' => {event: 'FitsSpecialization', mode: config.fetch('mode', 'Repl'), reply: 'Contract test reply'},
   'ReadyToWork' => {event: 'TaskPrepared', taskType: 'research', specification: {
-    objective: 'Compare the products.', inputs: [], expectedOutputs: ['A comparison'], completionCriteria: ['Return a sourced comparison.']}},
-  'Execution' => {event: 'Outcome', reply: 'Verified comparison', outcome: {status: 'Completed', satisfiedCriteria: ['Return a sourced comparison.'], artifacts: []}},
+    objective: 'Compare the products.', inputs: [], expectedOutputs: ['A comparison'], completionCriteria: [
+      {id: 'comparison', requirement: 'Return a sourced comparison.', applicability: {kind: 'Required'}}]}},
+  'Execution' => {event: 'Outcome', reply: 'Verified comparison', outcome: {status: 'Completed', criterionResults: [
+    {id: 'comparison', result: 'Satisfied', evidence: 'The sourced comparison was prepared.'}], artifacts: []}},
   'Delegation' => {event: 'HandoffPrepared', request: 'Compare the products.'},
   'CreatingSapi' => {event: 'SapiSpecified', name: 'NewResearcher', role: 'Research'}
 }
