@@ -788,12 +788,32 @@ verifyPolicyPreparation s owner identity origin = when (has origin "policyRoutin
  sequenceId <- parseRoutineSequence (at origin "policyRoutine")
  routine <- DB.connection s $ \db -> readRoutineOn db sequenceId
  require (routineId routine == at origin "policyRoutine") 409 "Stored routine identity does not match policy setup"
- either reject pure (policyPreparationCompletion owner identity routine)
+ generation <- if has origin "group" then do
+  group <- G.getGroup s owner False
+  requests <- G.readRequests group
+  request <- maybe (failure 409 "Policy setup request is missing") pure
+   (find ((==identity) . G.requestId) requests)
+  require (get (Object (G.requestFields request)) "origin" == origin)
+   409 "Policy setup request origin changed"
+  field 500 (toJSON request) "root"
+  else pure identity
+ either reject pure (policyPreparationCompletion owner generation routine)
  where
  reject problem = failure 409 $ case problem of
   PolicyNotSaved -> "Routine policy was not saved. Retry this setup or ask the owner to finish routine setup in chat."
   PolicyInstructionsChanged -> "Routine instructions changed before policy setup completed. Ask the owner to finish the current routine setup in chat."
   PolicyOwnerChanged -> "Routine owner changed before policy setup completed. Ask the current owner to finish routine setup in chat."
+
+data GroupPolicyPreparation = KeepGroupPolicyPreparation | StartGroupPolicyPreparation (Maybe G.GroupRequest)
+
+-- A leadership change may supersede queued or terminal setup, never a running
+-- call. The projected Turn is authoritative when the Request has not caught up.
+groupPolicyPreparation :: AgentId -> Maybe (G.GroupRequest,Maybe TurnStatus) -> GroupPolicyPreparation
+groupPolicyPreparation _ Nothing = StartGroupPolicyPreparation Nothing
+groupPolicyPreparation lead (Just (request,projected))
+ | G.requestTarget request == lead || status == Running = KeepGroupPolicyPreparation
+ | otherwise = StartGroupPolicyPreparation (Just request { G.requestStatus=status })
+ where status=fromMaybe (G.requestStatus request) projected
 
 ensurePolicyPreparation :: Service -> Routine -> IO ()
 ensurePolicyPreparation s routine = case routinePolicy routine of
@@ -815,21 +835,46 @@ ensurePolicyPreparation s routine = case routinePolicy routine of
      -- Conversation retention removes old Turns, not their durable history.
      when (any ((==identity) . turnId) (agentTurns state) || null archived) $
       materializePersonal s agent turn
-    GroupTarget group agent -> DB.connection s $ \db -> SQL.withTransaction db $ do
-     validateTargetOn db target
-     rows <- DB.queryRowsOn db "SELECT value FROM groups WHERE id=?" ["value"] [SQL.SQLText (groupIdText group)]
-     value <- case rows of
-      row:_ -> DB.decodeStored (at row "value")
-      [] -> failure 409 "Group disappeared during routine setup"
+    GroupTarget group agent -> do
+     value <- G.getGroup s (groupIdText group) True
      requests <- G.readRequests value
-     unless (any ((==identity) . G.requestId) requests) $ do
-      let requestOrigin=merge origin (obj [("group",toJSON group)])
-          entry=obj [("id",toJSON identity),("author",str "system"),("text",str input),("created",str created)]
-          request=G.GroupRequest identity agent Queued False (KM.fromList
-           [("message",toJSON identity),("root",toJSON identity),("created",str created),("origin",requestOrigin)])
-      DB.putValueOn db DB.Groups (groupIdText group) (merge value (obj
-       [("messages",arr (items value "messages"++[entry])),("requests",arr (items value "requests"++[toJSON request]))
-       ,("revision",num (int (get value "revision")+1))]))
+     let matching request = get (Object (G.requestFields request)) "root" == toJSON identity
+          && get (get (Object (G.requestFields request)) "origin") "policyRoutine" == str (routineId routine)
+         latestSetup=listToMaybe (reverse (filter matching requests))
+     projected <- forM latestSetup $ \request -> do
+      rows <- DB.queryRows s "SELECT status FROM turns WHERE id=?" ["status"]
+       [SQL.SQLText (runIdText (G.requestId request))]
+      status <- traverse (\row -> field 500 row "status") (listToMaybe rows)
+      pure (request,status)
+     case groupPolicyPreparation agent projected of
+      KeepGroupPolicyPreparation -> pure ()
+      StartGroupPolicyPreparation predecessor -> do
+       -- Save cancellation before the successor. Restart reprojects the old
+       -- Turn before resuming setup, so a crash cannot leave two runnable Turns.
+       forM_ predecessor $ \previous -> when (G.requestStatus previous == Queued) $ do
+        let oldOwner=agentIdText (G.requestTarget previous)
+        modifyTurns s oldOwner $ \saved -> if turnId saved == G.requestId previous
+         then saved { turnStatus=Cancelled } else saved
+        DB.project s oldOwner
+       time <- now
+       let next=maybe identity (\previous -> stableRunId
+            (runIdText (G.requestId previous) <> ":lead:" <> agentIdText agent)) predecessor
+           requestOrigin=merge origin (obj [("group",toJSON group)])
+           entry=obj [("id",toJSON identity),("author",str "system"),("text",str input),("created",str created)]
+           request=G.GroupRequest next agent Queued False (KM.fromList
+            [("message",toJSON identity),("root",toJSON identity),("created",str time),("origin",requestOrigin)])
+           superseded previous = toJSON $ if G.requestStatus previous == Queued
+            then previous { G.requestStatus=Cancelled } else previous
+       event <- forM predecessor $ \previous -> G.eventRecord "system" "policy setup reassigned"
+        (obj [("previous",toJSON (G.requestId previous)),("request",toJSON next),("lead",toJSON agent)])
+       DB.connection s $ \db -> SQL.withTransaction db $ do
+        validateTargetOn db target
+        let retained=maybe value (\previous -> G.replace "requests" (superseded previous) value) predecessor
+            messages=items value "messages"++[entry | isNothing predecessor]
+        DB.putValueOn db DB.Groups (groupIdText group) (merge retained (obj
+         [("messages",arr messages),("requests",arr (items retained "requests"++[toJSON request]))
+         ,("events",arr (items value "events"++maybeToList event))
+         ,("revision",num (int (get value "revision")+1)),("updated",str time)]))
 
 materializeOccurrence :: Service -> ScheduledOccurrence -> IO ()
 materializeOccurrence s occurrence = do

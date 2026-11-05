@@ -118,6 +118,8 @@ runGroup s run turn = do
   (group,typed) <- maybe (failure 409 "Unknown Group call") pure found
   let request=toJSON typed
   require (not (boolean (get group "archived")) && str (agentIdText (runOwner run)) `elem` items group "members") 409 "Group is archived or membership changed before execution"
+  when (has (turnField turn "origin") "policyRoutine") $
+   require (toJSON (runOwner run) == get group "lead") 409 "Routine policy setup belongs to the current Group Lead"
   let running = toJSON typed { requestStatus=Running }
   storeGroup s (replace "requests" running group)
   root <- folder s (at group "id")
@@ -227,6 +229,27 @@ reconcileGroups s = DB.values s DB.Groups >>= mapM_ reconcile
    let request = merge initial (obj [("memo",Bool True),("origin",obj [("group",get group "id"),("author",str "system"),("memo",Bool True)])])
    pure (append "requests" request (replace "messages" (put "memo_pending" (Bool False) entry) group))
 
+policySetupRetry :: AgentId -> [GroupRequest] -> GroupRequest -> Validation ()
+policySetupRetry lead requests typed = when (has (get request "origin") "policyRoutine") $ do
+ check (requestTarget typed == lead) 409 "Routine policy setup belongs to the current Group Lead"
+ let sameSetup candidate = get (toJSON candidate) "root" == get request "root"
+      && get (get (toJSON candidate) "origin") "policyRoutine" == get (get request "origin") "policyRoutine"
+     latest=listToMaybe (reverse (filter sameSetup requests))
+ check (fmap requestId latest == Just (requestId typed))
+  409 "This policy setup was superseded; use the current setup request"
+ where request=toJSON typed
+
+checkPolicyRetry :: Service -> Turn -> IO ()
+checkPolicyRetry s turn = when (has origin "group" && has origin "policyRoutine") $ do
+ groupValue <- getGroup s (at origin "group") True
+ requests <- readRequests groupValue
+ request <- maybe (failure 409 "Policy setup request is missing") pure
+  (find ((==turnId turn) . requestId) requests)
+ require (get (toJSON request) "origin" == origin) 409 "Policy setup request origin changed"
+ lead <- field 500 groupValue "lead"
+ validated (policySetupRetry lead requests request)
+ where origin=turnField turn "origin"
+
 actionGroup :: Service -> Text -> Text -> Text -> IO Value
 actionGroup s gid rid action = do
  group <- getGroup s gid (action == "retry")
@@ -243,6 +266,8 @@ actionGroup s gid rid action = do
    status <- field 500 value "status"
    if action == "retry" then do
     require (get request "target" `elem` items group "members") 409 "The recipient is no longer a Group member"
+    lead <- field 500 group "lead"
+    validated (policySetupRetry lead requests typed)
     require (not (has request "task")) 409 "Start the current task revision from Work instead"
     turnResult (validateTurnAction Retry status)
     state <- agentState s owner

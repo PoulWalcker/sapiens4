@@ -111,6 +111,7 @@ turnAction s a identity rawAction = do
    require (turnStatus archived == status && isJust (turnAttempt archived) && turnField archived "origin" == get stored "origin") 409 "Retained setup turn does not match its saved history; ask Sapi to finish routine setup in chat"
    pure archived
  let restored=if any ((==turnId turn) . turnId) (agentTurns state) then state else state { agentTurns=agentTurns state++[turn] }
+ when (action == Retry) (G.checkPolicyRetry s turn)
  work <- D.findWork s (RunId identity)
  require (not (maybe False (any ((==Just (RunId identity)) . D.callParent) . D.workCalls . fst) work)) 409 "This request was delegated; use the recipient call controls"
  runs <- readMVar (serviceRuns s)
