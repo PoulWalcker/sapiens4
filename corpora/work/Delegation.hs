@@ -209,8 +209,13 @@ withCall w c = w { workCalls = fmap (\x -> if callIdentity x == callIdentity c t
 data OutcomeError = InvalidSkippedCriterion | MissingCompletionEvidence deriving (Eq, Show)
 outcomeError :: OutcomeError -> Text
 outcomeError problem = case problem of
- InvalidSkippedCriterion -> "Only an unsatisfied, explicit If criterion can be not applicable"
+ InvalidSkippedCriterion -> "Only an unsatisfied, explicitly conditional criterion can be not applicable"
  MissingCompletionEvidence -> "Completed outcome requires evidence for all applicable completion criteria"
+data CompletionCriterion = RequiredCriterion Text | ConditionalCriterion Text deriving (Eq, Show)
+completionCriterion :: Text -> CompletionCriterion
+completionCriterion criterion
+ | any (`T.isPrefixOf` T.toCaseFold (T.stripStart criterion)) ["if ","если "] = ConditionalCriterion criterion
+ | otherwise = RequiredCriterion criterion
 validateOutcome :: DecisionResponse -> Outcome -> [Text] -> Either OutcomeError ()
 validateOutcome response outcome criteria
  | any invalidSkip skipped = Left InvalidSkippedCriterion
@@ -219,7 +224,12 @@ validateOutcome response outcome criteria
  where
  skipped = M.keys (notApplicable outcome)
  covered = satisfiedCriteria outcome ++ skipped
- invalidSkip criterion = criterion `notElem` criteria || not ("If " `T.isPrefixOf` criterion) || criterion `elem` satisfiedCriteria outcome
+ invalidSkip criterion = criterion `elem` satisfiedCriteria outcome || case find ((==criterion) . criterionText) (map completionCriterion criteria) of
+  Just (ConditionalCriterion _) -> False
+  _ -> True
+ criterionText form = case form of
+  RequiredCriterion value -> value
+  ConditionalCriterion value -> value
 begin :: Service -> AgentId -> Turn -> IO ()
 begin s a turn = do
  found <- findWork s (turnId turn)
