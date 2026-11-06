@@ -365,20 +365,29 @@ admission owner runs candidates tick
  legacy=[t | (t,_)<-candidates,not (boolean (turnField t "batchable"))]
 onPulse :: (AgentId -> IO ()) -> Service -> Pulse -> IO ()
 onPulse prepareSpecialist s tick = do
- R.dispatch s tick
  when (pulseFrequency tick==Bph60 || (pulseFrequency tick==Bpm60 && even (pulseNumber tick))) $ do
+  when (pulseFrequency tick==Bph60) $ R.restoreOccurrences s
   D.pendingWorks s
   G.reconcileGroups s
   G.dispatchGroups s
   contexts <- G.loadGroupRequestIndex s
   rows <- DB.agents s
+  -- Settle ready output before deciding whether the next Due is blocked.
+  forM_ rows $ \row -> do
+   let a=at row "id"
+   inactive <- retired s a
+   unless inactive $ publish s a contexts tick
+  D.reconcileWorks s
+  G.reconcileGroups s
+  R.dispatch s tick
+  G.dispatchGroups s
+  readyContexts <- G.loadGroupRequestIndex s
   forM_ rows $ \row -> do
    let a=at row "id"
    inactive <- retired s a
    unless inactive $ do
-    publish s a contexts tick
-    admit prepareSpecialist s a contexts tick
-    when (pulseFrequency tick==Bph60) $ admit prepareSpecialist s a contexts tick
+    admit prepareSpecialist s a readyContexts tick
+    when (pulseFrequency tick==Bph60) $ admit prepareSpecialist s a readyContexts tick
 runPulse :: (AgentId -> IO ()) -> Service -> Pulse -> IO ()
 runPulse prepareSpecialist s tick = try (onPulse prepareSpecialist s tick) >>= either report pure
  where report exception

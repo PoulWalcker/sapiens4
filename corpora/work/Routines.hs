@@ -558,7 +558,6 @@ pauseRoutine time paused routine = routine
 
 dispatch :: Service -> Pulse -> IO ()
 dispatch s tick = when (pulseFrequency tick == Bph60) $ do
- restoreOccurrences s
  time <- getCurrentTime
  rows <- DB.queryRows s "SELECT sequence,value FROM scheduled_routines ORDER BY sequence" ["sequence","value"] []
  forM_ rows $ \row -> tryRoutine ("scheduled routine " <> jsonText (get row "sequence")) $ do
