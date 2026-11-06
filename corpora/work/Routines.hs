@@ -733,7 +733,8 @@ prepareOccurrence time current target due = do
  let fields=case KM.lookup "title" (routineFields current) of
       Nothing -> KM.delete "title" (routineFields original)
       Just title -> KM.insert "title" title (routineFields original)
-     snapshot=original { routinePrompt=routinePrompt current, routinePolicy=routinePolicy current, routineFields=fields }
+     snapshot=original { routinePrompt=routinePrompt current, routinePolicy=routinePolicy current
+                       , routineSpecification=routineSpecification current, routineFields=fields }
      occurrence=ScheduledOccurrence (occurrenceIdFor snapshot) snapshot target time ScheduledTrigger Nothing
  check (dueId due == dueIdFor snapshot && validTarget occurrence) 409 "Due identity or target changed before admission"
  pure occurrence
@@ -1247,7 +1248,7 @@ ensurePolicyPreparation s routine = case routinePolicy routine of
      archived <- DB.queryRows s "SELECT id FROM turns WHERE id=? UNION SELECT id FROM workloads WHERE id=?"
       ["id"] [SQL.SQLText (runIdText identity),SQL.SQLText (runIdText identity)]
      when (any ((==identity) . turnId) (agentTurns state) || null archived) $
-      materializePersonal s agent turn
+      materializePersonal s agent turn Nothing
     GroupTarget group agent -> do
      value <- G.getGroup s (groupIdText group) True
      requests <- G.readRequests value
@@ -1296,11 +1297,12 @@ materializeOccurrence s occurrence = do
  materialization <- case occurrenceStoppedAt occurrence of
   Just _ -> cancelOccurrence s occurrence >> pure Materialized
   Nothing -> case occurrenceTarget occurrence of
-   PersonalTarget agent -> materializePersonal s agent (occurrenceTurn occurrence) >> pure Materialized
-   GroupTarget group _ -> materializeGroup s group (occurrenceTurn occurrence)
+   PersonalTarget agent -> materializePersonal s agent (occurrenceTurn occurrence) specification >> pure Materialized
+   GroupTarget group _ -> materializeGroup s group (occurrenceTurn occurrence) specification
  when (materialization == Materialized) $
   DB.executeSQL s "UPDATE routine_occurrences SET status='admitted_ready' WHERE id=? AND status='admitted_pending'"
    [SQL.SQLText (runIdText (occurrenceId occurrence))]
+ where specification=routineSpecification (occurrenceRoutineSnapshot occurrence)
 
 data PersonalMaterializationPlan = CreateTurn | KeepActiveTurn | KeepTerminalTurn | KeepRetainedHistory deriving (Eq)
 data PersonalRecoveryError = MissingLiveActiveTurn
@@ -1319,8 +1321,8 @@ planPersonalMaterialization Nothing (Just status) = case status of
  Interrupted -> Right KeepRetainedHistory
  Cancelled -> Right KeepRetainedHistory
 
-materializePersonal :: Service -> AgentId -> Turn -> IO ()
-materializePersonal s agent turn = do
+materializePersonal :: Service -> AgentId -> Turn -> Maybe D.TaskSpec -> IO ()
+materializePersonal s agent turn specification = do
  let owner=agentIdText agent
      identity=runIdText (turnId turn)
      created=get (toJSON turn) "created"
@@ -1350,7 +1352,7 @@ materializePersonal s agent turn = do
  unless (materialization == KeepRetainedHistory) (DB.project s owner)
  when (materialization `elem` [CreateTurn,KeepActiveTurn]) $ do
   found <- D.findWork s (turnId turn)
-  when (isNothing found) (D.begin s agent turn)
+  when (isNothing found) (D.begin s agent turn specification)
   (work,call) <- D.getWork s (turnId turn)
   when (D.callState call == D.CallRunning && null (D.workItems work "decisions")) $
    D.saveWork s (D.withCall work call { D.callProgress=D.QueuedAt (D.callNode call) })
@@ -1373,8 +1375,8 @@ groupRecoveryReason problem = case problem of
  LeadUnavailable -> "Routine recovery is waiting: choose an active Group Lead to continue the same Run."
 
 -- Existing requests keep their assignee; new requests use the current Lead.
-materializeGroup :: Service -> GroupId -> Turn -> IO MaterializationStatus
-materializeGroup s groupId turn = DB.connection s $ \db -> SQL.withTransaction db $ do
+materializeGroup :: Service -> GroupId -> Turn -> Maybe D.TaskSpec -> IO MaterializationStatus
+materializeGroup s groupId turn specification = DB.connection s $ \db -> SQL.withTransaction db $ do
  parsed <- requireExecutionOrigin (turnOrigin turn)
  routineIdentity <- maybe (failure 500 "Routine materialization requires scheduled provenance") pure (originRoutine parsed)
  let owner=groupIdText groupId
@@ -1421,7 +1423,7 @@ materializeGroup s groupId turn = DB.connection s $ \db -> SQL.withTransaction d
        messageId=MessageId identity
        groupOrigin=newOrigin (originPurpose parsed) (Just groupId) (KM.insert "author" (str "admin") (originMetadata parsed))
        message=obj [("id",toJSON messageId),("author",str "admin"),("text",str body),("created",str created),("routine",toJSON routineIdentity)]
-       task=GW.newScheduledTask taskId createdTime title body agent routineIdentity
+       task=GW.newScheduledTask taskId createdTime title body agent routineIdentity specification
        request=G.newGroupRequest (turnId turn) agent (ValidOrigin groupOrigin)
         (G.RequestLineage messageId messageId (Just (GW.taskLink task))) created
    DB.putValueOn db DB.Groups owner (merge group (obj

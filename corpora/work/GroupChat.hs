@@ -212,6 +212,12 @@ runGroup s run turn = do
   require (requestTarget typed == runOwner run && not (boolean (get group "archived")) && str (agentIdText (runOwner run)) `elem` items group "members") 409 "Group is archived or membership changed before execution"
   when (isJust (originPolicyRoutine parsed)) $
    require (toJSON (runOwner run) == get group "lead") 409 "Routine policy setup belongs to the current Group Lead"
+  specification <- if originIsScheduled parsed then do
+    lineage <- requireRequestLineage typed
+    link <- maybe (failure 500 "Scheduled Group request has no task revision") pure (requestTask lineage)
+    GroupTask { specification=saved } <- readTask group (taskIdText (requestTaskId link))
+    pure (maybe Null toJSON saved)
+   else pure Null
   let running = toJSON typed { requestStatus=Running }
   storeGroup s (replace "requests" running group)
   root <- folder s (at group "id")
@@ -224,7 +230,7 @@ runGroup s run turn = do
    value <- if exists then str <$> readText path else pure Null
    pure (name,value)
   let manifest name = fromMaybe Null (lookup name manifests)
-  pure (obj [("group",obj ([(k,get group k) | k <- ["id","name","description","lead","members"]] ++ [("workspace",str (T.pack root))])),("self_id",str (agentIdText (runOwner run))),("chief_id",str chief),("members",arr [r | r <- rows,get r "id" `elem` items group "members"]),("tasks",arr [select ["id","title","assignee","state","revision","deleted"] task | task <- takeLast 50 (items group "tasks")]),("messages",arr (if isMemo then items group "messages" else takeLast 30 (items group "messages"))),("memo",memo),("request",running),("scheduledExecutionPrompt",get (turnField turn "origin") "executionPrompt"),("identity",manifest "identity"),("host_control",manifest "host-control"),("computer",manifest "computer-use")],isMemo)
+  pure (obj [("group",obj ([(k,get group k) | k <- ["id","name","description","lead","members"]] ++ [("workspace",str (T.pack root))])),("self_id",str (agentIdText (runOwner run))),("chief_id",str chief),("members",arr [r | r <- rows,get r "id" `elem` items group "members"]),("tasks",arr [select ["id","title","assignee","state","revision","deleted"] task | task <- takeLast 50 (items group "tasks")]),("messages",arr (if isMemo then items group "messages" else takeLast 30 (items group "messages"))),("memo",memo),("request",running),("scheduledExecutionPrompt",get (turnField turn "origin") "executionPrompt"),("scheduledTaskSpecification",specification),("identity",manifest "identity"),("host_control",manifest "host-control"),("computer",manifest "computer-use")],isMemo)
  template <- prompt s (if isMemo then "group-memo" else "group-conversation")
  extra <- if isMemo then ("\n\n" <>) . (`render` [("notes_example",T.pack (repositoryRoot s </> "corpora/prompts/examples/jarvis-notes.html"))]) <$> prompt s "notes-wiki" else pure ""
  prefix <- if originIsScheduled parsed then (<> "\n\n") <$> prompt s "scheduled-execution" else pure ""

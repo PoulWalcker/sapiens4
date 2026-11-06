@@ -14,16 +14,19 @@ import qualified Data.Text as T
 import Types
 import qualified Store as DB
 import GroupModel
+import qualified Delegation as D
 
 -- Parsing preserves the established wire format; decisions below use typed values.
 data GroupTask = GroupTask
  { identity :: TaskId, title :: Text, body :: Text, assignee :: AgentId
- , state :: TaskState, deleted :: Bool, revision :: Int, metadata :: Object
+ , state :: TaskState, deleted :: Bool, revision :: Int, specification :: Maybe D.TaskSpec, metadata :: Object
  } deriving (Eq, Show)
 instance FromJSON GroupTask where
- parseJSON = withObject "Group task" $ \o -> GroupTask <$> o .: "id" <*> o .: "title" <*> o .: "body" <*> o .: "assignee" <*> o .: "state" <*> o .: "deleted" <*> o .: "revision" <*> pure (foldr KM.delete o ["id","title","body","assignee","state","deleted","revision"])
+ parseJSON = withObject "Group task" $ \o -> do
+  specification <- if KM.member "specification" o then Just <$> o .: "specification" else pure Nothing
+  GroupTask <$> o .: "id" <*> o .: "title" <*> o .: "body" <*> o .: "assignee" <*> o .: "state" <*> o .: "deleted" <*> o .: "revision" <*> pure specification <*> pure (foldr KM.delete o ["id","title","body","assignee","state","deleted","revision","specification"])
 instance ToJSON GroupTask where
- toJSON task = mergeFields [("id",toJSON task.identity),("title",str task.title),("body",str task.body),("assignee",toJSON task.assignee),("state",toJSON task.state),("deleted",Bool task.deleted),("revision",num task.revision)] (Object task.metadata)
+ toJSON task = mergeFields ([("id",toJSON task.identity),("title",str task.title),("body",str task.body),("assignee",toJSON task.assignee),("state",toJSON task.state),("deleted",Bool task.deleted),("revision",num task.revision)] ++ [("specification",toJSON spec) | spec <- maybeToList task.specification]) (Object task.metadata)
 
 data TaskPatch = TaskPatch
  { title :: Maybe Text, body :: Maybe Text, assignee :: Maybe AgentId
@@ -60,11 +63,11 @@ prepareTask lead patch = case patch.title of
  Nothing -> Left (InvalidTask "title must be nonempty text, at most 500 characters")
  Just title -> Right (CreateTask (T.strip title) (fromMaybe "" patch.body) (fromMaybe lead patch.assignee))
 newTask :: TaskId -> UTCTime -> Text -> CreateTask -> GroupTask
-newTask identity created actor draft = GroupTask identity draft.title draft.body draft.assignee Backlog False 1
+newTask identity created actor draft = GroupTask identity draft.title draft.body draft.assignee Backlog False 1 Nothing
  (KM.fromList [("created",str (timestamp created)),("author",str actor),("updated_by",str actor),("history",arr []),("results",arr [])])
-newScheduledTask :: TaskId -> UTCTime -> Text -> Text -> AgentId -> RoutineId -> GroupTask
-newScheduledTask identity created title body assignee routine = base
- { state=InProgress, metadata=KM.fromList [("taskType",str "automated"),("routine",toJSON routine)] <> base.metadata }
+newScheduledTask :: TaskId -> UTCTime -> Text -> Text -> AgentId -> RoutineId -> Maybe D.TaskSpec -> GroupTask
+newScheduledTask identity created title body assignee routine specification = base
+ { state=InProgress, specification=specification, metadata=KM.fromList [("taskType",str "automated"),("routine",toJSON routine)] <> base.metadata }
  where base=newTask identity created "admin" (CreateTask title body assignee)
 
 taskLink :: GroupTask -> TaskRevision
@@ -133,7 +136,7 @@ currentTaskRevision :: TaskRevision -> GroupTask -> Bool
 currentTaskRevision expected task = not task.deleted && taskLink task == expected
 
 forwardTask :: AgentId -> GroupTask -> GroupTask
-forwardTask assignee task = GroupTask task.identity task.title task.body assignee task.state task.deleted (task.revision+1) task.metadata
+forwardTask assignee task = task { assignee=assignee, revision=task.revision+1, specification=task.specification }
 
 stopTask :: UTCTime -> Text -> GroupTask -> GroupTask
 stopTask time actor task

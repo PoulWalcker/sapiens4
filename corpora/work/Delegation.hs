@@ -361,18 +361,21 @@ validateOutcome response outcome spec
   NotApplicable identity _ -> case find ((==identity) . criterionId) criteria of
    Just (Conditional _ _ _) -> False
    _ -> True
-begin :: Service -> AgentId -> Turn -> IO ()
-begin s a turn = do
+begin :: Service -> AgentId -> Turn -> Maybe TaskSpec -> IO ()
+begin s a turn specification = do
  found <- findWork s (turnId turn)
  origin <- requireExecutionOrigin (turnOrigin turn)
+ require (isNothing specification || originIsScheduled origin) 500 "Only Routine execution can supply an admitted Task specification"
  let routine=originIsScheduled origin
-     first=newCall (turnId turn) a Nothing (RunningAt (if routine then ReadyToWork else Assessing)) (turnInput turn)
+     node=if routine then (if isJust specification then Execution else ReadyToWork) else Assessing
+     first=newCall (turnId turn) a Nothing (RunningAt node) (turnInput turn)
      task=TaskEncoding (Just (obj [("taskId",str ("task_"<>runIdText (turnId turn))),("taskType",str (if routine then "automated" else "work"))])) (Just Null)
      initial=Workload (runIdText (turnId turn)) routine (first :| []) Unprepared task
       (ValidOrigin (newOrigin (originPurpose origin) (originGroup origin)
        (originMetadata origin <> KM.fromList [("agent",toJSON a),("call",toJSON (turnId turn))])))
       (KM.fromList [("originalIntent",str (turnInput turn)),("decisions",arr []),("outcome",Null)])
-     (w,c)=fromMaybe (initial,first) found
+     seeded=maybe initial (\spec -> acceptTaskSpec "automated" spec initial) specification
+     (w,c)=fromMaybe (seeded,first) found
      running=if isNothing (callOutput c) then c { callProgress=RunningAt (callNode c), callFields=KM.delete "error" (callFields c) } else c
      updated=setCallFields [("attempt",num (fromMaybe 1 (turnAttempt turn)))] running
  acceptedOrigin <- requireExecutionOrigin (workOrigin w)
@@ -403,7 +406,7 @@ recordDecision s a record = do
  saveWork s (setWorkField "decisions" (arr (map update (workItems w "decisions"))) w)
 accept :: Service -> Text -> Value -> Text -> Text -> IO ()
 accept s a record before after = recordDecision s a (merge record (obj [("accepted",Bool True),("transition",obj [("before",str before),("event",get record "hostEvent" `fallback` get (get record "response") "event"),("after",str (transition before (at (get record "response") "event") after)),("nextNode",str after)])]))
- where transition b e def = fromMaybe def $ lookup (b,e) [(("Assessing","FitsSpecialization"),"ReadyToWork"),(("Assessing","OutsideSpecialization"),"ChiefTriage"),(("ChiefTriage","SpecialistSelected"),"Assessing"),(("ChiefTriage","NewSpecialistNeeded"),"CreatingSapi"),(("ChiefTriage","RequestUnclear"),"WaitingForAdmin"),(("ChiefTriage","FitsSpecialization"),"ReadyToWork")]
+ where transition b e def = fromMaybe def $ lookup (b,e) [(("Assessing","OutsideSpecialization"),"ChiefTriage"),(("ChiefTriage","SpecialistSelected"),"Assessing"),(("ChiefTriage","NewSpecialistNeeded"),"CreatingSapi"),(("ChiefTriage","RequestUnclear"),"WaitingForAdmin")]
 decide :: Service -> Run -> Turn -> AgentState -> Node -> IORef [Value] -> IO (DecisionResponse,Value)
 decide s run turn state node logs = do
  (rendered,record) <- locked s $ do
@@ -502,7 +505,7 @@ applyDecision s owner current decision = do
    maybe (failure 409 "Delegation acceptance was not saved") pure (find ((==Just (RunId identity)) . callParent) (workCalls updated))
  pure (obj [("saved",Bool True),("callId",toJSON (callIdentity existing)),("target",toJSON (callRecipient existing))])
 data DecisionError
- = TrackedTaskNeedsExecution | OnlyChiefCreates | CriteriaRemoved
+ = TrackedTaskNeedsExecution | OnlyChiefCreates | CriteriaRemoved | RoutineTaskChanged
  | OwnerOnlyPolicySetup
  | InvalidOutcome OutcomeError | UnsupportedSavedTaskSpec | InvalidTaskContract Text | InvalidWorkOrigin Text
  deriving (Eq, Show)
@@ -519,7 +522,11 @@ advanceDecision chief response work call = case decisionBody response of
  ReplyNow reply
   | workTracksTask work -> Left TrackedTaskNeedsExecution
   | otherwise -> Right (finish work (FinishedCall (Answered reply)))
- ExecuteTask -> Right (finish (work { workTracksTask=True }) (RunningAt ReadyToWork))
+ ExecuteTask -> do
+  origin <- checkedWorkOrigin work
+  accepted <- acceptedTaskSpec work
+  let node=if originIsScheduled origin && isJust accepted then Execution else ReadyToWork
+  Right (finish (work { workTracksTask=True }) (RunningAt node))
  OutsideSpecialization -> do
   when (callRecipient call /= chief) (policyDelegation work)
   Right $ SaveDecision work $
@@ -533,11 +540,13 @@ advanceDecision chief response work call = case decisionBody response of
   | otherwise -> policyDelegation work >> Right (EnsureSpecialist name role)
  PrepareTask taskType spec -> do
    accepted <- acceptedTaskSpec work
+   origin <- checkedWorkOrigin work
+   let fixed=originIsScheduled origin && isJust accepted
+   when (fixed && accepted /= Just spec) (Left RoutineTaskChanged)
    let inherited=maybe [] (NE.toList . specCriteria) accepted
    unless (all (`elem` NE.toList (specCriteria spec)) inherited) (Left CriteriaRemoved)
-   origin <- checkedWorkOrigin work
    let savedType=if originIsScheduled origin then "automated" else taskType
-   Right (finish (acceptTaskSpec savedType spec work) (RunningAt Execution))
+   Right (finish (if fixed then work else acceptTaskSpec savedType spec work) (RunningAt Execution))
  Handoff request -> policyDelegation work >> Right (DelegateRequest request)
  ReportOutcome reply outcome -> do
   spec <- acceptedTaskSpec work >>= maybe (Left (InvalidTaskContract "Task has no accepted specification")) Right
@@ -570,6 +579,7 @@ decisionFailure problem = case problem of
  TrackedTaskNeedsExecution -> failure 409 "An accepted Task must execute and report its completion criteria"
  OnlyChiefCreates -> failure 403 "Only Chief can create a Sapi"
  CriteriaRemoved -> failure 400 "A handoff cannot remove accepted completion criteria"
+ RoutineTaskChanged -> failure 400 "A Routine Run cannot change its accepted specification; update the Routine and start a new Run"
  OwnerOnlyPolicySetup -> failure 409 "Personal routine policy setup must stay with its owner. Save a policy here, or retry this setup with its owner."
  InvalidOutcome reason -> failure 400 (outcomeError reason)
  UnsupportedSavedTaskSpec -> failure 409 "Saved Task specification must use structured completion criteria; create a new Task."
@@ -578,7 +588,7 @@ decisionFailure problem = case problem of
 
 runDecision :: (AgentId -> IO ()) -> (Workload -> IO ()) -> Service -> Run -> Turn -> AgentState -> IO (Text,[Value])
 runDecision prepareSpecialist verifyCompletion s run turn state = do
- locked s (begin s (runOwner run) turn)
+ locked s (begin s (runOwner run) turn Nothing)
  logs <- newIORef []
  let loop n = do
       require (n < 12) 409 "Decision transition limit reached; Admin must resolve the request"
