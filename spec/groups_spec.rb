@@ -175,6 +175,33 @@ RSpec.describe 'Group collaboration contracts' do
     message('For the new lead')
     host.idle
     expect(group['messages'].last['author']).to eq(@member)
+
+    # A memo already queued at the previous Lead must not execute as the new recipient.
+    saved = group
+    entry = saved.fetch('messages').find { |row| row['text'] == 'Already accepted' }
+    memo_id = 'queued-memo-before-lead-transfer'
+    origin = {group: saved.fetch('id'), author: 'system', memo: true}
+    saved.fetch('requests') << {id: memo_id, target: @lead, status: 'queued', settled: false,
+      message: entry.fetch('id'), root: entry.fetch('id'), created: entry.fetch('created'),
+      origin: origin, memo: true}
+    host.stop
+    state_path = File.join(host.root, 'agentpy', 'agents', @lead, 'state.json')
+    state = JSON.parse(File.read(state_path))
+    state.fetch('turns') << {id: memo_id, flow: 'chat', input: entry.fetch('text'), status: 'queued',
+      attempt: 1, created: entry.fetch('created'), batchable: false, origin: origin}
+    Contract.atomic_json(state_path, state)
+    SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+      db.execute('UPDATE groups SET value = ? WHERE id = ?', [JSON.generate(saved), saved.fetch('id')])
+    end
+    host.start
+    finished = host.turn(memo_id, %w[done failed])
+    aggregate_failures('queued memo recipient changed') do
+      expect(finished).to include('status' => 'failed',
+        'error' => 'Group is archived or membership changed before execution')
+      expect(group.fetch('requests').find { |row| row['id'] == memo_id }).to include('target' => @member)
+      expect(host.calls.select { |call| call['agency_run'] == memo_id }
+        .map { |call| call.slice('owner', 'node', 'agency_run') }).to be_empty
+    end
   end
 
   it 'rejects stale edits, preserves deleted work against late results, and retains task history' do

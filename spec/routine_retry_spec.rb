@@ -82,7 +82,7 @@ RSpec.describe 'Routine retry admission', :host do
     host.turn(older, 'interrupted')
   end
 
-  it 'rejects direct agent-turn retry of a failed Group Routine task without changing its history' do
+  it 'rejects direct agent-turn retry of a failed Group Routine task without changing its history', :aggregate_failures do
     owner, member = chief, host.agent('GroupMember')
     group = host.api('POST', '/api/groups', {name: 'Retry Group', description: 'Recover scheduled group work.',
       lead: owner, members: [owner, member]}, status: 201)
@@ -141,20 +141,42 @@ RSpec.describe 'Routine retry admission', :host do
     expect(host.state.fetch('routines')).to eq([routine])
     expect(host.calls).to be_empty
 
+    host.configure(block: true)
+    before_work_state = JSON.parse(File.read(state_path))
+    revised = host.api('PUT', "/api/groups/#{group.fetch('id')}/tasks/#{task_id}",
+      {revision: 2, assignee: member, state: 'in_progress', body: 'Execute this revised Work instruction.'})
+    restarted = host.api('POST', "/api/groups/#{group.fetch('id')}/tasks/#{task_id}/run", {revision: revised.fetch('revision')}, status: 202)
+    restarted_group = host.api('GET', "/api/groups/#{group.fetch('id')}")
+    restarted_request = restarted_group.fetch('requests').last
+    aggregate_failures('Work restart provenance') do
+      expect(restarted_request['origin']).to eq(JSON.parse(JSON.generate(origin)).merge('executionPrompt' => revised.fetch('body')))
+      expect(restarted_request).to include('target' => member, 'task' => task_id, 'task_revision' => restarted.fetch('revision'))
+      expect(restarted_group.fetch('requests').first).to eq(saved_group.fetch('requests').first)
+    end
+    host.stop
+    Contract.atomic_json(state_path, before_work_state)
+    SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+      db.execute('UPDATE groups SET value=? WHERE id=?', [JSON.generate(saved_group), group.fetch('id')])
+    end
+    host.start
+
     aggregate_failures('invalid Group provenance') do
       [
-        ['different Group owner', true],
-        ['missing Group context and request', false]
-      ].each do |name, change_owner|
+        ['different Group owner', :owner],
+        ['missing Group context and request', :context],
+        ['task belongs to another Routine', :task]
+      ].each do |name, damage|
         host.stop
         damaged_group = JSON.parse(JSON.generate(saved_group))
         damaged_turn = JSON.parse(JSON.generate(saved_turn))
-        if change_owner
+        if damage == :owner
           damaged_turn.fetch('origin')['routineOwner'] = other_group.fetch('id')
           damaged_group.fetch('requests').find { |item| item['id'] == id }.fetch('origin')['routineOwner'] = other_group.fetch('id')
-        else
+        elsif damage == :context
           damaged_turn.fetch('origin').delete('group')
           damaged_group.fetch('requests').reject! { |item| item['id'] == id }
+        else
+          damaged_group.fetch('tasks').first['routine'] = 'routine_sch_00002'
         end
         state = JSON.parse(File.read(state_path))
         state['turns'] = state.fetch('turns').map { |item| item['id'] == id ? damaged_turn : item }
@@ -169,10 +191,27 @@ RSpec.describe 'Routine retry admission', :host do
         before_calls = host.calls
         aggregate_failures(name) do
           expect(host.request('POST', "/api/agents/#{owner}/turns/#{id}/retry", {}).first).to eq(500)
+          expect(host.request('POST', "/api/groups/#{group.fetch('id')}/tasks/#{task_id}/run", {revision: 2}).first).to eq(500)
           expect(JSON.parse(File.read(state_path))).to eq(before_state)
           expect(host.api('GET', "/api/groups/#{group.fetch('id')}")).to eq(before_group)
           expect(host.state.fetch('events')).to eq(before_events)
           expect(host.state.fetch('routines')).to eq([routine])
+          expect(host.calls).to eq(before_calls)
+        end
+        if damage == :task
+          host.stop
+          queued_group = JSON.parse(JSON.generate(before_group))
+          queued_group.fetch('requests').first.merge!('status' => 'queued', 'settled' => false)
+          SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+            db.execute('UPDATE groups SET value=? WHERE id=?', [JSON.generate(queued_group), group.fetch('id')])
+          end
+          host.start
+          rejected = Contract.wait(description: 'inconsistent Routine request is quarantined without settling another Task') do
+            latest = host.api('GET', "/api/groups/#{group.fetch('id')}")
+            latest if latest.fetch('requests').first['settled']
+          end
+          expect(rejected.fetch('requests').first).to include('status' => 'failed')
+          expect(rejected.fetch('tasks')).to eq(before_group.fetch('tasks'))
           expect(host.calls).to eq(before_calls)
         end
       end

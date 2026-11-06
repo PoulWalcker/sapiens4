@@ -608,21 +608,7 @@ activeGroup db routine = do
  group <- case rows of
   row:_ -> DB.decodeStored (at row "value")
   [] -> failure 409 "Routine Group disappeared before admission"
- requests <- G.readRequests group
- origins <- forM [request | request <- requests, not (G.requestSettled request)] $ \request -> do
-  origin <- requireExecutionOrigin (G.requestOrigin request)
-  pure (request,origin)
- let historical=[(request,origin) | request <- requests, G.requestSettled request, ValidOrigin origin <- [G.requestOrigin request]]
- related <- filterM (activeRequest group) [(request,origin) | (request,origin) <- origins ++ historical, originRoutine origin == Just (routineId routine)]
- pure (G.requestId . fst <$> listToMaybe related)
- where
- activeRequest group (request,_) = do
-  lineage <- G.requireRequestLineage request
-  if not (G.requestSettled request) then pure True else case G.requestTask lineage of
-   Nothing -> pure False
-   Just link -> case findId (taskIdText (G.requestTaskId link)) (items group "tasks") of
-    Nothing -> pure False
-    Just value -> GW.taskInProgress <$> (decodeValue 500 value :: IO GW.GroupTask)
+ either (failure 500) pure (GW.activeRoutineRequest Nothing group (routineId routine))
 
 activeRun :: Service -> SQL.Connection -> Routine -> ScheduledTarget -> [StoredDue] -> IO (Maybe RunId)
 activeRun s db routine target dues = case [occurrenceId occurrence | Admitted occurrence MaterializationPending <- dues] of

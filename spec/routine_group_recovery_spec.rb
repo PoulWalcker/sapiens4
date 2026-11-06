@@ -113,6 +113,10 @@ RSpec.describe 'Group routine routing after recovery', :desktop, :slow do
     end
     group_message("Pause Scheduled Routine\n@#{@routine_id}")
     Contract.wait(description: 'fresh Group run schedule paused again') { group_routine['paused'] }
+    recovered_task = recovered.fetch('tasks').find { |row| row['id'] == request.fetch('task') }
+    expect(host.request('POST', "/api/groups/#{@group_id}/tasks/#{recovered_task.fetch('id')}/run",
+      {revision: recovered_task.fetch('revision')}).first).to eq(409)
+    expect(group_record.fetch('tasks').find { |row| row['id'] == recovered_task.fetch('id') }).to eq(recovered_task)
     finished = await_group_result(fresh.fetch('id'), description: 'fresh Group result publishes on the following minute pulse')
     desktop.see('Group recovery result: one current Lead observation recorded.')
     requests = finished.fetch('requests').select { |row| row.dig('origin', 'routine') == @routine_id }
@@ -156,5 +160,24 @@ RSpec.describe 'Group routine routing after recovery', :desktop, :slow do
     desktop.click('Open CurrentLead')
     desktop.see('Message CurrentLead')
     expect(desktop.text).not_to include('Group recovery result:', 'GROUP_RECOVERY_EFFECT:')
+    memo_calls_before_work = host.calls.count { |row| row['node'] == 'group-memo' }
+    restarted = host.api('POST', "/api/groups/#{@group_id}/tasks/#{recovered_task.fetch('id')}/run",
+      {revision: recovered_task.fetch('revision')}, status: 202)
+    work_request = group_record.fetch('requests').last
+    expect(work_request.fetch('origin')).to eq(request.fetch('origin'))
+    expect(work_request).to include('target' => current_lead, 'task_revision' => restarted.fetch('revision'))
+    work_message = group_record.fetch('messages').find { |row| row['id'] == work_request.fetch('message') }
+    expect(work_message).not_to have_key('memo_pending')
+    host.turn(work_request.fetch('id'), 'done', timeout: 150)
+    Contract.wait(description: 'Work revision settles without requesting a Group memo') do
+      group_record.fetch('requests').find { |row| row['id'] == work_request.fetch('id') }['settled']
+    end
+    work_calls = host.calls.select { |row| row['agency_run'] == work_request.fetch('id') }
+    expect(work_calls.size).to eq(1)
+    expect(work_calls.first).to include('node' => 'group', 'owner' => current_lead)
+    expect(work_calls.first.fetch('prompt')).to include('scheduledExecutionPrompt', execution)
+    expect(group_record.fetch('requests').select { |row| row['root'] == work_request.fetch('root') && row['memo'] }).to be_empty
+    expect(host.calls.count { |row| row['node'] == 'group-memo' }).to eq(memo_calls_before_work)
+    expect(group_routine).to include('paused' => true, 'runCount' => 2)
   end
 end

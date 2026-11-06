@@ -102,7 +102,11 @@ checkedRequestOrigin group request = do
  expected <- either (Left . T.pack) Right (parseEither parseJSON (get group "id"))
  origin <- checkedOperationalOrigin (requestOrigin request)
  case originPurpose origin of
-  ScheduledExecution _ -> unless (isJust (requestTask lineage)) (Left "Scheduled Group request has no task revision")
+  ScheduledExecution _ -> do
+   link <- maybe (Left "Scheduled Group request has no task revision") Right (requestTask lineage)
+   raw <- maybe (Left "Unknown Group task") Right (findId (taskIdText (requestTaskId link)) (items group "tasks"))
+   task <- either (Left . T.pack) Right (parseEither parseJSON raw)
+   validateTaskOrigin task origin
   OrdinaryWork -> Right ()
   RoutinePolicySetup _ -> Right ()
  if toJSON (requestOrigin request) == Null then do
@@ -205,7 +209,7 @@ runGroup s run turn = do
   (group,typed) <- maybe (failure 409 "Unknown Group call") pure found
   void (requestExecutionOrigin group typed)
   let request=toJSON typed
-  require (not (boolean (get group "archived")) && str (agentIdText (runOwner run)) `elem` items group "members") 409 "Group is archived or membership changed before execution"
+  require (requestTarget typed == runOwner run && not (boolean (get group "archived")) && str (agentIdText (runOwner run)) `elem` items group "members") 409 "Group is archived or membership changed before execution"
   when (isJust (originPolicyRoutine parsed)) $
    require (toJSON (runOwner run) == get group "lead") 409 "Routine policy setup belongs to the current Group Lead"
   let running = toJSON typed { requestStatus=Running }
