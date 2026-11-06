@@ -2,7 +2,7 @@
 module Routines
  ( Minutes, Routine, routineSummaries, storeRoutine, initializeRoutines
  , MissedDuePolicy(..), RoutineEdit(..), save, setPolicy, setPaused, command, receipt, acknowledge, dispatch, restoreOccurrences
- , verifyPolicyPreparationCompletion, ensureRetryAvailable
+ , verifyPolicyPreparationCompletion, ensureRetryAvailable, runNow
  ) where
 
 import Control.Monad
@@ -98,21 +98,39 @@ instance ToJSON ScheduledTarget where
   PersonalTarget agent -> obj [("kind",str "personal"),("agent",toJSON agent)]
   GroupTarget group agent -> obj [("kind",str "group"),("group",toJSON group),("agent",toJSON agent)]
 
+data RunTrigger = ScheduledTrigger | ManualTrigger Text deriving (Eq, Show)
+instance FromJSON RunTrigger where
+ parseJSON = withObject "Routine Run trigger" $ \o -> do
+  kind <- o .: "kind" :: Parser Text
+  case kind of
+   "scheduled" | KM.size o == 1 -> pure ScheduledTrigger
+   "manual" | KM.size o == 2 -> ManualTrigger <$> textFieldP "request" 128 (Object o)
+   _ -> fail "Invalid routine Run trigger"
+instance ToJSON RunTrigger where
+ toJSON trigger = case trigger of
+  ScheduledTrigger -> obj [("kind",str "scheduled")]
+  ManualTrigger request -> obj [("kind",str "manual"),("request",str request)]
+
 data ScheduledOccurrence = ScheduledOccurrence
  { occurrenceId :: RunId, occurrenceRoutineSnapshot :: Routine
  , occurrenceTarget :: ScheduledTarget, occurrenceAdmittedAt :: UTCTime
+ , occurrenceTrigger :: RunTrigger
  } deriving (Eq, Show)
 instance FromJSON ScheduledOccurrence where
  parseJSON = withObject "Scheduled occurrence" $ \o -> do
   created <- o .: "created" >>= maybe (fail "Invalid occurrence creation time") pure . parseTime
-  occurrence <- ScheduledOccurrence <$> o .: "id" <*> o .: "routine" <*> o .: "target" <*> pure created
-  unless (occurrenceId occurrence == occurrenceIdFor (occurrenceRoutineSnapshot occurrence) && validTarget occurrence)
+  trigger <- if KM.member "trigger" o then o .: "trigger" else pure ScheduledTrigger
+  occurrence <- ScheduledOccurrence <$> o .: "id" <*> o .: "routine" <*> o .: "target" <*> pure created <*> pure trigger
+  unless (occurrenceId occurrence == triggeredId (occurrenceRoutineSnapshot occurrence) trigger && validTarget occurrence)
    (fail "Invalid scheduled occurrence identity or target")
   pure occurrence
 instance ToJSON ScheduledOccurrence where
- toJSON occurrence = obj
+ toJSON occurrence = obj $
   [("id",toJSON (occurrenceId occurrence)),("routine",toJSON (occurrenceRoutineSnapshot occurrence))
   ,("target",toJSON (occurrenceTarget occurrence)),("created",str (timestamp (occurrenceAdmittedAt occurrence)))]
+  ++ case occurrenceTrigger occurrence of
+      ScheduledTrigger -> []
+      trigger@(ManualTrigger _) -> [("trigger",toJSON trigger)]
 
 newtype DueId = DueId { dueIdText :: Text } deriving (Eq, Ord, Show)
 instance FromJSON DueId where parseJSON value = DueId <$> parseJSON value
@@ -533,6 +551,11 @@ stableRunId key = RunId (T.filter (/='-') (UUID.toText
 occurrenceIdFor :: Routine -> RunId
 occurrenceIdFor routine = stableRunId (routineIdText (routineId routine) <> ":" <> deadlineText (routineDeadline routine))
 
+triggeredId :: Routine -> RunTrigger -> RunId
+triggeredId routine trigger = case trigger of
+ ScheduledTrigger -> occurrenceIdFor routine
+ ManualTrigger request -> stableRunId ("routine-manual:" <> routineIdText (routineId routine) <> ":" <> request)
+
 dueIdFor :: Routine -> DueId
 dueIdFor = DueId . runIdText . occurrenceIdFor
 
@@ -639,7 +662,8 @@ occurrenceTurn occurrence = newTurn (occurrenceId occurrence) Chat
  where
  routine=occurrenceRoutineSnapshot occurrence
  value=toJSON routine
- origin=toJSON (newOrigin (ScheduledExecution (ScheduledProvenance (routineId routine) (routineOwner routine) (Just (routineDeadline routine)))) Nothing
+ due=case occurrenceTrigger occurrence of ScheduledTrigger -> Just (routineDeadline routine); ManualTrigger _ -> Nothing
+ origin=toJSON (newOrigin (ScheduledExecution (ScheduledProvenance (routineId routine) (routineOwner routine) due)) Nothing
   (KM.fromList [("title",get value "title"),("minutes",toJSON (routineMinutes routine))
    ,("taskType",str "automated"),("executionPrompt",str (routinePrompt routine))]))
 
@@ -653,9 +677,56 @@ prepareOccurrence time current target due = do
       Nothing -> KM.delete "title" (routineFields original)
       Just title -> KM.insert "title" title (routineFields original)
      snapshot=original { routinePrompt=routinePrompt current, routinePolicy=routinePolicy current, routineFields=fields }
-     occurrence=ScheduledOccurrence (occurrenceIdFor snapshot) snapshot target time
+     occurrence=ScheduledOccurrence (occurrenceIdFor snapshot) snapshot target time ScheduledTrigger
  check (dueId due == dueIdFor snapshot && validTarget occurrence) 409 "Due identity or target changed before admission"
  pure occurrence
+
+prepareManualOccurrence :: UTCTime -> Routine -> ScheduledTarget -> Text -> Maybe RunId -> Validation ScheduledOccurrence
+prepareManualOccurrence time routine target request active = do
+ forM_ active $ \run -> check False 409
+  ("Another Run of this Routine is active: " <> runIdText run <> ". Finish or stop it before running it again.")
+ let trigger=ManualTrigger request
+     occurrence=ScheduledOccurrence (triggeredId routine trigger) routine target time trigger
+ check (validTarget occurrence) 409 "Routine target changed before admission"
+ pure occurrence
+
+runNow :: Service -> Text -> RoutineId -> Text -> RunId -> IO Value
+runNow s actor identity request caller = do
+ routine <- DB.connection s $ \db -> readRoutineOn db identity
+ case routineOwner routine of
+  PersonalOwner agent -> require (actor == agentIdText agent) 404 "Unknown Scheduled Routine in this conversation"
+  GroupOwner groupId -> G.getGroup s (groupIdText groupId) True >>= \group -> G.authorizeGroup s group actor Management
+ let trigger=ManualTrigger request
+ require (not (T.null (T.strip request)) && T.length request<=128) 500 "Invalid saved task identity for Run now"
+ destination <- scheduledTarget s routine
+ time <- getCurrentTime
+ (occurrence,materialization) <- DB.connection s $ \db -> SQL.withTransaction db $ do
+  latest <- readRoutineOn db identity
+  let run=triggeredId latest trigger
+  previous <- DB.queryRowsOn db "SELECT id,value,status FROM routine_occurrences WHERE id=?"
+   ["id","value","status"] [SQL.SQLText (runIdText run)]
+  case previous of
+   row:_ -> do
+    saved <- readStoredDue row
+    case saved of
+     Admitted existing status -> do
+      require (routineId (occurrenceRoutineSnapshot existing) == identity && occurrenceTrigger existing == trigger)
+       409 "Manual request identity belongs to another Run"
+      pure (existing,status)
+     _ -> failure 409 "Manual request identity belongs to a scheduled deadline"
+   [] -> do
+    target <- maybe (failure 409 "Routine owner must be active before running it") pure destination
+    validateTargetOn db target
+    stored <- readDuesOn db latest
+    active <- activeRun s db latest target stored
+    admitted <- validated (prepareManualOccurrence time latest target request active)
+    DB.executeOn db "INSERT INTO routine_occurrences(id,value,status) VALUES (?,?,'admitted_pending')"
+     [SQL.SQLText (runIdText run),SQL.SQLText (jsonText (toJSON admitted))]
+    DB.recordOn s db [routineOwnerText (routineOwner latest)] (routineIdText identity) "routine.triggered"
+     (obj [("turn",toJSON run),("trigger",toJSON trigger)]) actor (Just (runIdText caller))
+    pure (admitted,MaterializationPending)
+ when (materialization == MaterializationPending) (materializeOccurrence s occurrence)
+ pure (obj [("id",toJSON (occurrenceId occurrence)),("routine",toJSON (routineId (occurrenceRoutineSnapshot occurrence)))])
 
 readRoutineOn :: SQL.Connection -> RoutineId -> IO Routine
 readRoutineOn db identity = do
