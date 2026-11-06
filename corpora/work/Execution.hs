@@ -289,17 +289,22 @@ rejectInvalidOutputs s owner contexts = do
    saveState s owner (mapStateFields (put "output_buffer" (arr (filter (/=item) (items (stateJSON changed) "output_buffer")))) changed)
    DB.project s owner
 
+readyOnPulse :: Pulse -> ExecutionOrigin -> Bool
+readyOnPulse tick origin = case originPurpose origin of
+ ScheduledExecution scheduled -> isNothing (scheduledDeadline scheduled) || pulseFrequency tick==Bph60
+ OrdinaryWork -> pulseFrequency tick/=Bph60
+ RoutinePolicySetup _ -> pulseFrequency tick/=Bph60
+
 publish :: Service -> Text -> G.GroupRequestIndex -> Pulse -> IO ()
 publish s a contexts tick = do
  rejectInvalidOutputs s a contexts
  forM_ [1,2] $ \slot -> do
   state <- agentState s a
   let document=stateJSON state
-      scheduled=pulseFrequency tick==Bph60
   candidates <- forM (items document "output_buffer") $ \item -> do
    origin <- either (failure 500) pure (checkedBufferedOrigin contexts state item)
    pure (item,origin)
-  case find ((==scheduled) . originIsScheduled . snd) candidates of
+  case find (readyOnPulse tick . snd) candidates of
    Nothing -> pure ()
    Just (item,parsed) -> do
     time <- now
@@ -337,14 +342,17 @@ admission :: AgentId -> [(AgentId,Int)] -> [(Turn,ExecutionOrigin)] -> Pulse -> 
 admission owner runs candidates tick
  | owner `notElem` owners && length owners>=4 = Nothing
  | first:_ <- legacy, null mine, not scheduled = Just (Admission (first :| []) 0 False)
- | slot:_ <- available, Just batch <- NE.nonEmpty queued, all (/=0) mine = Just (Admission (if scheduled then NE.head batch :| [] else batch) slot True)
+ | slot:_ <- available, (first,origin):rest <- queued, all (/=0) mine =
+    let batch=if scheduled || originIsScheduled origin then first :| []
+         else first :| [turn | (turn,following) <- rest, not (originIsScheduled following)]
+    in Just (Admission batch slot True)
  | otherwise = Nothing
  where
  owners=nub (map fst runs)
  mine=[slot | (agent,slot)<-runs,agent==owner]
  available=[n | n<-[1,2],n `notElem` mine]
  scheduled=pulseFrequency tick==Bph60
- queued=[t | (t,origin)<-candidates,boolean (turnField t "batchable"),originIsScheduled origin==scheduled]
+ queued=[(turn,origin) | (turn,origin)<-candidates,boolean (turnField turn "batchable"),readyOnPulse tick origin]
  legacy=[t | (t,_)<-candidates,not (boolean (turnField t "batchable"))]
 onPulse :: (AgentId -> IO ()) -> Service -> Pulse -> IO ()
 onPulse prepareSpecialist s tick = do
