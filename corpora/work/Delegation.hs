@@ -5,7 +5,7 @@ module Delegation
  ( WorkCall(..), Workload, workloadId, workCalls, workOrigin, CallState(..), CallProgress(..)
  , callState, callNode, callOutput, begin, getWork, findWork, readWorks, saveWork, withCall, workItems
  , exceptionText, reconcileWorks, pendingWorks, runDecision, applyDecision, clarify
- , templates, editTemplate, workTasks, taskList, workSummaries
+ , TaskSpec, templates, editTemplate, workTasks, taskList, workSummaries
  ) where
 
 import Control.Concurrent

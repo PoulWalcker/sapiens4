@@ -76,16 +76,19 @@ instance ToJSON PolicySelection where
 data Routine = Routine
  { routineId :: RoutineId, routineOwner :: RoutineOwner, routinePrompt :: Text, routineMinutes :: Minutes
  , routineDeadline :: Deadline, routineAllowanceUsed :: Int, routinePaused :: Bool
- , routinePolicy :: PolicySelection, routineFields :: Object
+ , routinePolicy :: PolicySelection, routineSpecification :: Maybe D.TaskSpec, routineFields :: Object
  } deriving (Eq, Show)
 instance FromJSON Routine where
  parseJSON = withObject "Scheduled Routine" $ \o -> do
   due <- o .: "nextDue"
   count <- o .:? "runCount" .!= 0
   unless (count >= 0) (fail "Invalid routine run count")
-  Routine <$> o .: "id" <*> o .: "owner" <*> o .: "prompt" <*> o .: "minutes" <*> pure due <*> pure count <*> o .: "paused" <*> o .: "policySelection" <*> pure (foldr KM.delete o ["id","owner","prompt","minutes","nextDue","runCount","paused","policySelection"])
+  specification <- if KM.member "specification" o then Just <$> o .: "specification" else pure Nothing
+  Routine <$> o .: "id" <*> o .: "owner" <*> o .: "prompt" <*> o .: "minutes" <*> pure due <*> pure count <*> o .: "paused" <*> o .: "policySelection" <*> pure specification <*> pure (foldr KM.delete o ["id","owner","prompt","minutes","nextDue","runCount","paused","policySelection","specification"])
 instance ToJSON Routine where
- toJSON r = mergeFields [("id",toJSON (routineId r)),("owner",toJSON (routineOwner r)),("prompt",str (routinePrompt r)),("minutes",toJSON (routineMinutes r)),("nextDue",toJSON (routineDeadline r)),("runCount",num (routineAllowanceUsed r)),("paused",Bool (routinePaused r)),("policySelection",toJSON (routinePolicy r))] (Object (routineFields r))
+ toJSON r = mergeFields
+  ([("id",toJSON (routineId r)),("owner",toJSON (routineOwner r)),("prompt",str (routinePrompt r)),("minutes",toJSON (routineMinutes r)),("nextDue",toJSON (routineDeadline r)),("runCount",num (routineAllowanceUsed r)),("paused",Bool (routinePaused r)),("policySelection",toJSON (routinePolicy r))]
+   ++ [("specification",toJSON spec) | spec <- maybeToList (routineSpecification r)]) (Object (routineFields r))
 
 routineDue :: Routine -> UTCTime
 routineDue = deadlineTime . routineDeadline
@@ -362,12 +365,22 @@ selectRoutine edit candidate = case edit of
  AddRoutine source -> case candidate of
   Just existing -> Right (RoutineReplay existing)
   Nothing -> Right (RoutineChange (NewRoutine source))
-routineValue :: UTCTime -> RoutineOwner -> Minutes -> Text -> Maybe MissedDuePolicy -> RoutineWrite -> Value
-routineValue time owner interval body policy change = merge initial (obj
- [("owner",toJSON owner),("title",str (T.unwords (take 7 (T.words body)))),("minutes",toJSON interval)
- ,("prompt",str body),("updated",str (timestamp time)),("nextDue",str (timestamp (addUTCTime (intervalSeconds interval) time)))
- ,("policySelection",toJSON (maybe initialPolicy PolicySelected policy))])
+routineValue :: UTCTime -> RoutineOwner -> Minutes -> Text -> Maybe D.TaskSpec -> Maybe MissedDuePolicy -> RoutineWrite -> Validation Value
+routineValue time owner interval body specification policy change = do
+ case change of
+  ReviseRoutine existing -> check
+   (body == routinePrompt existing || isNothing (routineSpecification existing) || isJust specification)
+   400 "Changing structured Routine instructions requires its full specification"
+  NewRoutine _ -> pure ()
+ pure $ merge initial (obj (
+  [("owner",toJSON owner),("title",str (T.unwords (take 7 (T.words body)))),("minutes",toJSON interval)
+  ,("prompt",str body),("updated",str (timestamp time)),("nextDue",toJSON deadline)
+  ,("policySelection",toJSON (maybe initialPolicy PolicySelected policy))]
+  ++ [("specification",toJSON spec) | spec <- maybeToList specification]))
  where
+ deadline = case change of
+  ReviseRoutine existing | routineMinutes existing == interval -> routineDeadline existing
+  _ -> newDeadline (addUTCTime (intervalSeconds interval) time)
  initialPolicy = case change of
   ReviseRoutine existing -> routinePolicy existing
   NewRoutine _ -> AwaitingSelection
@@ -375,8 +388,8 @@ routineValue time owner interval body policy change = merge initial (obj
   ReviseRoutine existing -> toJSON existing
   NewRoutine source -> obj ([("created",str (timestamp time)),("runCount",num 0),("paused",Bool False),("policySelection",toJSON AwaitingSelection)] ++ [("sourceCall",str call) | call <- maybeToList source])
 
-save :: Service -> Text -> Value -> Value -> Maybe MissedDuePolicy -> RoutineEdit -> IO Value
-save s rawOwner minutes execution policy edit = do
+save :: Service -> Text -> Value -> Value -> Maybe D.TaskSpec -> Maybe MissedDuePolicy -> RoutineEdit -> IO Value
+save s rawOwner minutes execution specification policy edit = do
  owner <- decodeValue 400 (str rawOwner)
  (body,interval) <- validated (routineInput minutes execution)
  case owner of
@@ -389,6 +402,8 @@ save s rawOwner minutes execution policy edit = do
  selected <- validated (decodeRoutineCandidate edit interval body routines >>= selectRoutine edit)
  case selected of
   RoutineReplay existing -> do
+   forM_ specification $ \spec -> require (routineSpecification existing == Just spec)
+    409 "This creation already has a different specification; update the existing routine"
    forM_ policy $ \chosen -> require (routinePolicy existing == PolicySelected chosen)
     409 "This creation already has a different policy; update the existing routine"
    pure (toJSON existing)
@@ -402,17 +417,19 @@ save s rawOwner minutes execution policy edit = do
      NewRoutine _ -> pure change
      ReviseRoutine existing -> do
       latest <- readRoutineOn db (routineId existing)
-      unless (routinePaused latest || routineDue latest > time) $ do
+      advanced <- if routinePaused latest || routineDue latest > time then pure latest else do
        target <- maybe (failure 409 "Routine target is unavailable before editing elapsed deadlines") pure destination
        validateTargetOn db target
-       let (elapsed,_)=captureDues time latest target
+       let (elapsed,next)=captureDues time latest target
        stored <- readDuesOn db latest
        active <- activeRun s db latest target stored
        let reason=deferralReason (routinePolicy latest) active
        mapM_ (insertDeferredOn db reason) elapsed
        recordDeferralOn s db latest reason elapsed
-      pure (ReviseRoutine latest)
-    saved <- DB.saveRoutineOn db (routineValue time owner interval body policy captured)
+       pure next
+      pure (ReviseRoutine advanced)
+    value <- validated (routineValue time owner interval body specification policy captured)
+    saved <- DB.saveRoutineOn db value
     let action = case change of NewRoutine _ -> "routine.created"; ReviseRoutine _ -> "routine.updated"
     DB.recordOn s db [routineOwnerText owner] (at saved "id") action saved "admin" Nothing
     pure saved
@@ -469,10 +486,10 @@ command s owner input attached = case C.interpret attached (T.unpack input) of
  Left error -> failure 400 (T.pack error)
  Right Nothing -> pure Nothing
  Right (Just c) -> Just <$> case c of
-  C.Create interval body -> save s owner (toJSON interval) (str (T.pack body)) Nothing (AddRoutine Nothing)
+  C.Create interval body -> save s owner (toJSON interval) (str (T.pack body)) Nothing Nothing (AddRoutine Nothing)
   C.Edit i old interval body -> do
    identity <- decodeValue 400 (str (T.pack i))
-   save s owner (toJSON interval) (str (T.pack body)) Nothing (EditRoutine identity (Just (fromIntegral old)))
+   save s owner (toJSON interval) (str (T.pack body)) Nothing Nothing (EditRoutine identity (Just (fromIntegral old)))
   C.SetPaused i paused -> do
    identity <- decodeValue 400 (str (T.pack i))
    setPaused s owner identity paused

@@ -60,8 +60,8 @@ operationSchema =
  , ("status", ReadStatus, ["target"])
  , ("delegate", Delegate, ["decision"])
  , ("routines", ReadRoutines, ["group"])
- , ("routine_create", CreateRoutine, ["minutes","prompt","missedPolicy"])
- , ("routine_update", UpdateRoutine, ["id","minutes","prompt","missedPolicy"])
+ , ("routine_create", CreateRoutine, ["minutes","prompt","missedPolicy","specification"])
+ , ("routine_update", UpdateRoutine, ["id","minutes","prompt","missedPolicy","specification"])
  , ("routine_policy", SelectRoutinePolicy, ["id","expectedPrompt","expectedSelection","missedPolicy"])
  , ("routine_pause", PauseRoutine, ["id"])
  , ("routine_resume", ResumeRoutine, ["id"])
@@ -176,11 +176,13 @@ control s a payload = do
    obj . (:[]) . ("routines",) . arr . filter ((==owner) . (`at` "owner")) <$> R.routineSummaries s
   CreateRoutine -> do
    policy <- decodeValue 400 (get d "missedPolicy")
-   receipt . obj . (:[]) . ("routine",) <$> R.save s a (get d "minutes") (get d "prompt") (Just policy) (R.AddRoutine current)
+   specification <- if has d "specification" then Just <$> decodeValue 400 (get d "specification") else pure Nothing
+   receipt . obj . (:[]) . ("routine",) <$> R.save s a (get d "minutes") (get d "prompt") specification (Just policy) (R.AddRoutine current)
   UpdateRoutine -> do
    i <- routineIdentity
    policy <- if has d "missedPolicy" then Just <$> decodeValue 400 (get d "missedPolicy") else pure Nothing
-   receipt . obj . (:[]) . ("routine",) <$> R.save s a (get d "minutes") (get d "prompt") policy (R.EditRoutine i Nothing)
+   specification <- if has d "specification" then Just <$> decodeValue 400 (get d "specification") else pure Nothing
+   receipt . obj . (:[]) . ("routine",) <$> R.save s a (get d "minutes") (get d "prompt") specification policy (R.EditRoutine i Nothing)
   SelectRoutinePolicy -> do
    i <- routineIdentity
    expected <- textField d "expectedPrompt" 16000
