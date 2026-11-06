@@ -10,6 +10,11 @@ evidence and coverage of every criterion. NotApplicable is allowed only for an
 explicitly conditional criterion, with evidence explaining why it does not apply.
 If work is partial or its result cannot be established, use status Unresolved,
 preserve the completed part and explain the remaining limitations in reply.
+Criterion results are only Satisfied or NotApplicable, including for Unresolved.
+For Unresolved, report only the criteria actually satisfied or genuinely not
+applicable; omit unmet or uncertain criteria and explain them in reason and reply.
+The list may be empty. Do not invent NotSatisfied, Failed or Unresolved results
+for individual criteria.
 List only actually saved files in artifacts, using absolute paths. The host checks
 structural coverage; you remain responsible for checking the substance with tools.
 Mentions in an Outcome reply or evidence do not call other Group members.
