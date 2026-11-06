@@ -2,11 +2,14 @@
 module Routines
  ( Minutes, Routine, routineSummaries, storeRoutine, initializeRoutines
  , MissedDuePolicy(..), RoutineEdit(..), save, setPolicy, setPaused, command, receipt, acknowledge, dispatch, restoreOccurrences
- , verifyPolicyPreparationCompletion, ensureRetryAvailable, runNow
+ , verifyPolicyPreparationCompletion, ensureRetryAvailable, runNow, stopRun, ensureExecutionAllowed, ensureTaskAvailable
  ) where
 
 import Control.Monad
-import Control.Exception (SomeException, SomeAsyncException, fromException, throwIO, try, catch)
+import Control.Applicative ((<|>))
+import Control.Exception (SomeException, SomeAsyncException, fromException, throwIO, try, catch, mask_)
+import Control.Concurrent (readMVar)
+import Data.IORef (writeIORef)
 import Control.Concurrent.Async (AsyncCancelled)
 import qualified Command as C
 import Data.Aeson hiding (pairs)
@@ -115,12 +118,14 @@ data ScheduledOccurrence = ScheduledOccurrence
  { occurrenceId :: RunId, occurrenceRoutineSnapshot :: Routine
  , occurrenceTarget :: ScheduledTarget, occurrenceAdmittedAt :: UTCTime
  , occurrenceTrigger :: RunTrigger
+ , occurrenceStoppedAt :: Maybe UTCTime
  } deriving (Eq, Show)
 instance FromJSON ScheduledOccurrence where
  parseJSON = withObject "Scheduled occurrence" $ \o -> do
   created <- o .: "created" >>= maybe (fail "Invalid occurrence creation time") pure . parseTime
   trigger <- if KM.member "trigger" o then o .: "trigger" else pure ScheduledTrigger
-  occurrence <- ScheduledOccurrence <$> o .: "id" <*> o .: "routine" <*> o .: "target" <*> pure created <*> pure trigger
+  stopped <- if KM.member "stoppedAt" o then Just <$> (o .: "stoppedAt" >>= maybe (fail "Invalid Run stop time") pure . parseTime) else pure Nothing
+  occurrence <- ScheduledOccurrence <$> o .: "id" <*> o .: "routine" <*> o .: "target" <*> pure created <*> pure trigger <*> pure stopped
   unless (occurrenceId occurrence == triggeredId (occurrenceRoutineSnapshot occurrence) trigger && validTarget occurrence)
    (fail "Invalid scheduled occurrence identity or target")
   pure occurrence
@@ -128,6 +133,7 @@ instance ToJSON ScheduledOccurrence where
  toJSON occurrence = obj $
   [("id",toJSON (occurrenceId occurrence)),("routine",toJSON (occurrenceRoutineSnapshot occurrence))
   ,("target",toJSON (occurrenceTarget occurrence)),("created",str (timestamp (occurrenceAdmittedAt occurrence)))]
+  ++ [("stoppedAt",str (timestamp stopped)) | stopped <- maybeToList (occurrenceStoppedAt occurrence)]
   ++ case occurrenceTrigger occurrence of
       ScheduledTrigger -> []
       trigger@(ManualTrigger _) -> [("trigger",toJSON trigger)]
@@ -291,7 +297,14 @@ routineSummaries s = do
       Just (count,oldest) -> merge routine (obj
        [("deferredCount",toJSON count)
        ,("oldestDeferredDue",get (toJSON (dueRoutineSnapshot oldest)) "nextDue")])
- pure (map summarize routines)
+ forM routines $ \value -> (do
+  routine <- decodeValue 500 value
+  destination <- scheduledTarget s routine
+  active <- DB.connection s $ \db -> do
+   stored <- readDuesOn db routine
+   let recorded=listToMaybe [occurrenceTarget occurrence | Admitted occurrence _ <- stored]
+   forM (destination <|> recorded) $ \target -> activeRun s db routine target stored
+  pure (merge (summarize value) (obj [("activeRun",toJSON identity) | identity <- maybeToList (join active)]))) `catch` invalidActive value
  where
  readSummaryDue row = (Just <$> readStoredDue row) `catch` invalidSummary row
  invalidSummary :: Value -> APIError -> IO (Maybe StoredDue)
@@ -299,6 +312,10 @@ routineSummaries s = do
   hPutStrLn stderr ("Deferred due " <> T.unpack (at row "id")
    <> " omitted from routine summaries: " <> show problem)
   pure Nothing
+ invalidActive :: Value -> APIError -> IO Value
+ invalidActive value problem = do
+  hPutStrLn stderr ("Routine " <> T.unpack (at value "id") <> " active Run unavailable: " <> show problem)
+  pure value
 storeRoutine :: Service -> Routine -> IO Value
 storeRoutine s = DB.saveRoutine s . toJSON
 
@@ -598,9 +615,13 @@ activePersonal s db routine dues = do
      admitted = [occurrenceId occurrence | Admitted occurrence _ <- dues]
      identities = nub (admitted ++ map turnId turns)
  workRows <- readRuns "SELECT id,value FROM workloads" ["id","value"] identities
- turnRows <- readRuns "SELECT id,status FROM turns" ["id","status"] identities
- let works=M.fromList [(at row "id",row) | row<-workRows]
-     projected=M.fromList [(at row "id",row) | row<-turnRows]
+ savedWorks <- traverse (DB.decodeStored . (`at` "value")) workRows :: IO [D.Workload]
+ let calls=concatMap (map D.callIdentity . NE.toList . D.workCalls) savedWorks
+     works=M.fromList [(D.workloadId work,work) | work<-savedWorks]
+ turnRows <- readRuns "SELECT id,status FROM turns" ["id","status"] (nub (identities++calls))
+ projected <- fmap M.fromList $ forM turnRows $ \row -> do
+  status <- field 500 row "status"
+  pure (at row "id",status)
  active <- filterM (activeIdentity turns works projected) identities
  pure (case active of i:_ -> Just i; [] -> Nothing)
  where
@@ -614,16 +635,20 @@ activePersonal s db routine dues = do
   (rows++) <$> readRuns query columns remaining
  activeIdentity turns works projected identity = do
   let inState = find ((==identity) . turnId) turns
-  work <- traverse (DB.decodeStored . (`at` "value")) (M.lookup (runIdText identity) works) :: IO (Maybe D.Workload)
-  status <- traverse (\row -> decodeValue 500 (get row "status")) (M.lookup (runIdText identity) projected) :: IO (Maybe TurnStatus)
-  let liveCall = case work of
+      work=M.lookup (runIdText identity) works
+      status=M.lookup (runIdText identity) projected
+      liveCall = case work of
        Just w -> D.callState (NE.last (D.workCalls w)) `elem`
         [D.CallQueued,D.CallRunning,D.CallDelegated,D.CallWaiting]
        Nothing -> False
       liveTurn = maybe False (activeStatus . turnStatus) inState || maybe False activeStatus status
-  when (isNothing inState && isNothing status && isNothing work) $
+       || maybe False (any (maybe False activeStatus . (\call -> M.lookup (runIdText (D.callIdentity call)) projected)) . NE.toList . D.workCalls) work
+      stopped = any (\stored -> case stored of Admitted occurrence _ -> occurrenceId occurrence == identity && isJust (occurrenceStoppedAt occurrence); _ -> False) dues
+  runs <- readMVar (serviceRuns s)
+  let liveProcess=maybe False (any ((`M.member` runs) . D.callIdentity) . NE.toList . D.workCalls) work
+  when (isNothing inState && isNothing status && isNothing work && not stopped) $
    failure 500 "Admitted routine Run has no persisted state"
-  pure (liveCall || liveTurn)
+  pure (liveCall || liveTurn || liveProcess)
 
 activeGroup :: SQL.Connection -> Routine -> IO (Maybe RunId)
 activeGroup db routine = do
@@ -631,10 +656,22 @@ activeGroup db routine = do
  group <- case rows of
   row:_ -> DB.decodeStored (at row "value")
   [] -> failure 409 "Routine Group disappeared before admission"
- either (failure 500) pure (GW.activeRoutineRequest Nothing group (routineId routine))
+ active <- either (failure 500) pure (GW.activeRoutineRequest Nothing group (routineId routine))
+ requests <- G.readRequests group
+ case active >>= \identity -> find ((==identity) . G.requestId) requests of
+  Nothing -> pure active
+  Just request -> do
+   lineage <- G.requireRequestLineage request
+   pure (groupAdmission lineage <|> active)
+
+groupAdmission :: G.RequestLineage -> Maybe RunId
+groupAdmission lineage = do
+ link <- G.requestTask lineage
+ identity <- T.stripPrefix "gtask_" (taskIdText (G.requestTaskId link))
+ pure (RunId identity)
 
 activeRun :: Service -> SQL.Connection -> Routine -> ScheduledTarget -> [StoredDue] -> IO (Maybe RunId)
-activeRun s db routine target dues = case [occurrenceId occurrence | Admitted occurrence MaterializationPending <- dues] of
+activeRun s db routine target dues = case [occurrenceId occurrence | Admitted occurrence MaterializationPending <- dues, isNothing (occurrenceStoppedAt occurrence)] of
  i:_ -> pure (Just i)
  [] -> case target of
   PersonalTarget _ -> activePersonal s db routine dues
@@ -643,6 +680,7 @@ activeRun s db routine target dues = case [occurrenceId occurrence | Admitted oc
 -- Caller must hold the host lock through requeueing.
 ensureRetryAvailable :: Service -> Turn -> IO ()
 ensureRetryAvailable s turn = do
+ ensureExecutionAllowed s (turnId turn)
  origin <- requireExecutionOrigin (turnOrigin turn)
  forM_ (originRoutine origin) $ \identity -> do
   DB.connection s $ \db -> do
@@ -677,7 +715,7 @@ prepareOccurrence time current target due = do
       Nothing -> KM.delete "title" (routineFields original)
       Just title -> KM.insert "title" title (routineFields original)
      snapshot=original { routinePrompt=routinePrompt current, routinePolicy=routinePolicy current, routineFields=fields }
-     occurrence=ScheduledOccurrence (occurrenceIdFor snapshot) snapshot target time ScheduledTrigger
+     occurrence=ScheduledOccurrence (occurrenceIdFor snapshot) snapshot target time ScheduledTrigger Nothing
  check (dueId due == dueIdFor snapshot && validTarget occurrence) 409 "Due identity or target changed before admission"
  pure occurrence
 
@@ -686,7 +724,7 @@ prepareManualOccurrence time routine target request active = do
  forM_ active $ \run -> check False 409
   ("Another Run of this Routine is active: " <> runIdText run <> ". Finish or stop it before running it again.")
  let trigger=ManualTrigger request
-     occurrence=ScheduledOccurrence (triggeredId routine trigger) routine target time trigger
+     occurrence=ScheduledOccurrence (triggeredId routine trigger) routine target time trigger Nothing
  check (validTarget occurrence) 409 "Routine target changed before admission"
  pure occurrence
 
@@ -727,6 +765,162 @@ runNow s actor identity request caller = do
     pure (admitted,MaterializationPending)
  when (materialization == MaterializationPending) (materializeOccurrence s occurrence)
  pure (obj [("id",toJSON (occurrenceId occurrence)),("routine",toJSON (routineId (occurrenceRoutineSnapshot occurrence)))])
+
+ensureOccurrenceAvailable :: Service -> RunId -> IO ()
+ensureOccurrenceAvailable s identity = do
+ rows <- DB.queryRows s "SELECT id,value,status FROM routine_occurrences WHERE id=?"
+  ["id","value","status"] [SQL.SQLText (runIdText identity)]
+ forM_ rows $ \row -> do
+  stored <- readStoredDue row
+  case stored of
+   Admitted occurrence _ -> require (isNothing (occurrenceStoppedAt occurrence)) 409 "This Routine Run was stopped; request a new Run now instead"
+   _ -> failure 409 "This identity is not an admitted Routine Run"
+
+ensureTaskAvailable :: Service -> TaskId -> IO ()
+ensureTaskAvailable s task = forM_ (T.stripPrefix "gtask_" (taskIdText task)) (ensureOccurrenceAvailable s . RunId)
+
+ensureExecutionAllowed :: Service -> RunId -> IO ()
+ensureExecutionAllowed s identity = do
+ work <- D.findWork s identity
+ case work of
+  Just (saved,_) -> ensureOccurrenceAvailable s (RunId (D.workloadId saved))
+  Nothing -> do
+   groups <- DB.values s DB.Groups
+   forM_ groups $ \group -> do
+    requests <- G.readRequests group
+    forM_ (find ((==identity) . G.requestId) requests) $ \request -> do
+     lineage <- G.requireRequestLineage request
+     forM_ (groupAdmission lineage) (ensureOccurrenceAvailable s)
+
+occurrenceRequests :: ScheduledOccurrence -> Value -> IO [G.GroupRequest]
+occurrenceRequests occurrence group = do
+ requests <- G.readRequests group
+ filterM belongs requests
+ where
+ belongs request = do
+  lineage <- G.requireRequestLineage request
+  let related=groupAdmission lineage == Just (occurrenceId occurrence)
+  when related $ do
+   origin <- requireExecutionOrigin (G.requestOrigin request)
+   require (originRoutine origin == Just (routineId (occurrenceRoutineSnapshot occurrence)))
+    500 "Routine Run request has inconsistent provenance"
+  pure related
+
+occurrenceCalls :: Service -> ScheduledOccurrence -> IO [(AgentId,RunId)]
+occurrenceCalls s occurrence = case occurrenceTarget occurrence of
+ PersonalTarget agent -> do
+  saved <- D.findWork s (occurrenceId occurrence)
+  pure $ case saved of
+   Nothing -> [(agent,occurrenceId occurrence)]
+   Just (work,_) -> [(D.callRecipient call,D.callIdentity call) | call <- NE.toList (D.workCalls work)]
+ GroupTarget group _ -> do
+  value <- G.getGroup s (groupIdText group) False
+  requests <- occurrenceRequests occurrence value
+  pure [(G.requestTarget request,G.requestId request) | request <- requests]
+
+occurrenceActive :: Service -> ScheduledOccurrence -> MaterializationStatus -> IO Bool
+occurrenceActive s occurrence materialization = do
+ calls <- occurrenceCalls s occurrence
+ runs <- readMVar (serviceRuns s)
+ live <- forM calls $ \(owner,identity) -> do
+  state <- agentState s (agentIdText owner)
+  pure (M.member identity runs || any (\turn -> turnId turn == identity && turnStatus turn `elem` [Queued,Running]) (agentTurns state))
+ logical <- case occurrenceTarget occurrence of
+  PersonalTarget _ -> do
+   saved <- D.findWork s (occurrenceId occurrence)
+   pure (maybe False ((`elem` [D.CallQueued,D.CallRunning,D.CallWaiting]) . D.callState . NE.last . D.workCalls . fst) saved)
+  GroupTarget group _ -> do
+   value <- G.getGroup s (groupIdText group) False
+   requests <- occurrenceRequests occurrence value
+   task <- traverse (decodeValue 500) (findId ("gtask_" <> runIdText (occurrenceId occurrence)) (items value "tasks"))
+   pure (any (\request -> not (G.requestSettled request) && G.requestStatus request `elem` [Queued,Running]) requests
+    || (maybe False GW.taskInProgress task && not (any ((==OutputPending) . G.requestStatus) requests)))
+ pure (or live || logical || materialization == MaterializationPending)
+
+cancelOccurrenceTurn :: Service -> AgentId -> RunId -> IO ()
+cancelOccurrenceTurn s owner identity = do
+ runs <- readMVar (serviceRuns s)
+ state <- agentState s (agentIdText owner)
+ case find ((==identity) . turnId) (agentTurns state) of
+  Just turn | Just running <- M.lookup (batchLeader turn) runs -> writeIORef (runCancel running) True
+  Just turn | turnStatus turn `elem` [Queued,Running] -> do
+   let cancel saved = if turnId saved == identity then
+        (withTurnFields (put "error" (str "Stopped by Admin")) saved) { turnStatus=Cancelled } else saved
+   saveState s (agentIdText owner) (mapTurns cancel state)
+   DB.project s (agentIdText owner)
+  _ -> pure ()
+
+cancelOccurrence :: Service -> ScheduledOccurrence -> IO ()
+cancelOccurrence s occurrence = do
+ calls <- occurrenceCalls s occurrence
+ mapM_ (uncurry (cancelOccurrenceTurn s)) calls
+ case occurrenceTarget occurrence of
+  PersonalTarget _ -> do
+   saved <- D.findWork s (occurrenceId occurrence)
+   forM_ saved $ \(work,_) -> do
+    let frontier=D.callIdentity (NE.last (D.workCalls work))
+        cancel call = if D.callState call `elem` [D.CallQueued,D.CallRunning]
+          || (D.callIdentity call == frontier && D.callState call == D.CallWaiting)
+         then call { D.callProgress=D.CancelledAt (D.callNode call) } else call
+        changed=fmap cancel (D.workCalls work)
+    when (changed /= D.workCalls work) (D.saveWork s work { D.workCalls=changed })
+  GroupTarget group _ -> do
+   original <- G.getGroup s (groupIdText group) False
+   requests <- occurrenceRequests occurrence original
+   runs <- readMVar (serviceRuns s)
+   changed <- foldM (cancelRequest runs) original requests
+   time <- getCurrentTime
+   let taskId=TaskId ("gtask_" <> runIdText (occurrenceId occurrence))
+   updated <- case findId (taskIdText taskId) (items changed "tasks") of
+    Nothing -> pure changed
+    Just raw -> do
+     task <- decodeValue 500 raw
+     pure (G.replace "tasks" (toJSON (GW.stopTask time "system" task)) changed)
+   when (updated /= original) $ void (G.saveGroup s updated "system" "routine stopped" (toJSON (occurrenceId occurrence)))
+ where
+ cancelRequest runs group request
+  | G.requestSettled request || G.requestStatus request `notElem` [Queued,Running] || M.member (G.requestId request) runs = pure group
+  | otherwise = do
+     let stopped=request { G.requestStatus=Cancelled, G.requestSettled=True
+                         , G.requestFields=KM.insert "error" (str "Stopped by Admin") (G.requestFields request) }
+         turn=obj [("status",toJSON Cancelled),("output",Null),("error",str "Stopped by Admin")]
+     (updated,_) <- GW.settleTask group request turn
+     pure (G.replace "requests" (toJSON stopped) updated)
+
+stopRun :: Service -> Text -> RoutineId -> RunId -> IO Value
+stopRun s actor identity run = mask_ $ do
+ routine <- DB.connection s $ \db -> readRoutineOn db identity
+ case routineOwner routine of
+  PersonalOwner owner -> require (actor == "admin" || actor == agentIdText owner) 404 "Unknown Scheduled Routine in this conversation"
+  GroupOwner group -> G.getGroup s (groupIdText group) False >>= \value -> G.authorizeGroup s value actor Management
+ (occurrence,status) <- DB.connection s $ \db -> do
+  rows <- DB.queryRowsOn db "SELECT id,value,status FROM routine_occurrences WHERE id=?"
+   ["id","value","status"] [SQL.SQLText (runIdText run)]
+  row <- maybe (failure 404 "Unknown Routine Run") pure (listToMaybe rows)
+  stored <- readStoredDue row
+  case stored of
+   Admitted saved materialization -> do
+    require (routineId (occurrenceRoutineSnapshot saved) == identity) 404 "Run belongs to another Routine"
+    pure (saved,materialization)
+   _ -> failure 404 "This deadline has no admitted Run"
+ active <- occurrenceActive s occurrence status
+ case (occurrenceStoppedAt occurrence,active) of
+  (Nothing,False) -> pure (stopReceipt "finished")
+  _ -> do
+   time <- getCurrentTime
+   let stopped=occurrence { occurrenceStoppedAt=occurrenceStoppedAt occurrence <|> Just time }
+   DB.connection s $ \db -> SQL.withTransaction db $ do
+    DB.executeOn db "UPDATE routine_occurrences SET value=?,status='admitted_pending' WHERE id=?"
+     [SQL.SQLText (jsonText (toJSON stopped)),SQL.SQLText (runIdText run)]
+    when (isNothing (occurrenceStoppedAt occurrence)) $
+     DB.recordOn s db [routineOwnerText (routineOwner routine)] (routineIdText identity) "routine.stopped"
+      (obj [("run",toJSON run)]) actor Nothing
+   materializeOccurrence s stopped
+   calls <- occurrenceCalls s stopped
+   runs <- readMVar (serviceRuns s)
+   pure (stopReceipt (if any ((`M.member` runs) . snd) calls then "stopping" else "stopped"))
+ where
+ stopReceipt status = obj [("id",toJSON run),("routine",toJSON identity),("status",str status)]
 
 readRoutineOn :: SQL.Connection -> RoutineId -> IO Routine
 readRoutineOn db identity = do
@@ -931,9 +1125,11 @@ ensurePolicyPreparation s routine = case routinePolicy routine of
 
 materializeOccurrence :: Service -> ScheduledOccurrence -> IO ()
 materializeOccurrence s occurrence = do
- materialization <- case occurrenceTarget occurrence of
-  PersonalTarget agent -> materializePersonal s agent (occurrenceTurn occurrence) >> pure Materialized
-  GroupTarget group _ -> materializeGroup s group (occurrenceTurn occurrence)
+ materialization <- case occurrenceStoppedAt occurrence of
+  Just _ -> cancelOccurrence s occurrence >> pure Materialized
+  Nothing -> case occurrenceTarget occurrence of
+   PersonalTarget agent -> materializePersonal s agent (occurrenceTurn occurrence) >> pure Materialized
+   GroupTarget group _ -> materializeGroup s group (occurrenceTurn occurrence)
  when (materialization == Materialized) $
   DB.executeSQL s "UPDATE routine_occurrences SET status='admitted_ready' WHERE id=? AND status='admitted_pending'"
    [SQL.SQLText (runIdText (occurrenceId occurrence))]

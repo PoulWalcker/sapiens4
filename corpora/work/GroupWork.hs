@@ -135,6 +135,13 @@ currentTaskRevision expected task = not task.deleted && taskLink task == expecte
 forwardTask :: AgentId -> GroupTask -> GroupTask
 forwardTask assignee task = GroupTask task.identity task.title task.body assignee task.state task.deleted (task.revision+1) task.metadata
 
+stopTask :: UTCTime -> Text -> GroupTask -> GroupTask
+stopTask time actor task
+ | task.state /= InProgress = task
+ | otherwise = task { state=Backlog, revision=task.revision+1
+   , metadata=KM.fromList [("updated_by",str actor),("updated",str (timestamp time))
+      ,("history",arr (items (Object task.metadata) "history" ++ [remove ["history","results"] (toJSON task)]))] <> task.metadata }
+
 reviseTask :: [AgentId] -> UTCTime -> Text -> TaskPatch -> GroupTask -> Either TaskError GroupTask
 reviseTask members updated actor patch task
  | patch.revision /= Just task.revision = Left TaskChanged

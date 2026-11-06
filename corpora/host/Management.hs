@@ -51,7 +51,7 @@ prepare s a = do
  let context= obj [("currentSapi",str a),("chief",get facts "main_agent_id"),("groups",get facts "groups"),("team",get facts "team"),("workspace",obj [("path",str (T.pack (workspaceRoot s a)))])]
  writeText (agentRoot s a </> "manifests/corpora-state.md") (jsonText context)
 data WorkspaceOperation = OpenWorkspace | ZoomWorkspace | CloseWorkspace | FocusWorkspace | ReloadWorkspace | BackWorkspace | ForwardWorkspace | BookmarkWorkspace | UnbookmarkWorkspace deriving (Eq, Show)
-data Operation = ReadCorpora | UpdateCorpora | Batch | ReadStatus | Delegate | ReadRoutines | CreateRoutine | UpdateRoutine | SelectRoutinePolicy | PauseRoutine | ResumeRoutine | RunRoutine | CreateAgent | RetireAgent | RehireAgent | AcquireComputer | ChangeManager | ReadWorkspace | GroupCommand G.GroupOperation | WorkspaceCommand WorkspaceOperation deriving (Eq, Show)
+data Operation = ReadCorpora | UpdateCorpora | Batch | ReadStatus | Delegate | ReadRoutines | CreateRoutine | UpdateRoutine | SelectRoutinePolicy | PauseRoutine | ResumeRoutine | RunRoutine | StopRoutine | CreateAgent | RetireAgent | RehireAgent | AcquireComputer | ChangeManager | ReadWorkspace | GroupCommand G.GroupOperation | WorkspaceCommand WorkspaceOperation deriving (Eq, Show)
 operationSchema :: [(Text,Operation,[Text])]
 operationSchema =
  [ ("corpora_get", ReadCorpora, [])
@@ -66,6 +66,7 @@ operationSchema =
  , ("routine_pause", PauseRoutine, ["id"])
  , ("routine_resume", ResumeRoutine, ["id"])
  , ("routine_run", RunRoutine, ["id"])
+ , ("routine_stop", StopRoutine, ["id","run"])
  , ("group_create", GroupCommand G.GroupCreate, ["name","description","lead","members"])
  , ("group_get", GroupCommand G.GroupGet, ["group"])
  , ("group_update", GroupCommand G.GroupUpdate, ["group","revision","name","description","lead","members","archived"])
@@ -116,6 +117,12 @@ control s a payload = do
  let d=remove ["agencyRun"] payload; specific=if has payload "agencyRun" then Just (at payload "agencyRun") else Nothing
  current <- activeTurn s a specific
  when (isJust specific) $ require (isJust current) 409 "AgencyRun is no longer active"
+ forM_ specific $ \identity -> do
+  runs <- readMVar (serviceRuns s)
+  forM_ (M.lookup (RunId identity) runs) $ \running -> do
+   stopped <- readIORef (runCancel running)
+   require (not stopped) 409 "This execution is stopping; no further host actions are allowed"
+  R.ensureExecutionAllowed s (RunId identity)
  operation <- validated (decodeOperation d)
  when (requiresActiveAgent operation) $ requireActive s a
  chief <- DB.mainAgent s
@@ -187,6 +194,10 @@ control s a payload = do
    identity <- maybe (failure 409 "Run now requires an explicit running Sapi task") (pure . RunId) specific
    request <- routineRequestKey s a identity
    receipt <$> R.runNow s a i request identity
+  StopRoutine -> do
+   i <- routineIdentity
+   run <- decodeValue 400 (get d "run")
+   receipt <$> R.stopRun s a i run
   Delegate -> D.applyDecision s a current (at d "decision")
   ReadWorkspace -> workspaceOwner >>= workspace s
   WorkspaceCommand action -> do

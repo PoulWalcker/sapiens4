@@ -205,7 +205,11 @@ dispatch s method target body = locked s $ do
   ("POST",["api","groups",gid,"messages"]) -> json 202 (GC.submitGroup s gid d "admin")
   ("POST",["api","groups",gid,"tasks"]) -> json 201 (GW.createTask s gid d "admin")
   ("PUT",["api","groups",gid,"tasks",tid]) -> json 200 (GW.updateTask s gid tid d "admin")
-  ("POST",["api","groups",gid,"tasks",tid,"run"]) -> json 202 (GW.runTask s gid tid (get d "revision") "admin")
+  ("POST",["api","groups",gid,"tasks",tid,"run"]) -> json 202 (R.ensureTaskAvailable s (TaskId tid) >> GW.runTask s gid tid (get d "revision") "admin")
+  ("POST",["api","routines",rid,"runs",run,"stop"]) -> json 200 $ do
+   identity <- decodeValue 400 (str rid)
+   targetRun <- decodeValue 400 (str run)
+   R.stopRun s "admin" identity targetRun
   ("POST",["api","groups",gid,"calls",rid,action]) -> json 200 (GC.actionGroup s gid rid action)
   ("POST",["api","agents"]) -> json 201 $ do row<-createAgent s d; Mgt.prepare s (at row "id"); pure row
   ("PUT",["api","agents",a]) -> json 200 (updateAgent s a d)

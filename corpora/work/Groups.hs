@@ -7,6 +7,7 @@ import Data.Text (Text)
 import GroupModel
 import qualified GroupChat as Chat
 import qualified GroupWork as Work
+import qualified Routines as Routine
 
 data GroupOperation = GroupCreate | GroupUpdate | GroupGet | GroupMessage | GroupTaskCreate | GroupTaskUpdate | GroupTaskRun deriving (Eq, Show)
 groupControl :: Service -> Text -> GroupOperation -> Value -> IO Value
@@ -18,6 +19,7 @@ groupControl s actor operation input = case operation of
  GroupTaskCreate -> withGroup True (const (Work.createTask s gid payload actor))
  GroupTaskUpdate -> withGroup True (const (Work.updateTask s gid (at payload "task") (remove ["task"] payload) actor))
  GroupTaskRun -> withGroup True $ \_ -> do
+  Routine.ensureTaskAvailable s (TaskId (at payload "task"))
   root <- Chat.activeRoot s gid actor
   result <- Work.startTask s gid (at payload "task") (get payload "revision") actor root
   Chat.dispatchGroups s
