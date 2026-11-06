@@ -36,6 +36,7 @@ import Types
 import qualified Store as DB
 import Population
 import qualified Delegation as D
+import qualified Provider as P
 
 newtype Minutes = Minutes { minuteCount :: Int } deriving (Eq, Show)
 instance FromJSON Minutes where
@@ -1267,6 +1268,23 @@ runDetail s owner identity run = do
  (_,admitted) <- historyAdmissions s owner identity
  entry <- maybe (failure 404 "Unknown Run of this Routine") pure (find ((==run) . occurrenceId . fst) admitted)
  summary <- readRunSummary s entry
+ references <- case occurrenceTarget (fst entry) of
+  PersonalTarget _ -> do
+   work <- D.findWork s run
+   forM [decision | (saved,_) <- maybeToList work,decision <- D.workItems saved "decisions",has decision "providerTrace"] $ \decision -> do
+    reference <- decodeValue 500 (get decision "providerTrace")
+    owner <- parseValue 500 personalAgentP (get decision "agent")
+    call <- field 500 decision "callId"
+    require (P.traceBelongsTo owner call reference) 500 "Provider trace does not belong to this decision"
+    pure reference
+  GroupTarget groupId _ -> do
+   group <- G.getGroup s (groupIdText groupId) False
+   requests <- occurrenceRequests (fst entry) group
+   fmap concat $ forM requests $ \request -> do
+    references <- decodeValue 500 (get (Object (G.requestFields request)) "providerTraces" `fallback` arr [])
+    require (all (P.traceBelongsTo (G.requestTarget request) (G.requestId request)) references) 500 "Provider trace does not belong to this Group request"
+    pure references
+ traces <- mapM (P.readProviderTrace s) references
  results <- case occurrenceTarget (fst entry) of
   PersonalTarget _ -> D.findWork s run >>= maybe (pure []) (validated . D.resultHistory . fst)
   GroupTarget groupId _ -> do
@@ -1276,7 +1294,7 @@ runDetail s owner identity run = do
    rows <- maybe (pure []) (validated . GW.resultHistory) task
    pure (filter (\value -> get (get value "result") "request" `elem` map (toJSON . G.requestId) requests) rows)
  pure (merge (toJSON summary) (obj [("snapshot",toJSON (occurrenceRoutineSnapshot (fst entry)))
-  ,("result",toJSON (summaryResult summary)),("error",toJSON (summaryError summary)),("results",arr results)]))
+  ,("result",toJSON (summaryResult summary)),("error",toJSON (summaryError summary)),("results",arr results),("providerTraces",arr traces)]))
 
 readRoutineOn :: SQL.Connection -> RoutineId -> IO Routine
 readRoutineOn db identity = do

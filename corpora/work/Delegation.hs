@@ -413,7 +413,7 @@ recordDecision :: Service -> Text -> Value -> IO ()
 recordDecision s a record = do
  writeJSON (archivePath s a ("decisions/"<>at record "decisionId")) record
  (w,_) <- field 500 record "callId" >>= getWork s
- let update d = if get d "decisionId" == get record "decisionId" then merge d (selectPresent ["accepted","response","error","transition"] record) else d
+ let update d = if get d "decisionId" == get record "decisionId" then merge d (selectPresent ["accepted","response","error","transition","providerTrace"] record) else d
  saveWork s (setWorkField "decisions" (arr (map update (workItems w "decisions"))) w)
 accept :: Service -> Text -> Value -> Text -> Text -> IO ()
 accept s a record before after = recordDecision s a (merge record (obj [("accepted",Bool True),("transition",obj [("before",str before),("event",get record "hostEvent" `fallback` get (get record "response") "event"),("after",str (transition before (at (get record "response") "event") after)),("nextNode",str after)])]))
@@ -449,20 +449,28 @@ decide s run turn state node logs = do
  modifyIORef' logs (++[obj [("role",toJSON node),("prompt",str rendered),("session",Null)]])
  let updateLog extra = modifyIORef' logs (\entries -> [if index==logIndex then merge entry extra else entry | (index,entry)<-zip [0::Int ..] entries])
  rawResponse <- newIORef Nothing
+ observedRecord <- newIORef record
+ let retain reference = do
+      modifyIORef' observedRecord (put "providerTrace" (toJSON reference))
+      updateLog (obj [("providerTrace",toJSON reference)])
+      saved <- readIORef observedRecord
+      locked s (recordDecision s (agentIdText (runOwner run)) saved)
  result <- try $ do
-  raw <- invoke s run rendered
+  raw <- invokeObserved s run rendered retain
   writeIORef rawResponse (Just raw)
   activity <- readIORef (runActivity run)
   updateLog (obj ([("session",get activity "session"),("answer",str raw)]++[("warning",get activity "warning") | has activity "warning"]))
   require (T.length raw <= 100000) 400 "Decision response exceeds 100000 characters"
   response <- parseValue 400 (parseDecision node) (parseJSONText raw)
-  pure (response,merge record (obj [("rawResponse",str raw),("response",decisionRaw response)]))
+  saved <- readIORef observedRecord
+  pure (response,merge saved (obj [("rawResponse",str raw),("response",decisionRaw response)]))
  case result of
   Left (e::SomeException) -> do
    activity <- readIORef (runActivity run)
    updateLog (obj [("session",get activity "session")])
    raw <- readIORef rawResponse
-   let failed=put "error" (str (exceptionText e)) (maybe record (\value -> put "rawResponse" (str value) record) raw)
+   saved <- readIORef observedRecord
+   let failed=put "error" (str (exceptionText e)) (maybe saved (\value -> put "rawResponse" (str value) saved) raw)
    locked s (recordDecision s (agentIdText (runOwner run)) failed)
    throwIO e
   Right value@(_,record') -> locked s (recordDecision s (agentIdText (runOwner run)) record') >> pure value
@@ -713,7 +721,16 @@ workTasks s a full = do
  rows <- forM [w | w <- works,workTracksTask w,any ((==AgentId a) . callRecipient) (workCalls w)] $ \w -> do
   let lastCall=NE.last (workCalls w)
   results <- validated (resultHistory w)
-  decisions <- forM (workItems w "decisions") $ \d -> if full then merge d <$> readJSON (archivePath s (at d "agent") ("decisions/"<>at d "decisionId")) empty else pure d
+  decisions <- forM (workItems w "decisions") $ \d -> if full then do
+   record <- merge d <$> readJSON (archivePath s (at d "agent") ("decisions/"<>at d "decisionId")) empty
+   if not (has record "providerTrace") then pure record else do
+    reference <- decodeValue 500 (get record "providerTrace")
+    owner <- parseValue 500 personalAgentP (get record "agent")
+    call <- field 500 record "callId"
+    require (traceBelongsTo owner call reference) 500 "Provider trace does not belong to this decision"
+    evidence <- readProviderTrace s reference
+    pure (put "providerEvidence" evidence record)
+   else pure d
   pure $ mergeFields [("execution",obj [("state",toJSON (callState lastCall)),("owner",toJSON (callRecipient lastCall)),("currentCall",toJSON (callIdentity lastCall)),("attempt",callField lastCall "attempt")]),("decisions",arr decisions),("results",arr results)] (select ["task","workloadId","originalIntent","calls","outcome"] (toJSON w))
  pure (obj [("tasks",arr rows)])
 

@@ -252,7 +252,7 @@ runGroup s run turn = do
  let rendered = fit context
  rawAnswer <- newIORef Nothing
  outcome <- try $ do
-  raw <- maybe (invoke s run rendered) (pure . jsonText . D.decisionRaw) savedDecision
+  raw <- maybe (invokeObserved s run rendered (retainGroupTrace s run)) (pure . jsonText . D.decisionRaw) savedDecision
   writeIORef rawAnswer (Just raw)
   if structured then saveGroupDecision s run raw else pure raw
  activity <- readIORef (runActivity run)
@@ -263,6 +263,15 @@ runGroup s run turn = do
   Right result -> pure (result,[record])
   Left (error :: SomeException) -> throwIO (RunFailure (case fromException error of Just (APIError _ reason) -> reason; Nothing -> T.pack (displayException error)) [record])
  where takeLast count values = drop (length values-count) values
+
+retainGroupTrace :: Service -> Run -> TraceReference -> IO ()
+retainGroupTrace s run reference = locked s $ do
+ found <- findRequest s (runId run)
+ (group,request) <- maybe (failure 409 "Unknown Group call") pure found
+ let previous=get (Object (requestFields request)) "providerTraces" `fallback` arr []
+ references <- decodeValue 500 previous :: IO [TraceReference]
+ let saved=request { requestFields=KM.insert "providerTraces" (toJSON (references++[reference])) (requestFields request) }
+ storeGroup s (replace "requests" (toJSON saved) group)
 
 saveGroupDecision :: Service -> Run -> Text -> IO Text
 saveGroupDecision s run raw = locked s $ do

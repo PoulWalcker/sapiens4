@@ -269,15 +269,23 @@ RSpec.describe 'Delegation and completion contracts' do
     Contract.wait { host.calls.any? { |c| c['owner'] == researcher && c['node'] == 'Execution' } }
     task = tasks.first
     recipient_call = task['execution']['currentCall']
+    interrupted_trace = task['decisions'].last.fetch('providerTrace')
+    expect(task['decisions'].last.dig('providerEvidence', 'status', 'kind')).to eq('Collecting')
     route_to(researcher)
-    host.stop
+    host.crash
+    host.release
     host.start
     host.turn(recipient_call, 'interrupted')
     expect(tasks.first['calls'].size).to eq(2)
+    expect(tasks.first['decisions'].last.dig('providerEvidence', 'status', 'kind')).to eq('Incomplete')
     host.api('POST', "/api/agents/#{researcher}/turns/#{recipient_call}/retry", {})
     host.idle
     expect(tasks.first['execution']).to include('state' => 'Completed', 'attempt' => 2, 'currentCall' => recipient_call)
     expect(tasks.first['calls'].size).to eq(2)
+    attempts = tasks.first['decisions'].select { |entry| entry['node'] == 'Execution' }
+    expect(attempts.map { |entry| entry.fetch('providerTrace') }.uniq.size).to eq(2)
+    expect(attempts.first.fetch('providerTrace')).to eq(interrupted_trace)
+    expect(attempts.map { |entry| entry.dig('providerEvidence', 'status', 'kind') }).to eq(%w[Incomplete Complete])
   end
 
   criteria = [

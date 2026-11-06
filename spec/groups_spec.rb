@@ -162,6 +162,12 @@ RSpec.describe 'Group collaboration contracts' do
     expect(group['messages'].count { |m| m['author'] == 'admin' && m['text'] == 'Try once' }).to eq(1)
     expect(group['requests'].reject { |r| r['memo'] }.size).to eq(1)
     expect(group['messages'].last).to include('author' => @lead, 'text' => 'Contract test reply')
+    references = group['requests'].find { |entry| entry['id'] == request['id'] }.fetch('providerTraces')
+    expect(references.map { |reference| reference.fetch('id') }.uniq.size).to eq(2)
+    traces = references.map do |reference|
+      JSON.parse(File.read(File.join(host.root, 'agentpy/corpora/archive', @lead, 'provider', "#{reference.fetch('id')}.json")))
+    end
+    expect(traces.map { |trace| trace.dig('status', 'kind') }).to eq(%w[Incomplete Complete])
   end
 
   it 'preserves the original author during lead transfer and routes future messages to the new lead' do
