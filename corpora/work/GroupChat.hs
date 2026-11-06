@@ -14,6 +14,7 @@ import Data.List (find,nub)
 import qualified Data.Map.Strict as Map
 import Data.Maybe
 import Data.Text (Text)
+import Data.Time (getCurrentTime)
 import qualified Data.Text as T
 import System.Directory
 import System.FilePath
@@ -171,7 +172,14 @@ dispatchGroups s = do
    latest <- getGroup s (at group "id") False
    changed <- rejectGroupOrigin latest typed reason
    void (saveGroup s changed "system" "call failed" (toJSON (requestId typed)))
-  Right _ -> dispatchValid group typed
+  Right origin -> do
+   allowed <- try (Routine.ensureOriginAvailable s origin)
+   case allowed of
+    Right () -> dispatchValid group typed
+    Left (APIError _ reason) -> do
+     latest <- getGroup s (at group "id") False
+     changed <- rejectGroupOrigin latest typed reason
+     void (saveGroup s changed "system" "call failed" (toJSON (requestId typed)))
  dispatchValid group typed = do
   let request=toJSON typed
   let target = if boolean (get request "memo") then at group "lead" else at request "target"
@@ -315,11 +323,19 @@ reconcileGroups s = DB.values s DB.Groups >>= mapM_ reconcile
     case forwardingTargets origin group request mentioned of
      Left (APIError _ reason) -> rejectGroupOrigin base request reason
      Right recipients -> settleRecipients origin base request turn recipients
- settleRecipients origin base request turn recipients = do
+ settleRecipients origin original request turn proposed = do
+    lineage <- requireRequestLineage request
+    blocked <- if null proposed then pure False else Routine.stopDeletedForwarding s origin (requestTaskId <$> requestTask lineage)
+    base <- if blocked && originIsScheduled origin then do
+     link <- maybe (failure 500 "Scheduled Group request has no task revision") pure (requestTask lineage)
+     task <- readTask original (taskIdText (requestTaskId link))
+     time <- getCurrentTime
+     pure (replace "tasks" (toJSON (stopTask time "system" task)) original)
+     else pure original
     let routine=originIsScheduled origin
+        recipients=if blocked then [] else proposed
     (finished,stale) <- if routine && not (null recipients) then pure (base,TaskForwarded) else settleTask base request turn
     output <- if get turn "output" == Null then pure finished else do
-     lineage <- requireRequestLineage request
      initialMessage <- message (agentIdText (requestTarget request)) (at turn "output")
      let entry = merge initialMessage (obj [("turn",toJSON (requestId request)),("stale",Bool (stale == StaleResultRecorded))])
      foldM (\g target -> do
@@ -388,6 +404,7 @@ actionGroup s gid rid action = do
    Population.requireActive s owner
    status <- field 500 value "status"
    if action == "retry" then do
+    requireExecutionOrigin (requestOrigin typed) >>= Routine.ensureOriginAvailable s
     void (requestExecutionOrigin group typed)
     require (get request "target" `elem` items group "members") 409 "The recipient is no longer a Group member"
     lead <- field 500 group "lead"

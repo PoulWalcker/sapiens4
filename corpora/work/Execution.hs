@@ -80,7 +80,10 @@ submitTurn s a d = do
   Nothing -> do
    suffix <- attachmentPrompt s attachments
    let message=input<>suffix
-   i <- if has d "workload" then D.clarify s a (at d "workload") message else do
+   i <- if has d "workload" then do
+    R.ensureExecutionAllowed s (RunId (at d "workload"))
+    D.clarify s a (at d "workload") message
+    else do
     i <- newId
     time <- now
     agentState s a >>= saveState s a . enqueueTurn (RunId i) flow message time
@@ -324,9 +327,15 @@ admit prepareSpecialist s a contexts tick = do
  runs <- readMVar (serviceRuns s)
  state <- agentState s a
  let reject turn = case (turnStatus turn,G.checkedTurnContext contexts turn) of
-      (Queued,Left reason) -> (withTurnFields (put "error" (str reason)) turn) { turnStatus=Failed }
-      _ -> turn
-     checked=mapTurns reject state
+      (Queued,Left reason) -> pure ((withTurnFields (put "error" (str reason)) turn) { turnStatus=Failed })
+      (Queued,Right origin) -> do
+       allowed <- try (R.ensureOriginAvailable s origin)
+       pure $ case allowed of
+        Left (APIError _ reason) -> (withTurnFields (put "error" (str reason)) turn) { turnStatus=Cancelled }
+        Right () -> turn
+      _ -> pure turn
+ turns <- traverse reject (agentTurns state)
+ let checked=state { agentTurns=turns }
  when (checked /= state) $ do
   saveState s a checked
   DB.project s a
