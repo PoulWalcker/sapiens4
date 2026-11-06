@@ -222,6 +222,12 @@ dispatch s method target body = locked s $ do
    targetRun <- decodeValue 400 (str run)
    R.stopRun s "admin" identity targetRun
   ("POST",["api","routines",rid,"delete"]) -> json 200 $ decodeValue 400 (str rid) >>= R.deleteRoutine s "admin"
+  ("POST",["api","routines",rid,"runs",run,"reject"]) -> json 200 $ do
+   require (all (`elem` ["result","reason"]) (keys d)) 400 "Result rejection accepts result and reason"
+   identity <- decodeValue 400 (str rid)
+   targetRun <- decodeValue 400 (str run)
+   reason <- decodeValue 400 (get d "reason")
+   R.rejectRunResult s "admin" identity targetRun (get d "result") reason
   ("POST",["api","groups",gid,"calls",rid,action]) -> json 200 (GC.actionGroup s gid rid action)
   ("POST",["api","agents"]) -> json 201 $ do row<-createAgent s d; Mgt.prepare s (at row "id"); pure row
   ("PUT",["api","agents",a]) -> json 200 (updateAgent s a d)

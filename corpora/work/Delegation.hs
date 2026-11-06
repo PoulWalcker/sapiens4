@@ -6,6 +6,9 @@ module Delegation
  , callState, callNode, callOutput, begin, getWork, findWork, readWorks, saveWork, withCall, workItems
  , exceptionText, reconcileWorks, pendingWorks, runDecision, applyDecision, clarify
  , TaskSpec, templates, editTemplate, workTasks, taskList, workSummaries
+ , Outcome(..), OutcomeStatus(..), Decision(..), DecisionResponse(..), parseGroupDecision
+ , StructurallyValidOutcome, validatedOutcome, validateOutcome, outcomeError
+ , resultHistory, rejectResult
  ) where
 
 import Control.Concurrent
@@ -255,11 +258,17 @@ data Decision
  deriving (Eq, Show)
 data DecisionResponse = DecisionResponse { decisionBody :: Decision, decisionReason :: Text, decisionEvidence :: [Text], decisionRaw :: Value } deriving (Eq, Show)
 parseDecision :: Node -> Value -> Parser DecisionResponse
-parseDecision node value = do
+parseDecision node = parseDecisionEvents (eventsFor node) ("Unknown decision event for " <> wireName node)
+
+parseGroupDecision :: Value -> Parser DecisionResponse
+parseGroupDecision = parseDecisionEvents ["HandoffPrepared","Outcome"] "Group execution requires a handoff or Outcome"
+
+parseDecisionEvents :: [Text] -> Text -> Value -> Parser DecisionResponse
+parseDecisionEvents allowed unknown value = do
  let event=at value "event"
      variant fields parser = onlyFields (fields ++ ["event","reason","evidence"]) value >> parser
      textAt key limit = textFieldP key limit value
- unless (event `elem` eventsFor node) (fail ("Unknown decision event for " ++ T.unpack (wireName node)))
+ unless (event `elem` allowed) (fail (T.unpack unknown))
  reason <- textAt "reason" 4000 >> parseJSON (get value "reason")
  evidence <- stringsP "evidence" False (get value "evidence")
  body <- case event of
@@ -344,6 +353,8 @@ outcomeError problem = case problem of
  where completionEvidenceMessage = "Completed outcome requires evidence for all applicable completion criteria"
 -- Structural coverage and evidence presence only; the host cannot prove an LLM's claims.
 newtype StructurallyValidOutcome = StructurallyValidOutcome Outcome deriving (Eq, Show)
+validatedOutcome :: StructurallyValidOutcome -> Outcome
+validatedOutcome (StructurallyValidOutcome outcome) = outcome
 validateOutcome :: DecisionResponse -> Outcome -> TaskSpec -> Either OutcomeError StructurallyValidOutcome
 validateOutcome response outcome spec
  | Just identities <- NE.nonEmpty (filter (`notElem` acceptedIds) reportedIds) = Left (UnknownCriterion identities)
@@ -609,8 +620,11 @@ runDecision prepareSpecialist verifyCompletion s run turn state = do
              finish work updated = do
               let following=setCallFields [("observation",decisionRaw response)] updated
                   next=callNode following
+                  saved=case decisionBody response of
+                   ReportOutcome _ _ -> setWorkField "outcome" (put "decisionId" (get record "decisionId") (workField work "outcome")) work
+                   _ -> work
               when (callState following `elem` [CallCompleted,CallUnresolved,CallWaiting]) (verifyCompletion work)
-              saveWork s (withCall work following)
+              saveWork s (withCall saved following)
               accept s owner record (wireName node) (wireName next)
               pure (callOutput following)
          step <- either decisionFailure pure (advanceDecision (AgentId chief) response current call)
@@ -698,9 +712,39 @@ workTasks s a full = do
  works <- readWorks s
  rows <- forM [w | w <- works,workTracksTask w,any ((==AgentId a) . callRecipient) (workCalls w)] $ \w -> do
   let lastCall=NE.last (workCalls w)
+  results <- validated (resultHistory w)
   decisions <- forM (workItems w "decisions") $ \d -> if full then merge d <$> readJSON (archivePath s (at d "agent") ("decisions/"<>at d "decisionId")) empty else pure d
-  pure $ mergeFields [("execution",obj [("state",toJSON (callState lastCall)),("owner",toJSON (callRecipient lastCall)),("currentCall",toJSON (callIdentity lastCall)),("attempt",callField lastCall "attempt")]),("decisions",arr decisions)] (select ["task","workloadId","originalIntent","calls","outcome"] (toJSON w))
+  pure $ mergeFields [("execution",obj [("state",toJSON (callState lastCall)),("owner",toJSON (callRecipient lastCall)),("currentCall",toJSON (callIdentity lastCall)),("attempt",callField lastCall "attempt")]),("decisions",arr decisions),("results",arr results)] (select ["task","workloadId","originalIntent","calls","outcome"] (toJSON w))
  pure (obj [("tasks",arr rows)])
+
+resultHistory :: Workload -> Validation [Value]
+resultHistory work = fmap catMaybes $ forM (workItems work "decisions") $ \record -> do
+ let current=workField work "outcome"
+     identity=get record "decisionId"
+     savedHere=get current "decisionId" == identity
+     response=get record "response"
+ if not (boolean (get record "accepted") || savedHere) || (at response "event" /= "Outcome" && not savedHere)
+  then Right Nothing else do
+   outcome <- validateValue 500 parseJSON (if savedHere then select ["status","criterionResults","artifacts"] current else get response "outcome") :: Validation Outcome
+   rejection <- traverse (validateValue 500 parseJSON) (if has record "rejection" then Just (get record "rejection") else Nothing) :: Validation (Maybe ResultRejection)
+   let reply=if savedHere then get current "reply" else get response "reply"
+   Right (Just (obj [("result",obj [("decision",identity)]),("call",get record "callId"),("reply",reply),("outcome",toJSON outcome),("rejection",toJSON rejection)]))
+
+rejectResult :: Service -> RunId -> Text -> ResultRejection -> IO Value
+rejectResult s run identity proposed = do
+ (work,_) <- getWork s run
+ results <- validated (resultHistory work)
+ void (maybe (failure 404 "Unknown saved Outcome of this Run") pure (find ((==str identity) . (`get` "decision") . (`get` "result")) results))
+ record <- maybe (failure 404 "Unknown saved Outcome decision") pure (find ((==str identity) . (`get` "decisionId")) (workItems work "decisions"))
+ previous <- if has record "rejection" then Just <$> decodeValue 500 (get record "rejection") else pure Nothing
+ case previous of
+  Just saved -> do
+   require (rejectedBy saved == rejectedBy proposed && rejectionReason saved == rejectionReason proposed) 409 "This result already has a different rejection"
+   pure (toJSON saved)
+  Nothing -> do
+   let update item=if get item "decisionId" == str identity then put "rejection" (toJSON proposed) item else item
+   saveWork s (setWorkField "decisions" (arr (map update (workItems work "decisions"))) work)
+   pure (toJSON proposed)
 taskList :: Service -> Text -> IO Value
 taskList s a = do
  tasks <- items <$> workTasks s a False <*> pure "tasks"

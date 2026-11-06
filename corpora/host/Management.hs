@@ -51,7 +51,7 @@ prepare s a = do
  let context= obj [("currentSapi",str a),("chief",get facts "main_agent_id"),("groups",get facts "groups"),("team",get facts "team"),("workspace",obj [("path",str (T.pack (workspaceRoot s a)))])]
  writeText (agentRoot s a </> "manifests/corpora-state.md") (jsonText context)
 data WorkspaceOperation = OpenWorkspace | ZoomWorkspace | CloseWorkspace | FocusWorkspace | ReloadWorkspace | BackWorkspace | ForwardWorkspace | BookmarkWorkspace | UnbookmarkWorkspace deriving (Eq, Show)
-data Operation = ReadCorpora | UpdateCorpora | Batch | ReadStatus | Delegate | ReadRoutines | CreateRoutine | UpdateRoutine | SelectRoutinePolicy | PauseRoutine | ResumeRoutine | RunRoutine | StopRoutine | DeleteRoutine | CreateAgent | RetireAgent | RehireAgent | AcquireComputer | ChangeManager | ReadWorkspace | GroupCommand G.GroupOperation | WorkspaceCommand WorkspaceOperation deriving (Eq, Show)
+data Operation = ReadCorpora | UpdateCorpora | Batch | ReadStatus | Delegate | ReadRoutines | CreateRoutine | UpdateRoutine | SelectRoutinePolicy | PauseRoutine | ResumeRoutine | RunRoutine | StopRoutine | DeleteRoutine | ReadRoutineRun | RejectRoutineResult | CreateAgent | RetireAgent | RehireAgent | AcquireComputer | ChangeManager | ReadWorkspace | GroupCommand G.GroupOperation | WorkspaceCommand WorkspaceOperation deriving (Eq, Show)
 operationSchema :: [(Text,Operation,[Text])]
 operationSchema =
  [ ("corpora_get", ReadCorpora, [])
@@ -68,6 +68,8 @@ operationSchema =
  , ("routine_run", RunRoutine, ["id"])
  , ("routine_stop", StopRoutine, ["id","run"])
  , ("routine_delete", DeleteRoutine, ["id"])
+ , ("routine_result", ReadRoutineRun, ["id","run"])
+ , ("routine_reject_result", RejectRoutineResult, ["id","run","result","reason"])
  , ("group_create", GroupCommand G.GroupCreate, ["name","description","lead","members"])
  , ("group_get", GroupCommand G.GroupGet, ["group"])
  , ("group_update", GroupCommand G.GroupUpdate, ["group","revision","name","description","lead","members","archived"])
@@ -108,6 +110,7 @@ workspaceOperationName operation = case operation of
 
 requiresActiveAgent :: Operation -> Bool
 requiresActiveAgent ReadStatus = False
+requiresActiveAgent ReadRoutineRun = False
 requiresActiveAgent DeleteRoutine = False
 requiresActiveAgent ReadWorkspace = False
 requiresActiveAgent (WorkspaceCommand _) = False
@@ -203,6 +206,15 @@ control s a payload = do
    run <- decodeValue 400 (get d "run")
    receipt <$> R.stopRun s a i run
   DeleteRoutine -> routineIdentity >>= R.deleteRoutine s a >>= pure . receipt
+  ReadRoutineRun -> do
+   i <- routineIdentity
+   run <- decodeValue 400 (get d "run")
+   R.readRunResult s a i run
+  RejectRoutineResult -> do
+   i <- routineIdentity
+   run <- decodeValue 400 (get d "run")
+   reason <- decodeValue 400 (get d "reason")
+   receipt <$> R.rejectRunResult s a i run (get d "result") reason
   Delegate -> D.applyDecision s a current (at d "decision")
   ReadWorkspace -> workspaceOwner >>= workspace s
   WorkspaceCommand action -> do

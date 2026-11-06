@@ -3,7 +3,7 @@ module Routines
  ( Minutes, Routine, routineSummaries, storeRoutine, initializeRoutines
  , MissedDuePolicy(..), RoutineEdit(..), save, setPolicy, setPaused, command, receipt, acknowledge, dispatch, restoreOccurrences
  , verifyPolicyPreparationCompletion, ensureRetryAvailable, runNow, stopRun, ensureExecutionAllowed, ensureTaskAvailable
- , runHistory, runDetail, deleteRoutine, ensureOriginAvailable, stopDeletedForwarding
+ , runHistory, runDetail, deleteRoutine, ensureOriginAvailable, stopDeletedForwarding, rejectRunResult, readRunResult
  ) where
 
 import Control.Monad
@@ -1073,12 +1073,52 @@ stopRun s actor identity run = mask_ $ do
  where
  stopReceipt status = obj [("id",toJSON run),("routine",toJSON identity),("status",str status)]
 
+resultRoutine :: Service -> Text -> RoutineId -> IO Routine
+resultRoutine s actor identity = do
+ routine <- DB.connection s $ \db -> readRoutineOn db identity
+ case routineOwner routine of
+  PersonalOwner owner -> require (actor == "admin" || actor == agentIdText owner) 404 "Unknown Scheduled Routine in this conversation"
+  GroupOwner group -> G.getGroup s (groupIdText group) False >>= \value -> G.authorizeGroup s value actor Management
+ pure routine
+
+readRunResult :: Service -> Text -> RoutineId -> RunId -> IO Value
+readRunResult s actor identity run = do
+ routine <- resultRoutine s actor identity
+ runDetail s (routineOwnerText (routineOwner routine)) identity run
+
+rejectRunResult :: Service -> Text -> RoutineId -> RunId -> Value -> RejectionReason -> IO Value
+rejectRunResult s actor identity run target reason = do
+ routine <- resultRoutine s actor identity
+ (_,admitted) <- historyAdmissions s (routineOwnerText (routineOwner routine)) identity
+ occurrence <- maybe (failure 404 "Unknown Run of this Routine") (pure . fst) (find ((==run) . occurrenceId . fst) admitted)
+ reviewer <- if actor == "admin" then pure AdminReviewer else SapiReviewer <$> parseValue 400 personalAgentP (str actor)
+ time <- getCurrentTime
+ let proposed=ResultRejection time reviewer reason
+ rejection <- case occurrenceTarget occurrence of
+  PersonalTarget _ -> do
+   decision <- parseValue 400 (\value -> onlyFields ["decision"] value >> textFieldP "decision" 200 value) target
+   D.rejectResult s run decision proposed
+  GroupTarget groupId _ -> do
+   (requestId,revision) <- parseValue 400 (\value -> onlyFields ["request","revision"] value >> (,) <$> parseJSON (get value "request") <*> parseJSON (get value "revision")) target
+   group <- G.getGroup s (groupIdText groupId) False
+   requests <- occurrenceRequests occurrence group
+   request <- maybe (failure 404 "Result request belongs to another Run") pure (find ((==requestId) . G.requestId) requests)
+   lineage <- G.requireRequestLineage request
+   link <- maybe (failure 409 "Result request has no Work revision") pure (G.requestTask lineage)
+   require (G.requestTaskRevision link == revision && G.requestSettled request) 409 "Result revision does not match its settled request"
+   task <- GW.readTask group (taskIdText (G.requestTaskId link))
+   (changed,saved) <- validated (GW.rejectResult proposed requestId revision task)
+   when (changed /= task) $ void (G.saveGroup s (G.replace "tasks" (toJSON changed) group) actor "result rejected" target)
+   pure (toJSON saved)
+ pure (obj [("routine",toJSON identity),("run",toJSON run),("result",target),("rejection",rejection)])
+
 data RunSummary = RunSummary
  { summaryOccurrence :: ScheduledOccurrence, summaryMaterialization :: MaterializationStatus
  , summaryCallState :: Maybe D.CallState, summaryExecutionStatus :: Maybe TurnStatus
  , summaryExecutor :: Maybe AgentId, summaryLive :: Bool, summaryResult :: Maybe Text
  , summaryError :: Maybe Text, summaryStale :: Bool, summaryAttempt :: Maybe Int
  , summaryTaskRevision :: Maybe Int, summaryGroupSettled :: Maybe Bool
+ , summaryOutcome :: Maybe D.Outcome, summaryRejection :: Maybe ResultRejection, summaryResultTarget :: Maybe Value
  }
 
 runFinished :: RunSummary -> Bool
@@ -1102,6 +1142,7 @@ instance ToJSON RunSummary where
   ,("executor",toJSON (summaryExecutor summary)),("live",Bool (summaryLive summary)),("finished",Bool (runFinished summary))
   ,("result",toJSON (T.take 240 <$> summaryResult summary)),("error",toJSON (T.take 240 <$> summaryError summary))
   ,("stale",Bool (summaryStale summary)),("attempt",toJSON (summaryAttempt summary)),("taskRevision",toJSON (summaryTaskRevision summary)),("groupSettled",toJSON (summaryGroupSettled summary))]
+  `merge` obj [("outcome",toJSON (summaryOutcome summary)),("rejection",toJSON (summaryRejection summary)),("resultTarget",toJSON (summaryResultTarget summary))]
   where occurrence=summaryOccurrence summary; routine=occurrenceRoutineSnapshot occurrence
 
 historyTurn :: Service -> RunId -> IO (Maybe AgentId,Maybe TurnStatus,Maybe Text,Maybe Text)
@@ -1115,7 +1156,7 @@ historyTurn s identity = do
 
 readRunSummary :: Service -> (ScheduledOccurrence,MaterializationStatus) -> IO RunSummary
 readRunSummary s (occurrence,materialization) = do
- (call,execution,executor,result,problem,stale,attempt,revision,settled,identities) <- case occurrenceTarget occurrence of
+ (call,execution,executor,result,problem,stale,attempt,revision,settled,identities,businessResult) <- case occurrenceTarget occurrence of
   PersonalTarget owner -> do
    rows <- DB.queryRows s "SELECT value FROM workloads WHERE id=?" ["value"] [SQL.SQLText (runIdText (occurrenceId occurrence))]
    work <- traverse (DB.decodeStored . (`at` "value")) (listToMaybe rows) :: IO (Maybe D.Workload)
@@ -1131,8 +1172,10 @@ readRunSummary s (occurrence,materialization) = do
     500 "Materialized Routine Run has no persisted execution"
    callError <- maybe (pure Nothing) (\saved -> field 500 (toJSON saved) "error") frontier
    number <- maybe (pure Nothing) (\saved -> field 500 (toJSON saved) "attempt") frontier
+   results <- maybe (pure []) (validated . D.resultHistory) work
+   let business=listToMaybe (reverse (filter ((==toJSON current) . (`get` "call")) results))
    pure (state,status,actual <|> (recipient <$ frontier),(frontier >>= D.callOutput) <|> output,err <|> callError,False,number,Nothing,Nothing
-    ,maybe [current] (map D.callIdentity . NE.toList . D.workCalls) work)
+    ,maybe [current] (map D.callIdentity . NE.toList . D.workCalls) work,business)
   GroupTarget groupId _ -> do
    group <- G.getGroup s (groupIdText groupId) False
    requests <- occurrenceRequests occurrence group
@@ -1145,7 +1188,7 @@ readRunSummary s (occurrence,materialization) = do
    require (isJust current || materialization == MaterializationPending || isJust (occurrenceStoppedAt occurrence))
     500 "Materialized Routine Run has no Group request"
    case current of
-    Nothing -> pure (Nothing,Nothing,Nothing,Nothing,Nothing,False,Nothing,Nothing,Nothing,[])
+    Nothing -> pure (Nothing,Nothing,Nothing,Nothing,Nothing,False,Nothing,Nothing,Nothing,[],Nothing)
     Just (request,link) -> do
      (actual,status,output,err) <- historyTurn s (G.requestId request)
      task <- GW.readTask group (taskIdText (G.requestTaskId link))
@@ -1155,15 +1198,20 @@ readRunSummary s (occurrence,materialization) = do
      savedText <- maybe (pure Nothing) (\value -> field 500 value "text") recorded
      savedError <- maybe (pure Nothing) (\value -> field 500 value "error") recorded
      earlier <- maybe (pure False) (\value -> fromMaybe False <$> (field 500 value "stale" :: IO (Maybe Bool))) recorded
+     resultsView <- validated (GW.resultHistory task)
+     let business=listToMaybe (reverse (filter (\value -> get (get value "result") "request" == toJSON (G.requestId request)
+           && get (get value "result") "revision" == toJSON (G.requestTaskRevision link)) resultsView))
      let execution=fromMaybe (G.requestStatus request) status
      archive <- if execution == OutputPending && isNothing output && isNothing savedText then
       readJSON (archivePath s (agentIdText (G.requestTarget request)) ("runs/" <> runIdText (G.requestId request))) empty else pure empty
      archivedOutput <- field 500 archive "output"
      pure (Nothing,Just execution,actual <|> Just (G.requestTarget request),savedText <|> output <|> archivedOutput,err <|> savedError,earlier,Nothing
-      ,Just (G.requestTaskRevision link),Just (G.requestSettled request),map G.requestId requests)
+      ,Just (G.requestTaskRevision link),Just (G.requestSettled request),map G.requestId requests,business)
  runs <- readMVar (serviceRuns s)
+ outcome <- maybe (pure Nothing) (\value -> field 500 value "outcome") businessResult
+ rejection <- maybe (pure Nothing) (\value -> field 500 value "rejection") businessResult
  let live=any (`M.member` runs) identities
-     initial=RunSummary occurrence materialization call execution executor live Nothing problem stale attempt revision settled
+     initial=RunSummary occurrence materialization call execution executor live Nothing problem stale attempt revision settled outcome rejection (get <$> businessResult <*> pure "result")
      successful=execution `elem` map Just [OutputPending,Done,Warning]
       && call `notElem` map Just [D.CallQueued,D.CallRunning,D.CallDelegated,D.CallWaiting,D.CallFailed,D.CallInterrupted,D.CallCancelled]
       && isNothing (occurrenceStoppedAt occurrence) && runFinished initial
@@ -1219,8 +1267,16 @@ runDetail s owner identity run = do
  (_,admitted) <- historyAdmissions s owner identity
  entry <- maybe (failure 404 "Unknown Run of this Routine") pure (find ((==run) . occurrenceId . fst) admitted)
  summary <- readRunSummary s entry
+ results <- case occurrenceTarget (fst entry) of
+  PersonalTarget _ -> D.findWork s run >>= maybe (pure []) (validated . D.resultHistory . fst)
+  GroupTarget groupId _ -> do
+   group <- G.getGroup s (groupIdText groupId) False
+   requests <- occurrenceRequests (fst entry) group
+   task <- traverse (decodeValue 500) (findId ("gtask_" <> runIdText run) (items group "tasks"))
+   rows <- maybe (pure []) (validated . GW.resultHistory) task
+   pure (filter (\value -> get (get value "result") "request" `elem` map (toJSON . G.requestId) requests) rows)
  pure (merge (toJSON summary) (obj [("snapshot",toJSON (occurrenceRoutineSnapshot (fst entry)))
-  ,("result",toJSON (summaryResult summary)),("error",toJSON (summaryError summary))]))
+  ,("result",toJSON (summaryResult summary)),("error",toJSON (summaryError summary)),("results",arr results)]))
 
 readRoutineOn :: SQL.Connection -> RoutineId -> IO Routine
 readRoutineOn db identity = do
@@ -1560,8 +1616,8 @@ materializeGroup s groupId turn specification = DB.connection s $ \db -> SQL.wit
        groupOrigin=newOrigin (originPurpose parsed) (Just groupId) (KM.insert "author" (str "admin") (originMetadata parsed))
        message=obj [("id",toJSON messageId),("author",str "admin"),("text",str body),("created",str created),("routine",toJSON routineIdentity)]
        task=GW.newScheduledTask taskId createdTime title body agent routineIdentity specification
-       request=G.newGroupRequest (turnId turn) agent (ValidOrigin groupOrigin)
-        (G.RequestLineage messageId messageId (Just (GW.taskLink task))) created
+       request=GW.withResultProtocol specification (G.newGroupRequest (turnId turn) agent (ValidOrigin groupOrigin)
+        (G.RequestLineage messageId messageId (Just (GW.taskLink task))) created)
    DB.putValueOn db DB.Groups owner (merge group (obj
     [("messages",arr (items group "messages"++[message])),("tasks",arr (items group "tasks"++[toJSON task]))
     ,("requests",arr (items group "requests"++[toJSON request]))
