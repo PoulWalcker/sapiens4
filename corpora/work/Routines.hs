@@ -388,7 +388,7 @@ routineValue time owner interval body specification policy change = do
    (body == routinePrompt existing || isNothing (routineSpecification existing) || isJust specification)
    400 (case owner of
     PersonalOwner _ -> "This Routine has a structured specification. The text edit template can change its frequency with the prompt unchanged. To change the work, ask this Sapi in an ordinary message to update the full objective, inputs, expected outputs and criteria together. No changes were saved."
-    GroupOwner _ -> "This Group Routine has a structured specification. The text edit template can change its frequency with the prompt unchanged; changing its work requires a full specification. Group specification editing is not supported by this text template or routine_update. No changes were saved.")
+    GroupOwner _ -> "This Group Routine has a structured specification. The text edit template can change its frequency with the prompt unchanged. To change its work, ask the Group Lead to update the full objective, inputs, expected outputs and criteria together. No changes were saved.")
   NewRoutine _ -> pure ()
  pure $ merge initial (obj (
   [("owner",toJSON owner),("title",str (T.unwords (take 7 (T.words body)))),("minutes",toJSON interval)

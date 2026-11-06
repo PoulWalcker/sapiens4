@@ -60,11 +60,11 @@ operationSchema =
  , ("status", ReadStatus, ["target"])
  , ("delegate", Delegate, ["decision"])
  , ("routines", ReadRoutines, ["group"])
- , ("routine_create", CreateRoutine, ["minutes","prompt","missedPolicy","specification"])
- , ("routine_update", UpdateRoutine, ["id","minutes","prompt","missedPolicy","specification"])
+ , ("routine_create", CreateRoutine, ["minutes","prompt","missedPolicy","specification","group"])
+ , ("routine_update", UpdateRoutine, ["id","minutes","prompt","missedPolicy","specification","group"])
  , ("routine_policy", SelectRoutinePolicy, ["id","expectedPrompt","expectedSelection","missedPolicy"])
- , ("routine_pause", PauseRoutine, ["id"])
- , ("routine_resume", ResumeRoutine, ["id"])
+ , ("routine_pause", PauseRoutine, ["id","group"])
+ , ("routine_resume", ResumeRoutine, ["id","group"])
  , ("routine_run", RunRoutine, ["id"])
  , ("routine_stop", StopRoutine, ["id","run"])
  , ("routine_delete", DeleteRoutine, ["id"])
@@ -177,25 +177,27 @@ control s a payload = do
    writeIORef (serviceLease s) (Just (AgentId a,RunId identity))
    pure (obj [("owner",str a)])
   ReadRoutines -> do
-   owner <- workspaceOwner
+   owner <- routineOwner specific Member
    obj . (:[]) . ("routines",) . arr . filter ((==owner) . (`at` "owner")) <$> R.routineSummaries s
   CreateRoutine -> do
+   owner <- routineOwner specific Management
    policy <- decodeValue 400 (get d "missedPolicy")
    specification <- if has d "specification" then Just <$> decodeValue 400 (get d "specification") else pure Nothing
-   receipt . obj . (:[]) . ("routine",) <$> R.save s a (get d "minutes") (get d "prompt") specification (Just policy) (R.AddRoutine current)
+   receipt . obj . (:[]) . ("routine",) <$> R.save s owner (get d "minutes") (get d "prompt") specification (Just policy) (R.AddRoutine current)
   UpdateRoutine -> do
+   owner <- routineOwner specific Management
    i <- routineIdentity
    policy <- if has d "missedPolicy" then Just <$> decodeValue 400 (get d "missedPolicy") else pure Nothing
    specification <- if has d "specification" then Just <$> decodeValue 400 (get d "specification") else pure Nothing
-   receipt . obj . (:[]) . ("routine",) <$> R.save s a (get d "minutes") (get d "prompt") specification policy (R.EditRoutine i Nothing)
+   receipt . obj . (:[]) . ("routine",) <$> R.save s owner (get d "minutes") (get d "prompt") specification policy (R.EditRoutine i Nothing)
   SelectRoutinePolicy -> do
    i <- routineIdentity
    expected <- textField d "expectedPrompt" 16000
    selection <- decodeValue 400 (get d "expectedSelection")
    policy <- decodeValue 400 (get d "missedPolicy")
    receipt . obj . (:[]) . ("routine",) <$> R.setPolicy s a i expected selection policy
-  PauseRoutine -> pause receipt True
-  ResumeRoutine -> pause receipt False
+  PauseRoutine -> pause specific receipt True
+  ResumeRoutine -> pause specific receipt False
   RunRoutine -> do
    i <- routineIdentity
    identity <- maybe (failure 409 "Run now requires an explicit running Sapi task") (pure . RunId) specific
@@ -235,7 +237,26 @@ control s a payload = do
  routineIdentity = do
   void (textField d "id" 80)
   decodeValue 400 (get d "id")
- pause receipt paused=do i<-routineIdentity; receipt . obj . (:[]) . ("routine",) <$> R.setPaused s a i paused
+ routineOwner context access = do
+  group <- if has d "group" then do
+   identity <- field 400 d "group"
+   Just <$> G.getGroup s (groupIdText identity) True
+   else case context of
+    Nothing -> pure Nothing
+    Just identity -> do
+     request <- GC.findRequest s (RunId identity)
+     forM request $ \(group,call) -> do
+      void (GC.requestExecutionOrigin group call)
+      require (G.requestTarget call == AgentId a && G.requestStatus call == Running && not (G.requestSettled call)) 409 "Group request is no longer active"
+      require (not (boolean (get group "archived"))) 409 "Restore this Group before changing its work"
+      pure group
+  case group of
+   Nothing -> pure a
+   Just value -> G.authorizeGroup s value a access >> pure (at value "id")
+ pause context receipt paused=do
+  owner <- routineOwner context Management
+  i <- routineIdentity
+  receipt . obj . (:[]) . ("routine",) <$> R.setPaused s owner i paused
 
 routineRequestKey :: Service -> Text -> RunId -> IO Text
 routineRequestKey s actor identity = do
