@@ -1090,8 +1090,7 @@ readRunResult s actor identity run = do
 rejectRunResult :: Service -> Text -> RoutineId -> RunId -> Value -> RejectionReason -> IO Value
 rejectRunResult s actor identity run target reason = do
  routine <- resultRoutine s actor identity
- (_,admitted) <- historyAdmissions s (routineOwnerText (routineOwner routine)) identity
- occurrence <- maybe (failure 404 "Unknown Run of this Routine") (pure . fst) (find ((==run) . occurrenceId . fst) admitted)
+ (occurrence,_) <- historyAdmission s routine run
  reviewer <- if actor == "admin" then pure AdminReviewer else SapiReviewer <$> parseValue 400 personalAgentP (str actor)
  time <- getCurrentTime
  let proposed=ResultRejection time reviewer reason
@@ -1220,16 +1219,34 @@ readRunSummary s (occurrence,materialization) = do
  pure initial { summaryResult=if successful then result else Nothing
               , summaryError=if isJust (occurrenceStoppedAt occurrence) then stoppedError else problem }
 
-historyAdmissions :: Service -> Text -> RoutineId -> IO (Routine,[(ScheduledOccurrence,MaterializationStatus)])
-historyAdmissions s rawOwner identity = do
+historyRoutine :: Service -> Text -> RoutineId -> IO Routine
+historyRoutine s rawOwner identity = do
  owner <- decodeValue 400 (str rawOwner)
  rows <- DB.queryRows s "SELECT value FROM scheduled_routines WHERE sequence=?" ["value"] [SQL.SQLInteger (routineIdSequence identity)]
  row <- maybe (failure 404 "Unknown Routine") pure (listToMaybe rows)
  routine <- DB.decodeStored (at row "value")
  require (routineId routine == identity && routineOwner routine == owner) 404 "Unknown Routine in this conversation"
+ pure routine
+
+historyAdmission :: Service -> Routine -> RunId -> IO (ScheduledOccurrence,MaterializationStatus)
+historyAdmission s routine run = do
+ rows <- DB.queryRows s "SELECT id,value,status FROM routine_occurrences WHERE id=?" ["id","value","status"] [SQL.SQLText (runIdText run)]
+ row <- maybe (failure 404 "Unknown Run of this Routine") pure (listToMaybe rows)
+ stored <- readStoredDue row
+ case stored of
+  Admitted occurrence status -> do
+   let snapshot=occurrenceRoutineSnapshot occurrence
+   require (routineId snapshot == routineId routine) 404 "Unknown Run of this Routine"
+   require (routineOwner snapshot == routineOwner routine) 500 "Routine Run owner does not match its Routine"
+   pure (occurrence,status)
+  _ -> failure 404 "Unknown Run of this Routine"
+
+historyAdmissions :: Service -> Text -> RoutineId -> IO (Routine,[(ScheduledOccurrence,MaterializationStatus)])
+historyAdmissions s rawOwner identity = do
+ routine <- historyRoutine s rawOwner identity
  stored <- DB.connection s (\db -> readDuesOn db routine)
  let admitted=[(occurrence,status) | Admitted occurrence status <- stored]
- forM_ admitted $ \(occurrence,_) -> require (routineOwner (occurrenceRoutineSnapshot occurrence) == owner)
+ forM_ admitted $ \(occurrence,_) -> require (routineOwner (occurrenceRoutineSnapshot occurrence) == routineOwner routine)
   500 "Routine Run owner does not match its Routine"
  pure (routine,sortOn (Down . admissionOrder . fst) admitted)
 
@@ -1245,10 +1262,9 @@ runHistory s owner identity before = do
      page=take 20 eligible
  rows <- traverse (readRunSummary s) page
  active <- DB.connection s $ \db -> do
-  stored <- readDuesOn db routine
   case admitted of
    [] -> pure Nothing
-   (occurrence,_):_ -> activeRun s db routine (occurrenceTarget occurrence) stored
+   (occurrence,_):_ -> activeRun s db routine (occurrenceTarget occurrence) [Admitted saved status | (saved,status) <- admitted]
  current <- case active >>= \run -> find ((==run) . occurrenceId . fst) admitted of
   Nothing -> pure Nothing
   Just entry -> do
@@ -1265,8 +1281,8 @@ runHistory s owner identity before = do
 
 runDetail :: Service -> Text -> RoutineId -> RunId -> IO Value
 runDetail s owner identity run = do
- (_,admitted) <- historyAdmissions s owner identity
- entry <- maybe (failure 404 "Unknown Run of this Routine") pure (find ((==run) . occurrenceId . fst) admitted)
+ routine <- historyRoutine s owner identity
+ entry <- historyAdmission s routine run
  summary <- readRunSummary s entry
  references <- case occurrenceTarget (fst entry) of
   PersonalTarget _ -> do
