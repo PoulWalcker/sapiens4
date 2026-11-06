@@ -3,7 +3,7 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Delegation
  ( WorkCall(..), Workload, workloadId, workCalls, workOrigin, CallState(..), CallProgress(..)
- , callState, callNode, begin, getWork, findWork, readWorks, saveWork, withCall, workItems
+ , callState, callNode, callOutput, begin, getWork, findWork, readWorks, saveWork, withCall, workItems
  , exceptionText, reconcileWorks, pendingWorks, runDecision, applyDecision, clarify
  , templates, editTemplate, workTasks, taskList, workSummaries
  ) where

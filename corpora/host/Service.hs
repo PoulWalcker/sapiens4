@@ -191,6 +191,17 @@ dispatch s method target body = locked s $ do
   ("GET",["api","agents",a,"tasks"]) -> do
    void (DB.agent s a)
    if "format=json" `T.isInfixOf` query then json 200 (D.taskList s a) else do value<-D.workTasks s a True; pure (200,encode value,"application/yaml; charset=utf-8")
+  ("GET",["api",kind,a,"routines",rid,"runs"]) | kind `elem` ["agents","groups"] -> json 200 $ do
+   owner kind a
+   identity <- decodeValue 400 (str rid)
+   let parameters=[(k,T.drop 1 v) | entry<-T.splitOn "&" (T.drop 1 query),let (k,v)=T.breakOn "=" entry]
+   cursor <- traverse (decodeValue 400 . str . T.pack . unEscapeString . T.unpack) (lookup "before" parameters)
+   R.runHistory s a identity cursor
+  ("GET",["api",kind,a,"routines",rid,"runs",run]) | kind `elem` ["agents","groups"] -> json 200 $ do
+   owner kind a
+   identity <- decodeValue 400 (str rid)
+   targetRun <- decodeValue 400 (str run)
+   R.runDetail s a identity targetRun
   ("GET",["api",kind,a,"notes"]) | kind `elem` ["agents","groups"] -> do
    owner kind a
    let image=lookup "image" [(k,T.drop 1 v) | entry<-T.splitOn "&" (T.drop 1 query),let (k,v)=T.breakOn "=" entry]
