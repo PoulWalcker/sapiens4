@@ -123,20 +123,26 @@ activityNav :: M.Model -> V.Html
 activityNav m = V.node "nav" [V.cls "conversation-tabs",V.label "Agent activity"] $ map tab [Tuple "chat" "Chat",Tuple "work" "Work",Tuple "updates" "Updates"]
   where
   item activity label = V.choice (m.activity == activity) label (Navigate activity)
-  tree = case _ of
+  branchOpen :: N.NavTree -> Boolean
+  branchOpen = case _ of
+    N.Leaf _ -> false
+    N.Branch id _ _ children -> m.menu == Just ("activity-" <> id) || A.any branchOpen children
+  workOpen = m.menu == Just "activity-work" || A.any branchOpen N.workTree
+  menuOpen id = if id == "work" then workOpen else m.menu == Just ("activity-" <> id)
+  tree node = case node of
     N.Leaf view -> item (N.Work view N.Planned) (N.workLabel view)
-    N.Branch id label view children -> V.div "activity-submenu-row" [item (N.Work view N.Planned) label,V.controlWith [V.attr "data-activity-menu" $ "activity-" <> id,V.label $ label <> " menu",V.attr "aria-expanded" $ show $ m.menu == Just ("activity-" <> id)] [V.chevron true] (Menu $ "activity-" <> id),V.node "div" [V.cls "activity-menu activity-submenu",V.hidden $ m.menu /= Just ("activity-" <> id)] $ map tree children]
+    N.Branch id label view children -> V.div "activity-submenu-row" [item (N.Work view N.Planned) label,V.controlWith [V.attr "data-activity-menu" $ "activity-" <> id,V.label $ label <> " menu",V.attr "aria-expanded" $ show $ branchOpen node] [V.chevron true] (Menu $ "activity-" <> id),V.node "div" [V.cls "activity-menu activity-submenu",V.hidden $ not $ branchOpen node] $ map tree children]
   tab (Tuple id label) = V.div ("activity-tab " <> if N.panel m.activity == id then "active" else "")
     [V.control [V.attr "data-panel" id,V.attr "aria-pressed" $ show $ N.panel m.activity == id] (label) (if id == "work" then DefaultWork else Navigate $ if id == "chat" then N.Chat N.Conversation else N.Updates)
-    ,V.node "button" [V.cls "activity-toggle",V.label $ label <> " menu",V.attr "aria-expanded" $ show $ m.menu == Just ("activity-" <> id),V.click $ Menu $ "activity-" <> id] [V.chevron false]
-    ,V.node "div" [V.cls "activity-menu",V.hidden $ if id == "work" then not (A.elem m.menu $ map (Just <<< ("activity-" <> _)) ["work","tasks","automation","routine","workflows","composer"]) else m.menu /= Just ("activity-" <> id)] $ case id of
+    ,V.node "button" [V.cls "activity-toggle",V.label $ label <> " menu",V.attr "aria-expanded" $ show $ menuOpen id,V.click $ Menu $ "activity-" <> id] [V.chevron false]
+    ,V.node "div" [V.cls "activity-menu",V.hidden $ not $ menuOpen id] $ case id of
       "chat" -> map (\view -> item (N.Chat view) $ N.chatLabel view) [N.Pins,N.Threads,N.Comments] <> [V.node "hr" [] [],V.button "" "＋ Add feedback" Feedback]
       "work" -> map tree N.workTree
       _ -> [item N.Updates "Events",V.textNode "button" [V.disabled true,V.attr "title" "Not active yet"] "Records"]]
 
 viewbar :: M.Model -> V.Html
 viewbar m = V.node "div" [V.id "activity-viewbar",V.hidden hidden] $ [V.span [V.cls "activity-view-title"] (label)] <> case m.activity of
-  N.Work view period | A.elem view [N.Tasks,N.Automated,N.Scheduled] -> [V.div "work-nav-tools" [V.div "activity-view-menu" [V.controlWith [V.label $ if view == N.Scheduled then "Routine history" else if M.isGroup (M.selected m) then "Task status" else "Task history",V.attr "aria-expanded" $ show $ m.menu == Just "activity-filter"] [V.text $ N.periodLabel period,V.chevron false] (Menu "activity-filter"),V.node "div" [V.cls "activity-menu",V.hidden $ m.menu /= Just "activity-filter"] $ map (\p -> V.choice (p == period) (N.periodLabel p) (SetPeriod p)) (if view == N.Scheduled then [N.Planned,N.Paused] else [N.Planned,N.Executed] <> if M.isGroup (M.selected m) then [N.Deleted] else [])],V.when (not $ (M.selected m).archived) $ V.button "" "+ New" $ if view == N.Scheduled then PrepareDraft "Add New Scheduled Routine:\nFrequency: every XXX minutes\nExecute: PROMPT" "XXX" else PrepareDraft "Add New Task: TODO" "TODO"]]
+  N.Work view period | A.elem view [N.Tasks,N.Automated,N.Scheduled] -> [V.div "work-nav-tools" [V.div "activity-view-menu" [V.controlWith [V.label $ if view == N.Scheduled then "Routine history" else if M.isGroup (M.selected m) then "Task status" else "Task history",V.attr "aria-expanded" $ show $ m.menu == Just "activity-filter"] [V.text $ N.periodLabel period,V.chevron false] (Menu "activity-filter"),V.node "div" [V.cls "activity-menu",V.hidden $ m.menu /= Just "activity-filter"] $ map (\p -> V.choice (p == period) (N.periodLabel p) (SetPeriod p)) (if view == N.Scheduled then [N.Planned,N.Paused] else [N.Planned,N.Executed] <> if M.isGroup (M.selected m) then [N.Deleted] else [])],V.when (not $ (M.selected m).archived) $ V.button "" "+ New" $ if view == N.Scheduled then PrepareDraft "Add New Scheduled Routine:\nFrequency: every XXX minutes\nExecute: PROMPT" "XXX" else if view == N.Tasks && M.isGroup (M.selected m) then OpenDialog M.GroupTask F.NoRecord else PrepareDraft "Add New Task: TODO" "TODO"]]
   _ -> []
   where
   hidden = m.activity == N.Updates || m.activity == N.Work N.Memo N.Planned || m.activity == N.Chat N.Conversation
