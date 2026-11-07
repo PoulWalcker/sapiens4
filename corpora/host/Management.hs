@@ -23,10 +23,10 @@ import qualified Delegation as D
 import qualified Groups as G
 import qualified GroupChat as GC
 
-activeTurn :: Service -> Text -> Maybe Text -> IO (Maybe Text)
-activeTurn s a specific = do
+activeTurns :: Service -> Text -> Maybe Text -> IO [Turn]
+activeTurns s a specific = do
  state <- agentState s a
- pure $ listToMaybe [runIdText (turnId t) | t<-agentTurns state,turnStatus t==Running,maybe True ((==turnId t) . RunId) specific]
+ pure [t | t<-agentTurns state,turnStatus t==Running,maybe True ((==turnId t) . RunId) specific]
 status :: Service -> Text -> IO Value
 status s a = do
  chief <- DB.mainAgent s
@@ -116,11 +116,24 @@ requiresActiveAgent ReadWorkspace = False
 requiresActiveAgent (WorkspaceCommand _) = False
 requiresActiveAgent _ = True
 
+policySetupAllows :: Operation -> Bool
+policySetupAllows operation = case operation of
+ ReadCorpora -> True
+ ReadStatus -> True
+ ReadRoutines -> True
+ ReadRoutineRun -> True
+ ReadWorkspace -> True
+ GroupCommand G.GroupGet -> True
+ SelectRoutinePolicy -> True
+ Batch -> True
+ _ -> False
+
 control :: Service -> Text -> Value -> IO Value
 control s a payload = do
  void (DB.agent s a)
  let d=remove ["agencyRun"] payload; specific=if has payload "agencyRun" then Just (at payload "agencyRun") else Nothing
- current <- activeTurn s a specific
+ turns <- activeTurns s a specific
+ let current=runIdText . turnId <$> listToMaybe turns
  when (isJust specific) $ require (isJust current) 409 "AgencyRun is no longer active"
  forM_ specific $ \identity -> do
   runs <- readMVar (serviceRuns s)
@@ -129,6 +142,12 @@ control s a payload = do
    require (not stopped) 409 "This execution is stopping; no further host actions are allowed"
   R.ensureExecutionAllowed s (RunId identity)
  operation <- validated (decodeOperation d)
+ origins <- mapM (requireExecutionOrigin . turnOrigin) turns
+ let policyRoutines=mapMaybe originPolicyRoutine origins
+ unless (null policyRoutines) $ do
+  require (policySetupAllows operation) 409 "Routine policy setup may only read context and select its own missed-deadline policy"
+  when (operation == SelectRoutinePolicy) $
+   require (isJust specific || length turns == 1) 409 "Select a routine policy with an explicit AgencyRun while multiple tasks are running"
  when (requiresActiveAgent operation) $ requireActive s a
  chief <- DB.mainAgent s
  let receipt v=merge (obj [("self_id",str a),("saved",Bool True)]) v
@@ -192,6 +211,7 @@ control s a payload = do
    receipt . obj . (:[]) . ("routine",) <$> R.save s owner (get d "minutes") (get d "prompt") specification policy (R.EditRoutine i Nothing)
   SelectRoutinePolicy -> do
    i <- routineIdentity
+   require (all (==i) policyRoutines) 409 "Routine policy setup may only select the policy of its assigned routine"
    expected <- textField d "expectedPrompt" 16000
    selection <- decodeValue 400 (get d "expectedSelection")
    policy <- decodeValue 400 (get d "missedPolicy")
