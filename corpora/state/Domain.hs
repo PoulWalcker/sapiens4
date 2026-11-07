@@ -20,6 +20,8 @@ module Domain
  , populationChief, populationMembers, GroupRoster, MembershipError(..), memberRoster, rosterLead
  , messageText, AgentProfile(..), rosterMembers, activeStatus, retryableStatus, completedStatus
  , ResultReviewer(..), RejectionReason, mkRejectionReason, ResultRejection(..)
+ , ResultText, ResultPublication(..), publicationText, publicationFields, publicationP
+ , historyOnlyP, validatePublication
  ) where
 
 import Control.Monad
@@ -363,7 +365,7 @@ withTurnFields f t = case f fields of
 batchLeader :: Turn -> RunId
 batchLeader t = fromMaybe (turnId t) (turnBatchId t)
 retryTurn :: Turn -> Turn
-retryTurn t = (withTurnFields (remove ["error","batch_members","agency_kind","slot","pulseId"]) t) { turnStatus = Queued, turnAttempt=Just (fromMaybe 0 (turnAttempt t)+1), turnBatchId=Nothing }
+retryTurn t = (withTurnFields (remove ["error","batch_members","agency_kind","slot","pulseId","notification"]) t) { turnStatus = Queued, turnAttempt=Just (fromMaybe 0 (turnAttempt t)+1), turnBatchId=Nothing }
 data TurnControlError = TurnNotRetryable | TurnAlreadyComplete deriving (Eq, Show)
 validateTurnAction :: TurnAction -> TurnStatus -> Either TurnControlError ()
 validateTurnAction Retry status
@@ -458,6 +460,42 @@ jsonText :: Value -> Text
 jsonText = TE.decodeUtf8 . BL.toStrict . encode
 parseJSONText :: Text -> Value
 parseJSONText = fromMaybe Null . decode . BL.fromStrict . TE.encodeUtf8
+
+-- A result's publication decision does not assert delivery. Text remains available
+-- to history in both cases; only the checked decoder constructs ResultText.
+newtype ResultText = ResultText Text deriving (Eq, Show)
+data ResultPublication = PublishToChat ResultText | HistoryOnly ResultText deriving (Eq, Show)
+
+publicationText :: ResultPublication -> Text
+publicationText publication = case publication of
+ PublishToChat (ResultText content) -> content
+ HistoryOnly (ResultText content) -> content
+
+publicationFields :: ResultPublication -> [(Text,Value)]
+publicationFields publication = case publication of
+ PublishToChat _ -> []
+ HistoryOnly _ -> [("notification",str "quiet")]
+
+historyOnlyP :: Value -> Parser Bool
+historyOnlyP = withObject "result publication" $ \fields -> case KM.lookup "notification" fields of
+ Nothing -> pure False
+ Just (String "notify") -> pure False
+ Just (String "quiet") -> pure True
+ _ -> fail "notification must be notify or quiet"
+
+publicationP :: Value -> Parser ResultPublication
+publicationP value = do
+ content <- ResultText <$> textFieldP "reply" 64000 value
+ quiet <- historyOnlyP value
+ pure (if quiet then HistoryOnly content else PublishToChat content)
+
+validatePublication :: ExecutionOrigin -> Bool -> ResultPublication -> Either Text ()
+validatePublication origin completed publication = case publication of
+ PublishToChat _ -> Right ()
+ HistoryOnly _
+  | not completed -> Left "Only a Completed outcome can keep its result in history without a chat message"
+  | not (originIsScheduled origin) -> Left "History-only results require a Routine execution"
+  | otherwise -> Right ()
 
 messageText :: Value -> Either Text Text
 messageText value = case value `fallback` str "" of

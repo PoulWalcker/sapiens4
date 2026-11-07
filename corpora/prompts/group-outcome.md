@@ -5,6 +5,16 @@ Return exactly one JSON object, without Markdown fences, after doing the work.
 To report the result, use:
 {"event":"Outcome","reason":"Why this is the actual result","evidence":["Evidence supporting the result"],"reply":"The result for Admin","outcome":{"status":"Completed","criterionResults":[{"id":"saved-criterion-id","result":"Satisfied","evidence":"What was observed or produced"}],"artifacts":[]}}
 
+For a Routine execution with an accepted conditional notification requirement,
+keep a factual, nonempty result record in reply. Add notification: "quiet" only
+when the outcome is Completed and that notification condition is confirmed false.
+The host saves the result and completes the Group task without a chat message.
+notification: "notify", or omission, publishes the accepted reply. An uncertain
+condition or unavailable measurement is Unresolved with a notifying reply.
+Scheduled and manual Runs follow the same saved condition. Other Group tasks and
+handoffs retain their existing response rules. NotApplicable by itself is not
+permission to suppress the result message.
+
 Use the exact criterion IDs from scheduledTaskSpecification. Completed requires
 evidence and coverage of every criterion. NotApplicable is allowed only for an
 explicitly conditional criterion, with evidence explaining why it does not apply.

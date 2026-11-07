@@ -293,7 +293,9 @@ saveGroupDecision s run raw = locked s $ do
  reply <- case D.decisionBody response of
   D.ReportOutcome reply outcome -> case D.validateOutcome response outcome specification of
    Left problem -> failure 400 (D.outcomeError problem)
-   Right _ -> pure reply
+   Right _ -> do
+    either (failure 400) pure (validatePublication origin (D.outcomeStatus outcome == D.Completed) reply)
+    pure (publicationText reply)
   D.Handoff content -> do
    require (toJSON (requestTarget request) == get group "lead") 403 "Only the Group Lead can hand off scheduled work"
    mentioned <- mentions s group content
@@ -304,6 +306,25 @@ saveGroupDecision s run raw = locked s $ do
  let accepted=observed { requestFields=KM.insert "resultDecision" (D.decisionRaw response) (requestFields observed) }
  storeGroup s (replace "requests" (toJSON accepted) group)
  pure reply
+
+executionPublication :: Service -> RunId -> IO (Maybe ResultPublication)
+executionPublication s identity = do
+ found <- findRequest s identity
+ case found of
+  Nothing -> pure Nothing
+  Just (group,request) -> do
+   response <- validated (requestDecision request)
+   case response of
+    Just decision | D.ReportOutcome publication outcome <- D.decisionBody decision -> do
+     origin <- requestExecutionOrigin group request
+     lineage <- requireRequestLineage request
+     link <- maybe (failure 500 "Structured Group result has no Task revision") pure (requestTask lineage)
+     GroupTask { specification=saved } <- readTask group (taskIdText (requestTaskId link))
+     specification <- maybe (failure 500 "Structured Group result has no specification") pure saved
+     either (failure 500 . D.outcomeError) (const (pure ())) (D.validateOutcome decision outcome specification)
+     either (failure 500) pure (validatePublication origin (D.outcomeStatus outcome == D.Completed) publication)
+     pure (Just publication)
+    _ -> pure Nothing
 
 data GroupSettlement
  = KeepGroup Value
@@ -392,7 +413,15 @@ reconcileGroups s = DB.values s DB.Groups >>= mapM_ reconcile
         recipients=if blocked then [] else proposed
     (finished,stale) <- if routine && not (null recipients) then pure (base,TaskForwarded)
      else settleTask base request (if blocked then put "status" (str "cancelled") turn else turn)
-    output <- if get turn "output" == Null then pure finished else do
+    quiet <- if completedStatus (requestStatus request) then do
+     suppressed <- parseValue 500 historyOnlyP turn
+     savedPublication <- executionPublication s (requestId request)
+     case savedPublication of
+      Nothing -> require (not suppressed) 500 "History-only Group result has no accepted Outcome"
+      Just publication -> require (suppressed == not (null (publicationFields publication)) && get turn "output" == str (publicationText publication)) 500 "Group result publication does not match its Outcome"
+     pure suppressed
+     else pure False
+    output <- if quiet || get turn "output" == Null then pure finished else do
      initialMessage <- message (agentIdText (requestTarget request)) (at turn "output")
      let entry = merge initialMessage (obj [("turn",toJSON (requestId request)),("stale",Bool (stale == StaleResultRecorded))])
      foldM (\g target -> do

@@ -49,7 +49,7 @@ data CreateTask = CreateTask { title :: Text, body :: Text, assignee :: AgentId 
 data TaskError = InvalidTask Text | MissingTask | TaskChanged | RestoreRequired | RestoreAssigneeRequired | StartConflict | StartAssigneeRequired | AlreadyPending deriving (Eq, Show)
 data TaskCompletion = TaskCompletion
  { run :: RunId, owner :: AgentId, revision :: Int, status :: TurnStatus
- , output :: Maybe Text, error :: Maybe Text, outcome :: Maybe D.StructurallyValidOutcome
+ , output :: Maybe Text, error :: Maybe Text, outcome :: Maybe D.StructurallyValidOutcome, publication :: Maybe ResultPublication
  } deriving (Eq, Show)
 data Settlement = NoTask | TaskForwarded | StaleResultRecorded | TaskUpdated deriving (Eq, Show)
 
@@ -170,7 +170,8 @@ settleTaskResult :: UTCTime -> TaskCompletion -> GroupTask -> (GroupTask, Settle
 settleTaskResult time completion task =
  let stale = task.deleted || task.revision /= completion.revision
      result = obj ([("turn",toJSON completion.run),("author",toJSON completion.owner),("text",toJSON completion.output),("error",toJSON completion.error),("revision",num completion.revision),("stale",Bool stale),("created",str (timestamp time))]
-      ++ [("outcome",toJSON (D.validatedOutcome outcome)) | outcome <- maybeToList completion.outcome])
+      ++ [("outcome",toJSON (D.validatedOutcome outcome)) | outcome <- maybeToList completion.outcome]
+      ++ maybe [] publicationFields completion.publication)
      metadata = KM.insert "results" (arr (items (Object task.metadata) "results" ++ [result])) task.metadata
      changed = task { metadata=metadata }
  in if stale then (changed,StaleResultRecorded)
@@ -197,9 +198,12 @@ completionOutcome task request status = do
   specification <- maybe (Left (APIError 500 "Structured Group execution has no saved specification")) Right task.specification
   response <- requestDecision request >>= maybe (Left (APIError 500 "Completed Group execution has no saved decision")) Right
   case D.decisionBody response of
-   D.ReportOutcome _ outcome -> case D.validateOutcome response outcome specification of
-    Left problem -> Left (APIError 500 (D.outcomeError problem))
-    Right checked -> Right (Just checked)
+   D.ReportOutcome publication outcome -> do
+    origin <- either (Left . APIError 500) Right (checkedOrigin (requestOrigin request))
+    either (Left . APIError 500) Right (validatePublication origin (D.outcomeStatus outcome == D.Completed) publication)
+    case D.validateOutcome response outcome specification of
+     Left problem -> Left (APIError 500 (D.outcomeError problem))
+     Right checked -> Right (Just checked)
    _ -> Left (APIError 500 "A Group handoff cannot complete its Task")
 
 resultHistory :: GroupTask -> Validation [Value]
@@ -207,8 +211,12 @@ resultHistory task = forM (items (Object task.metadata) "results") $ \result -> 
  request <- validateValue 500 parseJSON (get result "turn") :: Validation RunId
  revision <- validateValue 500 parseJSON (get result "revision") :: Validation Int
  outcome <- traverse (validateValue 500 parseJSON) (if has result "outcome" then Just (get result "outcome") else Nothing) :: Validation (Maybe D.Outcome)
+ quiet <- validateValue 500 historyOnlyP result
+ when quiet $ do
+  check (maybe False ((==D.Completed) . D.outcomeStatus) outcome) 500 "History-only Group result requires a Completed outcome"
+  void (validateValue 500 (textFieldP "text" 64000) result)
  rejection <- traverse (validateValue 500 parseJSON) (if has result "rejection" then Just (get result "rejection") else Nothing) :: Validation (Maybe ResultRejection)
- pure (obj [("result",obj [("request",toJSON request),("revision",num revision)]),("reply",get result "text"),("error",get result "error"),("stale",get result "stale"),("outcome",toJSON outcome),("rejection",toJSON rejection)])
+ pure (obj [("result",obj [("request",toJSON request),("revision",num revision)]),("reply",get result "text"),("notification",str (if quiet then "quiet" else "notify")),("error",get result "error"),("stale",get result "stale"),("outcome",toJSON outcome),("rejection",toJSON rejection)])
 
 rejectResult :: ResultRejection -> RunId -> Int -> GroupTask -> Validation (GroupTask,ResultRejection)
 rejectResult proposed request revision task = do
@@ -312,8 +320,13 @@ settleTask group request turn = do
    time <- getCurrentTime
    status <- field 500 turn "status"
    outcome <- validated (completionOutcome task request status)
+   response <- validated (requestDecision request)
+   let publication=if completedStatus status then case D.decisionBody <$> response of
+        Just (D.ReportOutcome saved _) -> Just saved
+        _ -> Nothing
+       else Nothing
    completion <- TaskCompletion (requestId request) (requestTarget request) (requestTaskRevision link) status
-    <$> field 500 turn "output" <*> field 500 turn "error" <*> pure outcome
+    <$> field 500 turn "output" <*> field 500 turn "error" <*> pure outcome <*> pure publication
    let (changed,settlement) = settleTaskResult time completion task
    pure (replace "tasks" (toJSON changed) group,settlement)
 

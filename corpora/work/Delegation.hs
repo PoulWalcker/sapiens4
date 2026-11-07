@@ -8,7 +8,7 @@ module Delegation
  , TaskSpec, templates, editTemplate, workTasks, taskList, workSummaries
  , Outcome(..), OutcomeStatus(..), Decision(..), DecisionResponse(..), parseGroupDecision
  , StructurallyValidOutcome, validatedOutcome, validateOutcome, outcomeError
- , resultHistory, rejectResult
+ , resultHistory, rejectResult, executionPublication
  ) where
 
 import Control.Concurrent
@@ -76,6 +76,7 @@ callOutput call = case callProgress call of
   Answered output -> output; UnresolvedResult output -> output; HandedOff output -> output; NeedsClarification output -> output
 instance FromJSON WorkCall where
  parseJSON = withObject "Workload call" $ \o -> do
+  void (historyOnlyP (Object o))
   node <- o .: "node"
   state <- o .: "state"
   output <- o .:? "output"
@@ -254,7 +255,7 @@ instance ToJSON Outcome where
 data Decision
  = ReplyNow Text | ExecuteTask | OutsideSpecialization | SelectSpecialist Text
  | NeedSpecialist | AskAdmin Text | SpecifySapi Text Text | PrepareTask Text TaskSpec
- | Handoff Text | ReportOutcome Text Outcome
+ | Handoff Text | ReportOutcome ResultPublication Outcome
  deriving (Eq, Show)
 data DecisionResponse = DecisionResponse { decisionBody :: Decision, decisionReason :: Text, decisionEvidence :: [Text], decisionRaw :: Value } deriving (Eq, Show)
 parseDecision :: Node -> Value -> Parser DecisionResponse
@@ -283,7 +284,7 @@ parseDecisionEvents allowed unknown value = do
   "SapiSpecified" -> variant ["name","role"] (SpecifySapi <$> nameP value <*> textAt "role" 60)
   "TaskPrepared" -> variant ["taskType","specification"] (PrepareTask <$> textAt "taskType" 60 <*> parseJSON (get value "specification"))
   "HandoffPrepared" -> variant ["request"] (Handoff <$> textAt "request" 16000)
-  "Outcome" -> variant ["reply","outcome"] (ReportOutcome <$> textAt "reply" 64000 <*> parseJSON (get value "outcome"))
+  "Outcome" -> variant ["reply","notification","outcome"] (ReportOutcome <$> publicationP value <*> parseJSON (get value "outcome"))
   _ -> fail "Unknown decision event"
  pure (DecisionResponse body reason evidence value)
 
@@ -567,12 +568,17 @@ advanceDecision chief response work call = case decisionBody response of
    let savedType=if originIsScheduled origin then "automated" else taskType
    Right (finish (if fixed then work else acceptTaskSpec savedType spec work) (RunningAt Execution))
  Handoff request -> policyDelegation work >> Right (DelegateRequest request)
- ReportOutcome reply outcome -> do
+ ReportOutcome publication outcome -> do
   spec <- acceptedTaskSpec work >>= maybe (Left (InvalidTaskContract "Task has no accepted specification")) Right
   StructurallyValidOutcome checked <- B.first InvalidOutcome (validateOutcome response outcome spec)
-  let saved=mergeFields [("reply",str reply),("evidence",toJSON (decisionEvidence response)),("author",toJSON (callRecipient call))] (toJSON checked)
+  origin <- checkedWorkOrigin work
+  B.first InvalidTaskContract (validatePublication origin (outcomeStatus checked == Completed) publication)
+  let reply=publicationText publication
+      fields=publicationFields publication
+      saved=mergeFields (fields ++ [("reply",str reply),("evidence",toJSON (decisionEvidence response)),("author",toJSON (callRecipient call))]) (toJSON checked)
       result=case outcomeStatus outcome of Completed -> Answered reply; Unresolved -> UnresolvedResult reply
-  pure (finish (setWorkField "outcome" saved work) (FinishedCall result))
+      finished=setCallFields fields (call { callFields=KM.delete "notification" (callFields call) })
+  pure (SaveDecision (setWorkField "outcome" saved work) (finished { callProgress=FinishedCall result }))
  where
  finish changed progress = SaveDecision changed (call { callProgress=progress })
 
@@ -662,6 +668,33 @@ runDecision prepareSpecialist verifyCompletion s run turn state = do
     _ -> pure ()
   readIORef logs >>= throwIO . RunFailure (exceptionText e))
  (output,) <$> readIORef logs
+-- Recover the publication decision from the accepted result, never from text
+-- returned by a tool or from the absence of a chat message.
+executionPublication :: Service -> RunId -> IO (Maybe ResultPublication)
+executionPublication s identity = do
+ found <- findWork s identity
+ case found of
+  Nothing -> pure Nothing
+  Just (work,call) -> do
+   results <- validated (resultHistory work)
+   case listToMaybe (reverse (filter ((==toJSON identity) . (`get` "call")) results)) of
+    Nothing -> pure Nothing
+    Just saved -> do
+     publication <- parseValue 500 publicationP saved
+     let decisionId=get (get saved "result") "decision"
+     record <- maybe (failure 500 "Saved result has no decision record") pure (find ((==decisionId) . (`get` "decisionId")) (workItems work "decisions"))
+     response <- parseValue 500 (parseDecision Execution) (get record "response")
+     spec <- either decisionFailure (maybe (failure 500 "Saved result has no accepted specification") pure) (acceptedTaskSpec work)
+     case decisionBody response of
+      ReportOutcome original outcome -> do
+       require (original == publication) 500 "Saved publication does not match its accepted decision"
+       either (failure 500 . outcomeError) (const (pure ())) (validateOutcome response outcome spec)
+      _ -> failure 500 "Saved result requires an Outcome decision"
+     origin <- requireExecutionOrigin (workOrigin work)
+     either (failure 500) pure (validatePublication origin (at (get saved "outcome") "status" == "Completed") publication)
+     require (callOutput call == Just (publicationText publication)) 500 "Saved result text does not match its completed Call"
+     pure (Just publication)
+
 reconcileCall :: [Value] -> WorkCall -> Validation WorkCall
 reconcileCall turns call = case findId (runIdText (callIdentity call)) turns of
  Just turn | isNothing (callOutput call) -> do
@@ -744,8 +777,10 @@ resultHistory work = fmap catMaybes $ forM (workItems work "decisions") $ \recor
   then Right Nothing else do
    outcome <- validateValue 500 parseJSON (if savedHere then select ["status","criterionResults","artifacts"] current else get response "outcome") :: Validation Outcome
    rejection <- traverse (validateValue 500 parseJSON) (if has record "rejection" then Just (get record "rejection") else Nothing) :: Validation (Maybe ResultRejection)
-   let reply=if savedHere then get current "reply" else get response "reply"
-   Right (Just (obj [("result",obj [("decision",identity)]),("call",get record "callId"),("reply",reply),("outcome",toJSON outcome),("rejection",toJSON rejection)]))
+   publication <- validateValue 500 publicationP (if savedHere then current else response)
+   origin <- either (Left . APIError 500) Right (checkedOrigin (workOrigin work))
+   either (Left . APIError 500) Right (validatePublication origin (outcomeStatus outcome == Completed) publication)
+   Right (Just (obj (publicationFields publication ++ [("result",obj [("decision",identity)]),("call",get record "callId"),("reply",str (publicationText publication)),("outcome",toJSON outcome),("rejection",toJSON rejection)])))
 
 rejectResult :: Service -> RunId -> Text -> ResultRejection -> IO Value
 rejectResult s run identity proposed = do
@@ -767,4 +802,4 @@ taskList s a = do
  tasks <- items <$> workTasks s a False <*> pure "tasks"
  pure $ obj [("tasks",arr (reverse [let body=get (get t "task") "specification" `fallback` obj [("objective",get t "originalIntent")]; execution=get t "execution"; calls=items t "calls" in obj [("id",get t "workloadId"),("title",get body "objective"),("taskType",get (get t "task") "taskType"),("state",get execution "state"),("owner",get execution "owner"),("sender",maybe Null (`get` "addressedTo") (listToMaybe calls)),("body",str (jsonText body <> "\n")),("result",get (get t "outcome") "reply"),("error",maybe Null (`get` "error") (listToMaybe (reverse calls)))] | t <- tasks]))]
 workSummaries :: [Workload] -> [Value]
-workSummaries works = [let c=NE.last (workCalls w) in obj [("taskType",get (taskValue w) "taskType"),("id",str (workloadId w)),("taskId",get (taskValue w) "taskId"),("origin",workField w "origin"),("callId",toJSON (callIdentity c)),("owner",toJSON (callRecipient c)),("state",toJSON (callState c)),("participants",toJSON (nub (map callRecipient (NE.toList (workCalls w))))),("output",toJSON (callOutput c)),("error",callField c "error"),("decisions",num (length (workItems w "decisions"))),("calls",num (length (workCalls w)))] | w <- works,workTracksTask w]
+workSummaries works = [let c=NE.last (workCalls w) in obj [("taskType",get (taskValue w) "taskType"),("id",str (workloadId w)),("taskId",get (taskValue w) "taskId"),("origin",workField w "origin"),("callId",toJSON (callIdentity c)),("owner",toJSON (callRecipient c)),("state",toJSON (callState c)),("participants",toJSON (nub (map callRecipient (NE.toList (workCalls w))))),("output",toJSON (callOutput c)),("notification",callField c "notification" `fallback` str "notify"),("error",callField c "error"),("decisions",num (length (workItems w "decisions"))),("calls",num (length (workCalls w)))] | w <- works,workTracksTask w]
