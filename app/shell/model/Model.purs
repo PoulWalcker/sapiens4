@@ -202,8 +202,9 @@ projectSnapshot snapshot m = withWorkspaces snapshot.preferences m { snapshot=sn
         quiet = work.historyOnly && fromMaybe (work.error == "") ((\t -> A.elem t.status [X.Queued,X.Running,X.OutputPending,X.Done,X.Warning]) <$> turn)
         problem = D.fallback work.error $ fromMaybe "" $ _.error <$> turn
         content = if work.historyOnly then "" else work.output
+        recipientName = D.fallback "a specialist" $ fromMaybe "" $ _.name <$> X.findEntity work.owner agents
     in if work.callId == work.origin.call || quiet then all else
-    let message = {user:false,author:work.owner,text:D.fallback (D.fallback ("Delegated to " <> D.fallback work.owner (fromMaybe "" $ _.name <$> X.findEntity work.owner agents) <> " · " <> X.workName work.state) problem) content
+    let message = {user:false,author:work.owner,text:D.fallback (D.fallback ("Task assigned to " <> recipientName <> " · " <> X.workName work.state) problem) content
           ,created:fromMaybe "" $ _.created <$> turn,delegated:true,request:turn >>= \t -> if A.elem t.status [X.Done,X.Warning] then Nothing else Just t,chatKey:"delegation:" <> work.id,attachments:[],warning:"",turnId:"",stale:false,outputOrder:0.0}
     in append work.origin.agent [message] all) groupMessages snapshot.workloads
   messages = map (A.sortBy (\a b -> compare (B.parseTime a.created) (B.parseTime b.created) <> compare a.outputOrder b.outputOrder)) delegated

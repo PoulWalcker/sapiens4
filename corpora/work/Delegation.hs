@@ -489,6 +489,10 @@ validateTarget s w source target = do
  require (not (any (\c -> callState c == CallQueued && callRecipient c == AgentId target) (concatMap (NE.toList . workCalls) works))) 409 "Recipient already has an accepted call"
  require (length (workCalls w) <= 8) 409 "Routing limit reached; Admin must resolve the request"
  require (target == chief || not (any ((==AgentId target) . callRecipient) (workCalls w))) 409 "This specialist already assessed the request; ask Admin to resolve routing"
+handoffReply :: AgentProfile -> Text
+handoffReply recipient = "Task assigned to " <> name <> "."
+ where name=if T.null (T.strip (profileName recipient)) then "a specialist" else profileName recipient
+
 transfer :: Service -> Run -> Text -> Text -> Value -> IO Text
 transfer s run request reason record = do
  (w,c) <- getWork s (runId run)
@@ -496,10 +500,11 @@ transfer s run request reason record = do
  require (not stopped) 409 "Stopped before handoff acceptance"
  let target=text (callField c "target")
  validateTarget s w (agentIdText (runOwner run)) target
+ recipient <- DB.agent s target >>= decodeValue 500
  i <- newId
  chief <- DB.mainAgent s
  let child=setCallFields [("handoffReason",str reason)] (newCall (RunId i) (AgentId target) (Just (callIdentity c)) (QueuedAt (if target==chief then ChiefTriage else Assessing)) request)
-     reply="Delegated to "<>target<>"."
+     reply=handoffReply recipient
      updated=c { callProgress=FinishedCall (HandedOff reply) }
      accepted=withCall w updated
  saveWork s accepted { workTracksTask=True, workCalls=workCalls accepted <> (child :| []) }
