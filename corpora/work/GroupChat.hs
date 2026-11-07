@@ -14,6 +14,7 @@ import Data.List (find,nub)
 import qualified Data.Map.Strict as Map
 import Data.Maybe
 import Data.Text (Text)
+import Data.Time (getCurrentTime)
 import qualified Data.Text as T
 import System.Directory
 import System.FilePath
@@ -26,6 +27,7 @@ import Memo
 import Provider
 import GroupModel
 import GroupWork
+import qualified Delegation as D
 
 mentions :: Service -> Value -> Text -> IO [Text]
 mentions s group content = DB.agents s >>= validated . mentionedMembers group content
@@ -171,7 +173,14 @@ dispatchGroups s = do
    latest <- getGroup s (at group "id") False
    changed <- rejectGroupOrigin latest typed reason
    void (saveGroup s changed "system" "call failed" (toJSON (requestId typed)))
-  Right _ -> dispatchValid group typed
+  Right origin -> do
+   allowed <- try (Routine.ensureOriginAvailable s origin)
+   case allowed of
+    Right () -> dispatchValid group typed
+    Left (APIError _ reason) -> do
+     latest <- getGroup s (at group "id") False
+     changed <- rejectGroupOrigin latest typed reason
+     void (saveGroup s changed "system" "call failed" (toJSON (requestId typed)))
  dispatchValid group typed = do
   let request=toJSON typed
   let target = if boolean (get request "memo") then at group "lead" else at request "target"
@@ -204,14 +213,22 @@ requestReady target identity running state workloads projected =
 runGroup :: Service -> Run -> Turn -> IO (Text,[Value])
 runGroup s run turn = do
  parsed <- requireExecutionOrigin (turnOrigin turn)
- (context,isMemo) <- locked s $ do
+ (context,isMemo,structured,savedDecision) <- locked s $ do
   found <- findRequest s (turnId turn)
   (group,typed) <- maybe (failure 409 "Unknown Group call") pure found
   void (requestExecutionOrigin group typed)
+  structured <- validated (usesResultProtocol typed)
+  savedDecision <- if structured then validated (requestDecision typed) else pure Nothing
   let request=toJSON typed
   require (requestTarget typed == runOwner run && not (boolean (get group "archived")) && str (agentIdText (runOwner run)) `elem` items group "members") 409 "Group is archived or membership changed before execution"
   when (isJust (originPolicyRoutine parsed)) $
    require (toJSON (runOwner run) == get group "lead") 409 "Routine policy setup belongs to the current Group Lead"
+  specification <- if originIsScheduled parsed then do
+    lineage <- requireRequestLineage typed
+    link <- maybe (failure 500 "Scheduled Group request has no task revision") pure (requestTask lineage)
+    GroupTask { specification=saved } <- readTask group (taskIdText (requestTaskId link))
+    pure (maybe Null toJSON saved)
+   else pure Null
   let running = toJSON typed { requestStatus=Running }
   storeGroup s (replace "requests" running group)
   root <- folder s (at group "id")
@@ -224,20 +241,69 @@ runGroup s run turn = do
    value <- if exists then str <$> readText path else pure Null
    pure (name,value)
   let manifest name = fromMaybe Null (lookup name manifests)
-  pure (obj [("group",obj ([(k,get group k) | k <- ["id","name","description","lead","members"]] ++ [("workspace",str (T.pack root))])),("self_id",str (agentIdText (runOwner run))),("chief_id",str chief),("members",arr [r | r <- rows,get r "id" `elem` items group "members"]),("tasks",arr [select ["id","title","assignee","state","revision","deleted"] task | task <- takeLast 50 (items group "tasks")]),("messages",arr (if isMemo then items group "messages" else takeLast 30 (items group "messages"))),("memo",memo),("request",running),("scheduledExecutionPrompt",get (turnField turn "origin") "executionPrompt"),("identity",manifest "identity"),("host_control",manifest "host-control"),("computer",manifest "computer-use")],isMemo)
+  pure (obj [("group",obj ([(k,get group k) | k <- ["id","name","description","lead","members"]] ++ [("workspace",str (T.pack root))])),("self_id",str (agentIdText (runOwner run))),("chief_id",str chief),("members",arr [r | r <- rows,get r "id" `elem` items group "members"]),("tasks",arr [select ["id","title","assignee","state","revision","deleted"] task | task <- takeLast 50 (items group "tasks")]),("messages",arr (if isMemo then items group "messages" else takeLast 30 (items group "messages"))),("memo",memo),("request",running),("scheduledExecutionPrompt",get (turnField turn "origin") "executionPrompt"),("scheduledTaskSpecification",specification),("identity",manifest "identity"),("host_control",manifest "host-control"),("computer",manifest "computer-use")],isMemo,structured,savedDecision)
  template <- prompt s (if isMemo then "group-memo" else "group-conversation")
  extra <- if isMemo then ("\n\n" <>) . (`render` [("notes_example",T.pack (repositoryRoot s </> "corpora/prompts/examples/jarvis-notes.html"))]) <$> prompt s "notes-wiki" else pure ""
- prefix <- if originIsScheduled parsed then (<> "\n\n") <$> prompt s "scheduled-execution" else pure ""
+ scheduled <- if originIsScheduled parsed then (<> "\n\n") <$> prompt s "scheduled-execution" else pure ""
+ contract <- if structured then (<> "\n\n") <$> prompt s "group-outcome" else pure ""
+ let prefix=scheduled<>contract
  let renderContext ctx = prefix <> render template [("context",jsonText ctx),("task",turnInput turn)] <> extra
      fit ctx = let rendered = renderContext ctx in if T.length rendered <= 60000 || null (items ctx "messages") then rendered else fit (put "history_truncated" (Bool True) (put "messages" (arr (drop 1 (items ctx "messages"))) ctx))
  let rendered = fit context
- outcome <- try (invoke s run rendered)
+ rawAnswer <- newIORef Nothing
+ outcome <- try $ do
+  raw <- maybe (invokeObserved s run rendered (retainGroupTrace s run)) (pure . jsonText . D.decisionRaw) savedDecision
+  writeIORef rawAnswer (Just raw)
+  if structured then saveGroupDecision s run raw else pure raw
  activity <- readIORef (runActivity run)
- let record = obj ([("role",str (if isMemo then "group-memo" else "group")),("prompt",str rendered),("session",get activity "session")] ++ [("warning",get activity "warning") | has activity "warning"])
+ raw <- readIORef rawAnswer
+ let record = obj ([("role",str (if isMemo then "group-memo" else "group")),("prompt",str rendered),("session",get activity "session")]
+       ++ [("answer",str answer) | answer <- maybeToList raw] ++ [("warning",get activity "warning") | has activity "warning"])
  case outcome of
-  Right result -> pure (result,[put "answer" (str result) record])
+  Right result -> pure (result,[record])
   Left (error :: SomeException) -> throwIO (RunFailure (case fromException error of Just (APIError _ reason) -> reason; Nothing -> T.pack (displayException error)) [record])
  where takeLast count values = drop (length values-count) values
+
+retainGroupTrace :: Service -> Run -> TraceReference -> IO ()
+retainGroupTrace s run reference = locked s $ do
+ found <- findRequest s (runId run)
+ (group,request) <- maybe (failure 409 "Unknown Group call") pure found
+ let previous=get (Object (requestFields request)) "providerTraces" `fallback` arr []
+ references <- decodeValue 500 previous :: IO [TraceReference]
+ let saved=request { requestFields=KM.insert "providerTraces" (toJSON (references++[reference])) (requestFields request) }
+ storeGroup s (replace "requests" (toJSON saved) group)
+
+saveGroupDecision :: Service -> Run -> Text -> IO Text
+saveGroupDecision s run raw = locked s $ do
+ found <- findRequest s (runId run)
+ (group,request) <- maybe (failure 409 "Unknown Group call") pure found
+ let fields=requestFields request
+     observed=request { requestFields=if KM.member "resultDecision" fields && KM.member "rawResult" fields
+       then fields else KM.insert "rawResult" (str raw) fields }
+ storeGroup s (replace "requests" (toJSON observed) group)
+ stopped <- readIORef (runCancel run)
+ require (not stopped && not (requestSettled request)) 409 "Group execution is stopped or already settled"
+ Routine.ensureExecutionAllowed s (runId run)
+ response <- parseValue 400 D.parseGroupDecision (parseJSONText raw)
+ origin <- requestExecutionOrigin group request
+ lineage <- requireRequestLineage request
+ link <- maybe (failure 500 "Structured Group execution has no Task revision") pure (requestTask lineage)
+ GroupTask { specification=saved } <- readTask group (taskIdText (requestTaskId link))
+ specification <- maybe (failure 500 "Structured Group execution has no saved specification") pure saved
+ reply <- case D.decisionBody response of
+  D.ReportOutcome reply outcome -> case D.validateOutcome response outcome specification of
+   Left problem -> failure 400 (D.outcomeError problem)
+   Right _ -> pure reply
+  D.Handoff content -> do
+   require (toJSON (requestTarget request) == get group "lead") 403 "Only the Group Lead can hand off scheduled work"
+   mentioned <- mentions s group content
+   recipients <- validated (forwardingTargets origin group request mentioned)
+   require (length mentioned == 1 && length recipients == 1) 400 "A structured Group handoff must address one uncalled current member"
+   pure content
+  _ -> failure 400 "Group execution requires a handoff or Outcome"
+ let accepted=observed { requestFields=KM.insert "resultDecision" (D.decisionRaw response) (requestFields observed) }
+ storeGroup s (replace "requests" (toJSON accepted) group)
+ pure reply
 
 data GroupSettlement
  = KeepGroup Value
@@ -259,7 +325,7 @@ settlementPlan projected group initial = do
        base=replace "requests" (toJSON settled) changed
    pure $ if activeStatus status || requestSettled initial then KeepGroup changed
     else if boolean (get (Object (requestFields request)) "memo") then SettleMemo base request turn
-    else SettleMessage base request turn
+    else SettleMessage base current turn
 
 forwardingTargets :: ExecutionOrigin -> Value -> GroupRequest -> [Text] -> Validation [Text]
 forwardingTargets origin group request mentioned = do
@@ -305,15 +371,28 @@ reconcileGroups s = DB.values s DB.Groups >>= mapM_ reconcile
     event <- eventRecord (agentIdText (requestTarget request)) ("memo " <> at turn "status") (toJSON (requestId request))
     pure (append "events" event base)
    SettleMessage base request turn -> do
-    mentioned <- if toJSON (requestTarget request) == get group "lead" && not (boolean (get group "archived")) && not (T.null (at turn "output")) then mentions s group (at turn "output") `catch` (\(_::APIError) -> pure []) else pure []
+    structured <- validated (usesResultProtocol request)
+    response <- if structured && completedStatus (requestStatus request) then validated (requestDecision request) else pure Nothing
+    let content=if structured then case D.decisionBody <$> response of Just (D.Handoff instruction) -> instruction; _ -> "" else at turn "output"
+    mentioned <- if (not structured || completedStatus (requestStatus request)) && toJSON (requestTarget request) == get group "lead" && not (boolean (get group "archived")) && not (T.null content) then mentions s group content `catch` (\(_::APIError) -> pure []) else pure []
     case forwardingTargets origin group request mentioned of
      Left (APIError _ reason) -> rejectGroupOrigin base request reason
+     Right recipients | structured, Just (D.Handoff _) <- D.decisionBody <$> response, null recipients -> rejectGroupOrigin base request "Group handoff target is no longer available"
      Right recipients -> settleRecipients origin base request turn recipients
- settleRecipients origin base request turn recipients = do
+ settleRecipients origin original request turn proposed = do
+    lineage <- requireRequestLineage request
+    blocked <- if null proposed then pure False else Routine.stopDeletedForwarding s origin (requestTaskId <$> requestTask lineage)
+    base <- if blocked && originIsScheduled origin then do
+     link <- maybe (failure 500 "Scheduled Group request has no task revision") pure (requestTask lineage)
+     task <- readTask original (taskIdText (requestTaskId link))
+     time <- getCurrentTime
+     pure (replace "tasks" (toJSON (stopTask time "system" task)) original)
+     else pure original
     let routine=originIsScheduled origin
-    (finished,stale) <- if routine && not (null recipients) then pure (base,TaskForwarded) else settleTask base request turn
+        recipients=if blocked then [] else proposed
+    (finished,stale) <- if routine && not (null recipients) then pure (base,TaskForwarded)
+     else settleTask base request (if blocked then put "status" (str "cancelled") turn else turn)
     output <- if get turn "output" == Null then pure finished else do
-     lineage <- requireRequestLineage request
      initialMessage <- message (agentIdText (requestTarget request)) (at turn "output")
      let entry = merge initialMessage (obj [("turn",toJSON (requestId request)),("stale",Bool (stale == StaleResultRecorded))])
      foldM (\g target -> do
@@ -323,7 +402,10 @@ reconcileGroups s = DB.values s DB.Groups >>= mapM_ reconcile
         task <- readTask g (taskIdText (requestTaskId link))
         childLineage <- requireRequestLineage initialCall
         let revised=forwardTask (AgentId target) task
-            call=initialCall { requestOrigin=requestOrigin request, requestLineage=ValidLineage childLineage { requestTask=Just (taskLink revised) } }
+            GroupTask { specification=forwardedSpec }=revised
+            call=if KM.member "resultProtocol" (requestFields request)
+             then withResultProtocol forwardedSpec forwarded else forwarded
+            forwarded=initialCall { requestOrigin=requestOrigin request, requestLineage=ValidLineage childLineage { requestTask=Just (taskLink revised) } }
         pure (append "requests" (toJSON call) (replace "tasks" (toJSON revised) g))
        else pure (append "requests" (toJSON initialCall) g)) (append "messages" entry finished) recipients
     event <- eventRecord (agentIdText (requestTarget request)) (if stale == StaleResultRecorded then "result needs review" else "call " <> at turn "status") (toJSON (requestId request))
@@ -382,6 +464,7 @@ actionGroup s gid rid action = do
    Population.requireActive s owner
    status <- field 500 value "status"
    if action == "retry" then do
+    requireExecutionOrigin (requestOrigin typed) >>= Routine.ensureOriginAvailable s
     void (requestExecutionOrigin group typed)
     require (get request "target" `elem` items group "members") 409 "The recipient is no longer a Group member"
     lead <- field 500 group "lead"

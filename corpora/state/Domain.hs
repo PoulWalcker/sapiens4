@@ -19,6 +19,7 @@ module Domain
  , jsonText, parseJSONText, textFieldP, stringsP, nameP, onlyFields, Population, populationRoster
  , populationChief, populationMembers, GroupRoster, MembershipError(..), memberRoster, rosterLead
  , messageText, AgentProfile(..), rosterMembers, activeStatus, retryableStatus, completedStatus
+ , ResultReviewer(..), RejectionReason, mkRejectionReason, ResultRejection(..)
  ) where
 
 import Control.Monad
@@ -43,6 +44,40 @@ import Text.Read (readMaybe)
 import Data.Time (UTCTime, defaultTimeLocale, formatTime, parseTimeM)
 
 newtype AgentId = AgentId { agentIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
+
+data ResultReviewer = AdminReviewer | SapiReviewer AgentId deriving (Eq, Show)
+instance FromJSON ResultReviewer where
+ parseJSON value = case at value "kind" of
+  "admin" -> onlyFields ["kind"] value >> pure AdminReviewer
+  "sapi" -> onlyFields ["kind","id"] value >> SapiReviewer <$> personalAgentP (get value "id")
+  _ -> fail "Unknown result reviewer"
+instance ToJSON ResultReviewer where
+ toJSON reviewer = case reviewer of
+  AdminReviewer -> obj [("kind",str "admin")]
+  SapiReviewer identity -> obj [("kind",str "sapi"),("id",toJSON identity)]
+
+newtype RejectionReason = RejectionReason Text deriving (Eq, Show)
+mkRejectionReason :: Text -> Either Text RejectionReason
+mkRejectionReason raw
+ | T.null reason = Left "Result rejection requires a nonempty reason"
+ | T.length raw > 4000 = Left "Result rejection reason must be at most 4000 characters"
+ | otherwise = Right (RejectionReason reason)
+ where reason=T.strip raw
+instance FromJSON RejectionReason where
+ parseJSON = withText "Result rejection reason" (either (fail . T.unpack) pure . mkRejectionReason)
+instance ToJSON RejectionReason where toJSON (RejectionReason reason) = str reason
+
+data ResultRejection = ResultRejection
+ { rejectedAt :: UTCTime, rejectedBy :: ResultReviewer, rejectionReason :: RejectionReason
+ } deriving (Eq, Show)
+instance FromJSON ResultRejection where
+ parseJSON value = do
+  onlyFields ["rejectedAt","rejectedBy","reason"] value
+  rawTime <- parseJSON (get value "rejectedAt")
+  time <- maybe (fail "Invalid result rejection time") pure (parseTime rawTime)
+  ResultRejection time <$> parseJSON (get value "rejectedBy") <*> parseJSON (get value "reason")
+instance ToJSON ResultRejection where
+ toJSON rejection = obj [("rejectedAt",str (timestamp (rejectedAt rejection))),("rejectedBy",toJSON (rejectedBy rejection)),("reason",toJSON (rejectionReason rejection))]
 newtype MessageId = MessageId { messageIdText :: Text } deriving (Eq, Ord, Show)
 instance FromJSON MessageId where
  parseJSON = withText "Group message ID" $ \identity -> do

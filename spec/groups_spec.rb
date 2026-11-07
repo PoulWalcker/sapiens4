@@ -162,6 +162,12 @@ RSpec.describe 'Group collaboration contracts' do
     expect(group['messages'].count { |m| m['author'] == 'admin' && m['text'] == 'Try once' }).to eq(1)
     expect(group['requests'].reject { |r| r['memo'] }.size).to eq(1)
     expect(group['messages'].last).to include('author' => @lead, 'text' => 'Contract test reply')
+    references = group['requests'].find { |entry| entry['id'] == request['id'] }.fetch('providerTraces')
+    expect(references.map { |reference| reference.fetch('id') }.uniq.size).to eq(2)
+    traces = references.map do |reference|
+      JSON.parse(File.read(File.join(host.root, 'agentpy/corpora/archive', @lead, 'provider', "#{reference.fetch('id')}.json")))
+    end
+    expect(traces.map { |trace| trace.dig('status', 'kind') }).to eq(%w[Incomplete Complete])
   end
 
   it 'preserves the original author during lead transfer and routes future messages to the new lead' do
@@ -264,6 +270,7 @@ RSpec.describe 'Group collaboration contracts' do
       [@member, {op: 'group_create', name: 'Forbidden', lead: @lead, members: [@lead, @member]}],
       [@lead, {op: 'group_update', group: gid, revision: group['revision'], archived: true}],
       [@outsider, {op: 'group_task_create', group: gid, title: 'Intrusion'}],
+      [@member, {op: 'routine_create', group: gid, minutes: 60, prompt: 'Group comparison', missedPolicy: 'run_latest'}],
       [@outsider, {op: 'workspace_open', group: gid, url: 'https://example.com'}]
     ].each do |owner, data|
       expect(host.request('POST', "/api/agents/#{owner}/control", data).first).to eq(403)
@@ -271,6 +278,27 @@ RSpec.describe 'Group collaboration contracts' do
     created = host.control(@member, 'group_task_create', group: gid, title: 'Member initiative', assignee: @lead)
     expect(created['author']).to eq(@member)
     expect(host.request('POST', "/api/agents/#{chief}/control", {op: 'retire_agent', target: @lead}).first).to eq(409)
+    specification = {objective: 'Compare products', inputs: [], expectedOutputs: ['A comparison'],
+      completionCriteria: [{id: 'comparison', requirement: 'Provide the comparison', applicability: {kind: 'Required'}}]}
+    host.configure(rules: {"#{@lead}:group" => {actions: [
+      {control: {op: 'routine_create', minutes: 60, prompt: 'Group comparison', specification: specification, missedPolicy: 'run_latest'}},
+      {control: {op: 'routine_pause', id: 'routine_sch_00001'}},
+      {control: {op: 'routine_update', id: 'routine_sch_00001', minutes: 120, prompt: 'Updated Group comparison', specification: specification}},
+      {control: {op: 'routines'}, receipt: 'group-routines.json'}]}})
+    message('Configure the Group comparison')
+    host.idle
+    saved = JSON.parse(File.read(File.join(host.root, 'workspaces', @lead, 'group-routines.json'))).fetch('routines').first
+    expect(saved).to include('owner' => gid, 'paused' => true, 'minutes' => 120, 'prompt' => 'Updated Group comparison', 'specification' => JSON.parse(JSON.generate(specification)))
+    expect(host.control(@lead, 'routines').fetch('routines')).to be_empty
+    host.configure(rules: {"#{@lead}:group" => {block: true, gate: 'group-resume',
+      actions: [{control: {op: 'routine_resume', id: saved.fetch('id')}}]}})
+    message('Resume after inspection')
+    Contract.wait { host.calls.any? { |call| call['node'] == 'group' && call['prompt'].include?('Resume after inspection') } }
+    edit(archived: true)
+    host.release('group-resume')
+    host.idle
+    expect(host.state['routines'].find { |entry| entry['id'] == saved['id'] }).to include('paused' => true)
+    expect(group['requests'].last['error']).to include('Restore this Group')
   end
 
   it 'scopes shared attachments and browser tabs to their group' do

@@ -3,9 +3,12 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Delegation
  ( WorkCall(..), Workload, workloadId, workCalls, workOrigin, CallState(..), CallProgress(..)
- , callState, callNode, begin, getWork, findWork, readWorks, saveWork, withCall, workItems
+ , callState, callNode, callOutput, begin, getWork, findWork, readWorks, saveWork, withCall, workItems
  , exceptionText, reconcileWorks, pendingWorks, runDecision, applyDecision, clarify
- , templates, editTemplate, workTasks, taskList, workSummaries
+ , TaskSpec, templates, editTemplate, workTasks, taskList, workSummaries
+ , Outcome(..), OutcomeStatus(..), Decision(..), DecisionResponse(..), parseGroupDecision
+ , StructurallyValidOutcome, validatedOutcome, validateOutcome, outcomeError
+ , resultHistory, rejectResult
  ) where
 
 import Control.Concurrent
@@ -255,11 +258,17 @@ data Decision
  deriving (Eq, Show)
 data DecisionResponse = DecisionResponse { decisionBody :: Decision, decisionReason :: Text, decisionEvidence :: [Text], decisionRaw :: Value } deriving (Eq, Show)
 parseDecision :: Node -> Value -> Parser DecisionResponse
-parseDecision node value = do
+parseDecision node = parseDecisionEvents (eventsFor node) ("Unknown decision event for " <> wireName node)
+
+parseGroupDecision :: Value -> Parser DecisionResponse
+parseGroupDecision = parseDecisionEvents ["HandoffPrepared","Outcome"] "Group execution requires a handoff or Outcome"
+
+parseDecisionEvents :: [Text] -> Text -> Value -> Parser DecisionResponse
+parseDecisionEvents allowed unknown value = do
  let event=at value "event"
      variant fields parser = onlyFields (fields ++ ["event","reason","evidence"]) value >> parser
      textAt key limit = textFieldP key limit value
- unless (event `elem` eventsFor node) (fail ("Unknown decision event for " ++ T.unpack (wireName node)))
+ unless (event `elem` allowed) (fail (T.unpack unknown))
  reason <- textAt "reason" 4000 >> parseJSON (get value "reason")
  evidence <- stringsP "evidence" False (get value "evidence")
  body <- case event of
@@ -344,6 +353,8 @@ outcomeError problem = case problem of
  where completionEvidenceMessage = "Completed outcome requires evidence for all applicable completion criteria"
 -- Structural coverage and evidence presence only; the host cannot prove an LLM's claims.
 newtype StructurallyValidOutcome = StructurallyValidOutcome Outcome deriving (Eq, Show)
+validatedOutcome :: StructurallyValidOutcome -> Outcome
+validatedOutcome (StructurallyValidOutcome outcome) = outcome
 validateOutcome :: DecisionResponse -> Outcome -> TaskSpec -> Either OutcomeError StructurallyValidOutcome
 validateOutcome response outcome spec
  | Just identities <- NE.nonEmpty (filter (`notElem` acceptedIds) reportedIds) = Left (UnknownCriterion identities)
@@ -361,18 +372,21 @@ validateOutcome response outcome spec
   NotApplicable identity _ -> case find ((==identity) . criterionId) criteria of
    Just (Conditional _ _ _) -> False
    _ -> True
-begin :: Service -> AgentId -> Turn -> IO ()
-begin s a turn = do
+begin :: Service -> AgentId -> Turn -> Maybe TaskSpec -> IO ()
+begin s a turn specification = do
  found <- findWork s (turnId turn)
  origin <- requireExecutionOrigin (turnOrigin turn)
+ require (isNothing specification || originIsScheduled origin) 500 "Only Routine execution can supply an admitted Task specification"
  let routine=originIsScheduled origin
-     first=newCall (turnId turn) a Nothing (RunningAt (if routine then ReadyToWork else Assessing)) (turnInput turn)
+     node=if routine then (if isJust specification then Execution else ReadyToWork) else Assessing
+     first=newCall (turnId turn) a Nothing (RunningAt node) (turnInput turn)
      task=TaskEncoding (Just (obj [("taskId",str ("task_"<>runIdText (turnId turn))),("taskType",str (if routine then "automated" else "work"))])) (Just Null)
      initial=Workload (runIdText (turnId turn)) routine (first :| []) Unprepared task
       (ValidOrigin (newOrigin (originPurpose origin) (originGroup origin)
        (originMetadata origin <> KM.fromList [("agent",toJSON a),("call",toJSON (turnId turn))])))
       (KM.fromList [("originalIntent",str (turnInput turn)),("decisions",arr []),("outcome",Null)])
-     (w,c)=fromMaybe (initial,first) found
+     seeded=maybe initial (\spec -> acceptTaskSpec "automated" spec initial) specification
+     (w,c)=fromMaybe (seeded,first) found
      running=if isNothing (callOutput c) then c { callProgress=RunningAt (callNode c), callFields=KM.delete "error" (callFields c) } else c
      updated=setCallFields [("attempt",num (fromMaybe 1 (turnAttempt turn)))] running
  acceptedOrigin <- requireExecutionOrigin (workOrigin w)
@@ -399,11 +413,11 @@ recordDecision :: Service -> Text -> Value -> IO ()
 recordDecision s a record = do
  writeJSON (archivePath s a ("decisions/"<>at record "decisionId")) record
  (w,_) <- field 500 record "callId" >>= getWork s
- let update d = if get d "decisionId" == get record "decisionId" then merge d (selectPresent ["accepted","response","error","transition"] record) else d
+ let update d = if get d "decisionId" == get record "decisionId" then merge d (selectPresent ["accepted","response","error","transition","providerTrace"] record) else d
  saveWork s (setWorkField "decisions" (arr (map update (workItems w "decisions"))) w)
 accept :: Service -> Text -> Value -> Text -> Text -> IO ()
 accept s a record before after = recordDecision s a (merge record (obj [("accepted",Bool True),("transition",obj [("before",str before),("event",get record "hostEvent" `fallback` get (get record "response") "event"),("after",str (transition before (at (get record "response") "event") after)),("nextNode",str after)])]))
- where transition b e def = fromMaybe def $ lookup (b,e) [(("Assessing","FitsSpecialization"),"ReadyToWork"),(("Assessing","OutsideSpecialization"),"ChiefTriage"),(("ChiefTriage","SpecialistSelected"),"Assessing"),(("ChiefTriage","NewSpecialistNeeded"),"CreatingSapi"),(("ChiefTriage","RequestUnclear"),"WaitingForAdmin"),(("ChiefTriage","FitsSpecialization"),"ReadyToWork")]
+ where transition b e def = fromMaybe def $ lookup (b,e) [(("Assessing","OutsideSpecialization"),"ChiefTriage"),(("ChiefTriage","SpecialistSelected"),"Assessing"),(("ChiefTriage","NewSpecialistNeeded"),"CreatingSapi"),(("ChiefTriage","RequestUnclear"),"WaitingForAdmin")]
 decide :: Service -> Run -> Turn -> AgentState -> Node -> IORef [Value] -> IO (DecisionResponse,Value)
 decide s run turn state node logs = do
  (rendered,record) <- locked s $ do
@@ -435,20 +449,28 @@ decide s run turn state node logs = do
  modifyIORef' logs (++[obj [("role",toJSON node),("prompt",str rendered),("session",Null)]])
  let updateLog extra = modifyIORef' logs (\entries -> [if index==logIndex then merge entry extra else entry | (index,entry)<-zip [0::Int ..] entries])
  rawResponse <- newIORef Nothing
+ observedRecord <- newIORef record
+ let retain reference = do
+      modifyIORef' observedRecord (put "providerTrace" (toJSON reference))
+      updateLog (obj [("providerTrace",toJSON reference)])
+      saved <- readIORef observedRecord
+      locked s (recordDecision s (agentIdText (runOwner run)) saved)
  result <- try $ do
-  raw <- invoke s run rendered
+  raw <- invokeObserved s run rendered retain
   writeIORef rawResponse (Just raw)
   activity <- readIORef (runActivity run)
   updateLog (obj ([("session",get activity "session"),("answer",str raw)]++[("warning",get activity "warning") | has activity "warning"]))
   require (T.length raw <= 100000) 400 "Decision response exceeds 100000 characters"
   response <- parseValue 400 (parseDecision node) (parseJSONText raw)
-  pure (response,merge record (obj [("rawResponse",str raw),("response",decisionRaw response)]))
+  saved <- readIORef observedRecord
+  pure (response,merge saved (obj [("rawResponse",str raw),("response",decisionRaw response)]))
  case result of
   Left (e::SomeException) -> do
    activity <- readIORef (runActivity run)
    updateLog (obj [("session",get activity "session")])
    raw <- readIORef rawResponse
-   let failed=put "error" (str (exceptionText e)) (maybe record (\value -> put "rawResponse" (str value) record) raw)
+   saved <- readIORef observedRecord
+   let failed=put "error" (str (exceptionText e)) (maybe saved (\value -> put "rawResponse" (str value) saved) raw)
    locked s (recordDecision s (agentIdText (runOwner run)) failed)
    throwIO e
   Right value@(_,record') -> locked s (recordDecision s (agentIdText (runOwner run)) record') >> pure value
@@ -502,7 +524,7 @@ applyDecision s owner current decision = do
    maybe (failure 409 "Delegation acceptance was not saved") pure (find ((==Just (RunId identity)) . callParent) (workCalls updated))
  pure (obj [("saved",Bool True),("callId",toJSON (callIdentity existing)),("target",toJSON (callRecipient existing))])
 data DecisionError
- = TrackedTaskNeedsExecution | OnlyChiefCreates | CriteriaRemoved
+ = TrackedTaskNeedsExecution | OnlyChiefCreates | CriteriaRemoved | RoutineTaskChanged
  | OwnerOnlyPolicySetup
  | InvalidOutcome OutcomeError | UnsupportedSavedTaskSpec | InvalidTaskContract Text | InvalidWorkOrigin Text
  deriving (Eq, Show)
@@ -519,7 +541,11 @@ advanceDecision chief response work call = case decisionBody response of
  ReplyNow reply
   | workTracksTask work -> Left TrackedTaskNeedsExecution
   | otherwise -> Right (finish work (FinishedCall (Answered reply)))
- ExecuteTask -> Right (finish (work { workTracksTask=True }) (RunningAt ReadyToWork))
+ ExecuteTask -> do
+  origin <- checkedWorkOrigin work
+  accepted <- acceptedTaskSpec work
+  let node=if originIsScheduled origin && isJust accepted then Execution else ReadyToWork
+  Right (finish (work { workTracksTask=True }) (RunningAt node))
  OutsideSpecialization -> do
   when (callRecipient call /= chief) (policyDelegation work)
   Right $ SaveDecision work $
@@ -533,11 +559,13 @@ advanceDecision chief response work call = case decisionBody response of
   | otherwise -> policyDelegation work >> Right (EnsureSpecialist name role)
  PrepareTask taskType spec -> do
    accepted <- acceptedTaskSpec work
+   origin <- checkedWorkOrigin work
+   let fixed=originIsScheduled origin && isJust accepted
+   when (fixed && accepted /= Just spec) (Left RoutineTaskChanged)
    let inherited=maybe [] (NE.toList . specCriteria) accepted
    unless (all (`elem` NE.toList (specCriteria spec)) inherited) (Left CriteriaRemoved)
-   origin <- checkedWorkOrigin work
    let savedType=if originIsScheduled origin then "automated" else taskType
-   Right (finish (acceptTaskSpec savedType spec work) (RunningAt Execution))
+   Right (finish (if fixed then work else acceptTaskSpec savedType spec work) (RunningAt Execution))
  Handoff request -> policyDelegation work >> Right (DelegateRequest request)
  ReportOutcome reply outcome -> do
   spec <- acceptedTaskSpec work >>= maybe (Left (InvalidTaskContract "Task has no accepted specification")) Right
@@ -570,6 +598,7 @@ decisionFailure problem = case problem of
  TrackedTaskNeedsExecution -> failure 409 "An accepted Task must execute and report its completion criteria"
  OnlyChiefCreates -> failure 403 "Only Chief can create a Sapi"
  CriteriaRemoved -> failure 400 "A handoff cannot remove accepted completion criteria"
+ RoutineTaskChanged -> failure 400 "A Routine Run cannot change its accepted specification; update the Routine and start a new Run"
  OwnerOnlyPolicySetup -> failure 409 "Personal routine policy setup must stay with its owner. Save a policy here, or retry this setup with its owner."
  InvalidOutcome reason -> failure 400 (outcomeError reason)
  UnsupportedSavedTaskSpec -> failure 409 "Saved Task specification must use structured completion criteria; create a new Task."
@@ -578,7 +607,7 @@ decisionFailure problem = case problem of
 
 runDecision :: (AgentId -> IO ()) -> (Workload -> IO ()) -> Service -> Run -> Turn -> AgentState -> IO (Text,[Value])
 runDecision prepareSpecialist verifyCompletion s run turn state = do
- locked s (begin s (runOwner run) turn)
+ locked s (begin s (runOwner run) turn Nothing)
  logs <- newIORef []
  let loop n = do
       require (n < 12) 409 "Decision transition limit reached; Admin must resolve the request"
@@ -599,8 +628,11 @@ runDecision prepareSpecialist verifyCompletion s run turn state = do
              finish work updated = do
               let following=setCallFields [("observation",decisionRaw response)] updated
                   next=callNode following
+                  saved=case decisionBody response of
+                   ReportOutcome _ _ -> setWorkField "outcome" (put "decisionId" (get record "decisionId") (workField work "outcome")) work
+                   _ -> work
               when (callState following `elem` [CallCompleted,CallUnresolved,CallWaiting]) (verifyCompletion work)
-              saveWork s (withCall work following)
+              saveWork s (withCall saved following)
               accept s owner record (wireName node) (wireName next)
               pure (callOutput following)
          step <- either decisionFailure pure (advanceDecision (AgentId chief) response current call)
@@ -688,9 +720,48 @@ workTasks s a full = do
  works <- readWorks s
  rows <- forM [w | w <- works,workTracksTask w,any ((==AgentId a) . callRecipient) (workCalls w)] $ \w -> do
   let lastCall=NE.last (workCalls w)
-  decisions <- forM (workItems w "decisions") $ \d -> if full then merge d <$> readJSON (archivePath s (at d "agent") ("decisions/"<>at d "decisionId")) empty else pure d
-  pure $ mergeFields [("execution",obj [("state",toJSON (callState lastCall)),("owner",toJSON (callRecipient lastCall)),("currentCall",toJSON (callIdentity lastCall)),("attempt",callField lastCall "attempt")]),("decisions",arr decisions)] (select ["task","workloadId","originalIntent","calls","outcome"] (toJSON w))
+  results <- validated (resultHistory w)
+  decisions <- forM (workItems w "decisions") $ \d -> if full then do
+   record <- merge d <$> readJSON (archivePath s (at d "agent") ("decisions/"<>at d "decisionId")) empty
+   if not (has record "providerTrace") then pure record else do
+    reference <- decodeValue 500 (get record "providerTrace")
+    owner <- parseValue 500 personalAgentP (get record "agent")
+    call <- field 500 record "callId"
+    require (traceBelongsTo owner call reference) 500 "Provider trace does not belong to this decision"
+    evidence <- readProviderTrace s reference
+    pure (put "providerEvidence" evidence record)
+   else pure d
+  pure $ mergeFields [("execution",obj [("state",toJSON (callState lastCall)),("owner",toJSON (callRecipient lastCall)),("currentCall",toJSON (callIdentity lastCall)),("attempt",callField lastCall "attempt")]),("decisions",arr decisions),("results",arr results)] (select ["task","workloadId","originalIntent","calls","outcome"] (toJSON w))
  pure (obj [("tasks",arr rows)])
+
+resultHistory :: Workload -> Validation [Value]
+resultHistory work = fmap catMaybes $ forM (workItems work "decisions") $ \record -> do
+ let current=workField work "outcome"
+     identity=get record "decisionId"
+     savedHere=get current "decisionId" == identity
+     response=get record "response"
+ if not (boolean (get record "accepted") || savedHere) || (at response "event" /= "Outcome" && not savedHere)
+  then Right Nothing else do
+   outcome <- validateValue 500 parseJSON (if savedHere then select ["status","criterionResults","artifacts"] current else get response "outcome") :: Validation Outcome
+   rejection <- traverse (validateValue 500 parseJSON) (if has record "rejection" then Just (get record "rejection") else Nothing) :: Validation (Maybe ResultRejection)
+   let reply=if savedHere then get current "reply" else get response "reply"
+   Right (Just (obj [("result",obj [("decision",identity)]),("call",get record "callId"),("reply",reply),("outcome",toJSON outcome),("rejection",toJSON rejection)]))
+
+rejectResult :: Service -> RunId -> Text -> ResultRejection -> IO Value
+rejectResult s run identity proposed = do
+ (work,_) <- getWork s run
+ results <- validated (resultHistory work)
+ void (maybe (failure 404 "Unknown saved Outcome of this Run") pure (find ((==str identity) . (`get` "decision") . (`get` "result")) results))
+ record <- maybe (failure 404 "Unknown saved Outcome decision") pure (find ((==str identity) . (`get` "decisionId")) (workItems work "decisions"))
+ previous <- if has record "rejection" then Just <$> decodeValue 500 (get record "rejection") else pure Nothing
+ case previous of
+  Just saved -> do
+   require (rejectedBy saved == rejectedBy proposed && rejectionReason saved == rejectionReason proposed) 409 "This result already has a different rejection"
+   pure (toJSON saved)
+  Nothing -> do
+   let update item=if get item "decisionId" == str identity then put "rejection" (toJSON proposed) item else item
+   saveWork s (setWorkField "decisions" (arr (map update (workItems work "decisions"))) work)
+   pure (toJSON proposed)
 taskList :: Service -> Text -> IO Value
 taskList s a = do
  tasks <- items <$> workTasks s a False <*> pure "tasks"

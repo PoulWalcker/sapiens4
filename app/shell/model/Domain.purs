@@ -269,7 +269,7 @@ routinePolicyLabel = case _ of
   Right SkipMissedDeadlines -> "Missed runs: skip"
 
 type Routine =
-  { id :: String, owner :: String, title :: String, prompt :: String, minutes :: Number, nextDue :: String, runCount :: Number, paused :: Boolean, deferredCount :: Number, oldestDeferredDue :: String, policy :: Either String RoutinePolicy }
+  { id :: String, owner :: String, title :: String, prompt :: String, minutes :: Number, nextDue :: String, runCount :: Number, paused :: Boolean, activeRun :: Maybe String, deferredCount :: Number, oldestDeferredDue :: String, policy :: Either String RoutinePolicy }
 
 routine :: Json -> Routine
 routine value =
@@ -281,6 +281,7 @@ routine value =
   , nextDue: D.s "nextDue" value
   , runCount: D.n "runCount" value
   , paused: D.b "paused" value
+  , activeRun: toString $ D.get "activeRun" value
   , deferredCount: D.n "deferredCount" value
   , oldestDeferredDue: D.s "oldestDeferredDue" value
   , policy: routinePolicy $ D.get "policySelection" value
@@ -608,7 +609,7 @@ checkOrchestration :: Check
 checkOrchestration = record [optional "manager" stringValue, optional "notes" checkNotes]
 
 checkRoutine :: Check
-checkRoutine = record [optional "id" stringValue, optional "owner" stringValue, optional "title" stringValue, optional "prompt" stringValue, optional "minutes" numberValue, optional "nextDue" stringValue, optional "runCount" numberValue, optional "paused" booleanValue, optional "deferredCount" numberValue, optional "oldestDeferredDue" stringValue, field "policySelection" (void <<< routinePolicy)]
+checkRoutine = record [optional "id" stringValue, optional "owner" stringValue, optional "title" stringValue, optional "prompt" stringValue, optional "minutes" numberValue, optional "nextDue" stringValue, optional "runCount" numberValue, optional "paused" booleanValue, optional "activeRun" stringValue, optional "deferredCount" numberValue, optional "oldestDeferredDue" stringValue, field "policySelection" (void <<< routinePolicy)]
 
 checkEvent :: Check
 checkEvent = record [optional "timestamp" stringValue, optional "actor" stringValue, optional "entity" stringValue, optional "event" stringValue, optional "agency" stringValue]

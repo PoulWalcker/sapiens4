@@ -80,7 +80,10 @@ submitTurn s a d = do
   Nothing -> do
    suffix <- attachmentPrompt s attachments
    let message=input<>suffix
-   i <- if has d "workload" then D.clarify s a (at d "workload") message else do
+   i <- if has d "workload" then do
+    R.ensureExecutionAllowed s (RunId (at d "workload"))
+    D.clarify s a (at d "workload") message
+    else do
     i <- newId
     time <- now
     agentState s a >>= saveState s a . enqueueTurn (RunId i) flow message time
@@ -289,17 +292,22 @@ rejectInvalidOutputs s owner contexts = do
    saveState s owner (mapStateFields (put "output_buffer" (arr (filter (/=item) (items (stateJSON changed) "output_buffer")))) changed)
    DB.project s owner
 
+readyOnPulse :: Pulse -> ExecutionOrigin -> Bool
+readyOnPulse tick origin = case originPurpose origin of
+ ScheduledExecution scheduled -> isNothing (scheduledDeadline scheduled) || pulseFrequency tick==Bph60
+ OrdinaryWork -> pulseFrequency tick/=Bph60
+ RoutinePolicySetup _ -> pulseFrequency tick/=Bph60
+
 publish :: Service -> Text -> G.GroupRequestIndex -> Pulse -> IO ()
 publish s a contexts tick = do
  rejectInvalidOutputs s a contexts
  forM_ [1,2] $ \slot -> do
   state <- agentState s a
   let document=stateJSON state
-      scheduled=pulseFrequency tick==Bph60
   candidates <- forM (items document "output_buffer") $ \item -> do
    origin <- either (failure 500) pure (checkedBufferedOrigin contexts state item)
    pure (item,origin)
-  case find ((==scheduled) . originIsScheduled . snd) candidates of
+  case find (readyOnPulse tick . snd) candidates of
    Nothing -> pure ()
    Just (item,parsed) -> do
     time <- now
@@ -319,9 +327,15 @@ admit prepareSpecialist s a contexts tick = do
  runs <- readMVar (serviceRuns s)
  state <- agentState s a
  let reject turn = case (turnStatus turn,G.checkedTurnContext contexts turn) of
-      (Queued,Left reason) -> (withTurnFields (put "error" (str reason)) turn) { turnStatus=Failed }
-      _ -> turn
-     checked=mapTurns reject state
+      (Queued,Left reason) -> pure ((withTurnFields (put "error" (str reason)) turn) { turnStatus=Failed })
+      (Queued,Right origin) -> do
+       allowed <- try (R.ensureOriginAvailable s origin)
+       pure $ case allowed of
+        Left (APIError _ reason) -> (withTurnFields (put "error" (str reason)) turn) { turnStatus=Cancelled }
+        Right () -> turn
+      _ -> pure turn
+ turns <- traverse reject (agentTurns state)
+ let checked=state { agentTurns=turns }
  when (checked /= state) $ do
   saveState s a checked
   DB.project s a
@@ -337,31 +351,43 @@ admission :: AgentId -> [(AgentId,Int)] -> [(Turn,ExecutionOrigin)] -> Pulse -> 
 admission owner runs candidates tick
  | owner `notElem` owners && length owners>=4 = Nothing
  | first:_ <- legacy, null mine, not scheduled = Just (Admission (first :| []) 0 False)
- | slot:_ <- available, Just batch <- NE.nonEmpty queued, all (/=0) mine = Just (Admission (if scheduled then NE.head batch :| [] else batch) slot True)
+ | slot:_ <- available, (first,origin):rest <- queued, all (/=0) mine =
+    let batch=if scheduled || originIsScheduled origin then first :| []
+         else first :| [turn | (turn,following) <- rest, not (originIsScheduled following)]
+    in Just (Admission batch slot True)
  | otherwise = Nothing
  where
  owners=nub (map fst runs)
  mine=[slot | (agent,slot)<-runs,agent==owner]
  available=[n | n<-[1,2],n `notElem` mine]
  scheduled=pulseFrequency tick==Bph60
- queued=[t | (t,origin)<-candidates,boolean (turnField t "batchable"),originIsScheduled origin==scheduled]
+ queued=[(turn,origin) | (turn,origin)<-candidates,boolean (turnField turn "batchable"),readyOnPulse tick origin]
  legacy=[t | (t,_)<-candidates,not (boolean (turnField t "batchable"))]
 onPulse :: (AgentId -> IO ()) -> Service -> Pulse -> IO ()
 onPulse prepareSpecialist s tick = do
- R.dispatch s tick
  when (pulseFrequency tick==Bph60 || (pulseFrequency tick==Bpm60 && even (pulseNumber tick))) $ do
+  when (pulseFrequency tick==Bph60) $ R.restoreOccurrences s
   D.pendingWorks s
   G.reconcileGroups s
   G.dispatchGroups s
   contexts <- G.loadGroupRequestIndex s
   rows <- DB.agents s
+  -- Settle ready output before deciding whether the next Due is blocked.
+  forM_ rows $ \row -> do
+   let a=at row "id"
+   inactive <- retired s a
+   unless inactive $ publish s a contexts tick
+  D.reconcileWorks s
+  G.reconcileGroups s
+  R.dispatch s tick
+  G.dispatchGroups s
+  readyContexts <- G.loadGroupRequestIndex s
   forM_ rows $ \row -> do
    let a=at row "id"
    inactive <- retired s a
    unless inactive $ do
-    publish s a contexts tick
-    admit prepareSpecialist s a contexts tick
-    when (pulseFrequency tick==Bph60) $ admit prepareSpecialist s a contexts tick
+    admit prepareSpecialist s a readyContexts tick
+    when (pulseFrequency tick==Bph60) $ admit prepareSpecialist s a readyContexts tick
 runPulse :: (AgentId -> IO ()) -> Service -> Pulse -> IO ()
 runPulse prepareSpecialist s tick = try (onPulse prepareSpecialist s tick) >>= either report pure
  where report exception
