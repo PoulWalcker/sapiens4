@@ -66,10 +66,10 @@ submitGroup s gid input actor = do
  require (not (T.null content) || not (null attachments)) 400 "Write a message or attach a file"
  routine <- if actor == "admin" then Routine.command s gid content (not (null attachments)) else pure Nothing
  case routine of
-  Just r -> do
+  Just (change,saved) -> do
    latest <- getGroup s gid True
-   entry <- message actor content; acknowledgment <- message (at latest "lead") (Routine.receipt r content)
-   void (saveGroup s (append "messages" acknowledgment (append "messages" entry latest)) actor "routine saved" (get r "id"))
+   entry <- message actor content; acknowledgment <- message (at latest "lead") (Routine.receipt change saved)
+   void (saveGroup s (append "messages" acknowledgment (append "messages" entry latest)) actor "routine saved" (get (toJSON saved) "id"))
    pure entry
   Nothing -> do
    targets <- if has input "target" then pure [at input "target"] else mentions s group content

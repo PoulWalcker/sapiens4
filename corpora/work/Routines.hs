@@ -503,32 +503,53 @@ setPaused s rawOwner identity paused = do
    result <- DB.saveRoutineOn db (toJSON updated)
    DB.recordOn s db [routineOwnerText owner] (routineIdText identity) (if paused then "routine.paused" else "routine.resumed") result "admin" Nothing
    pure result
-command :: Service -> Text -> Text -> Bool -> IO (Maybe Value)
+command :: Service -> Text -> Text -> Bool -> IO (Maybe (C.Command,Routine))
 command s owner input attached = case C.interpret attached (T.unpack input) of
  Left error -> failure 400 (T.pack error)
  Right Nothing -> pure Nothing
- Right (Just c) -> Just <$> case c of
-  C.Create interval body -> save s owner (toJSON interval) (str (T.pack body)) Nothing Nothing (AddRoutine Nothing)
-  C.Edit i old interval body -> do
-   identity <- decodeValue 400 (str (T.pack i))
-   save s owner (toJSON interval) (str (T.pack body)) Nothing Nothing (EditRoutine identity (Just (fromIntegral old)))
-  C.SetPaused i paused -> do
-   identity <- decodeValue 400 (str (T.pack i))
-   setPaused s owner identity paused
-receipt :: Value -> Text -> Text
-receipt r input = action <> " @"<>at r "id"<>" ( "<>at r "title"<>" )\nStatus: "<>status<>" · "<>jsonText (get r "runCount")<>"/1000 runs\nFrequency: every "<>jsonText (get r "minutes")<>" minutes\nExecute: "<>at r "prompt"
- where action=fromMaybe "Updated" (listToMaybe (T.words input) >>= (`lookup` [("Pause","Paused"),("Resume","Resumed"),("Add","Created")]))
-       status=if boolean (get r "paused") then "Paused" else "Planned"
-acknowledge :: Service -> Text -> Text -> Value -> IO Value
-acknowledge s owner input r = do
+ Right (Just change) -> do
+  value <- case change of
+   C.Create interval body -> save s owner (toJSON interval) (str (T.pack body)) Nothing Nothing (AddRoutine Nothing)
+   C.Edit i old interval body -> do
+    identity <- decodeValue 400 (str (T.pack i))
+    save s owner (toJSON interval) (str (T.pack body)) Nothing Nothing (EditRoutine identity (Just (fromIntegral old)))
+   C.SetPaused i paused -> do
+    identity <- decodeValue 400 (str (T.pack i))
+    setPaused s owner identity paused
+  routine <- decodeValue 500 value
+  pure (Just (change,routine))
+
+receipt :: C.Command -> Routine -> Text
+receipt change routine = action <> interval <> availability
+ where
+ action=case change of
+  C.Create _ _ -> "Schedule created."
+  C.Edit _ _ _ _ -> "Schedule updated."
+  C.SetPaused _ _ -> if routinePaused routine then "Schedule paused." else "Schedule resumed."
+ minutes=minuteCount (routineMinutes routine)
+ interval=" It is set to run every " <> T.pack (show minutes) <> (if minutes == 1 then " minute." else " minutes.")
+ availability
+  | routinePaused routine = case change of
+     C.SetPaused _ _ -> ""
+     C.Create _ _ -> " It is paused."
+     C.Edit _ _ _ _ -> " It is paused."
+  | routinePolicy routine == AwaitingSelection = " Automatic runs are waiting for setup to finish."
+  | otherwise = case change of
+     C.SetPaused _ _ -> ""
+     C.Create _ _ -> " It is active."
+     C.Edit _ _ _ _ -> " It is active."
+
+acknowledge :: Service -> Text -> Text -> C.Command -> Routine -> IO Value
+acknowledge s owner input change routine = do
  i <- newId
  t <- now
- let output=receipt r input
+ let output=receipt change routine
      turn=obj [("id",str i),("flow",str "chat"),("input",str input),("status",str "done"),("created",str t),("output_at",str t)]
      messages=[obj [("role",str role),("content",str content),("turn",str i),("time",str t)] | (role,content)<-[("user",input),("agent",output)]]
  modifyState s owner $ \state -> merge state (obj [("turns",arr (items state "turns"++[toJSON turn])),("chat",arr (items state "chat"++messages))])
  DB.project s owner
  pure (obj [("id",str i),("agent",str owner),("status",str "done"),("flow",str "chat")])
+
 advanceDeadline :: Routine -> Routine
 advanceDeadline routine = routine
  { routineDeadline=newDeadline (addUTCTime (intervalSeconds (routineMinutes routine)) (routineDue routine)) }

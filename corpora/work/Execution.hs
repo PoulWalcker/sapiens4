@@ -76,7 +76,7 @@ submitTurn s a d = do
  requireActive s a
  routine <- R.command s a input (not (null attachments))
  case routine of
-  Just r -> R.acknowledge s a input r
+  Just (change,routine) -> R.acknowledge s a input change routine
   Nothing -> do
    suffix <- attachmentPrompt s attachments
    let message=input<>suffix
