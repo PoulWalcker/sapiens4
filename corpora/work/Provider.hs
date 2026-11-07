@@ -515,7 +515,7 @@ sensitiveKey key = any (`T.isInfixOf` normalized) ["password","passwd","secret",
  where normalized=T.filter isAlphaNum (T.toCaseFold key)
 sensitiveText :: [Text] -> Text -> Bool
 sensitiveText secrets value = any (`T.isInfixOf` value) secrets || (T.unpack (T.toCaseFold value) =~ pattern_ :: Bool)
- where pattern_ = "(password|passwd|secret|token|api[_-]?key|authorization|cookie|credential|private[_-]?key|access[_-]?key|client[_-]?secret)[\"']?[[:space:]]*[:=]|(bearer|basic)[[:space:]]+[a-z0-9+/=_-]+|sk-[a-z0-9_-]{8,}|ghp_[a-z0-9]+|github_pat_[a-z0-9_]+|akia[a-z0-9]{16}|eyj[a-z0-9_-]+\\.[a-z0-9_-]+\\.[a-z0-9_-]+|-----begin .*private key|--(password|passwd|token|secret|api[_-]?key|access[_-]?key|client[_-]?secret)[[:space:]]+|https?://[^[:space:]/]+:[^[:space:]/]*@|https?://[^[:space:]]*[?&][^=[:space:]]*%[a-f0-9]{2}[^=[:space:]]*=" :: String
+ where pattern_ = "(password|passwd|secret|token|api[_-]?key|authorization|cookie|credential|private[_-]?key|access[_-]?key|client[_-]?secret)[\"']?[[:space:]]*[:=]|(bearer|basic)[[:space:]]+[a-z0-9+/=_-]+|sk-[a-z0-9_-]{8,}|ghp_[a-z0-9]+|github_pat_[a-z0-9_]+|akia[a-z0-9]{16}|eyj[a-z0-9_-]+\\.[a-z0-9_-]+\\.[a-z0-9_-]+|-----begin .*private key|--(password|passwd|token|secret|api[_-]?key|access[_-]?key|client[_-]?secret)[[:space:]]+|[a-z][a-z0-9+.-]*://[^[:space:]/:@]*:[^[:space:]/]*@|https?://[^[:space:]]*[?&][^=[:space:]]*%[a-f0-9]{2}[^=[:space:]]*=" :: String
 
 data Sanitized = Sanitized { cleanValue :: Value, cleanOmitted :: Int, cleanRedacted :: Int, cleanTruncated :: Int }
 mergeClean :: Value -> [Sanitized] -> Sanitized

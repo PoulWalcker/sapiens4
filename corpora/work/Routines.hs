@@ -20,6 +20,7 @@ import Data.List (find, nub, sortOn)
 import Data.Ord (Down(..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as M
+import qualified Data.Set as S
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -654,6 +655,7 @@ activePersonal s db routine dues = do
  let turns = [turn | turn <- agentTurns state, ValidOrigin origin <- [turnOrigin turn], originRoutine origin == Just (routineId routine)]
      admitted = [occurrenceId occurrence | Admitted occurrence _ <- dues]
      identities = nub (admitted ++ map turnId turns)
+     stopped = S.fromList [occurrenceId occurrence | Admitted occurrence _ <- dues, isJust (occurrenceStoppedAt occurrence)]
  workRows <- readRuns "SELECT id,value FROM workloads" ["id","value"] identities
  savedWorks <- traverse (DB.decodeStored . (`at` "value")) workRows :: IO [D.Workload]
  let calls=concatMap (map D.callIdentity . NE.toList . D.workCalls) savedWorks
@@ -662,7 +664,7 @@ activePersonal s db routine dues = do
  projected <- fmap M.fromList $ forM turnRows $ \row -> do
   status <- field 500 row "status"
   pure (at row "id",status)
- active <- filterM (activeIdentity turns works projected) identities
+ active <- filterM (activeIdentity turns works projected stopped) identities
  pure (case active of i:_ -> Just i; [] -> Nothing)
  where
  -- Bound placeholders for SQLite builds with lower variable limits.
@@ -673,7 +675,7 @@ activePersonal s db routine dues = do
   rows <- DB.queryRowsOn db (query<>" WHERE id IN ("<>placeholders<>")") columns
    [SQL.SQLText (runIdText identity) | identity<-batch]
   (rows++) <$> readRuns query columns remaining
- activeIdentity turns works projected identity = do
+ activeIdentity turns works projected stopped identity = do
   let inState = find ((==identity) . turnId) turns
       work=M.lookup (runIdText identity) works
       status=M.lookup (runIdText identity) projected
@@ -683,10 +685,9 @@ activePersonal s db routine dues = do
        Nothing -> False
       liveTurn = maybe False (activeStatus . turnStatus) inState || maybe False activeStatus status
        || maybe False (any (maybe False activeStatus . (\call -> M.lookup (runIdText (D.callIdentity call)) projected)) . NE.toList . D.workCalls) work
-      stopped = any (\stored -> case stored of Admitted occurrence _ -> occurrenceId occurrence == identity && isJust (occurrenceStoppedAt occurrence); _ -> False) dues
   runs <- readMVar (serviceRuns s)
   let liveProcess=maybe False (any ((`M.member` runs) . D.callIdentity) . NE.toList . D.workCalls) work
-  when (isNothing inState && isNothing status && isNothing work && not stopped) $
+  when (isNothing inState && isNothing status && isNothing work && identity `S.notMember` stopped) $
    failure 500 "Admitted routine Run has no persisted state"
   pure (liveCall || liveTurn || liveProcess)
 
@@ -732,7 +733,7 @@ ensureRetryAvailable s turn = do
     GroupTarget _ _ -> failure 409 "Start the current task revision from Work instead"
     PersonalTarget _ -> do
      active <- activeRun s db routine target stored
-     require (isNothing active) 409 "Another Run of this Routine is active; finish or stop it before retrying"
+     require (isNothing active) 409 "Another Run of this Routine is active or awaiting publication. Wait for its result to be published, or stop it if it is still running, before retrying"
 
 occurrenceTurn :: ScheduledOccurrence -> Turn
 occurrenceTurn occurrence = newTurn (occurrenceId occurrence) Chat
@@ -763,7 +764,7 @@ prepareOccurrence time current target due = do
 prepareManualOccurrence :: UTCTime -> Routine -> ScheduledTarget -> Text -> Maybe RunId -> Validation ScheduledOccurrence
 prepareManualOccurrence time routine target request active = do
  forM_ active $ \run -> check False 409
-  ("Another Run of this Routine is active: " <> runIdText run <> ". Finish or stop it before running it again.")
+  ("Another Run of this Routine is active or awaiting publication: " <> runIdText run <> ". Wait for its result to be published, or stop it if it is still running, before running it again.")
  let trigger=ManualTrigger request
      occurrence=ScheduledOccurrence (triggeredId routine trigger) routine target time trigger Nothing
  check (validTarget occurrence) 409 "Routine target changed before admission"
