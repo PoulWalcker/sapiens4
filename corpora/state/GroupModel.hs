@@ -3,7 +3,7 @@ module GroupModel where
 
 import Control.Monad
 import Data.Aeson hiding (pairs)
-import Data.Aeson.Types (parseEither)
+import Data.Aeson.Types (Parser, parseEither)
 import qualified Data.Aeson.KeyMap as KM
 import Data.List
 import Data.Maybe
@@ -16,6 +16,12 @@ import qualified Store as DB
 import qualified Population as Population
 import Memo
 
+revisionP :: Value -> Parser Int
+revisionP value = do
+ revision <- parseJSON value
+ unless (revision >= 0) (fail "Group revision cannot be negative")
+ pure revision
+
 data GroupRecord = GroupRecord
  { groupIdentity :: GroupId, groupRoster :: GroupRoster, groupRevision :: Int
  , groupArchived :: Bool, groupFields :: Object
@@ -25,7 +31,8 @@ instance FromJSON GroupRecord where
   lead <- o .: "lead"
   people <- o .: "members"
   roster <- either (fail . show) pure (memberRoster lead people)
-  GroupRecord <$> o .: "id" <*> pure roster <*> o .: "revision" <*> o .: "archived"
+  revision <- o .: "revision" >>= revisionP
+  GroupRecord <$> o .: "id" <*> pure roster <*> pure revision <*> o .: "archived"
     <*> pure (foldr KM.delete o ["id","lead","members","revision","archived"])
 instance ToJSON GroupRecord where
  toJSON group = mergeFields [("id",toJSON (groupIdentity group)),("lead",toJSON (rosterLead (groupRoster group))),
@@ -51,7 +58,7 @@ decodeLineage fields = case parseEither parse (Object fields) of
    (Just rawTask,Just rawRevision) -> do
     identity <- parseJSON rawTask
     unless (not (T.null (T.strip (taskIdText identity)))) (fail "Group task ID cannot be empty")
-    Just . TaskRevision identity <$> parseJSON rawRevision
+    Just . TaskRevision identity <$> revisionP rawRevision
    _ -> fail "Group task and revision must be present together"
   RequestLineage <$> value .: "message" <*> value .: "root" <*> pure task
 

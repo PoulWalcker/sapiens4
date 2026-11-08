@@ -7,6 +7,7 @@ import Control.Monad
 import Data.Aeson hiding (pairs)
 import qualified Data.Aeson.KeyMap as KM
 import Data.Maybe (fromMaybe, isNothing, isJust, maybeToList)
+import Data.List (find)
 import Data.Aeson.Types (parseEither, parseMaybe)
 import Data.Text (Text)
 import Data.Time (UTCTime, getCurrentTime)
@@ -14,16 +15,20 @@ import qualified Data.Text as T
 import Types
 import qualified Store as DB
 import GroupModel
+import qualified Delegation as D
 
 -- Parsing preserves the established wire format; decisions below use typed values.
 data GroupTask = GroupTask
  { identity :: TaskId, title :: Text, body :: Text, assignee :: AgentId
- , state :: TaskState, deleted :: Bool, revision :: Int, metadata :: Object
+ , state :: TaskState, deleted :: Bool, revision :: Int, specification :: Maybe D.TaskSpec, metadata :: Object
  } deriving (Eq, Show)
 instance FromJSON GroupTask where
- parseJSON = withObject "Group task" $ \o -> GroupTask <$> o .: "id" <*> o .: "title" <*> o .: "body" <*> o .: "assignee" <*> o .: "state" <*> o .: "deleted" <*> o .: "revision" <*> pure (foldr KM.delete o ["id","title","body","assignee","state","deleted","revision"])
+ parseJSON = withObject "Group task" $ \o -> do
+  specification <- if KM.member "specification" o then Just <$> o .: "specification" else pure Nothing
+  revision <- o .: "revision" >>= revisionP
+  GroupTask <$> o .: "id" <*> o .: "title" <*> o .: "body" <*> o .: "assignee" <*> o .: "state" <*> o .: "deleted" <*> pure revision <*> pure specification <*> pure (foldr KM.delete o ["id","title","body","assignee","state","deleted","revision","specification"])
 instance ToJSON GroupTask where
- toJSON task = mergeFields [("id",toJSON task.identity),("title",str task.title),("body",str task.body),("assignee",toJSON task.assignee),("state",toJSON task.state),("deleted",Bool task.deleted),("revision",num task.revision)] (Object task.metadata)
+ toJSON task = mergeFields ([("id",toJSON task.identity),("title",str task.title),("body",str task.body),("assignee",toJSON task.assignee),("state",toJSON task.state),("deleted",Bool task.deleted),("revision",num task.revision)] ++ [("specification",toJSON spec) | spec <- maybeToList task.specification]) (Object task.metadata)
 
 data TaskPatch = TaskPatch
  { title :: Maybe Text, body :: Maybe Text, assignee :: Maybe AgentId
@@ -33,7 +38,7 @@ instance FromJSON TaskPatch where
  parseJSON value = onlyFields ["title","body","assignee","state","deleted","revision"] value *>
   (TaskPatch <$> optional "title" (\raw -> textFieldP "title" 500 value *> parseJSON raw)
              <*> optional "body" body <*> optional "assignee" parseJSON
-             <*> optional "state" parseJSON <*> optional "deleted" parseJSON <*> optional "revision" parseJSON)
+             <*> optional "state" parseJSON <*> optional "deleted" parseJSON <*> optional "revision" revisionP)
   where
   optional key parser = if has value key then Just <$> parser (get value key) else pure Nothing
   body raw = do
@@ -45,7 +50,7 @@ data CreateTask = CreateTask { title :: Text, body :: Text, assignee :: AgentId 
 data TaskError = InvalidTask Text | MissingTask | TaskChanged | RestoreRequired | RestoreAssigneeRequired | StartConflict | StartAssigneeRequired | AlreadyPending deriving (Eq, Show)
 data TaskCompletion = TaskCompletion
  { run :: RunId, owner :: AgentId, revision :: Int, status :: TurnStatus
- , output :: Maybe Text, error :: Maybe Text
+ , output :: Maybe Text, error :: Maybe Text, outcome :: Maybe D.StructurallyValidOutcome, publication :: Maybe ResultPublication
  } deriving (Eq, Show)
 data Settlement = NoTask | TaskForwarded | StaleResultRecorded | TaskUpdated deriving (Eq, Show)
 
@@ -60,11 +65,11 @@ prepareTask lead patch = case patch.title of
  Nothing -> Left (InvalidTask "title must be nonempty text, at most 500 characters")
  Just title -> Right (CreateTask (T.strip title) (fromMaybe "" patch.body) (fromMaybe lead patch.assignee))
 newTask :: TaskId -> UTCTime -> Text -> CreateTask -> GroupTask
-newTask identity created actor draft = GroupTask identity draft.title draft.body draft.assignee Backlog False 1
+newTask identity created actor draft = GroupTask identity draft.title draft.body draft.assignee Backlog False 1 Nothing
  (KM.fromList [("created",str (timestamp created)),("author",str actor),("updated_by",str actor),("history",arr []),("results",arr [])])
-newScheduledTask :: TaskId -> UTCTime -> Text -> Text -> AgentId -> RoutineId -> GroupTask
-newScheduledTask identity created title body assignee routine = base
- { state=InProgress, metadata=KM.fromList [("taskType",str "automated"),("routine",toJSON routine)] <> base.metadata }
+newScheduledTask :: TaskId -> UTCTime -> Text -> Text -> AgentId -> RoutineId -> Maybe D.TaskSpec -> GroupTask
+newScheduledTask identity created title body assignee routine specification = base
+ { state=InProgress, specification=specification, metadata=KM.fromList [("taskType",str "automated"),("routine",toJSON routine)] <> base.metadata }
  where base=newTask identity created "admin" (CreateTask title body assignee)
 
 taskLink :: GroupTask -> TaskRevision
@@ -133,7 +138,14 @@ currentTaskRevision :: TaskRevision -> GroupTask -> Bool
 currentTaskRevision expected task = not task.deleted && taskLink task == expected
 
 forwardTask :: AgentId -> GroupTask -> GroupTask
-forwardTask assignee task = GroupTask task.identity task.title task.body assignee task.state task.deleted (task.revision+1) task.metadata
+forwardTask assignee task = task { assignee=assignee, revision=task.revision+1, specification=task.specification }
+
+stopTask :: UTCTime -> Text -> GroupTask -> GroupTask
+stopTask time actor task
+ | task.state /= InProgress = task
+ | otherwise = task { state=Backlog, revision=task.revision+1
+   , metadata=KM.fromList [("updated_by",str actor),("updated",str (timestamp time))
+      ,("history",arr (items (Object task.metadata) "history" ++ [remove ["history","results"] (toJSON task)]))] <> task.metadata }
 
 reviseTask :: [AgentId] -> UTCTime -> Text -> TaskPatch -> GroupTask -> Either TaskError GroupTask
 reviseTask members updated actor patch task
@@ -158,11 +170,69 @@ beginTask members pending revision actor task
 settleTaskResult :: UTCTime -> TaskCompletion -> GroupTask -> (GroupTask, Settlement)
 settleTaskResult time completion task =
  let stale = task.deleted || task.revision /= completion.revision
-     result = obj [("turn",toJSON completion.run),("author",toJSON completion.owner),("text",toJSON completion.output),("error",toJSON completion.error),("revision",num completion.revision),("stale",Bool stale),("created",str (timestamp time))]
+     result = obj ([("turn",toJSON completion.run),("author",toJSON completion.owner),("text",toJSON completion.output),("error",toJSON completion.error),("revision",num completion.revision),("stale",Bool stale),("created",str (timestamp time))]
+      ++ [("outcome",toJSON (D.validatedOutcome outcome)) | outcome <- maybeToList completion.outcome]
+      ++ maybe [] publicationFields completion.publication)
      metadata = KM.insert "results" (arr (items (Object task.metadata) "results" ++ [result])) task.metadata
      changed = task { metadata=metadata }
  in if stale then (changed,StaleResultRecorded)
-    else (changed { state=if completedStatus completion.status then TaskDone else Backlog, revision=task.revision+1, metadata=KM.insert "updated_by" (toJSON completion.owner) metadata },TaskUpdated)
+    else (changed { state=if completedStatus completion.status && maybe True ((==D.Completed) . D.outcomeStatus . D.validatedOutcome) completion.outcome then TaskDone else Backlog, revision=task.revision+1, metadata=KM.insert "updated_by" (toJSON completion.owner) metadata },TaskUpdated)
+
+withResultProtocol :: Maybe D.TaskSpec -> GroupRequest -> GroupRequest
+withResultProtocol specification request = case specification of
+ Nothing -> request
+ Just _ -> request { requestFields=KM.insert "resultProtocol" (str "outcome") (requestFields request) }
+
+usesResultProtocol :: GroupRequest -> Validation Bool
+usesResultProtocol request = case KM.lookup "resultProtocol" (requestFields request) of
+ Nothing -> Right False
+ Just (String "outcome") -> Right True
+ _ -> Left (APIError 500 "Unsupported Group result protocol")
+
+requestDecision :: GroupRequest -> Validation (Maybe D.DecisionResponse)
+requestDecision request = traverse (validateValue 500 D.parseGroupDecision) (KM.lookup "resultDecision" (requestFields request))
+
+completionOutcome :: GroupTask -> GroupRequest -> TurnStatus -> Validation (Maybe D.StructurallyValidOutcome)
+completionOutcome task request status = do
+ structured <- usesResultProtocol request
+ if not structured || not (completedStatus status) then Right Nothing else do
+  specification <- maybe (Left (APIError 500 "Structured Group execution has no saved specification")) Right task.specification
+  response <- requestDecision request >>= maybe (Left (APIError 500 "Completed Group execution has no saved decision")) Right
+  case D.decisionBody response of
+   D.ReportOutcome publication outcome -> do
+    origin <- either (Left . APIError 500) Right (checkedOrigin (requestOrigin request))
+    either (Left . APIError 500) Right (D.validateTaskPublication origin outcome specification publication)
+    case D.validateOutcome response outcome specification of
+     Left problem -> Left (APIError 500 (D.outcomeError problem))
+     Right checked -> Right (Just checked)
+   _ -> Left (APIError 500 "A Group handoff cannot complete its Task")
+
+resultHistory :: GroupTask -> Validation [Value]
+resultHistory task = forM (items (Object task.metadata) "results") $ \result -> do
+ request <- validateValue 500 parseJSON (get result "turn") :: Validation RunId
+ revision <- validateValue 500 revisionP (get result "revision")
+ outcome <- traverse (validateValue 500 parseJSON) (if has result "outcome" then Just (get result "outcome") else Nothing) :: Validation (Maybe D.Outcome)
+ quiet <- validateValue 500 historyOnlyP result
+ when quiet $ do
+  check (maybe False ((==D.Completed) . D.outcomeStatus) outcome) 500 "History-only Group result requires a Completed outcome"
+  void (validateValue 500 (textFieldP "text" 64000) result)
+ rejection <- traverse (validateValue 500 parseJSON) (if has result "rejection" then Just (get result "rejection") else Nothing) :: Validation (Maybe ResultRejection)
+ pure (obj [("result",obj [("request",toJSON request),("revision",num revision)]),("reply",get result "text"),("notification",str (if quiet then "quiet" else "notify")),("error",get result "error"),("stale",get result "stale"),("outcome",toJSON outcome),("rejection",toJSON rejection)])
+
+rejectResult :: ResultRejection -> RunId -> Int -> GroupTask -> Validation (GroupTask,ResultRejection)
+rejectResult proposed request revision task = do
+ let matches result=get result "turn" == toJSON request && get result "revision" == num revision && get result "text" /= Null
+     results=items (Object task.metadata) "results"
+ result <- maybe (Left (APIError 404 "Unknown saved Group result")) Right (find matches results)
+ check (length (filter matches results) == 1) 409 "Saved Group result reference is ambiguous"
+ previous <- traverse (validateValue 500 parseJSON) (if has result "rejection" then Just (get result "rejection") else Nothing)
+ case previous of
+  Just saved -> do
+   check (rejectedBy saved == rejectedBy proposed && rejectionReason saved == rejectionReason proposed) 409 "This result already has a different rejection"
+   Right (task,saved)
+  Nothing -> do
+   let updated=map (\item -> if matches item then put "rejection" (toJSON proposed) item else item) results
+   Right (task { metadata=KM.insert "results" (arr updated) task.metadata },proposed)
 
 -- Only these adapters acquire time/identity, authorize actors and persist changes.
 taskResult :: Either TaskError a -> IO a
@@ -228,7 +298,7 @@ startTask s gid tid revision actor root = do
  let entry=mergeFields ([("task",str tid)] ++ [("memo_pending",Bool True) | actor == "admin" && not (originIsScheduled parsed)]) initial
  request <- newRequest entry task.assignee root
  lineage <- requireRequestLineage request
- let call=request { requestOrigin=origin, requestLineage=ValidLineage lineage { requestTask=Just (taskLink changed) } }
+ let call=withResultProtocol changed.specification request { requestOrigin=origin, requestLineage=ValidLineage lineage { requestTask=Just (taskLink changed) } }
  void (saveGroup s (append "requests" (toJSON call) (append "messages" entry (replace "tasks" (toJSON changed) group))) actor "task started" (str tid))
  pure (toJSON changed)
 
@@ -249,8 +319,15 @@ settleTask group request turn = do
    origin <- requireExecutionOrigin (requestOrigin request)
    either (failure 500) pure (validateTaskOrigin task origin)
    time <- getCurrentTime
-   completion <- TaskCompletion (requestId request) (requestTarget request) (requestTaskRevision link)
-    <$> field 500 turn "status" <*> field 500 turn "output" <*> field 500 turn "error"
+   status <- field 500 turn "status"
+   outcome <- validated (completionOutcome task request status)
+   response <- validated (requestDecision request)
+   let publication=if completedStatus status then case D.decisionBody <$> response of
+        Just (D.ReportOutcome saved _) -> Just saved
+        _ -> Nothing
+       else Nothing
+   completion <- TaskCompletion (requestId request) (requestTarget request) (requestTaskRevision link) status
+    <$> field 500 turn "output" <*> field 500 turn "error" <*> pure outcome <*> pure publication
    let (changed,settlement) = settleTaskResult time completion task
    pure (replace "tasks" (toJSON changed) group,settlement)
 

@@ -180,7 +180,7 @@ project s a = do
       actor=projectionActor projection
       old=maybe Null (get `flip` "status") (listToMaybe previous)
   when (old /= str status) $ recordOn s db owners (at turn "id") ("call." <> status) (obj [("previous",old),("origin",origin),("error",get turn "error"),("warning",get turn "warning")]) actor (Just (if has turn "output_order" then "chatOutput" else at turn "agency_kind"))
-  let details = selectPresent ["origin","batch_id","batch_members","agency_kind","slot","pulseId","output_at","output_order"] turn
+  let details = selectPresent ["origin","batch_id","batch_members","agency_kind","slot","pulseId","output_at","output_order","notification"] turn
   putValueOn db TurnDetails (at turn "id") details
   let output=projectionOutput projection
   archived <- if isNothing output && status `elem` ["done","warning"] && batchLeader typed == turnId typed then readJSON (archivePath s a ("runs/" <> at turn "id")) empty else pure empty

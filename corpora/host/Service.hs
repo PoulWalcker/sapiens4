@@ -191,6 +191,17 @@ dispatch s method target body = locked s $ do
   ("GET",["api","agents",a,"tasks"]) -> do
    void (DB.agent s a)
    if "format=json" `T.isInfixOf` query then json 200 (D.taskList s a) else do value<-D.workTasks s a True; pure (200,encode value,"application/yaml; charset=utf-8")
+  ("GET",["api",kind,a,"routines",rid,"runs"]) | kind `elem` ["agents","groups"] -> json 200 $ do
+   owner kind a
+   identity <- decodeValue 400 (str rid)
+   let parameters=[(k,T.drop 1 v) | entry<-T.splitOn "&" (T.drop 1 query),let (k,v)=T.breakOn "=" entry]
+   cursor <- traverse (decodeValue 400 . str . T.pack . unEscapeString . T.unpack) (lookup "before" parameters)
+   R.runHistory s a identity cursor
+  ("GET",["api",kind,a,"routines",rid,"runs",run]) | kind `elem` ["agents","groups"] -> json 200 $ do
+   owner kind a
+   identity <- decodeValue 400 (str rid)
+   targetRun <- decodeValue 400 (str run)
+   R.runDetail s a identity targetRun
   ("GET",["api",kind,a,"notes"]) | kind `elem` ["agents","groups"] -> do
    owner kind a
    let image=lookup "image" [(k,T.drop 1 v) | entry<-T.splitOn "&" (T.drop 1 query),let (k,v)=T.breakOn "=" entry]
@@ -205,7 +216,18 @@ dispatch s method target body = locked s $ do
   ("POST",["api","groups",gid,"messages"]) -> json 202 (GC.submitGroup s gid d "admin")
   ("POST",["api","groups",gid,"tasks"]) -> json 201 (GW.createTask s gid d "admin")
   ("PUT",["api","groups",gid,"tasks",tid]) -> json 200 (GW.updateTask s gid tid d "admin")
-  ("POST",["api","groups",gid,"tasks",tid,"run"]) -> json 202 (GW.runTask s gid tid (get d "revision") "admin")
+  ("POST",["api","groups",gid,"tasks",tid,"run"]) -> json 202 (R.ensureTaskAvailable s (TaskId tid) >> GW.runTask s gid tid (get d "revision") "admin")
+  ("POST",["api","routines",rid,"runs",run,"stop"]) -> json 200 $ do
+   identity <- decodeValue 400 (str rid)
+   targetRun <- decodeValue 400 (str run)
+   R.stopRun s "admin" identity targetRun
+  ("POST",["api","routines",rid,"delete"]) -> json 200 $ decodeValue 400 (str rid) >>= R.deleteRoutine s "admin"
+  ("POST",["api","routines",rid,"runs",run,"reject"]) -> json 200 $ do
+   require (all (`elem` ["result","reason"]) (keys d)) 400 "Result rejection accepts result and reason"
+   identity <- decodeValue 400 (str rid)
+   targetRun <- decodeValue 400 (str run)
+   reason <- decodeValue 400 (get d "reason")
+   R.rejectRunResult s "admin" identity targetRun (get d "result") reason
   ("POST",["api","groups",gid,"calls",rid,action]) -> json 200 (GC.actionGroup s gid rid action)
   ("POST",["api","agents"]) -> json 201 $ do row<-createAgent s d; Mgt.prepare s (at row "id"); pure row
   ("PUT",["api","agents",a]) -> json 200 (updateAgent s a d)

@@ -189,17 +189,22 @@ projectSnapshot snapshot m = withWorkspaces snapshot.preferences m { snapshot=sn
     , preview=D.cut 150 $ D.replace "\\s+" " " $ D.fallback "Ready for your message." $ fromMaybe "" $ _.text <$> (O.lookup a.id personalMessages >>= A.last)}) snapshot.agents
   turns = snapshot.turns
   append owner rows = O.alter (Just <<< (_ <> rows) <<< fromMaybe []) owner
-  personalMessages = foldl (\all t -> if t.group /= "" || not (A.elem t.flow ["chat","computer"]) then all else
+  personalMessages = foldl (\all t -> if t.group /= "" || not (A.elem t.flow ["chat","computer"]) || (t.historyOnly && t.status == X.Done && t.hasOutput && t.error == "") then all else
     let input = {user:true,author:t.origin.caller,text:t.input,created:t.created,attachments:t.attachments,request:Just t,chatKey:"user:" <> t.id,delegated:false,warning:"",turnId:"",stale:false,outputOrder:0.0}
         reply = result t
         output = {user:false,author:"",text:reply.text,warning:reply.warning,created:D.fallback t.created t.output_at,outputOrder:t.output_order,turnId:t.id,chatKey:"assistant:" <> t.id,attachments:[],request:Nothing,delegated:false,stale:false}
-    in append t.agent ([input] <> if A.elem t.status [X.Done,X.Warning] && t.hasOutput then [output] else []) all) O.empty turns
+    in append t.agent ([input] <> if A.elem t.status [X.Done,X.Warning] && t.hasOutput && not t.historyOnly then [output] else []) all) O.empty turns
   groups = map (\g -> g {busy=A.any ((X.Running == _) <<< _.status) g.requests,lastActivity=B.parseTime g.updated,preview=D.fallback (D.fallback "Shared workspace" g.description) $ fromMaybe "" $ _.text <$> A.last g.messages}) snapshot.groups
   agents = personal <> groups
   groupMessages = foldl (\all g -> O.insert g.id (map (\msg -> {user:msg.author == "admin",author:if msg.author == "admin" then "" else msg.author,chatKey:msg.id,text:msg.text,created:msg.created,attachments:msg.attachments,stale:msg.stale,request:Nothing,delegated:false,warning:"",turnId:"",outputOrder:0.0}) g.messages) all) personalMessages groups
-  delegated = foldl (\all work -> if work.callId == work.origin.call then all else
+  delegated = foldl (\all work ->
     let turn = A.find ((work.callId == _) <<< _.id) turns
-        message = {user:false,author:work.owner,text:D.fallback (D.fallback ("Delegated to " <> D.fallback work.owner (fromMaybe "" $ _.name <$> X.findEntity work.owner agents) <> " · " <> X.workName work.state) work.error) work.output
+        quiet = work.historyOnly && fromMaybe (work.error == "") ((\t -> A.elem t.status [X.Queued,X.Running,X.OutputPending,X.Done,X.Warning]) <$> turn)
+        problem = D.fallback work.error $ fromMaybe "" $ _.error <$> turn
+        content = if work.historyOnly then "" else work.output
+        recipientName = D.fallback "a specialist" $ fromMaybe "" $ _.name <$> X.findEntity work.owner agents
+    in if work.callId == work.origin.call || quiet then all else
+    let message = {user:false,author:work.owner,text:D.fallback (D.fallback ("Task assigned to " <> recipientName <> " · " <> X.workName work.state) problem) content
           ,created:fromMaybe "" $ _.created <$> turn,delegated:true,request:turn >>= \t -> if A.elem t.status [X.Done,X.Warning] then Nothing else Just t,chatKey:"delegation:" <> work.id,attachments:[],warning:"",turnId:"",stale:false,outputOrder:0.0}
     in append work.origin.agent [message] all) groupMessages snapshot.workloads
   messages = map (A.sortBy (\a b -> compare (B.parseTime a.created) (B.parseTime b.created) <> compare a.outputOrder b.outputOrder)) delegated

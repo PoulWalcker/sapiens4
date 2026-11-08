@@ -21,11 +21,12 @@ import Memo
 import qualified Routines as R
 import qualified Delegation as D
 import qualified Groups as G
+import qualified GroupChat as GC
 
-activeTurn :: Service -> Text -> Maybe Text -> IO (Maybe Text)
-activeTurn s a specific = do
+activeTurns :: Service -> Text -> Maybe Text -> IO [Turn]
+activeTurns s a specific = do
  state <- agentState s a
- pure $ listToMaybe [runIdText (turnId t) | t<-agentTurns state,turnStatus t==Running,maybe True ((==turnId t) . RunId) specific]
+ pure [t | t<-agentTurns state,turnStatus t==Running,maybe True ((==turnId t) . RunId) specific]
 status :: Service -> Text -> IO Value
 status s a = do
  chief <- DB.mainAgent s
@@ -50,7 +51,7 @@ prepare s a = do
  let context= obj [("currentSapi",str a),("chief",get facts "main_agent_id"),("groups",get facts "groups"),("team",get facts "team"),("workspace",obj [("path",str (T.pack (workspaceRoot s a)))])]
  writeText (agentRoot s a </> "manifests/corpora-state.md") (jsonText context)
 data WorkspaceOperation = OpenWorkspace | ZoomWorkspace | CloseWorkspace | FocusWorkspace | ReloadWorkspace | BackWorkspace | ForwardWorkspace | BookmarkWorkspace | UnbookmarkWorkspace deriving (Eq, Show)
-data Operation = ReadCorpora | UpdateCorpora | Batch | ReadStatus | Delegate | ReadRoutines | CreateRoutine | UpdateRoutine | SelectRoutinePolicy | PauseRoutine | ResumeRoutine | CreateAgent | RetireAgent | RehireAgent | AcquireComputer | ChangeManager | ReadWorkspace | GroupCommand G.GroupOperation | WorkspaceCommand WorkspaceOperation deriving (Eq, Show)
+data Operation = ReadCorpora | UpdateCorpora | Batch | ReadStatus | Delegate | ReadRoutines | CreateRoutine | UpdateRoutine | SelectRoutinePolicy | PauseRoutine | ResumeRoutine | RunRoutine | StopRoutine | DeleteRoutine | ReadRoutineRun | RejectRoutineResult | CreateAgent | RetireAgent | RehireAgent | AcquireComputer | ChangeManager | ReadWorkspace | GroupCommand G.GroupOperation | WorkspaceCommand WorkspaceOperation deriving (Eq, Show)
 operationSchema :: [(Text,Operation,[Text])]
 operationSchema =
  [ ("corpora_get", ReadCorpora, [])
@@ -59,11 +60,16 @@ operationSchema =
  , ("status", ReadStatus, ["target"])
  , ("delegate", Delegate, ["decision"])
  , ("routines", ReadRoutines, ["group"])
- , ("routine_create", CreateRoutine, ["minutes","prompt","missedPolicy"])
- , ("routine_update", UpdateRoutine, ["id","minutes","prompt","missedPolicy"])
+ , ("routine_create", CreateRoutine, ["minutes","prompt","missedPolicy","specification","group"])
+ , ("routine_update", UpdateRoutine, ["id","minutes","prompt","missedPolicy","specification","group"])
  , ("routine_policy", SelectRoutinePolicy, ["id","expectedPrompt","expectedSelection","missedPolicy"])
- , ("routine_pause", PauseRoutine, ["id"])
- , ("routine_resume", ResumeRoutine, ["id"])
+ , ("routine_pause", PauseRoutine, ["id","group"])
+ , ("routine_resume", ResumeRoutine, ["id","group"])
+ , ("routine_run", RunRoutine, ["id"])
+ , ("routine_stop", StopRoutine, ["id","run"])
+ , ("routine_delete", DeleteRoutine, ["id"])
+ , ("routine_result", ReadRoutineRun, ["id","run"])
+ , ("routine_reject_result", RejectRoutineResult, ["id","run","result","reason"])
  , ("group_create", GroupCommand G.GroupCreate, ["name","description","lead","members"])
  , ("group_get", GroupCommand G.GroupGet, ["group"])
  , ("group_update", GroupCommand G.GroupUpdate, ["group","revision","name","description","lead","members","archived"])
@@ -104,17 +110,44 @@ workspaceOperationName operation = case operation of
 
 requiresActiveAgent :: Operation -> Bool
 requiresActiveAgent ReadStatus = False
+requiresActiveAgent ReadRoutineRun = False
+requiresActiveAgent DeleteRoutine = False
 requiresActiveAgent ReadWorkspace = False
 requiresActiveAgent (WorkspaceCommand _) = False
 requiresActiveAgent _ = True
+
+policySetupAllows :: Operation -> Bool
+policySetupAllows operation = case operation of
+ ReadCorpora -> True
+ ReadStatus -> True
+ ReadRoutines -> True
+ ReadRoutineRun -> True
+ ReadWorkspace -> True
+ GroupCommand G.GroupGet -> True
+ SelectRoutinePolicy -> True
+ Batch -> True
+ _ -> False
 
 control :: Service -> Text -> Value -> IO Value
 control s a payload = do
  void (DB.agent s a)
  let d=remove ["agencyRun"] payload; specific=if has payload "agencyRun" then Just (at payload "agencyRun") else Nothing
- current <- activeTurn s a specific
+ turns <- activeTurns s a specific
+ let current=runIdText . turnId <$> listToMaybe turns
  when (isJust specific) $ require (isJust current) 409 "AgencyRun is no longer active"
+ forM_ specific $ \identity -> do
+  runs <- readMVar (serviceRuns s)
+  forM_ (M.lookup (RunId identity) runs) $ \running -> do
+   stopped <- readIORef (runCancel running)
+   require (not stopped) 409 "This execution is stopping; no further host actions are allowed"
+  R.ensureExecutionAllowed s (RunId identity)
  operation <- validated (decodeOperation d)
+ origins <- mapM (requireExecutionOrigin . turnOrigin) turns
+ let policyRoutines=mapMaybe originPolicyRoutine origins
+ unless (null policyRoutines) $ do
+  require (policySetupAllows operation) 409 "Routine policy setup may only read context and select its own missed-deadline policy"
+  when (operation == SelectRoutinePolicy) $
+   require (isJust specific || length turns == 1) 409 "Select a routine policy with an explicit AgencyRun while multiple tasks are running"
  when (requiresActiveAgent operation) $ requireActive s a
  chief <- DB.mainAgent s
  let receipt v=merge (obj [("self_id",str a),("saved",Bool True)]) v
@@ -126,7 +159,8 @@ control s a payload = do
    forM_ operations $ \item -> require (case decodeOperation item of Right Batch -> False; Right _ -> True; Left _ -> False) 400 "Invalid batch operation or field; nested batches are not supported"
    let execute index results []=pure (receipt (obj [("results",arr results)]))
        execute index results (item:rest)=do
-        result <- try (control s a item)
+        let scoped=maybe item (\identity -> put "agencyRun" (str identity) item) specific
+        result <- try (control s a scoped)
         case result of
          Right v -> execute (index+1) (results++[v]) rest
          Left (APIError code err) -> pure (obj [("self_id",str a),("saved",Bool False),("results",arr results),("failed_index",num index),("error",str err),("status",num code),("partial",Bool (not (null results)))])
@@ -162,23 +196,47 @@ control s a payload = do
    writeIORef (serviceLease s) (Just (AgentId a,RunId identity))
    pure (obj [("owner",str a)])
   ReadRoutines -> do
-   owner <- workspaceOwner
+   owner <- routineOwner specific Member
    obj . (:[]) . ("routines",) . arr . filter ((==owner) . (`at` "owner")) <$> R.routineSummaries s
   CreateRoutine -> do
+   owner <- routineOwner specific Management
    policy <- decodeValue 400 (get d "missedPolicy")
-   receipt . obj . (:[]) . ("routine",) <$> R.save s a (get d "minutes") (get d "prompt") (Just policy) (R.AddRoutine current)
+   specification <- if has d "specification" then Just <$> decodeValue 400 (get d "specification") else pure Nothing
+   receipt . obj . (:[]) . ("routine",) <$> R.save s owner (get d "minutes") (get d "prompt") specification (Just policy) (R.AddRoutine current)
   UpdateRoutine -> do
+   owner <- routineOwner specific Management
    i <- routineIdentity
    policy <- if has d "missedPolicy" then Just <$> decodeValue 400 (get d "missedPolicy") else pure Nothing
-   receipt . obj . (:[]) . ("routine",) <$> R.save s a (get d "minutes") (get d "prompt") policy (R.EditRoutine i Nothing)
+   specification <- if has d "specification" then Just <$> decodeValue 400 (get d "specification") else pure Nothing
+   receipt . obj . (:[]) . ("routine",) <$> R.save s owner (get d "minutes") (get d "prompt") specification policy (R.EditRoutine i Nothing)
   SelectRoutinePolicy -> do
    i <- routineIdentity
+   require (all (==i) policyRoutines) 409 "Routine policy setup may only select the policy of its assigned routine"
    expected <- textField d "expectedPrompt" 16000
    selection <- decodeValue 400 (get d "expectedSelection")
    policy <- decodeValue 400 (get d "missedPolicy")
    receipt . obj . (:[]) . ("routine",) <$> R.setPolicy s a i expected selection policy
-  PauseRoutine -> pause receipt True
-  ResumeRoutine -> pause receipt False
+  PauseRoutine -> pause specific receipt True
+  ResumeRoutine -> pause specific receipt False
+  RunRoutine -> do
+   i <- routineIdentity
+   identity <- maybe (failure 409 "Run now requires an explicit running Sapi task") (pure . RunId) specific
+   request <- routineRequestKey s a identity
+   receipt <$> R.runNow s a i request identity
+  StopRoutine -> do
+   i <- routineIdentity
+   run <- decodeValue 400 (get d "run")
+   receipt <$> R.stopRun s a i run
+  DeleteRoutine -> routineIdentity >>= R.deleteRoutine s a >>= pure . receipt
+  ReadRoutineRun -> do
+   i <- routineIdentity
+   run <- decodeValue 400 (get d "run")
+   R.readRunResult s a i run
+  RejectRoutineResult -> do
+   i <- routineIdentity
+   run <- decodeValue 400 (get d "run")
+   reason <- decodeValue 400 (get d "reason")
+   receipt <$> R.rejectRunResult s a i run (get d "result") reason
   Delegate -> D.applyDecision s a current (at d "decision")
   ReadWorkspace -> workspaceOwner >>= workspace s
   WorkspaceCommand action -> do
@@ -199,7 +257,43 @@ control s a payload = do
  routineIdentity = do
   void (textField d "id" 80)
   decodeValue 400 (get d "id")
- pause receipt paused=do i<-routineIdentity; receipt . obj . (:[]) . ("routine",) <$> R.setPaused s a i paused
+ routineOwner context access = do
+  group <- if has d "group" then do
+   identity <- field 400 d "group"
+   Just <$> G.getGroup s (groupIdText identity) True
+   else case context of
+    Nothing -> pure Nothing
+    Just identity -> do
+     request <- GC.findRequest s (RunId identity)
+     forM request $ \(group,call) -> do
+      void (GC.requestExecutionOrigin group call)
+      require (G.requestTarget call == AgentId a && G.requestStatus call == Running && not (G.requestSettled call)) 409 "Group request is no longer active"
+      require (not (boolean (get group "archived"))) 409 "Restore this Group before changing its work"
+      pure group
+  case group of
+   Nothing -> pure a
+   Just value -> G.authorizeGroup s value a access >> pure (at value "id")
+ pause context receipt paused=do
+  owner <- routineOwner context Management
+  i <- routineIdentity
+  receipt . obj . (:[]) . ("routine",) <$> R.setPaused s owner i paused
+
+routineRequestKey :: Service -> Text -> RunId -> IO Text
+routineRequestKey s actor identity = do
+ work <- D.findWork s identity
+ case work of
+  Just (saved,call) -> do
+   require (agentIdText (D.callRecipient call) == actor && D.callState call == D.CallRunning)
+    409 "Run now requires your running task"
+   pure (D.workloadId saved)
+  Nothing -> do
+   (group,request) <- maybe (failure 409 "Unknown running task for Run now") pure =<< GC.findRequest s identity
+   void (GC.requestExecutionOrigin group request)
+   G.authorizeGroup s group actor Member
+   require (G.requestTarget request == AgentId actor && G.requestStatus request == Running && not (G.requestSettled request)
+    && not (boolean (get group "archived"))) 409 "Run now requires your running Group request"
+   lineage <- G.requireRequestLineage request
+   pure ("group:" <> at group "id" <> ":" <> messageIdText (G.requestRoot lineage))
 reviseCorpora :: Value -> CorporaConfig -> Validation CorporaConfig
 reviseCorpora d cfg = do
  check (get d "revision"==num (corporaRevision cfg)) 409 "Corpora changed. Read its settings again."

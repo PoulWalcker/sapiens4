@@ -70,7 +70,7 @@ origin value =
   }
 
 type Turn =
-  { id :: String, agent :: String, group :: String, flow :: String, status :: CallState, input :: String, output :: String, hasOutput :: Boolean, created :: String, output_at :: String, output_order :: Number, error :: String, batch_id :: String, origin :: Origin, attachments :: Array Attachment }
+  { id :: String, agent :: String, group :: String, flow :: String, status :: CallState, input :: String, output :: String, hasOutput :: Boolean, historyOnly :: Boolean, created :: String, output_at :: String, output_order :: Number, error :: String, batch_id :: String, origin :: Origin, attachments :: Array Attachment }
 
 turn :: Json -> Turn
 turn value =
@@ -82,6 +82,7 @@ turn value =
   , input: D.s "input" value
   , output: D.s "output" value
   , hasOutput: D.valid $ D.get "output" value
+  , historyOnly: D.s "notification" value == "quiet"
   , created: D.s "created" value
   , output_at: D.s "output_at" value
   , output_order: D.n "output_order" value
@@ -92,7 +93,7 @@ turn value =
   }
 
 type Workload =
-  { revision :: String, id :: String, taskId :: String, taskType :: String, callId :: String, owner :: String, state :: WorkState, output :: String, error :: String, origin :: Origin, participants :: Array String }
+  { revision :: String, id :: String, taskId :: String, taskType :: String, callId :: String, owner :: String, state :: WorkState, output :: String, historyOnly :: Boolean, error :: String, origin :: Origin, participants :: Array String }
 
 workload :: Json -> Workload
 workload value =
@@ -104,6 +105,7 @@ workload value =
   , owner: D.s "owner" value
   , state: workState $ D.s "state" value
   , output: D.s "output" value
+  , historyOnly: D.s "notification" value == "quiet"
   , error: D.s "error" value
   , origin: origin $ D.get "origin" value
   , participants: D.strings $ D.get "participants" value
@@ -269,7 +271,7 @@ routinePolicyLabel = case _ of
   Right SkipMissedDeadlines -> "Missed runs: skip"
 
 type Routine =
-  { id :: String, owner :: String, title :: String, prompt :: String, minutes :: Number, nextDue :: String, runCount :: Number, paused :: Boolean, deferredCount :: Number, oldestDeferredDue :: String, policy :: Either String RoutinePolicy }
+  { id :: String, owner :: String, title :: String, prompt :: String, minutes :: Number, nextDue :: String, runCount :: Number, paused :: Boolean, activeRun :: Either String (Maybe String), deferredCount :: Number, oldestDeferredDue :: String, policy :: Either String RoutinePolicy }
 
 routine :: Json -> Routine
 routine value =
@@ -281,6 +283,9 @@ routine value =
   , nextDue: D.s "nextDue" value
   , runCount: D.n "runCount" value
   , paused: D.b "paused" value
+  , activeRun: case toString $ D.get "activeRunError" value of
+      Just reason -> Left reason
+      Nothing -> Right $ toString $ D.get "activeRun" value
   , deferredCount: D.n "deferredCount" value
   , oldestDeferredDue: D.s "oldestDeferredDue" value
   , policy: routinePolicy $ D.get "policySelection" value
@@ -574,11 +579,19 @@ checkAttachment = record [optional "id" stringValue, optional "kind" stringValue
 checkOrigin :: Check
 checkOrigin = record [optional "agent" stringValue, optional "call" stringValue, optional "group" stringValue, optional "caller" stringValue]
 
+checkPublication :: Check
+checkPublication value = case toObject value >>= O.lookup "notification" of
+  Nothing -> Right unit
+  Just mode -> case toString mode of
+    Just "notify" -> Right unit
+    Just "quiet" -> Right unit
+    _ -> Left "notification must be notify or quiet"
+
 checkTurn :: Check
-checkTurn = record [optional "id" stringValue, optional "agent" stringValue, optional "group" stringValue, optional "flow" stringValue, optional "status" stringValue, optional "input" stringValue, optional "output" stringValue, optional "created" stringValue, optional "output_at" stringValue, optional "output_order" numberValue, optional "error" stringValue, optional "batch_id" stringValue, optional "origin" checkOrigin, optional "attachments" (list checkAttachment)]
+checkTurn = record [checkPublication, optional "id" stringValue, optional "agent" stringValue, optional "group" stringValue, optional "flow" stringValue, optional "status" stringValue, optional "input" stringValue, optional "output" stringValue, optional "created" stringValue, optional "output_at" stringValue, optional "output_order" numberValue, optional "error" stringValue, optional "batch_id" stringValue, optional "origin" checkOrigin, optional "attachments" (list checkAttachment)]
 
 checkWorkload :: Check
-checkWorkload = record [optional "id" stringValue, optional "taskId" stringValue, optional "taskType" stringValue, optional "callId" stringValue, optional "owner" stringValue, optional "state" stringValue, optional "output" stringValue, optional "error" stringValue, optional "origin" checkOrigin, optional "participants" (list stringValue)]
+checkWorkload = record [checkPublication, optional "id" stringValue, optional "taskId" stringValue, optional "taskType" stringValue, optional "callId" stringValue, optional "owner" stringValue, optional "state" stringValue, optional "output" stringValue, optional "error" stringValue, optional "origin" checkOrigin, optional "participants" (list stringValue)]
 
 checkGroupMessage :: Check
 checkGroupMessage = record [optional "id" stringValue, optional "author" stringValue, optional "text" stringValue, optional "created" stringValue, optional "turn" stringValue, optional "stale" booleanValue, optional "attachments" (list checkAttachment)]
@@ -608,7 +621,14 @@ checkOrchestration :: Check
 checkOrchestration = record [optional "manager" stringValue, optional "notes" checkNotes]
 
 checkRoutine :: Check
-checkRoutine = record [optional "id" stringValue, optional "owner" stringValue, optional "title" stringValue, optional "prompt" stringValue, optional "minutes" numberValue, optional "nextDue" stringValue, optional "runCount" numberValue, optional "paused" booleanValue, optional "deferredCount" numberValue, optional "oldestDeferredDue" stringValue, field "policySelection" (void <<< routinePolicy)]
+checkRoutine = record [checkRoutineRun, optional "id" stringValue, optional "owner" stringValue, optional "title" stringValue, optional "prompt" stringValue, optional "minutes" numberValue, optional "nextDue" stringValue, optional "runCount" numberValue, optional "paused" booleanValue, optional "activeRun" stringValue, optional "deferredCount" numberValue, optional "oldestDeferredDue" stringValue, field "policySelection" (void <<< routinePolicy)]
+
+checkRoutineRun :: Check
+checkRoutineRun value = case toObject value >>= O.lookup "activeRunError" of
+  Nothing -> Right unit
+  Just raw -> case toString raw of
+    Just reason | reason /= "" -> if D.valid (D.get "activeRun" value) then Left "activeRun and activeRunError are mutually exclusive" else Right unit
+    _ -> Left "activeRunError must be a nonempty string"
 
 checkEvent :: Check
 checkEvent = record [optional "timestamp" stringValue, optional "actor" stringValue, optional "entity" stringValue, optional "event" stringValue, optional "agency" stringValue]

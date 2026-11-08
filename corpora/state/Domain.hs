@@ -19,6 +19,9 @@ module Domain
  , jsonText, parseJSONText, textFieldP, stringsP, nameP, onlyFields, Population, populationRoster
  , populationChief, populationMembers, GroupRoster, MembershipError(..), memberRoster, rosterLead
  , messageText, AgentProfile(..), rosterMembers, activeStatus, retryableStatus, completedStatus
+ , ResultReviewer(..), RejectionReason, mkRejectionReason, ResultRejection(..)
+ , ResultText, ResultPublication(..), publicationText, publicationFields, publicationP
+ , historyOnlyP, validatePublicationContext
  ) where
 
 import Control.Monad
@@ -42,15 +45,57 @@ import qualified Data.Vector as V
 import Text.Read (readMaybe)
 import Data.Time (UTCTime, defaultTimeLocale, formatTime, parseTimeM)
 
-newtype AgentId = AgentId { agentIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
+identityP :: String -> Value -> Parser Text
+identityP label = withText label $ \identity -> do
+ unless (not (T.null (T.strip identity))) (fail (label <> " cannot be empty"))
+ pure identity
+
+newtype AgentId = AgentId { agentIdText :: Text } deriving (Eq, Ord, Show, ToJSON)
+instance FromJSON AgentId where parseJSON value = AgentId <$> identityP "Sapi ID" value
+
+data ResultReviewer = AdminReviewer | SapiReviewer AgentId deriving (Eq, Show)
+instance FromJSON ResultReviewer where
+ parseJSON value = case at value "kind" of
+  "admin" -> onlyFields ["kind"] value >> pure AdminReviewer
+  "sapi" -> onlyFields ["kind","id"] value >> SapiReviewer <$> personalAgentP (get value "id")
+  _ -> fail "Unknown result reviewer"
+instance ToJSON ResultReviewer where
+ toJSON reviewer = case reviewer of
+  AdminReviewer -> obj [("kind",str "admin")]
+  SapiReviewer identity -> obj [("kind",str "sapi"),("id",toJSON identity)]
+
+newtype RejectionReason = RejectionReason Text deriving (Eq, Show)
+mkRejectionReason :: Text -> Either Text RejectionReason
+mkRejectionReason raw
+ | T.null reason = Left "Result rejection requires a nonempty reason"
+ | T.length raw > 4000 = Left "Result rejection reason must be at most 4000 characters"
+ | otherwise = Right (RejectionReason reason)
+ where reason=T.strip raw
+instance FromJSON RejectionReason where
+ parseJSON = withText "Result rejection reason" (either (fail . T.unpack) pure . mkRejectionReason)
+instance ToJSON RejectionReason where toJSON (RejectionReason reason) = str reason
+
+data ResultRejection = ResultRejection
+ { rejectedAt :: UTCTime, rejectedBy :: ResultReviewer, rejectionReason :: RejectionReason
+ } deriving (Eq, Show)
+instance FromJSON ResultRejection where
+ parseJSON value = do
+  onlyFields ["rejectedAt","rejectedBy","reason"] value
+  rawTime <- parseJSON (get value "rejectedAt")
+  time <- maybe (fail "Invalid result rejection time") pure (parseTime rawTime)
+  ResultRejection time <$> parseJSON (get value "rejectedBy") <*> parseJSON (get value "reason")
+instance ToJSON ResultRejection where
+ toJSON rejection = obj [("rejectedAt",str (timestamp (rejectedAt rejection))),("rejectedBy",toJSON (rejectedBy rejection)),("reason",toJSON (rejectionReason rejection))]
 newtype MessageId = MessageId { messageIdText :: Text } deriving (Eq, Ord, Show)
 instance FromJSON MessageId where
  parseJSON = withText "Group message ID" $ \identity -> do
   unless (not (T.null (T.strip identity))) (fail "Group message ID cannot be empty")
   pure (MessageId identity)
 instance ToJSON MessageId where toJSON = str . messageIdText
-newtype TaskId = TaskId { taskIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
-newtype RunId = RunId { runIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
+newtype TaskId = TaskId { taskIdText :: Text } deriving (Eq, Ord, Show, ToJSON)
+instance FromJSON TaskId where parseJSON value = TaskId <$> identityP "Task ID" value
+newtype RunId = RunId { runIdText :: Text } deriving (Eq, Ord, Show, ToJSON)
+instance FromJSON RunId where parseJSON value = RunId <$> identityP "Run ID" value
 
 newtype GroupId = GroupId Text deriving (Eq, Ord, Show)
 groupIdText :: GroupId -> Text
@@ -71,7 +116,7 @@ parseRoutineId :: Text -> Maybe RoutineId
 parseRoutineId identity = do
  suffix <- T.stripPrefix "routine_sch_" identity
  sequenceNumber <- readMaybe (T.unpack suffix) :: Maybe Integer
- guard (sequenceNumber >= toInteger (minBound :: Int64) && sequenceNumber <= toInteger (maxBound :: Int64))
+ guard (sequenceNumber > 0 && sequenceNumber <= toInteger (maxBound :: Int64))
  pure (RoutineId identity (fromInteger sequenceNumber))
 instance FromJSON RoutineId where
  parseJSON = withText "Scheduled Routine ID" $ maybe (fail "Invalid scheduled routine ID") pure . parseRoutineId
@@ -328,7 +373,7 @@ withTurnFields f t = case f fields of
 batchLeader :: Turn -> RunId
 batchLeader t = fromMaybe (turnId t) (turnBatchId t)
 retryTurn :: Turn -> Turn
-retryTurn t = (withTurnFields (remove ["error","batch_members","agency_kind","slot","pulseId"]) t) { turnStatus = Queued, turnAttempt=Just (fromMaybe 0 (turnAttempt t)+1), turnBatchId=Nothing }
+retryTurn t = (withTurnFields (remove ["error","batch_members","agency_kind","slot","pulseId","notification"]) t) { turnStatus = Queued, turnAttempt=Just (fromMaybe 0 (turnAttempt t)+1), turnBatchId=Nothing }
 data TurnControlError = TurnNotRetryable | TurnAlreadyComplete deriving (Eq, Show)
 validateTurnAction :: TurnAction -> TurnStatus -> Either TurnControlError ()
 validateTurnAction Retry status
@@ -423,6 +468,42 @@ jsonText :: Value -> Text
 jsonText = TE.decodeUtf8 . BL.toStrict . encode
 parseJSONText :: Text -> Value
 parseJSONText = fromMaybe Null . decode . BL.fromStrict . TE.encodeUtf8
+
+-- A result's publication decision does not assert delivery. Text remains available
+-- to history in both cases; only the checked decoder constructs ResultText.
+newtype ResultText = ResultText Text deriving (Eq, Show)
+data ResultPublication = PublishToChat ResultText | HistoryOnly ResultText deriving (Eq, Show)
+
+publicationText :: ResultPublication -> Text
+publicationText publication = case publication of
+ PublishToChat (ResultText content) -> content
+ HistoryOnly (ResultText content) -> content
+
+publicationFields :: ResultPublication -> [(Text,Value)]
+publicationFields publication = case publication of
+ PublishToChat _ -> []
+ HistoryOnly _ -> [("notification",str "quiet")]
+
+historyOnlyP :: Value -> Parser Bool
+historyOnlyP = withObject "result publication" $ \fields -> case KM.lookup "notification" fields of
+ Nothing -> pure False
+ Just (String "notify") -> pure False
+ Just (String "quiet") -> pure True
+ _ -> fail "notification must be notify or quiet"
+
+publicationP :: Value -> Parser ResultPublication
+publicationP value = do
+ content <- ResultText <$> textFieldP "reply" 64000 value
+ quiet <- historyOnlyP value
+ pure (if quiet then HistoryOnly content else PublishToChat content)
+
+validatePublicationContext :: ExecutionOrigin -> Bool -> ResultPublication -> Either Text ()
+validatePublicationContext origin completed publication = case publication of
+ PublishToChat _ -> Right ()
+ HistoryOnly _
+  | not completed -> Left "Only a Completed outcome can keep its result in history without a chat message"
+  | not (originIsScheduled origin) -> Left "History-only results require a Routine execution"
+  | otherwise -> Right ()
 
 messageText :: Value -> Either Text Text
 messageText value = case value `fallback` str "" of

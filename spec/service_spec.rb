@@ -305,24 +305,56 @@ RSpec.describe 'Local service contracts' do
   it 'preserves provider transcripts and actor attribution through success, failure and restart' do
     owner = chief
     child = host.control(owner, 'create_agent', name: 'Auditor', role: 'Review')['agent']['id']
-    host.configure(mode: 'Exec')
+    terminal = {type: 'turn.completed', usage: {input_tokens: 100, cached_input_tokens: 20, output_tokens: 30}}
+    host.configure(mode: 'Exec', rules: {
+      'Assessing' => {completion: [terminal, terminal]},
+      'ReadyToWork' => {events: ['{', {type: 'future.event'},
+        {type: 'item.started', item: {id: 'open-tool', type: 'command_execution', command: 'read local data', status: 'in_progress'}}], completion: []},
+      'Execution' => {completion: [{type: 'turn.completed'}]}})
     completed = host.submit(owner)
     host.turn(completed)
     read_run = ->(id) { JSON.parse(File.read(File.join(host.root, 'agentpy/corpora/archive', owner, 'runs', "#{id}.json"))) }
     saved = read_run.call(completed)
     expect(saved['logs'].map { |entry| entry['role'] }).to eq(%w[Assessing ReadyToWork Execution])
     expect(saved['logs']).to all(include('session' => 'fixture-session', 'answer' => a_kind_of(String)))
+    read_trace = ->(entry) { JSON.parse(File.read(File.join(host.root, 'agentpy/corpora/archive', owner, 'provider', "#{entry.fetch('providerTrace').fetch('id')}.json"))) }
+    traces = saved['logs'].map(&read_trace)
+    expect(traces.map { |trace| trace.dig('status', 'kind') }).to eq(%w[Complete Incomplete Complete])
+    expect(traces.first['usage']).to include('inputTokens' => 100, 'cachedInputTokens' => 20, 'outputTokens' => 30, 'duplicates' => 1, 'price' => nil)
+    expect(traces[1].dig('status', 'gaps')).to include('MissingTerminal', 'OpenTools', 'MalformedEvents', 'UnknownEvents')
+    expect(traces.last['usage']).to include('inputTokens' => nil, 'cachedInputTokens' => nil, 'outputTokens' => nil)
     expect(host.state['events'][owner]).to include(hash_including('event' => 'task.completed', 'actor' => owner, 'agency' => 'chatInput'))
     expect(host.state['events'][child]).to include(hash_including('event' => 'sapi.created', 'actor' => owner))
+    secret = 'SYNTHETIC-TRACE-CANARY'
+    events = [
+      {type: 'item.started', item: {id: 'secret-tool', type: 'command_execution', command: "read token=#{secret}", status: 'in_progress'}},
+      {type: 'item.completed', item: {id: 'secret-tool', type: 'command_execution', aggregated_output: "password=#{secret}", status: 'completed', exit_code: 0}}
+    ] + Array.new(300) { |index| {type: 'item.completed', item: {id: "reason-#{index}", type: 'reasoning'}} } + ['x' * 2_097_153]
+    host.configure(mode: 'Repl', rules: {'Assessing' => {events: events, completion: [
+      {type: 'turn.completed', usage: {input_tokens: 10**100, output_tokens: 3, "password_#{secret}" => 1}},
+      {type: 'turn.started'}, {type: 'thread.started', thread_id: 'different-session'}]}})
+    bounded = host.submit(owner, 'Retain a bounded provider record')
+    host.turn(bounded)
+    bounded_trace = read_trace.call(read_run.call(bounded)['logs'].first)
+    expect(bounded_trace.dig('status', 'gaps')).to include('DroppedEvents', 'OmittedContent', 'OutOfOrderEvents', 'ConflictingUsage')
+    expect(bounded_trace['events'].size).to be <= 256
+    expect(JSON.generate(bounded_trace).bytesize).to be < 160_000
+    expect(JSON.generate(bounded_trace)).not_to include(secret)
+    expect(bounded_trace['session']).to eq('fixture-session')
+    expect(bounded_trace['usage']).to include('inputTokens' => nil, 'outputTokens' => 3)
     host.configure(fail: true)
     failed = host.submit(owner, 'Keep the unsuccessful call reviewable')
     host.turn(failed, 'failed')
     rejected = read_run.call(failed)
     expect(rejected['logs'].first).to include('role' => 'Assessing', 'prompt' => a_string_including('Keep the unsuccessful call reviewable'))
     expect(rejected['error']).to include('Scripted provider failure')
+    failed_trace = read_trace.call(rejected['logs'].first)
+    expect(failed_trace.dig('status', 'kind')).to eq('Incomplete')
     host.restart
     expect(read_run.call(completed)).to eq(saved)
     expect(read_run.call(failed)).to eq(rejected)
+    expect(saved['logs'].map(&read_trace)).to eq(traces)
+    expect(read_trace.call(rejected['logs'].first)).to eq(failed_trace)
   end
 
   it 'keeps the designated Chief after identity edits, creation and restart' do

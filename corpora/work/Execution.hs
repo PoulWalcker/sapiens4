@@ -76,11 +76,14 @@ submitTurn s a d = do
  requireActive s a
  routine <- R.command s a input (not (null attachments))
  case routine of
-  Just r -> R.acknowledge s a input r
+  Just (change,routine) -> R.acknowledge s a input change routine
   Nothing -> do
    suffix <- attachmentPrompt s attachments
    let message=input<>suffix
-   i <- if has d "workload" then D.clarify s a (at d "workload") message else do
+   i <- if has d "workload" then do
+    R.ensureExecutionAllowed s (RunId (at d "workload"))
+    D.clarify s a (at d "workload") message
+    else do
     i <- newId
     time <- now
     agentState s a >>= saveState s a . enqueueTurn (RunId i) flow message time
@@ -175,6 +178,7 @@ settleRun parsed outcome time ids turn state = result
  (output,logs,failureText)=outcomeFields outcome
  failedStatus=case outcome of RunStopped _ _->Interrupted; _->Failed
  buffered=turnField turn "agency_kind"==str "chatInput"
+ quiet=turnField turn "notification"==str "quiet"
  origin=turnField turn "origin"
  warnings=[at entry "warning" | entry<-logs,has entry "warning"]
  update t | turnId t `notElem` ids = t
@@ -182,11 +186,12 @@ settleRun parsed outcome time ids turn state = result
              Just e -> (withTurnFields (put "error" (str e)) t) { turnStatus = failedStatus }
              Nothing | buffered -> t { turnStatus = OutputPending }
                      | otherwise -> (withTurnFields (put "output_at" (str time)) t) { turnStatus = Done }
- warningFields = if null warnings then remove ["warning"] else put "warning" (str (T.intercalate " " warnings))
+ warningFields value = mergeFields [("notification",str "quiet") | quiet] . remove ["notification"] $
+  (if null warnings then remove ["warning"] else put "warning" (str (T.intercalate " " warnings))) value
  updated=mapTurns update state
  result | isJust failureText = updated
-        | buffered = mapStateFields (appendItems "output_buffer" [obj [("turn",str i),("members",toJSON ids),("content",str output),("origin",origin)]]) updated
-        | isJust (originGroup parsed) = updated
+        | buffered = mapStateFields (appendItems "output_buffer" [obj ([("turn",str i),("members",toJSON ids),("content",str output),("origin",origin)] ++ [("notification",str "quiet") | quiet])]) updated
+        | quiet || isJust (originGroup parsed) = updated
         | otherwise = mapStateFields (put "last_output" (str output) . appendItems "chat" [obj [("role",str "agent"),("content",str output),("turn",str i),("time",str time),("origin",origin)]]) updated
 
 finish :: Service -> Run -> Turn -> Either SomeException (Text,[Value]) -> IO ()
@@ -203,14 +208,27 @@ finish s run turn outcome = do
      | isJust (fromException problem :: Maybe AsyncCancelled) -> throwIO problem
      | otherwise -> pure (Left (toException (RunFailure (D.exceptionText problem) logs)))
   _ -> pure outcome
- let a=agentIdText (runOwner run); i=runIdText (runId run)
-     completed=runOutcome stop checked
+ checkedPublication <- try $ case checked of
+  Right (output,_) | not stop -> do
+   saved <- if isJust (originGroup parsed) then G.executionPublication s (turnId turn) else D.executionPublication s (turnId turn)
+   forM_ saved $ \result -> require (publicationText result == output) 500 "Execution output does not match its accepted result"
+   pure saved
+  _ -> pure Nothing
+ (final,publication) <- case checkedPublication of
+  Right saved -> pure (checked,saved)
+  Left (problem :: SomeException)
+   | isJust (fromException problem :: Maybe SomeAsyncException) -> throwIO problem
+   | isJust (fromException problem :: Maybe AsyncCancelled) -> throwIO problem
+   | otherwise -> pure (Left (toException (RunFailure (D.exceptionText problem) (either (const []) snd checked))),Nothing)
+ let settledTurn=withTurnFields (mergeFields (maybe [] publicationFields publication) . remove ["notification"]) turn
+     a=agentIdText (runOwner run); i=runIdText (runId run)
+     completed=runOutcome stop final
      (output,logs,failureText)=outcomeFields completed
- writeJSON (archivePath s a ("runs/"<>i)) (obj [("output",str output),("logs",arr logs),("error",maybe Null str failureText)])
+ writeJSON (archivePath s a ("runs/"<>i)) (obj ([("output",str output),("logs",arr logs),("error",maybe Null str failureText)] ++ maybe [] publicationFields publication))
  state <- agentState s a
  time <- now
  ids <- decodeValue 500 (turnField turn "batch_members" `fallback` toJSON [turnId turn]) :: IO [RunId]
- let result = settleRun parsed completed time ids turn state
+ let result = settleRun parsed completed time ids settledTurn state
  saveState s a result
  DB.project s a
  trimConversation s a
@@ -272,22 +290,42 @@ checkedBufferedOrigin contexts state item = do
    (Left "Buffered output provenance does not match its Turn")
  pure actual
 
+checkBufferedPublication :: Service -> ExecutionOrigin -> Value -> IO ()
+checkBufferedPublication s origin item = do
+ quiet <- parseValue 500 historyOnlyP item
+ identity <- either (failure 500) pure (bufferIdentity item)
+ saved <- if isJust (originGroup origin) then G.executionPublication s identity else D.executionPublication s identity
+ case saved of
+  Nothing -> require (not quiet) 500 "History-only output has no accepted Outcome"
+  Just publication -> do
+   let expected=not (null (publicationFields publication))
+   require (quiet == expected && publicationText publication == at item "content") 500 "Buffered publication does not match its accepted result"
+
 rejectInvalidOutputs :: Service -> Text -> G.GroupRequestIndex -> IO ()
 rejectInvalidOutputs s owner contexts = do
  state <- agentState s owner
- forM_ (items (stateJSON state) "output_buffer") $ \item -> case checkedBufferedOrigin contexts state item of
-  Right _ -> pure ()
-  Left reason -> do
-   archive <- newId
-   writeJSON (archivePath s owner ("rejected-outputs/" <> archive)) (obj [("item",item),("error",str reason)])
-   let identity=case bufferIdentity item of Right saved -> Just saved; Left _ -> Nothing
-   DB.record s [owner] (maybe archive runIdText identity) "call.output_rejected" (obj [("item",item),("error",str reason)]) owner Nothing
-   current <- agentState s owner
-   let changed=mapTurns (\turn -> case identity of
-        Just saved | batchLeader turn == saved || turnId turn == saved -> (withTurnFields (put "error" (str reason)) turn) { turnStatus=Failed }
-        _ -> turn) current
-   saveState s owner (mapStateFields (put "output_buffer" (arr (filter (/=item) (items (stateJSON changed) "output_buffer")))) changed)
-   DB.project s owner
+ forM_ (items (stateJSON state) "output_buffer") $ \item -> do
+  assessment <- case checkedBufferedOrigin contexts state item of
+   Left reason -> pure (Left reason)
+   Right origin -> (Right <$> checkBufferedPublication s origin item) `catch` (\(APIError _ reason) -> pure (Left reason))
+  case assessment of
+   Right () -> pure ()
+   Left reason -> do
+    archive <- newId
+    writeJSON (archivePath s owner ("rejected-outputs/" <> archive)) (obj [("item",item),("error",str reason)])
+    let identity=case bufferIdentity item of Right saved -> Just saved; Left _ -> Nothing
+    DB.record s [owner] (maybe archive runIdText identity) "call.output_rejected" (obj [("item",item),("error",str reason)]) owner Nothing
+    current <- agentState s owner
+    let changed=mapTurns (\turn -> case identity of
+         Just saved | batchLeader turn == saved || turnId turn == saved -> (withTurnFields (put "error" (str reason)) turn) { turnStatus=Failed }
+         _ -> turn) current
+    saveState s owner (mapStateFields (put "output_buffer" (arr (filter (/=item) (items (stateJSON changed) "output_buffer")))) changed)
+    DB.project s owner
+readyOnPulse :: Pulse -> ExecutionOrigin -> Bool
+readyOnPulse tick origin = case originPurpose origin of
+ ScheduledExecution scheduled -> isNothing (scheduledDeadline scheduled) || pulseFrequency tick==Bph60
+ OrdinaryWork -> pulseFrequency tick/=Bph60
+ RoutinePolicySetup _ -> pulseFrequency tick/=Bph60
 
 publish :: Service -> Text -> G.GroupRequestIndex -> Pulse -> IO ()
 publish s a contexts tick = do
@@ -295,22 +333,22 @@ publish s a contexts tick = do
  forM_ [1,2] $ \slot -> do
   state <- agentState s a
   let document=stateJSON state
-      scheduled=pulseFrequency tick==Bph60
   candidates <- forM (items document "output_buffer") $ \item -> do
    origin <- either (failure 500) pure (checkedBufferedOrigin contexts state item)
    pure (item,origin)
-  case find ((==scheduled) . originIsScheduled . snd) candidates of
+  case find (readyOnPulse tick . snd) candidates of
    Nothing -> pure ()
    Just (item,parsed) -> do
+    quiet <- parseValue 500 historyOnlyP item
     time <- now
     ids <- field 500 item "members" :: IO [RunId]
     let sequence=int (get document "output_sequence")+1
         origin=toJSON parsed
         grouped=isJust (originGroup parsed)
-        updated=mapTurns (\t -> if turnId t `elem` ids then (withTurnFields (mergeFields [("output_at",str time),("output_order",num sequence)]) t) { turnStatus = Done } else t) state
-        messages=if grouped || any (\m -> get m "turn"==get item "turn" && at m "role"=="agent") (items document "chat") then items document "chat" else items document "chat"++[obj [("role",str "agent"),("content",get item "content"),("turn",get item "turn"),("time",str time),("origin",origin)]]
-    saveState s a $ mapStateFields (mergeFields ([("output_buffer",arr (filter (/=item) (items document "output_buffer"))),("output_sequence",num sequence),("chat",arr messages)] ++ [("last_output",get item "content") | not grouped])) updated
-    DB.pulseCall s tick a "chatOutput" slot (map groupIdText (maybeToList (originGroup parsed)))
+        updated=mapTurns (\t -> if turnId t `elem` ids then (withTurnFields (mergeFields ([("output_at",str time),("output_order",num sequence)] ++ [("notification",str "quiet") | quiet]) . remove ["notification"]) t) { turnStatus = Done } else t) state
+        messages=if quiet || grouped || any (\m -> get m "turn"==get item "turn" && at m "role"=="agent") (items document "chat") then items document "chat" else items document "chat"++[obj [("role",str "agent"),("content",get item "content"),("turn",get item "turn"),("time",str time),("origin",origin)]]
+    saveState s a $ mapStateFields (mergeFields ([("output_buffer",arr (filter (/=item) (items document "output_buffer"))),("output_sequence",num sequence),("chat",arr messages)] ++ [("last_output",get item "content") | not grouped && not quiet])) updated
+    unless quiet $ DB.pulseCall s tick a "chatOutput" slot (map groupIdText (maybeToList (originGroup parsed)))
     DB.project s a
     trimConversation s a
 
@@ -319,9 +357,15 @@ admit prepareSpecialist s a contexts tick = do
  runs <- readMVar (serviceRuns s)
  state <- agentState s a
  let reject turn = case (turnStatus turn,G.checkedTurnContext contexts turn) of
-      (Queued,Left reason) -> (withTurnFields (put "error" (str reason)) turn) { turnStatus=Failed }
-      _ -> turn
-     checked=mapTurns reject state
+      (Queued,Left reason) -> pure ((withTurnFields (put "error" (str reason)) turn) { turnStatus=Failed })
+      (Queued,Right origin) -> do
+       allowed <- try (R.ensureOriginAvailable s origin)
+       pure $ case allowed of
+        Left (APIError _ reason) -> (withTurnFields (put "error" (str reason)) turn) { turnStatus=Cancelled }
+        Right () -> turn
+      _ -> pure turn
+ turns <- traverse reject (agentTurns state)
+ let checked=state { agentTurns=turns }
  when (checked /= state) $ do
   saveState s a checked
   DB.project s a
@@ -337,31 +381,43 @@ admission :: AgentId -> [(AgentId,Int)] -> [(Turn,ExecutionOrigin)] -> Pulse -> 
 admission owner runs candidates tick
  | owner `notElem` owners && length owners>=4 = Nothing
  | first:_ <- legacy, null mine, not scheduled = Just (Admission (first :| []) 0 False)
- | slot:_ <- available, Just batch <- NE.nonEmpty queued, all (/=0) mine = Just (Admission (if scheduled then NE.head batch :| [] else batch) slot True)
+ | slot:_ <- available, (first,origin):rest <- queued, all (/=0) mine =
+    let batch=if scheduled || originIsScheduled origin then first :| []
+         else first :| [turn | (turn,following) <- rest, not (originIsScheduled following)]
+    in Just (Admission batch slot True)
  | otherwise = Nothing
  where
  owners=nub (map fst runs)
  mine=[slot | (agent,slot)<-runs,agent==owner]
  available=[n | n<-[1,2],n `notElem` mine]
  scheduled=pulseFrequency tick==Bph60
- queued=[t | (t,origin)<-candidates,boolean (turnField t "batchable"),originIsScheduled origin==scheduled]
+ queued=[(turn,origin) | (turn,origin)<-candidates,boolean (turnField turn "batchable"),readyOnPulse tick origin]
  legacy=[t | (t,_)<-candidates,not (boolean (turnField t "batchable"))]
 onPulse :: (AgentId -> IO ()) -> Service -> Pulse -> IO ()
 onPulse prepareSpecialist s tick = do
- R.dispatch s tick
  when (pulseFrequency tick==Bph60 || (pulseFrequency tick==Bpm60 && even (pulseNumber tick))) $ do
+  when (pulseFrequency tick==Bph60) $ R.restoreOccurrences s
   D.pendingWorks s
   G.reconcileGroups s
   G.dispatchGroups s
   contexts <- G.loadGroupRequestIndex s
   rows <- DB.agents s
+  -- Settle ready output before deciding whether the next Due is blocked.
+  forM_ rows $ \row -> do
+   let a=at row "id"
+   inactive <- retired s a
+   unless inactive $ publish s a contexts tick
+  D.reconcileWorks s
+  G.reconcileGroups s
+  R.dispatch s tick
+  G.dispatchGroups s
+  readyContexts <- G.loadGroupRequestIndex s
   forM_ rows $ \row -> do
    let a=at row "id"
    inactive <- retired s a
    unless inactive $ do
-    publish s a contexts tick
-    admit prepareSpecialist s a contexts tick
-    when (pulseFrequency tick==Bph60) $ admit prepareSpecialist s a contexts tick
+    admit prepareSpecialist s a readyContexts tick
+    when (pulseFrequency tick==Bph60) $ admit prepareSpecialist s a readyContexts tick
 runPulse :: (AgentId -> IO ()) -> Service -> Pulse -> IO ()
 runPulse prepareSpecialist s tick = try (onPulse prepareSpecialist s tick) >>= either report pure
  where report exception

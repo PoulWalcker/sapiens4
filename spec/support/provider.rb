@@ -96,4 +96,9 @@ record[:finished] = Time.now.to_f
 File.write(path + '.new', JSON.generate(record))
 File.rename(path + '.new', path)
 puts JSON.generate(type: 'thread.started', thread_id: 'fixture-session')
+puts JSON.generate(type: 'turn.started')
+Array(rule.fetch('events', [])).each { |event| puts(event.is_a?(String) ? event : JSON.generate(event)) }
 puts JSON.generate(type: 'item.completed', item: {type: 'agent_message', text: reply})
+Array(rule.fetch('completion', [{type: 'turn.completed', usage: {input_tokens: 100, cached_input_tokens: 20, output_tokens: 30}}])).each do |event|
+  puts(event.is_a?(String) ? event : JSON.generate(event))
+end
