@@ -70,18 +70,32 @@ begin
   end;
 end;
 
-function ProcessesStopped: Boolean;
-var Locator, Service, Processes, Process: Variant; I: Integer; Prefix, Executable: String;
+function InstallerProcessId: Cardinal;
+  external 'GetCurrentProcessId@kernel32.dll stdcall';
+
+function ProcessesStopped(ForUninstall: Boolean): Boolean;
+var Locator, Service, Processes, Process, SelfProcess: Variant;
+    I: Integer; ParentId: Cardinal; Prefix, Executable, Uninstaller: String;
 begin
   Result := False;
   try
     Prefix := AddBackslash(ExpandConstant('{app}'));
     Locator := CreateOleObject('WbemScripting.SWbemLocator');
     Service := Locator.ConnectServer('', 'root\CIMV2');
-    Processes := Service.ExecQuery('SELECT ExecutablePath FROM Win32_Process WHERE ExecutablePath IS NOT NULL');
+    ParentId := 0; Uninstaller := '';
+    if ForUninstall then begin
+      SelfProcess := Service.Get('Win32_Process.Handle="' + IntToStr(InstallerProcessId) + '"');
+      ParentId := SelfProcess.ParentProcessId;
+      Uninstaller := ExpandConstant('{uninstallexe}');
+    end;
+    Processes := Service.ExecQuery('SELECT ExecutablePath, ProcessId FROM Win32_Process WHERE ExecutablePath IS NOT NULL');
     for I := 0 to Processes.Count - 1 do begin
       Process := Processes.ItemIndex(I);
       Executable := Process.ExecutablePath;
+      { Inno keeps its original installed first phase alive while the temporary
+        second phase runs. Exempt only this exact path and current/parent PID. }
+      if ForUninstall and (CompareText(Executable, Uninstaller) = 0) and
+         ((Process.ProcessId = InstallerProcessId) or (Process.ProcessId = ParentId)) then Continue;
       if CompareText(Copy(Executable, 1, Length(Prefix)), Prefix) = 0 then begin
         Log('Install/uninstall refused: an executable from the installation is running.');
         Exit;
@@ -98,13 +112,13 @@ begin
   Result := '';
   if not SafeDestination then
     Result := 'Choose a new installation directory. Existing data or unowned files cannot be replaced.'
-  else if not ProcessesStopped then
+  else if not ProcessesStopped(False) then
     Result := 'Quit Sapiens4 Development and its backend, then retry. No running process will be stopped by Setup.';
 end;
 
 function InitializeUninstall: Boolean;
 begin
-  Result := OwnedDirectory and ProcessesStopped;
+  Result := OwnedDirectory and ProcessesStopped(True);
   if not Result then begin
     Log('Uninstall refused: missing installation identity, running process, or process-check failure.');
     if not UninstallSilent then

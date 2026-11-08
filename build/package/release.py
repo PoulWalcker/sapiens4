@@ -20,24 +20,36 @@ def verify(args):
             raise ValueError('Unexpected release identity')
         if record['packageStatus'] != 'provider-complete' or record['sourceCommit'] != args.source_commit or record['sourceDirty'] or record['version'] != args.version:
             raise ValueError('Incomplete provider, wrong version/source or dirty build cannot be released')
-        if len(record['artifacts']) != 1:
-            raise ValueError('Each platform receipt must bind one exact artifact')
-        item = record['artifacts'][0]
-        target = (item['platform'], item['architecture'])
+        items = record['artifacts']
+        if len(items) != 2 or {item.get('kind') for item in items} != {'installer', 'portable-zip'}:
+            raise ValueError('Each platform requires its primary installer and portable ZIP')
+        target = (items[0]['platform'], items[0]['architecture'])
         if target in targets:
             raise ValueError('Duplicate target')
         targets.add(target)
-        signing = {('macos', 'arm64'): 'developer-id', ('windows', 'x64'): 'authenticode'}
-        if item.get('signing') != signing.get(target) or item.get('supportStatus') != 'declared-target':
-            raise ValueError('Publisher-signed supported-target artifacts are required')
-        if target[0] == 'macos' and item.get('minimumOS') != '13.0':
-            raise ValueError('Experimental support-floor artifacts cannot be released')
-        if Path(item['assetName']).name != item['assetName'] or '\n' in item['assetName'] or '\r' in item['assetName']:
-            raise ValueError('Invalid asset name')
-        artifact = receipt.parent / item['assetName']
-        if artifact.stat().st_size != item['size'] or digest(artifact) != item['sha256']:
-            raise ValueError('Final artifact does not match receipt')
-        assets += [artifact, receipt]
+        expected = {('macos', 'arm64'): ('developer-id', 'Sapiens.dmg'),
+                    ('windows', 'x64'): ('authenticode', 'Sapiens-Setup.exe')}
+        if target not in expected:
+            raise ValueError('Unsupported release target')
+        signing, installer = expected[target]
+        names = set()
+        for item in items:
+            if (item['platform'], item['architecture']) != target or item.get('signing') != signing or item.get('supportStatus') != 'declared-target':
+                raise ValueError('Publisher-signed supported-target artifacts are required')
+            if target[0] == 'macos' and item.get('minimumOS') != '13.0':
+                raise ValueError('Experimental support-floor artifacts cannot be released')
+            name = item['assetName']
+            if Path(name).name != name or '\n' in name or '\r' in name or name in names:
+                raise ValueError('Invalid or duplicate asset name')
+            names.add(name)
+            wanted = installer if item['kind'] == 'installer' else f'sapiens4-development-{args.version}-{target[0]}-{target[1]}.zip'
+            if name != wanted:
+                raise ValueError('Unexpected installer/portable artifact name')
+            artifact = receipt.parent / name
+            if artifact.stat().st_size != item['size'] or digest(artifact) != item['sha256']:
+                raise ValueError('Final artifact does not match receipt')
+            assets.append(artifact)
+        assets.append(receipt)
     if targets != {('macos', 'arm64'), ('windows', 'x64')}:
         raise ValueError('Both supported targets must have the exact tag version')
     Path(args.output).write_text(''.join(str(path) + '\n' for path in assets))
