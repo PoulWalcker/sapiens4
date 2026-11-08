@@ -56,10 +56,13 @@ try {
     $signing = if ($CertificateThumbprint) { 'authenticode' } else { 'none' }
     & python build/package/package.py finalize --runtime $payload --signing $signing
     if ($LASTEXITCODE -ne 0) { throw 'Final signed runtime inventory failed' }
+    [IO.File]::WriteAllText((Join-Path $destination 'sapiens-installation.id'), 'com.poulwalcker.sapiens4.development')
     $artifact = Join-Path (Split-Path $destination -Parent) "sapiens4-development-$Version-windows-x64.zip"
     if (Test-Path -LiteralPath $artifact) { throw 'Versioned artifact already exists' }
     Compress-Archive -LiteralPath $destination -DestinationPath $artifact
-    & python build/package/package.py receipt --artifact $artifact --manifest $manifest --output ($artifact -replace '\.zip$','.release.json')
+    & (Join-Path $repo 'build/package/windows-installer.ps1') -PackageDirectory $destination -OutputDirectory (Split-Path $destination -Parent) -Version $Version -CertificateThumbprint $CertificateThumbprint -TimestampUrl $TimestampUrl
+    if ($LASTEXITCODE -ne 0) { throw 'Installer assembly failed' }
+    & python build/package/package.py receipt --artifact $artifact --installer (Join-Path (Split-Path $destination -Parent) 'Sapiens-Setup.exe') --manifest $manifest --output ($artifact -replace '\.zip$','.release.json')
     if ($LASTEXITCODE -ne 0) { throw 'Release receipt failed' }
     Write-Host "Built $destination/Sapiens4.exe`nArtifact $artifact"
 } finally { Pop-Location }
