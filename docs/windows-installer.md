@@ -70,10 +70,20 @@ No further installer framework or update owner needs selection.
 Use a disposable existing Windows test context with synthetic state and an
 unlocked desktop. These are prepared commands, not steps executed by this report.
 The Windows checkout must be main's frozen combined source (including D3's
-Windows environment/credential fixes), not the D1-only branch. Keep GHC, Make and
-shell paths free of spaces. Reuse the version/toolchain setup in
+Windows environment/credential fixes), not the D1-only branch. Main supplies the
+reviewed source snapshot and exact local submodule contents/pins, including any
+unpublished local registration. A portable validation export omits `.git` and
+includes generated `build/source-provenance.json`, `.rspec` and the complete
+`spec/` helpers as well as application/build/resource files. This ensures the
+Windows build produces `sapiens-provider.exe` for controlled scenarios. Main
+creates that export from its frozen checkpoint; D1 does not copy active UI edits.
+Keep GHC, Make and shell paths free of spaces. Reuse the version/toolchain setup in
 [the Windows README](../environments/windows/README.md): x64 GHC 9.14.1, Cabal
-3.18.2, Node 22.5+, Ruby 3.4, Python 3.10+, Rust 1.99.0/MSVC, Git, sh and Make.
+3.18.2 (3.18.2.0 numeric version), Node 22.23.2 and Ruby 3.4.11 matching the current
+native CI pins, Python 3.10+, Rust 1.99.0/MSVC, Git, sh and Make. Put the GHC
+`bin` and `mingw/bin` tools on PATH; `build/Build.hs` invokes `windres` by name.
+Blindly's pinned script builds target `x86_64-pc-windows-msvc`; that Rust target
+and MSVC build tools must be configured, including for an x64-emulation run.
 Record tool versions, source SHA/patch receipt, exact submodule pins and OS/process
 architecture; do not collect complete environment variables or credentials.
 
@@ -105,7 +115,26 @@ remain research evidence, not production update/migration acceptance.
 Then validate the combined native portable app with the already acquired provider:
 
 ```powershell
+$ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $Checkout
+Get-Command ghc,cabal,node,rustc,cargo,ruby,python,git,sh,make,windres |
+  Select-Object Name,Source
+ghc --numeric-version
+ghc --print-target-platform # Must be x86_64 Windows/mingw, not native ARM64.
+cabal --numeric-version
+node --version
+rustc --version
+rustup target list --installed
+ruby --version
+python --version
+# Match native CI's isolated HTTPS Hackage configuration, preserving existing config.
+$CabalCache = Join-Path $Checkout 'submodules\libs4\haskell\.cabal'
+$CabalConfig = Join-Path $CabalCache 'config'
+if (-not (Test-Path -LiteralPath $CabalConfig)) {
+  New-Item -ItemType Directory -Path $CabalCache -Force | Out-Null
+  [IO.File]::WriteAllText($CabalConfig,
+    "repository hackage.haskell.org`n  url: https://hackage.haskell.org/`n  secure: True`n")
+}
 $Evidence = Join-Path $env:TEMP ('Sapiens D1 evidence ' + [Guid]::NewGuid())
 New-Item -ItemType Directory -Path $Evidence | Out-Null
 $env:SAPIENS_CONFIG_DIR = Join-Path $Evidence 'synthetic config'
@@ -152,7 +181,10 @@ be exercised. Until then, installer install/reinstall/uninstall and generated
 helper signing remain NOT_RUN. For every actual native run retain source/pins,
 manifest/buildId, final receipts, package/public-route assertions, owned-process
 exit evidence, prerequisite results and sanitized failure logs under `$Evidence`.
-Record Windows 11 ARM x64-emulation separately from x64-PC results. Reuse these
+Record Windows 11 ARM x64-emulation separately from x64-PC results. Unsigned
+builds need no publisher account; SignTool/certificates become prerequisites only
+for the separately authorized signing phase. Keep the c9b18b6 macOS audit baseline
+and main's next D3 UI checkpoint distinct in source/patch receipts. Reuse these
 existing scenarios and the probe; no second PowerShell test framework is needed.
 
 ## Fixed builder inputs and prepared command
