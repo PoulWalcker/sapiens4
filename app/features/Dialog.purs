@@ -78,50 +78,29 @@ dialogTitle :: M.Dialog -> String
 dialogTitle d = if d.kind /= M.Onboarding then d.title else case d.content of
   F.Setup value -> case D.s "step" value of
     "welcome" -> "Welcome to Sapiens"
-    "sign_in" -> "Sign in to Codex"
+    "sign_in" -> if D.s "state" (D.get "login" value) == "signing_in" then "Complete sign-in in your browser" else "Connect your ChatGPT account"
     _ -> "System permissions"
   _ -> d.title
 
 body :: M.Model -> M.Dialog -> V.Html
 body m d = case d.kind of
   M.AppMenu -> V.node "nav" [V.label "Corpora menu"] [V.button "app-menu-row" "Workspace & settings" $ OpenDialog M.WorkspaceSettings F.NoRecord,V.button "app-menu-row" "Shared computer" $ OpenDialog M.Computer F.NoRecord]
-  M.WorkspaceSettings -> V.div "" [V.p "" "Talk to your Sapis in chat, manage their notes, and save documents in their workspaces. Sapis can delegate requests through ChiefSapi.",V.p "" "Use the corpora menu to switch workspaces. Active and Paused describe execution on the host; Connecting means this device is restoring its connection.",V.button "button" "Edit decision prompts" $ OpenDialog M.DecisionPrompts F.NoRecord,V.when m.localAvailable $ V.button "button" "Set up Sapiens" $ OpenDialog M.Onboarding F.NoRecord]
+  M.WorkspaceSettings -> V.div "" [V.p "" "Talk to your Sapis in chat, manage their notes, and save documents in their workspaces. Sapis can delegate requests through ChiefSapi.",V.p "" "Use the corpora menu to switch workspaces. Active and Paused describe execution on the host; Connecting means this device is restoring its connection.",V.when m.localAvailable $ accountView d,V.button "button" "Edit decision prompts" $ OpenDialog M.DecisionPrompts F.NoRecord,V.when m.localAvailable $ V.button "button" "System permissions" $ OpenDialog M.Onboarding F.NoRecord]
   M.Computer -> V.div "" [V.p "" "Ask a Sapi in chat to work on your computer.",V.div "settings-row" [V.span [] (if m.snapshot.computer.built then "Computer helper is installed" else "Computer helper is missing. Reinstall Sapiens to repair it."),V.span [V.cls "tag"] (if owner == "" then "Available" else "In use · " <> (M.agent m owner).name)],V.p "" $ "Sapis share one computer. " <> if windows then "Windows UI Automation works with accessible apps on your desktop. Elevated apps and secure system dialogs cannot be controlled." else "macOS Accessibility access is required for desktop interaction.",V.when m.localAvailable $ V.button "button" "Check setup and permissions" $ OpenDialog M.Onboarding F.NoRecord]
   M.Onboarding -> case d.content of
     F.Setup value ->
-      let provider = D.s "provider" value
-          login = D.get "login" value
-          state = D.s "state" login
-          permission = D.s "computer_permission" value
-          setup name caption = V.button "button" caption $ DialogCommand $ Intent.Setup name
+      let permission = D.s "computer_permission" value
+          setup = setupButton d
       in V.div "setup-screen" $ case D.s "step" value of
         "welcome" ->
           [V.p "form-hint" "Step 1 of 3 · Welcome"
-          ,V.p "" "Sapiens helps you work with AI in your own workspace. First, connect Codex, then choose whether to enable computer control."
-          ,V.p "" "Your existing Codex sign-in will be used if this Sapiens installation is already connected."
+          ,V.p "" "Sapiens helps you work with AI in your own workspace. First, connect your ChatGPT account, then choose whether to enable computer control."
+          ,V.p "" "If this Sapiens installation is already connected, you can skip signing in again."
           ,setup "begin" "Get started"]
-        "sign_in" ->
-          [V.p "form-hint" "Step 2 of 3 · Codex sign-in"
-          ,V.p "" "Sign in with your ChatGPT account to use Codex in Sapiens. Sapiens keeps this sign-in separate from your other Codex installations."
-          ,V.textNode "p" [V.attr "role" "status"] $ case provider of
-            "missing" -> "Codex is missing from this installation. Reinstall Sapiens to repair it."
-            "unavailable" -> "Codex sign-in could not be checked. Recheck setup to retry. Any existing sign-in has been preserved."
-            "signing_in" -> "Waiting for you to finish signing in…"
-            _ -> "Connect Codex to continue to your workspace. Your account's model access and usage limits apply."
-          ,V.when (state == "failed" || state == "expired" || state == "cancelled") $ V.p "" $ case state of
-            "cancelled" -> "Sign-in cancelled. You can try again when you are ready."
-            "expired" -> "Sign-in expired. Start again for a new code."
-            _ -> "Sign-in failed. Check your connection and enable device code authorization in your ChatGPT security settings, then try again."
-          ,V.when (provider == "sign_in_required") $ setup "login" "Sign in with ChatGPT"
-          ,V.when (D.s "code" login /= "") $ V.div ""
-            [V.p "" "Open the official sign-in page and enter this one-time code. Continue only if you started this sign-in in Sapiens."
-            ,V.textNode "strong" [] (D.s "code" login)
-            ,setup "open-login" "Open sign-in page"]
-          ,V.when (provider == "signing_in") $ setup "cancel" "Cancel sign-in"
-          ,setup "refresh" "Recheck setup"]
+        "sign_in" -> [V.p "form-hint" "Step 2 of 3 · ChatGPT account",signInView value]
         _ ->
           [V.p "form-hint" "Step 3 of 3 · System permissions"
-          ,V.p "" "Codex is connected. Chat and Notes do not need extra system permissions."
+          ,V.p "" "ChatGPT is connected. Chat and Notes do not need extra system permissions."
           ,V.p "" $ case permission of
             "missing" -> "The optional computer helper is missing. You can use chat now and reinstall Sapiens to repair computer control later."
             "granted" -> "Accessibility access is enabled for computer control."
@@ -255,3 +234,65 @@ saveTask m d deleted =
   let existing = F.contextId d.record /= ""
       payload = D.merge (D.json {title:d.fields.title,body:d.fields.body,assignee:d.fields.assignee,state:d.fields.state}) $ if existing then D.json {revision:D.json $ F.contextRevision d.record,deleted,state:if F.contextDeleted d.record then "backlog" else d.fields.state} else D.empty
   in {path:M.ownerPath m <> "/tasks" <> if existing then "/" <> B.encodeURI (F.contextId d.record) else "",method:if existing then "PUT" else "POST",body:payload,caption:if deleted then "Task deleted." else "Task saved."}
+
+
+setupButton :: M.Dialog -> String -> String -> V.Html
+setupButton d name caption = V.control [V.cls "button",V.disabled $ M.dialogBusy d] caption $ DialogCommand $ Intent.Setup name
+
+signInView :: Json -> V.Html
+signInView value = V.div "account-sign-in" $
+  [V.textNode "p" [V.attr "role" "status"] $ if signing then "Once you’re signed in, you can return to Sapiens." else "Sign in to start using Sapiens."
+  ,V.when (provider == "missing") $ V.p "" "Codex is missing from this installation. Reinstall Sapiens to repair it."
+  ,V.when (provider == "unavailable") $ V.p "" "We couldn’t check your sign-in. Your existing account has been preserved."
+  ,V.when (state == "failed" || state == "expired" || state == "browser_busy" || state == "logout_failed" || state == "cancelled") $ V.p "" $ case state of
+    "expired" -> "Sign-in timed out. Please try again."
+    "browser_busy" -> "Another sign-in is using the browser callback. Finish it and try again, or use a one-time code."
+    "logout_failed" -> "We couldn’t finish signing out. Recheck your connection, then try signing out again."
+    "cancelled" -> "Sign-in cancelled. You can try again when you’re ready."
+    _ -> "Sign-in failed. Check your connection and try again."
+  ,V.when (provider == "sign_in_required") $ V.button "button primary" (if state == "failed" || state == "expired" then "Try again" else "Continue with ChatGPT") $ DialogCommand $ Intent.Setup "login"
+  ,V.when (provider == "sign_in_required") $ V.p "form-hint" "Your browser will open to complete sign-in."
+  ,V.when (signing && D.s "url" login /= "") $ V.div "account-actions"
+    [V.button "button" (if D.s "code" login == "" then "Open browser again" else "Open sign-in page") $ DialogCommand $ Intent.Setup "open-login"
+    ,V.button "button" "Copy sign-in link" $ Copy (D.s "url" login) "Sign-in link copied."]
+  ,V.when (D.s "code" login /= "") $ V.div "account-device-code"
+    [V.p "" "Enter this one-time code on the official OpenAI page. Only continue if you started this sign-in in Sapiens."
+    ,V.textNode "strong" [] (D.s "code" login)]
+  ,V.when signing $ V.button "button" "Cancel" $ DialogCommand $ Intent.Setup "cancel"
+  ,V.when (not signing && provider /= "missing") $ V.button "button" "Recheck connection" $ DialogCommand $ Intent.Setup "refresh"
+  ,V.when (provider == "sign_in_required") $ V.node "details" [V.cls "account-help"]
+    [V.textNode "summary" [] "Having trouble signing in?"
+    ,V.p "form-hint" "You can connect the same ChatGPT account using a one-time code. Device code login must be enabled in your ChatGPT security settings."
+    ,V.button "button" "Use a one-time code" $ DialogCommand $ Intent.Setup "device-login"]]
+  where
+  provider = D.s "provider" value
+  login = D.get "login" value
+  state = D.s "state" login
+  signing = provider == "signing_in"
+
+accountView :: M.Dialog -> V.Html
+accountView d = V.node "section" [V.cls "account-card",V.label "ChatGPT account"] $
+  [V.textNode "h3" [] "ChatGPT account"] <> case d.content of
+    F.Setup value ->
+      let provider = D.s "provider" value
+          state = D.s "state" (D.get "login" value)
+          confirmation = d.fields.value == "change-account" || d.fields.value == "sign-out"
+      in if provider == "signing_out" then [V.textNode "p" [V.attr "role" "status"] "Signing out…"]
+      else if confirmation then
+        [V.textNode "h4" [] (if d.fields.value == "change-account" then "Change ChatGPT account?" else "Sign out of ChatGPT?")
+        ,V.p "" "You’ll be signed out of your current account. Your chats and settings will stay on this device."
+        ,V.when (d.fields.value == "change-account") $ V.p "form-hint" "Choose the account you want on the OpenAI page. If you cancel the new sign-in, Sapiens will stay disconnected."
+        ,V.div "account-actions" [setupButton d (d.fields.value) (if d.fields.value == "change-account" then "Continue" else "Sign out"),V.control [V.cls "button",V.disabled $ M.dialogBusy d] "Cancel" $ Field F.Value ""]]
+      else if provider == "signed_in" then
+        [V.textNode "p" [V.cls "account-connected",V.attr "role" "status"] "Connected"
+        ,V.when (D.s "hold" value == "review") $ V.div ""
+          [V.p "form-hint" "AI work is paused. Review any pending tasks before resuming with this account."
+          ,setupButton d "resume" "Resume AI work"]
+        ,V.when (D.s "hold" value /= "" && D.s "hold" value /= "review") $ V.p "" "The last account change was interrupted. Sign out and reconnect before resuming AI work."
+        ,V.div "account-actions"
+          [V.control [V.cls "button",V.disabled $ M.dialogBusy d] "Change account" $ Field F.Value "change-account"
+          ,V.control [V.cls "button",V.disabled $ M.dialogBusy d] "Sign out" $ Field F.Value "sign-out"]]
+      else [V.when (provider /= "signing_in") $ V.p "" (if provider == "unavailable" then "Unable to check connection" else "Not connected")
+           ,signInView value
+           ,V.when (provider == "unavailable" || state == "logout_failed") $ V.control [V.cls "button",V.disabled $ M.dialogBusy d] "Sign out" $ Field F.Value "sign-out"]
+    _ -> [V.p "" "Checking connection…"]

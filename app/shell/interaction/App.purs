@@ -70,7 +70,9 @@ handle runtime input = session input
       unless (M.remote m || m.setupChecked) do
         H.modify_ _ {setupChecked=true}
         E.attempt (C.json "/api/host/onboarding" "GET" D.null) \result -> case result of
-          Right value -> unless (D.b "completed" value) $ dispatch $ OpenDialog M.Onboarding F.NoRecord
+          Right value -> do
+            H.modify_ _ {account=value}
+            unless (D.b "completed" value) $ dispatch $ OpenDialog M.Onboarding F.NoRecord
           Left _ -> pure unit
     Finalize -> liftEffect $ C.dispose runtime
     Poll -> E.runUpdate runtime dispatch U.Poll

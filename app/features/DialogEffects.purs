@@ -44,14 +44,16 @@ handle runtime dispatch action = case action of
         M.DecisionPrompts -> receive d.identity (\value -> E.modifyDialog d.identity _ {content=F.Prompts $ map F.prompt $ D.rows "prompts" value,fields=F.decode $ D.first $ D.rows "prompts" value,status=M.Editing}) $ E.api runtime m "/api/decision-prompts" "GET" D.null
         M.RelayList -> receive d.identity (\value -> E.modifyDialog d.identity _ {content=F.relayRegistry value,status=M.Editing}) $ C.json "/api/host/relays" "GET" D.null
         M.Onboarding -> dispatch $ OnboardingPoll d.identity
+        M.WorkspaceSettings -> when m.localAvailable $ dispatch $ OnboardingPoll d.identity
         M.HostPairing -> dispatch $ HostPairPoll d.identity
         M.EditCorpora -> liftEffect $ B.focus "#corpora-dialog textarea"
         M.ConnectRemote -> liftEffect $ B.focus "#paste-invitation textarea"
         _ -> pure unit
-  OnboardingPoll id -> E.inDialog id \d -> when (d.kind == M.Onboarding) do
+  OnboardingPoll id -> E.inDialog id \d -> when (d.kind == M.Onboarding || d.kind == M.WorkspaceSettings) do
     receive id (\value -> do
+      H.modify_ _ {account=value}
       E.modifyDialog id _ {content=F.Setup value,status=M.Editing}
-      when (D.s "provider" value == "signing_in") $ E.later 1000.0 $ dispatch $ OnboardingPoll id) $ C.json "/api/host/onboarding" "GET" D.null
+      when (A.elem (D.s "provider" value) ["signing_in","signing_out"]) $ E.later 1000.0 $ dispatch $ OnboardingPoll id) $ C.json "/api/host/onboarding" "GET" D.null
   CloseDialog -> do
     m <- H.get
     case m.dialog of
@@ -206,9 +208,10 @@ handle runtime dispatch action = case action of
       _ -> traverse_ (\d -> unless (M.dialogBusy d) $ dialogCommand m d command) m.dialog
   dialogCommand m d command = case command of
     Intent.Setup setupAction -> runDialog d (\value -> do
-      E.modifyDialog d.identity _ {content=F.Setup value,status=M.Editing}
+      H.modify_ _ {account=value}
+      E.modifyDialog d.identity \current -> current {content=F.Setup value,status=M.Editing,fields=current.fields {value=""}}
       when (setupAction == "finish" && D.b "completed" value) $ dispatch CloseDialog
-      when (setupAction == "login" && D.s "provider" value == "signing_in") $ E.later 1000.0 $ dispatch $ OnboardingPoll d.identity) $ C.json "/api/host/onboarding" "POST" $ D.json {action: setupAction}
+      when (A.elem (D.s "provider" value) ["signing_in","signing_out"]) $ E.later 1000.0 $ dispatch $ OnboardingPoll d.identity) $ C.json "/api/host/onboarding" "POST" $ D.json {action: setupAction}
     Intent.SuggestNames -> do
       E.modifyDialog d.identity (\s -> s {identity=s.identity+1})
       H.modify_ (\s -> s {sequence=s.sequence+1})

@@ -25,6 +25,7 @@ import GHC.Clock (getMonotonicTimeNSec)
 import System.Directory
 import System.Environment
 import System.Exit
+import System.FileLock
 import System.FilePath
 import System.Info
 import System.IO
@@ -107,7 +108,40 @@ codexHome = do
 #endif
  pure home
 codexConfig :: [String]
-codexConfig = ["-c","cli_auth_credentials_store=\"file\""]
+codexConfig = ["-c","cli_auth_credentials_store=\"file\"","-c","forced_login_method=\"chatgpt\""]
+
+-- A profile-wide OS lock covers whole runs, including gaps between model calls.
+-- Credential changes take the exclusive side, across corpora and host processes.
+profileFile :: FilePath -> IO FilePath
+profileFile name = (</>name) . takeDirectory <$> codexHome
+
+profileHold :: IO Text
+profileHold = do
+ path <- profileFile "account-state.json"
+ (do
+  value <- readJSON path empty
+  pure (at value "hold")) `catch` (\(_::IOException) -> pure "uncertain")
+
+holdProfile :: Text -> IO ()
+holdProfile hold = profileFile "account-state.json" >>= \path -> writeJSON path (obj [("hold",str hold)])
+
+profileLock :: SharedExclusive -> IO (Maybe FileLock)
+profileLock mode = profileFile "account.lock" >>= flip tryLockFile mode
+
+runLease :: IO (Maybe FileLock)
+runLease = mask_ $ do
+ lease <- profileLock Shared
+ case lease of
+  Nothing -> pure Nothing
+  Just lock -> do
+   hold <- profileHold `onException` unlockFile lock
+   if T.null hold then pure lease else unlockFile lock >> pure Nothing
+
+withReadyProfile :: IO a -> IO a
+withReadyProfile action = bracket
+ (runLease >>= maybe (failure 409 "Connect ChatGPT in Settings and resume AI work before starting a task.") pure)
+ unlockFile (const action)
+
 codexBinary :: IO (Maybe FilePath)
 codexBinary = do
  override <- lookupEnv "SAPIENS_CODEX_BINARY"

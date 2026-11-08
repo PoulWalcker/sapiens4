@@ -108,7 +108,7 @@ submission m =
   let text = S.trim $ M.draft m
       items = M.attachments m
       owner = M.selected m
-  in if (text == "" && A.null items) || Set.member m.selected m.sending || m.uploading > 0 || not (M.online m) || (M.busy m) || owner.retired || owner.archived || A.elem (m.snapshot.corpora.status) [X.Paused,X.Archived] then Nothing
+  in if M.accountBlocked m || (text == "" && A.null items) || Set.member m.selected m.sending || m.uploading > 0 || not (M.online m) || (M.busy m) || owner.retired || owner.archived || A.elem (m.snapshot.corpora.status) [X.Paused,X.Archived] then Nothing
      else Just {epoch:m.epoch,owner:m.selected,text,attachments:map (_.id) items,path:M.ownerPath m <> "/messages",workload:case m.clarification of
        Just work | work.owner == m.selected -> Just $ work.id
        _ -> Nothing}

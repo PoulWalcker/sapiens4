@@ -107,4 +107,4 @@ composer m = V.node "div" [V.cls "composer-area",V.id "composer-area",V.hidden $
   placeholder = case m.clarification of
     Just work | work.owner == m.selected -> "Clarify " <> work.taskId <> " for Chief…"
     _ -> if N.limit m.env < 3 then "Message…" else "Message " <> a.name <> "…"
-  blocked = not (M.online m) || (M.busy m) || a.retired || a.archived || A.elem (m.snapshot.corpora.status) [X.Paused,X.Archived] || Set.member m.selected m.sending || m.uploading > 0
+  blocked = M.accountBlocked m || not (M.online m) || (M.busy m) || a.retired || a.archived || A.elem (m.snapshot.corpora.status) [X.Paused,X.Archived] || Set.member m.selected m.sending || m.uploading > 0
