@@ -4,14 +4,17 @@ RSpec.describe 'Source distribution contract' do
     @release = File.join(@folder, 'source')
     files, error, code = Contract.capture('git', 'ls-files', '--recurse-submodules',
       'build', 'corpora', 'remote', 'environments', 'app',
-      'license', 'README.md', 'submodules/blindly4/license', 'submodules/blindly4/README.md', 'submodules/libs4')
+      'license', 'README.md', 'submodules/blindly4', 'submodules/libs4')
     expect(code).to eq(0), error
     files.lines.map(&:strip).each do |file|
-      next if file.end_with?('.py', '.swift', '.cs')
+      next if file.end_with?('.swift', '.cs') || (file.end_with?('.py') && !file.start_with?('build/package/'))
       target = File.join(@release, file)
       FileUtils.mkdir_p(File.dirname(target))
       FileUtils.cp(File.join(Contract::ROOT, file), target)
     end
+    _, error, code = Contract.capture(Gem.win_platform? ? 'python' : 'python3', 'build/package/package.py', 'provenance',
+      '--output', File.join(@release, 'build/source-provenance.json'))
+    expect(code).to eq(0), error
     if ENV['SAPIENS_TEST_CABAL_CACHE']
       cache = File.realpath(ENV['SAPIENS_TEST_CABAL_CACHE'])
       destination = File.join(@release, 'submodules/libs4/haskell/.cabal')
@@ -24,12 +27,8 @@ RSpec.describe 'Source distribution contract' do
     @data = File.join(@folder, "existing corpora's é")
     FileUtils.mkdir_p(@data)
     File.write(File.join(@data, 'keep.txt'), 'Existing corpora data')
-    @app = File.join(@release, '.build/macos/Sapiens4.app')
-    if RUBY_PLATFORM.include?('darwin')
-      FileUtils.mkdir_p(File.join(@app, 'Contents/Resources'))
-      File.write(File.join(@app, 'Contents/Resources/obsolete-helper.py'), 'Old build artifact')
-    end
-    command = RUBY_PLATFORM.include?('darwin') ? ['sh', 'environments/macos/build.sh'] : ['runghc', 'build/Build.hs']
+    @app = File.join(@release, '.build/macos/Sapiens4 Development.app')
+    command = RUBY_PLATFORM.include?('darwin') ? ['sh', 'environments/macos/build.sh', '--allow-missing-provider'] : ['runghc', 'build/Build.hs']
     out, error, code = Contract.capture(*command, chdir: @release, timeout: 1200,
       env: {'SAPIENS_DATA_DIR' => @data})
     expect(code).to eq(0), out + error
@@ -51,15 +50,21 @@ RSpec.describe 'Source distribution contract' do
 
   it 'builds a signed macOS launcher for existing data without changing that data', :macos do
     skip 'macOS desktop build' unless RUBY_PLATFORM.include?('darwin')
-    out, error, code = Contract.capture('plutil', '-convert', 'json', '-o', '-', File.join(@app, 'Contents/Resources/Launcher.plist'))
-    expect(code).to eq(0), error
-    expect(JSON.parse(out)).to include('Repository' => @release, 'DataDirectory' => @data,
-      'Executable' => File.join(@release, '.build/bin/sapiens4'))
+    manifest = JSON.parse(File.read(File.join(@app, 'Contents/Resources/runtime/package-manifest.json')))
+    expect(manifest).to include('appId' => 'com.poulwalcker.sapiens4.development',
+      'channel' => 'development', 'updateDiscovery' => false)
+    expect(File.exist?(File.join(@app, 'Contents/Resources/Launcher.plist'))).to eq(false)
+    expect(File.executable?(File.join(@app, 'Contents/Resources/runtime/.build/bin/sapiens4'))).to eq(true)
     expect(Dir.children(@data)).to eq(['keep.txt'])
     expect(File.read(File.join(@data, 'keep.txt'))).to eq('Existing corpora data')
-    expect(File.exist?(File.join(@app, 'Contents/Resources/obsolete-helper.py'))).to eq(false)
     _, error, code = Contract.capture('codesign', '--verify', '--strict', @app)
     expect(code).to eq(0), error
+    before = File.binread(File.join(@app, 'Contents/Resources/runtime/package-manifest.json'))
+    _, error, code = Contract.capture('sh', 'environments/macos/build.sh', '--skip-build', '--allow-missing-provider',
+      chdir: @release, timeout: 120)
+    expect(code).not_to eq(0)
+    expect(error).to include('Output app already exists')
+    expect(File.binread(File.join(@app, 'Contents/Resources/runtime/package-manifest.json'))).to eq(before)
   end
 
   it 'boots from a source-only release and completes work using its packaged assets' do
