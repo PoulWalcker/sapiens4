@@ -178,16 +178,19 @@ def stage(args):
 
 
 def receipt(args):
-    artifact, manifest = Path(args.artifact), Path(args.manifest)
+    manifest = Path(args.manifest)
     package = json.loads(manifest.read_text())
+    artifacts = [(Path(args.artifact), 'portable-zip')]
+    if args.installer:
+        artifacts.insert(0, (Path(args.installer), 'installer'))
     record = {'schemaVersion': 1, 'appId': package['appId'], 'version': package['version'],
               'repository': package['repository'], 'channel': package['channel'],
               'sourceCommit': package['sourceCommit'], 'sourceDirty': package['sourceDirty'],
               'packageStatus': package['packageStatus'], 'artifacts': [{
                   'platform': package['platform'], 'architecture': package['architecture'], 'buildId': package['buildId'],
                   'minimumOS': package['minimumOS'], 'supportStatus': package['supportStatus'], 'signing': package['signing'],
-                  'assetName': artifact.name, 'size': artifact.stat().st_size, 'sha256': digest(artifact),
-                  'packageManifestSha256': digest(manifest)}]}
+                  'kind': kind, 'assetName': artifact.name, 'size': artifact.stat().st_size, 'sha256': digest(artifact),
+                  'packageManifestSha256': digest(manifest)} for artifact, kind in artifacts]}
     Path(args.output).write_text(json.dumps(record, indent=2) + '\n')
 
 
@@ -216,6 +219,7 @@ if __name__ == '__main__':
     record = commands.add_parser('receipt')
     for name in ('artifact', 'manifest', 'output'):
         record.add_argument('--' + name, required=True)
+    record.add_argument('--installer')
     record.set_defaults(run=receipt)
     for name, action in [('finalize', finalize), ('verify', verify)]:
         operation = commands.add_parser(name)
