@@ -1,59 +1,57 @@
-# Sapiens4 for macOS
+# Sapiens4 Development for macOS
 
-An AppKit/WebKit window with a Dock icon. Requires macOS 13+, Command Line Tools,
-stable Rust, GHC 9.14.1, Cabal 3.18.2, Node.js 22.5+, npm, Git and authenticated
-Codex CLI 0.156.1 or newer.
+The development bundle contains the AppKit/WebKit shell, owned Haskell host,
+generated UI, prompts, Blindly4, complete pinned Codex payload and licenses.
+It derives its runtime from the installed app, including paths with spaces or
+Unicode. End users do not need a source checkout or build tools.
 
-## Build and open
+The supported macOS floor remains **13.0**. The currently selected complete
+provider includes a voice helper declaring 14.0. Packaging rejects that mismatch
+by default. `--experimental-minimum-os 14.0` permits an explicitly labeled local
+experiment; it does not certify macOS 13 compatibility or authorize a support
+change. D3's provider compatibility investigation and integration remain required.
 
-From the repository root:
+## Build a development bundle
 
-```sh
-git submodule update --init --recursive
-./submodules/blindly4/macos/build.sh
-./environments/macos/build.sh
-open .build/macos/Sapiens4.app
-```
-
-The build records the compiled backend executable, PATH, repository location
-and data directory. Keep the checkout and its build output in place.
-The app starts the local backend when needed; closing or quitting its window
-leaves the backend running so conversations can finish. It installs no login item.
-Right-click the Dock icon → Options → Keep in Dock.
-
-Data defaults to the checkout's `.sapiens4` directory. Set `SAPIENS_DATA_DIR` when
-building to retain an existing data location. The backend log is
-`desktop-server.log` inside that directory. Builds do not move or delete data.
-
-## Manual version changes
-
-Desktop update checks, update controls, managed installation, and automatic
-backup/rollback are removed. Build and open each new version manually. The
-app is locally ad-hoc signed, not notarized or portable.
-
-For an existing managed installation, first let active work finish, quit the old
-app, and gracefully stop its backend before opening the replacement. Reuse the
-exact data directory recorded by the old installation:
+Builders need GHC 9.14.1, Cabal 3.18.2, Node.js 22.5+, Rust, Python 3.10+, Git
+and Command Line Tools. Initialize the exact submodule pins. Acquire the complete
+provider with D3's acquisition script after integration, then run:
 
 ```sh
-SAPIENS_DATA_DIR="/absolute/path/to/existing/data" ./environments/macos/build.sh
-open .build/macos/Sapiens4.app
+./environments/macos/build.sh --version 0.1.0-dev --provider /absolute/path/to/verified/codex
+open '.build/macos/Sapiens4 Development.app'
 ```
 
-Keep the old data directory and backups. The new build does not read or modify
-old managed releases, and an old Dock shortcut still opens the old app; pin the
-new app instead. Never run two backends against the same data directory.
+The script builds native/UI/Blindly outputs and assembles a new app, versioned ZIP
+and external release receipt. Output must be new; use `--output-directory` for
+another assembly. `--skip-build` reuses existing outputs and requires separately
+verified build provenance. `--allow-missing-provider` is limited to native
+validation and cannot produce a complete release. Default signing is ad-hoc.
+See [the release runbook](../../docs/release-development.md) for publisher signing.
 
-## Workspace and verification
+## State and process ownership
 
-Native tabs support links, local files, bookmarks, back/forward, reload and zoom.
-WebKit tabs keep their own browser sessions. File selection, editing shortcuts,
-external links, themes and the favicon-derived Dock icon remain available.
+Data defaults to `~/Library/Application Support/Sapiens4 Development/data`;
+configuration defaults to the adjacent `config` directory. Explicit launch-time
+`SAPIENS_DATA_DIR` and `SAPIENS_CONFIG_DIR` overrides support synthetic validation.
+Packaging never imports or stamps historical data and does not discover an
+existing production installation. Do not point development validation at real data.
+
+Each app starts its own host on a dynamic loopback port. Closing the window keeps
+the app running; explicit Quit stops its owned host and confirms exit. The host
+log is `desktop-server.log` in the data directory. No login item is installed.
+Native tabs retain links, local files, bookmarks, navigation and zoom.
+
+## Verification
 
 ```sh
-ruby submodules/libs4/ruby/bundle.rb exec rspec spec/distribution_spec.rb spec/workspace_accessibility_spec.rb
-codesign --verify --strict .build/macos/Sapiens4.app
+codesign --verify --deep --strict '.build/macos/Sapiens4 Development.app'
+SAPIENS_TEST_PACKAGE_RUNTIME="$PWD/.build/macos/Sapiens4 Development.app/Contents/Resources/runtime" \
+  ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb
 ```
 
-Tests use temporary data and controlled model executables; see
-[coverage and platform requirements](../../docs/testing.md).
+The RSpec scenario verifies final inventories and the bundled provider version,
+then launches the real backend twice with fresh synthetic state and a restricted
+PATH. Full native UI, permissions, macOS 13 acceptance, D3 onboarding, genuine
+signing/notarization and downloaded/quarantined launch are separate acceptance
+steps. Existing manual relocation/UI evidence is retained in D1_PROGRESS.md.

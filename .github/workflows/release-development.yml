@@ -1,0 +1,38 @@
+name: Publish reviewed development artifacts
+# Creating even a draft release is an external operation. Invoke only after
+# explicit authorization; never triggered by a tag, push, or successful build.
+on:
+  workflow_dispatch:
+    inputs:
+      build_run:
+        description: Reviewed Native development packages run ID
+        required: true
+      tag:
+        description: Development tag (dev-vX.Y.Z...)
+        required: true
+      authorize_draft:
+        description: Explicit authorization to upload a draft prerelease
+        type: boolean
+        default: false
+        required: true
+permissions:
+  contents: read
+jobs:
+  draft:
+    if: github.repository == 'PoulWalcker/sapiens4' && github.ref == 'refs/heads/main' && inputs.authorize_draft
+    runs-on: ubuntu-24.04
+    environment: development-release
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Download and validate reviewed artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN: ${{ inputs.build_run }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          python build/package/release.py --repository "$GITHUB_REPOSITORY" --run "$BUILD_RUN" --tag "$RELEASE_TAG" --download-directory release-assets --create-draft

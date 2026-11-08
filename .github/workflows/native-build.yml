@@ -1,0 +1,91 @@
+name: Native development packages
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Development SemVer (no publication)
+        default: 0.1.0-dev
+        required: true
+permissions:
+  contents: read
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            platform: darwin-arm64
+          - runner: windows-2025
+            platform: windows-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      PACKAGE_VERSION: ${{ inputs.version || '0.1.0-dev' }}
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Resolve pinned dependencies from explicit upstream URLs
+        shell: bash
+        run: |
+          git config submodule.blindly4.url https://github.com/aleski-green/blindly4.git
+          git config submodule.libs4.url https://github.com/aleski-green/libs4.git
+          git submodule update --init --recursive
+          git submodule status --recursive
+      - uses: haskell-actions/setup@dff6740730ca3e77557046f6f893af0e94909198 # v2.8.2
+        with:
+          ghc-version: '9.14.1'
+          cabal-version: '3.18.2.0'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.23.2'
+      - name: Install RSpec dependencies
+        uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1 snapshot, 2026-11-08
+        with:
+          ruby-version: '3.4.11'
+      - name: Install repository gems
+        shell: bash
+        run: ruby submodules/libs4/ruby/bundle.rb install
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal
+          rustup override set 1.99.0
+      - name: Configure isolated Hackage index with HTTPS
+        shell: python
+        run: |
+          from pathlib import Path
+          root = Path('submodules/libs4/haskell/.cabal')
+          root.mkdir(parents=True, exist_ok=True)
+          (root / 'config').write_text('repository hackage.haskell.org\n  url: https://hackage.haskell.org/\n  secure: True\n')
+      - name: Acquire complete pinned provider
+        shell: bash
+        run: python build/package/acquire-provider.py --platform '${{ matrix.platform }}' --destination runtime/codex
+      - name: Build macOS arm64 application
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          test "$(uname -m)" = arm64
+          ./environments/macos/build.sh --version "$PACKAGE_VERSION" --output-directory .build/distribution
+          SAPIENS_TEST_PACKAGE_RUNTIME="$PWD/.build/distribution/Sapiens4 Development.app/Contents/Resources/runtime" ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb
+      - name: Build Windows x64 application
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./environments/windows/build.ps1 -Runtime win-x64 -Version $env:PACKAGE_VERSION -OutputDirectory .build/distribution/Sapiens4-Development-win-x64
+          if ($LASTEXITCODE -ne 0) { throw 'Package build failed' }
+          $env:SAPIENS_TEST_PACKAGE_RUNTIME = (Resolve-Path .build/distribution/Sapiens4-Development-win-x64/runtime).Path
+          ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb
+          if ($LASTEXITCODE -ne 0) { throw 'Package smoke failed' }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sapiens4-development-${{ matrix.platform }}
+          path: |
+            .build/distribution/*.zip
+            .build/distribution/*.release.json
+          if-no-files-found: error
