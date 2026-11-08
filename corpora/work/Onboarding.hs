@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 module Onboarding where
 
 import Types
@@ -14,22 +15,58 @@ import Data.Maybe
 import qualified Data.Text as T
 import System.Directory
 import System.Exit
+import System.FilePath
 import System.Info
 import System.IO
 import System.Process hiding (runProcess)
 import System.Timeout
+#ifndef mingw32_HOST_OS
+import System.Posix.Signals
+#endif
 
 -- Owned by the outer local host only; remote corpus routes cannot reach login.
-data Onboarding = Onboarding FilePath (MVar (Bool,Maybe (Async ()))) (IORef Value) (IORef T.Text)
+data Onboarding = Onboarding FilePath (MVar (Bool,Maybe (Async ()))) (IORef Value) (IORef T.Text) (MVar (Bool,[Async T.Text]))
 
 openOnboarding :: FilePath -> IO Onboarding
-openOnboarding root = Onboarding root <$> newMVar (False,Nothing) <*> newIORef (loginState "idle" "") <*> newIORef "not_requested"
+openOnboarding root = Onboarding root <$> newMVar (False,Nothing) <*> newIORef (loginState "idle" "") <*> newIORef "not_requested" <*> newMVar (False,[])
 
 loginState :: T.Text -> T.Text -> Value
 loginState state code = obj [("state",str state),("code",str code),("url",if T.null code then Null else str "https://auth.openai.com/codex/device")]
 
 closeOnboarding :: Onboarding -> IO ()
-closeOnboarding (Onboarding _ worker _ _) = modifyMVar_ worker $ \(_,active) -> mapM_ cancel active >> pure (True,Nothing)
+closeOnboarding (Onboarding _ worker _ _ checks) = do
+ modifyMVar_ checks $ \(_,active) -> mapM_ cancel active >> pure (True,[])
+ modifyMVar_ worker $ \(_,active) -> mapM_ cancel active >> pure (True,Nothing)
+
+-- HTTP handlers may be abandoned when Warp stops; their subprocesses belong to
+-- onboarding, which cancels and joins them before the host can exit.
+checkedProviderStatus :: Onboarding -> IO T.Text
+checkedProviderStatus (Onboarding _ _ _ _ checks) = bracket acquire release wait
+ where
+ acquire = modifyMVar checks $ \(closed,active) -> do
+  require (not closed) 503 "Sapiens is shutting down."
+  task <- async providerStatus
+  pure ((False,task:active),task)
+ release task = do
+  cancel task
+  modifyMVar_ checks $ \(closed,active) -> pure (closed,filter ((/=asyncThreadId task) . asyncThreadId) active)
+
+-- Capture the owned group before waiting can reap the parent. On Windows,
+-- process jobs retain descendants until waitForProcess observes the whole job.
+withOwnedProcess :: CreateProcess -> ((Maybe Handle,Maybe Handle,Maybe Handle,ProcessHandle) -> IO a) -> IO a
+withOwnedProcess command run = bracket acquire release (run . fst)
+ where
+ acquire = do
+  handles@(_,_,_,process) <- createProcess command {create_group=True,use_process_jobs=True,detach_console=os=="mingw32"}
+  group <- getPid process
+  pure (handles,group)
+ release ((input,output,errors,process),group) = do
+  P.killTree process
+#ifndef mingw32_HOST_OS
+  forM_ group $ \pid -> signalProcessGroup sigKILL pid `catch` (\(_::IOException) -> pure ())
+#endif
+  void (waitForProcess process)
+  forM_ [input,output,errors] $ mapM_ (\h -> hClose h `catch` (\(_::IOException) -> pure ()))
 
 -- Exit status is the supported readiness signal. Discard all diagnostics: even
 -- login status may print account/API-key information. No model call is made.
@@ -40,27 +77,30 @@ providerStatus = do
   Nothing -> pure "missing"
   Just path -> (do
    environment <- P.codexEnvironment
-   result <- timeout 10000000 (readCreateProcessWithExitCode (proc path (P.codexConfig ++ ["login","status"])) {env=Just environment,detach_console=os=="mingw32",use_process_jobs=True} "")
-   pure (case result of Just (ExitSuccess,_,_) -> "signed_in"; Just _ -> "sign_in_required"; Nothing -> "unavailable")) `catch` (\(_::IOException) -> pure "unavailable")
+   -- No diagnostic pipes: status output can contain account/key information.
+   result <- withOwnedProcess (proc path (P.codexConfig ++ ["login","status"])) {env=Just environment,std_in=NoStream,std_out=NoStream,std_err=NoStream} $ \(_,_,_,process) -> timeout 10000000 (waitForProcess process)
+   stored <- maybe (pure False) (doesPathExist . (</>"auth.json")) (lookup "CODEX_HOME" environment)
+   pure (case result of Just ExitSuccess -> "signed_in"; Just _ | not stored -> "sign_in_required"; _ -> "unavailable")) `catch` (\(_::IOException) -> pure "unavailable")
 
 onboardingView :: Onboarding -> IO Value
-onboardingView (Onboarding root _ progress permission) = do
+onboardingView onboarding@(Onboarding root _ progress permission _) = do
  login <- readIORef progress
- provider <- if at login "state" == "signing_in" then pure "signing_in" else providerStatus
+ provider <- if at login "state" == "signing_in" then pure "signing_in" else checkedProviderStatus onboarding
  binary <- C.blindlyBinary root
  built <- doesFileExist binary
  computer <- if not built then pure "missing" else if os/="darwin" then pure "not_required" else readIORef permission
  pure (obj [("schema",num (1::Int)),("provider",str provider),("login",login),("computer_permission",str computer),("computer_available",Bool built),("ready",Bool (provider=="signed_in"))])
 
 onboardingAction :: Onboarding -> Value -> IO Value
-onboardingAction onboarding@(Onboarding root worker progress permission) value = do
+onboardingAction onboarding@(Onboarding root worker progress permission _) value = do
  case at value "action" of
   "login" -> modifyMVar_ worker $ \(closed,active) -> do
    require (not closed) 503 "Sapiens is shutting down."
    running <- maybe (pure False) (fmap isNothing . poll) active
    require (not running) 409 "Sign-in is already running. Complete it or cancel first."
-   status <- providerStatus
+   status <- checkedProviderStatus onboarding
    require (status/="signed_in") 409 "Codex is already signed in."
+   require (status=="sign_in_required") 503 "Codex sign-in could not be checked. Recheck setup; your existing sign-in has been preserved."
    binary <- P.codexBinary >>= maybe (failure 503 "Codex is missing. Reinstall Sapiens to repair its runtime.") pure
    environment <- P.codexEnvironment
    writeIORef progress (loginState "signing_in" "")
@@ -90,12 +130,8 @@ onboardingAction onboarding@(Onboarding root worker progress permission) value =
  onboardingView onboarding
 
 deviceLogin :: FilePath -> [(String,String)] -> IORef Value -> IO ()
-deviceLogin binary environment progress = bracket
- (createProcess (proc binary (P.codexConfig ++ ["login","--device-auth"])) {env=Just environment,std_in=NoStream,std_out=CreatePipe,std_err=NoStream,create_group=True,use_process_jobs=True,detach_console=os=="mingw32"})
- (\(_,output,_,process) -> do
-  P.killTree process
-  void (waitForProcess process)
-  mapM_ (\h -> hClose h `catch` (\(_::IOException) -> pure ())) output)
+deviceLogin binary environment progress = withOwnedProcess
+ (proc binary (P.codexConfig ++ ["login","--device-auth"])) {env=Just environment,std_in=NoStream,std_out=CreatePipe,std_err=NoStream}
  (\(_,output,_,process) -> do
   handle <- maybe (failure 500 "Sign-in output unavailable") pure output
   let consume expecting = do

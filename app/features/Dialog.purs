@@ -92,7 +92,7 @@ body m d = case d.kind of
           "cancelled" -> "Sign-in cancelled. You can try again."
           "expired" -> "Sign-in expired. Start again for a new code."
           _ -> "Sign-in failed. Check your connection and enable device code authorization in your ChatGPT security settings, then try again."
-        ,V.when (provider == "sign_in_required" || provider == "unavailable") $ V.button "button" "Sign in with ChatGPT" $ DialogCommand $ Intent.Setup "login"
+        ,V.when (provider == "sign_in_required") $ V.button "button" "Sign in with ChatGPT" $ DialogCommand $ Intent.Setup "login"
         ,V.when (D.s "code" login /= "") $ V.div ""
           [V.p "" "Open the official sign-in page and enter this one-time code. Continue only if you started this sign-in in Sapiens."
           ,V.textNode "strong" [] (D.s "code" login)

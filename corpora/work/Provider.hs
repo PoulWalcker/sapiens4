@@ -13,7 +13,7 @@ import Text.Read (readMaybe)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import Data.IORef
-import Data.Char (toLower)
+import Data.Char (toLower,toUpper)
 import Data.List (nub,sortOn)
 import qualified Data.Map.Strict as M
 import Data.Maybe
@@ -98,9 +98,10 @@ codexEnvironment = do
 #endif
  environment <- getEnvironment
  binary <- codexBinary
- let tools=maybe "" (\p -> takeDirectory (takeDirectory p)</>"codex-path") binary
-     path=maybe "" id (lookup "PATH" environment)
- pure (("CODEX_HOME",home):("PATH",tools<>[searchPathSeparator]<>path):filter (\(key,_) -> key/="PATH" && not ("CODEX_" `T.isPrefixOf` T.pack key || "OPENAI_" `T.isPrefixOf` T.pack key)) environment)
+ let name=if os=="mingw32" then map toUpper else id
+     tools=maybe "" (\p -> takeDirectory (takeDirectory p)</>"codex-path") binary
+     path=fromMaybe "" (listToMaybe [value | (key,value)<-environment,name key=="PATH"])
+ pure (("CODEX_HOME",home):("PATH",tools<>[searchPathSeparator]<>path):filter (\(key,_) -> name key/="PATH" && not ("CODEX_" `T.isPrefixOf` T.pack (name key) || "OPENAI_" `T.isPrefixOf` T.pack (name key))) environment)
 codexConfig :: [String]
 codexConfig = ["-c","cli_auth_credentials_store=\"file\""]
 codexBinary :: IO (Maybe FilePath)
@@ -149,15 +150,17 @@ codexBinary = do
    pure (snd <$> listToMaybe (reverse (sortOn id (filter (not . null . fst) versions))))
 killTree :: ProcessHandle -> IO ()
 killTree ph = do
+#ifdef mingw32_HOST_OS
+ -- Retain the job handle until termination, even if its root already exited.
+ -- getProcessExitCode can otherwise close the root and lose the job handle.
+ terminateProcess ph
+#else
  result <- getProcessExitCode ph
  when (isNothing result) $ do
   pid <- getPid ph
   case pid of
    Nothing -> terminateProcess ph
    Just root -> do
-#ifdef mingw32_HOST_OS
-    terminateProcess ph
-#else
     let send sig p = signalProcess sig p `catch` (\(_::IOException) -> pure ())
         collect stopped pending = do
          mapM_ (send sigSTOP) pending
@@ -167,8 +170,8 @@ killTree ph = do
          if null children then pure known else collect known children
     stopped <- collect [] [root] `catch` (\(_::SomeException) -> pure [root])
     mapM_ (send sigKILL) (reverse stopped)
-#endif
   pure ()
+#endif
 invoke :: Service -> Run -> Text -> IO Text
 invoke s run input = do
  foreground <- Computer.captureForeground (repositoryRoot s) (workspaceRoot s (agentIdText (runOwner run)))
