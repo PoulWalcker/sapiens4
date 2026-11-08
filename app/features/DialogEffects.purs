@@ -53,9 +53,13 @@ handle runtime dispatch action = case action of
       E.modifyDialog id _ {content=F.Setup value,status=M.Editing}
       when (D.s "provider" value == "signing_in") $ E.later 1000.0 $ dispatch $ OnboardingPoll id) $ C.json "/api/host/onboarding" "GET" D.null
   CloseDialog -> do
-    void $ H.fork $ H.liftAff $ C.cancelPairing runtime
-    H.modify_ Dialog.close
-    E.sync
+    m <- H.get
+    case m.dialog of
+      Just d | not (Dialog.dismissible d) -> E.modifyDialog d.identity $ M.setDialogError "Finish setup before entering your workspace. You can close the app and return to setup later."
+      _ -> do
+        void $ H.fork $ H.liftAff $ C.cancelPairing runtime
+        H.modify_ Dialog.close
+        E.sync
   Field key value -> do
     H.modify_ \m -> m {dialog=map (Dialog.updateField key value) m.dialog}
     when (key == F.ShowLink) do
@@ -203,6 +207,7 @@ handle runtime dispatch action = case action of
   dialogCommand m d command = case command of
     Intent.Setup setupAction -> runDialog d (\value -> do
       E.modifyDialog d.identity _ {content=F.Setup value,status=M.Editing}
+      when (setupAction == "finish" && D.b "completed" value) $ dispatch CloseDialog
       when (setupAction == "login" && D.s "provider" value == "signing_in") $ E.later 1000.0 $ dispatch $ OnboardingPoll d.identity) $ C.json "/api/host/onboarding" "POST" $ D.json {action: setupAction}
     Intent.SuggestNames -> do
       E.modifyDialog d.identity (\s -> s {identity=s.identity+1})

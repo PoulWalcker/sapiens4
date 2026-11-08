@@ -66,13 +66,26 @@ view :: M.Model -> V.Html
 view m = case m.dialog of
   Nothing -> V.node "dialog" [V.id "modal"] []
   Just d -> V.node "dialog" [V.id $ if M.corporaDialog d.kind then "corpora-dialog" else "modal",V.cls $ if d.kind == M.AppMenu then "app-menu-sheet" else "",V.attr "aria-labelledby" "dialog-title",V.on "cancel" \e -> Link e CloseDialog]
-    [V.div (if M.corporaDialog d.kind then "corpora-menu-heading" else "modal-top") [V.span [V.cls "tiny-label"] "SAPIENS4",V.icon (if M.corporaDialog d.kind then "Close" else "Close dialog") "×" CloseDialog]
-    ,V.node "div" [V.id $ if M.corporaDialog d.kind then "corpora-dialog-body" else "modal-content"] [V.textNode "h2" [V.id "dialog-title"] (d.title),body m d,V.textNode "p" [V.cls "corpora-feedback",V.attr "role" "status"] ((M.dialogError d))]]
+    [V.div (if M.corporaDialog d.kind then "corpora-menu-heading" else "modal-top") [V.span [V.cls "tiny-label"] "SAPIENS4",V.when (dismissible d) $ V.icon (if M.corporaDialog d.kind then "Close" else "Close dialog") "×" CloseDialog]
+    ,V.node "div" [V.id $ if M.corporaDialog d.kind then "corpora-dialog-body" else "modal-content"] [V.textNode "h2" [V.id "dialog-title"] (dialogTitle d),body m d,V.textNode "p" [V.cls "corpora-feedback",V.attr "role" "status"] ((M.dialogError d))]]
+
+dismissible :: M.Dialog -> Boolean
+dismissible d = d.kind /= M.Onboarding || case d.content of
+  F.Setup value -> D.b "completed" value
+  _ -> false
+
+dialogTitle :: M.Dialog -> String
+dialogTitle d = if d.kind /= M.Onboarding then d.title else case d.content of
+  F.Setup value -> case D.s "step" value of
+    "welcome" -> "Welcome to Sapiens"
+    "sign_in" -> "Sign in to Codex"
+    _ -> "System permissions"
+  _ -> d.title
 
 body :: M.Model -> M.Dialog -> V.Html
 body m d = case d.kind of
-  M.AppMenu -> V.node "nav" [V.label "Corpora menu"] [V.button "app-menu-row" "Workspace & settings" $ OpenDialog M.WorkspaceSettings F.NoRecord,V.button "app-menu-row" "Shared computer" $ OpenDialog M.Computer F.NoRecord,V.when m.localAvailable $ V.button "app-menu-row" "Set up Sapiens" $ OpenDialog M.Onboarding F.NoRecord]
-  M.WorkspaceSettings -> V.div "" [V.p "" "Talk to your Sapis in chat, manage their notes, and save documents in their workspaces. Sapis can delegate requests through ChiefSapi.",V.p "" "Use the corpora menu to switch workspaces. Active and Paused describe execution on the host; Connecting means this device is restoring its connection.",V.button "button" "Edit decision prompts" $ OpenDialog M.DecisionPrompts F.NoRecord]
+  M.AppMenu -> V.node "nav" [V.label "Corpora menu"] [V.button "app-menu-row" "Workspace & settings" $ OpenDialog M.WorkspaceSettings F.NoRecord,V.button "app-menu-row" "Shared computer" $ OpenDialog M.Computer F.NoRecord]
+  M.WorkspaceSettings -> V.div "" [V.p "" "Talk to your Sapis in chat, manage their notes, and save documents in their workspaces. Sapis can delegate requests through ChiefSapi.",V.p "" "Use the corpora menu to switch workspaces. Active and Paused describe execution on the host; Connecting means this device is restoring its connection.",V.button "button" "Edit decision prompts" $ OpenDialog M.DecisionPrompts F.NoRecord,V.when m.localAvailable $ V.button "button" "Set up Sapiens" $ OpenDialog M.Onboarding F.NoRecord]
   M.Computer -> V.div "" [V.p "" "Ask a Sapi in chat to work on your computer.",V.div "settings-row" [V.span [] (if m.snapshot.computer.built then "Computer helper is installed" else "Computer helper is missing. Reinstall Sapiens to repair it."),V.span [V.cls "tag"] (if owner == "" then "Available" else "In use · " <> (M.agent m owner).name)],V.p "" $ "Sapis share one computer. " <> if windows then "Windows UI Automation works with accessible apps on your desktop. Elevated apps and secure system dialogs cannot be controlled." else "macOS Accessibility access is required for desktop interaction.",V.when m.localAvailable $ V.button "button" "Check setup and permissions" $ OpenDialog M.Onboarding F.NoRecord]
   M.Onboarding -> case d.content of
     F.Setup value ->
@@ -80,33 +93,45 @@ body m d = case d.kind of
           login = D.get "login" value
           state = D.s "state" login
           permission = D.s "computer_permission" value
-      in V.div "setup-screen"
-        [V.p "" "Sign in with your ChatGPT account to use Codex in Sapiens. Sapiens keeps this sign-in separate from your other Codex installations."
-        ,V.textNode "p" [V.attr "role" "status"] $ case provider of
-          "signed_in" -> "Codex is signed in. Send a chat message to run your first task. Your account's model access and usage limits apply."
-          "missing" -> "Codex is missing from this installation. Reinstall Sapiens to repair it."
-          "unavailable" -> "Codex could not start. Retry, or reinstall Sapiens if the problem continues."
-          "signing_in" -> "Waiting for you to finish signing in…"
-          _ -> "Sign in to Codex to run AI tasks."
-        ,V.when (state == "failed" || state == "expired" || state == "cancelled") $ V.p "" $ case state of
-          "cancelled" -> "Sign-in cancelled. You can try again."
-          "expired" -> "Sign-in expired. Start again for a new code."
-          _ -> "Sign-in failed. Check your connection and enable device code authorization in your ChatGPT security settings, then try again."
-        ,V.when (provider == "sign_in_required") $ V.button "button" "Sign in with ChatGPT" $ DialogCommand $ Intent.Setup "login"
-        ,V.when (D.s "code" login /= "") $ V.div ""
-          [V.p "" "Open the official sign-in page and enter this one-time code. Continue only if you started this sign-in in Sapiens."
-          ,V.textNode "strong" [] (D.s "code" login)
-          ,V.button "button" "Open sign-in page" $ DialogCommand $ Intent.Setup "open-login"]
-        ,V.when (provider == "signing_in") $ V.button "button" "Cancel sign-in" $ DialogCommand $ Intent.Setup "cancel"
-        ,V.p "" $ case permission of
-          "missing" -> "Computer helper is missing. Reinstall Sapiens to repair it."
-          "granted" -> "Accessibility access is enabled."
-          "denied" -> "Enable Sapiens in System Settings > Privacy & Security > Accessibility, then recheck. Chat and Notes remain available."
-          "not_required" -> "Computer control is available for accessible desktop applications."
-          _ -> "Computer control needs macOS Accessibility access. You can do this later."
-        ,V.when (permission == "not_requested" || permission == "denied" || permission == "granted") $ V.button "button" "Allow / recheck Accessibility" $ DialogCommand $ Intent.Setup "permission"
-        ,V.button "button" "Recheck setup" $ DialogCommand $ Intent.Setup "refresh"
-        ,V.button "button" (if D.b "ready" value then "Done" else "Continue to workspace") CloseDialog]
+          setup name caption = V.button "button" caption $ DialogCommand $ Intent.Setup name
+      in V.div "setup-screen" $ case D.s "step" value of
+        "welcome" ->
+          [V.p "form-hint" "Step 1 of 3 · Welcome"
+          ,V.p "" "Sapiens helps you work with AI in your own workspace. First, connect Codex, then choose whether to enable computer control."
+          ,V.p "" "Your existing Codex sign-in will be used if this Sapiens installation is already connected."
+          ,setup "begin" "Get started"]
+        "sign_in" ->
+          [V.p "form-hint" "Step 2 of 3 · Codex sign-in"
+          ,V.p "" "Sign in with your ChatGPT account to use Codex in Sapiens. Sapiens keeps this sign-in separate from your other Codex installations."
+          ,V.textNode "p" [V.attr "role" "status"] $ case provider of
+            "missing" -> "Codex is missing from this installation. Reinstall Sapiens to repair it."
+            "unavailable" -> "Codex sign-in could not be checked. Recheck setup to retry. Any existing sign-in has been preserved."
+            "signing_in" -> "Waiting for you to finish signing in…"
+            _ -> "Connect Codex to continue to your workspace. Your account's model access and usage limits apply."
+          ,V.when (state == "failed" || state == "expired" || state == "cancelled") $ V.p "" $ case state of
+            "cancelled" -> "Sign-in cancelled. You can try again when you are ready."
+            "expired" -> "Sign-in expired. Start again for a new code."
+            _ -> "Sign-in failed. Check your connection and enable device code authorization in your ChatGPT security settings, then try again."
+          ,V.when (provider == "sign_in_required") $ setup "login" "Sign in with ChatGPT"
+          ,V.when (D.s "code" login /= "") $ V.div ""
+            [V.p "" "Open the official sign-in page and enter this one-time code. Continue only if you started this sign-in in Sapiens."
+            ,V.textNode "strong" [] (D.s "code" login)
+            ,setup "open-login" "Open sign-in page"]
+          ,V.when (provider == "signing_in") $ setup "cancel" "Cancel sign-in"
+          ,setup "refresh" "Recheck setup"]
+        _ ->
+          [V.p "form-hint" "Step 3 of 3 · System permissions"
+          ,V.p "" "Codex is connected. Chat and Notes do not need extra system permissions."
+          ,V.p "" $ case permission of
+            "missing" -> "The optional computer helper is missing. You can use chat now and reinstall Sapiens to repair computer control later."
+            "granted" -> "Accessibility access is enabled for computer control."
+            "denied" -> "For optional computer control, enable Sapiens in System Settings > Privacy & Security > Accessibility, then recheck. You can do this later."
+            "not_required" -> "Optional computer control works with accessible Windows applications. Elevated apps and secure system dialogs cannot be controlled."
+            _ -> "Optional computer control uses macOS Accessibility access. You can enable it now or later in Settings."
+          ,V.when (permission == "not_requested" || permission == "denied" || permission == "granted") $ setup "permission" (if permission == "granted" then "Recheck Accessibility" else "Allow Accessibility")
+          ,V.p "" "You can revisit setup and permissions in Workspace & settings."
+          ,setup "refresh" "Recheck setup"
+          ,setup "finish" "Enter workspace"]
     _ -> V.p "" "Checking setup…"
   M.AgentSettings -> form "Save"
     [V.node "div" [V.cls "settings-tabs",V.attr "role" "tablist",V.label "Sapi settings"] $ map (\caption -> V.textNode "button" [V.attr "type" "button",V.attr "role" "tab",V.attr "aria-selected" $ show $ caption == "Profile",V.disabled $ caption /= "Profile"] (caption)) ["Profile","Context","Usage","Limits"]

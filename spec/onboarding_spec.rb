@@ -45,7 +45,10 @@ RSpec.describe 'Local Codex setup' do
       load #{File.join(__dir__, 'support/provider.rb').inspect}
     RUBY
     host.start
-    expect(host.api('GET', '/api/host/onboarding').fetch('provider')).to eq('sign_in_required')
+    expect(host.api('GET', '/api/host/onboarding')).to include('provider' => 'sign_in_required', 'step' => 'welcome', 'completed' => false)
+    host.api('POST', '/api/host/onboarding', {action: 'finish'}, status: 409)
+    expect(host.api('POST', '/api/host/onboarding', action: 'begin')).to include('step' => 'sign_in', 'completed' => false)
+    host.api('POST', '/api/host/onboarding', {action: 'finish'}, status: 409)
     File.write(File.join(host.root, 'slow-status'), '')
     uri = URI(host.url + '/api/host/onboarding')
     http = Net::HTTP.new(uri.host, uri.port, nil)
@@ -85,6 +88,7 @@ RSpec.describe 'Local Codex setup' do
     expect(JSON.generate(view)).not_to include('synthetic-private-diagnostic')
     host.api('POST', '/api/host/onboarding', {action: 'login'}, status: 409)
     expect(host.api('POST', '/api/host/onboarding', action: 'cancel').dig('login', 'state')).to eq('cancelled')
+    expect(host.api('GET', '/api/host/onboarding')).to include('step' => 'sign_in', 'completed' => false)
     expect { Process.kill(0, File.read(File.join(host.root, 'login.pid')).to_i) }.to raise_error(Errno::ESRCH)
     expect(File.exist?(File.join(config, 'codex/auth.json'))).to eq(false)
     host.api('POST', '/api/host/onboarding', action: 'login')
@@ -94,6 +98,7 @@ RSpec.describe 'Local Codex setup' do
     expect { Process.kill(0, login_pid) }.to raise_error(Errno::ESRCH)
     expect(File.exist?(File.join(config, 'codex/auth.json'))).to eq(false)
     host.start
+    expect(host.api('GET', '/api/host/onboarding')).to include('step' => 'sign_in', 'completed' => false)
     File.write(File.join(host.root, 'fail-login'), '')
     host.api('POST', '/api/host/onboarding', action: 'login')
     Contract.wait { host.api('GET', '/api/host/onboarding').dig('login', 'state') == 'failed' }
@@ -101,18 +106,31 @@ RSpec.describe 'Local Codex setup' do
     host.api('POST', '/api/host/onboarding', action: 'login')
     File.write(File.join(host.root, 'finish-login'), '')
     Contract.wait { host.api('GET', '/api/host/onboarding').fetch('ready') }
+    expect(host.api('GET', '/api/host/onboarding')).to include('step' => 'permissions', 'completed' => false)
     auth_file = File.join(config, 'codex/auth.json')
     saved_auth = File.binread(auth_file)
     File.write(File.join(host.root, 'fail-status'), '')
     expect(host.api('GET', '/api/host/onboarding').fetch('provider')).to eq('unavailable')
     host.api('POST', '/api/host/onboarding', {action: 'login'}, status: 503)
+    host.api('POST', '/api/host/onboarding', {action: 'finish'}, status: 409)
     host.api('POST', '/api/host/onboarding', action: 'refresh')
     expect(File.binread(auth_file)).to eq(saved_auth)
     File.delete(File.join(host.root, 'fail-status'))
     host.api('POST', '/api/host/onboarding', {action: 'login'}, status: 409)
+    # Optional computer permissions/helper availability do not gate basic chat.
+    expect(host.api('POST', '/api/host/onboarding', action: 'finish')).to include('step' => 'complete', 'completed' => true)
+    setup_file = File.join(config, 'onboarding.json')
+    expect(JSON.parse(File.read(setup_file))).to eq('schema' => 1, 'welcomed' => true, 'completed' => true)
     host.restart
-    expect(host.api('GET', '/api/host/onboarding').fetch('ready')).to eq(true)
+    expect(host.api('GET', '/api/host/onboarding')).to include('ready' => true, 'step' => 'complete', 'completed' => true)
     expect(File.binread(auth_file)).to eq(saved_auth)
+    # Existing app auth skips redundant sign-in when setup has no prior marker.
+    File.rename(setup_file, setup_file + '.preserved')
+    host.restart
+    expect(host.api('GET', '/api/host/onboarding').fetch('step')).to eq('welcome')
+    expect(host.api('POST', '/api/host/onboarding', action: 'begin').fetch('step')).to eq('permissions')
+    expect(File.binread(auth_file)).to eq(saved_auth)
+    host.api('POST', '/api/host/onboarding', action: 'finish')
     id = host.submit(host.state.fetch('main_agent_id'), 'Hello')
     host.turn(id)
     invocations = File.readlines(File.join(host.root, 'auth-invocations.jsonl')).map { |line| JSON.parse(line) }
@@ -127,7 +145,7 @@ RSpec.describe 'Local Codex setup' do
     host.environment['PATH'] = host.root + File::PATH_SEPARATOR + ENV.fetch('PATH')
     count = invocations.length
     host.restart
-    expect(host.api('GET', '/api/host/onboarding').fetch('provider')).to eq('missing')
+    expect(host.api('GET', '/api/host/onboarding')).to include('provider' => 'missing', 'step' => 'sign_in', 'completed' => false)
     host.api('POST', '/api/host/onboarding', {action: 'login'}, status: 503)
     expect(File.readlines(File.join(host.root, 'auth-invocations.jsonl')).length).to eq(count)
   ensure

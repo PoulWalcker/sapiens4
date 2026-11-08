@@ -25,23 +25,38 @@ import System.Posix.Signals
 #endif
 
 -- Owned by the outer local host only; remote corpus routes cannot reach login.
-data Onboarding = Onboarding FilePath (MVar (Bool,Maybe (Async ()))) (IORef Value) (IORef T.Text) (MVar (Bool,[Async T.Text]))
+data Onboarding = Onboarding FilePath (MVar (Bool,Maybe (Async ()))) (IORef Value) (IORef T.Text) (MVar (Bool,[Async T.Text])) (FilePath,MVar Value)
 
 openOnboarding :: FilePath -> IO Onboarding
-openOnboarding root = Onboarding root <$> newMVar (False,Nothing) <*> newIORef (loginState "idle" "") <*> newIORef "not_requested" <*> newMVar (False,[])
+openOnboarding root = do
+ home <- P.codexHome
+ let path=takeDirectory home</>"onboarding.json"
+     initial=obj [("schema",num (1::Int)),("welcomed",Bool False),("completed",Bool False)]
+ saved <- readJSON path initial `catch` (\(_::IOException) -> pure initial)
+ state <- newMVar (if int (get saved "schema")==1 then saved else initial)
+ Onboarding root <$> newMVar (False,Nothing) <*> newIORef (loginState "idle" "") <*> newIORef "not_requested" <*> newMVar (False,[]) <*> pure (path,state)
+
+setupState :: Onboarding -> IO Value
+setupState (Onboarding _ _ _ _ _ (_,state)) = readMVar state
+
+saveSetup :: Onboarding -> (Value -> Value) -> IO ()
+saveSetup (Onboarding _ _ _ _ _ (path,state)) update = modifyMVar_ state $ \current -> do
+ let next=update current
+ writeJSON path next `catch` (\(_::IOException) -> failure 503 "Could not save setup. Check that Sapiens can write to its configuration folder, then retry.")
+ pure next
 
 loginState :: T.Text -> T.Text -> Value
 loginState state code = obj [("state",str state),("code",str code),("url",if T.null code then Null else str "https://auth.openai.com/codex/device")]
 
 closeOnboarding :: Onboarding -> IO ()
-closeOnboarding (Onboarding _ worker _ _ checks) = do
+closeOnboarding (Onboarding _ worker _ _ checks _) = do
  modifyMVar_ checks $ \(_,active) -> mapM_ cancel active >> pure (True,[])
  modifyMVar_ worker $ \(_,active) -> mapM_ cancel active >> pure (True,Nothing)
 
 -- HTTP handlers may be abandoned when Warp stops; their subprocesses belong to
 -- onboarding, which cancels and joins them before the host can exit.
 checkedProviderStatus :: Onboarding -> IO T.Text
-checkedProviderStatus (Onboarding _ _ _ _ checks) = bracket acquire release wait
+checkedProviderStatus (Onboarding _ _ _ _ checks _) = bracket acquire release wait
  where
  acquire = modifyMVar checks $ \(closed,active) -> do
   require (not closed) 503 "Sapiens is shutting down."
@@ -83,17 +98,29 @@ providerStatus = do
    pure (case result of Just ExitSuccess -> "signed_in"; Just _ | not stored -> "sign_in_required"; _ -> "unavailable")) `catch` (\(_::IOException) -> pure "unavailable")
 
 onboardingView :: Onboarding -> IO Value
-onboardingView onboarding@(Onboarding root _ progress permission _) = do
+onboardingView onboarding@(Onboarding root _ progress permission _ _) = do
  login <- readIORef progress
  provider <- if at login "state" == "signing_in" then pure "signing_in" else checkedProviderStatus onboarding
  binary <- C.blindlyBinary root
  built <- doesFileExist binary
  computer <- if not built then pure "missing" else if os/="darwin" then pure "not_required" else readIORef permission
- pure (obj [("schema",num (1::Int)),("provider",str provider),("login",login),("computer_permission",str computer),("computer_available",Bool built),("ready",Bool (provider=="signed_in"))])
+ saved <- setupState onboarding
+ let welcomed=boolean (get saved "welcomed")
+     ready=provider=="signed_in"
+     complete=welcomed && ready && boolean (get saved "completed")
+     step=if not welcomed then "welcome" else if not ready then "sign_in" else if complete then "complete" else "permissions"
+ pure (obj [("schema",num (1::Int)),("step",str step),("completed",Bool complete),("provider",str provider),("login",login),("computer_permission",str computer),("computer_available",Bool built),("ready",Bool ready)])
 
 onboardingAction :: Onboarding -> Value -> IO Value
-onboardingAction onboarding@(Onboarding root worker progress permission _) value = do
+onboardingAction onboarding@(Onboarding root worker progress permission _ _) value = do
  case at value "action" of
+  "begin" -> saveSetup onboarding (put "welcomed" (Bool True))
+  "finish" -> do
+   saved <- setupState onboarding
+   require (boolean (get saved "welcomed")) 409 "Start setup from the welcome screen."
+   status <- checkedProviderStatus onboarding
+   require (status=="signed_in") 409 "Sign in to Codex before entering your workspace."
+   saveSetup onboarding (put "completed" (Bool True))
   "login" -> modifyMVar_ worker $ \(closed,active) -> do
    require (not closed) 503 "Sapiens is shutting down."
    running <- maybe (pure False) (fmap isNothing . poll) active
@@ -101,6 +128,8 @@ onboardingAction onboarding@(Onboarding root worker progress permission _) value
    status <- checkedProviderStatus onboarding
    require (status/="signed_in") 409 "Codex is already signed in."
    require (status=="sign_in_required") 503 "Codex sign-in could not be checked. Recheck setup; your existing sign-in has been preserved."
+   saved <- setupState onboarding
+   require (boolean (get saved "welcomed")) 409 "Start setup from the welcome screen."
    binary <- P.codexBinary >>= maybe (failure 503 "Codex is missing. Reinstall Sapiens to repair its runtime.") pure
    environment <- P.codexEnvironment
    writeIORef progress (loginState "signing_in" "")

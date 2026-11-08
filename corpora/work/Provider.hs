@@ -87,6 +87,15 @@ modelDefaults = (,) <$> (maybe "gpt-6-sol" T.pack <$> lookupEnv "SAPIENS_CODEX_M
 -- Never inherit a shell's Codex home, API key or workload identity credentials.
 codexEnvironment :: IO [(String,String)]
 codexEnvironment = do
+ home <- codexHome
+ environment <- getEnvironment
+ binary <- codexBinary
+ let name=if os=="mingw32" then map toUpper else id
+     tools=maybe "" (\p -> takeDirectory (takeDirectory p)</>"codex-path") binary
+     path=fromMaybe "" (listToMaybe [value | (key,value)<-environment,name key=="PATH"])
+ pure (("CODEX_HOME",home):("PATH",tools<>[searchPathSeparator]<>path):filter (\(key,_) -> name key/="PATH" && not ("CODEX_" `T.isPrefixOf` T.pack (name key) || "OPENAI_" `T.isPrefixOf` T.pack (name key))) environment)
+codexHome :: IO FilePath
+codexHome = do
  config <- lookupEnv "SAPIENS_CONFIG_DIR" >>= maybe (do
   home <- getHomeDirectory
   base <- if os=="mingw32" then fromMaybe (home</>"AppData/Local") <$> lookupEnv "LOCALAPPDATA" else pure (home</>"Library/Application Support")
@@ -96,12 +105,7 @@ codexEnvironment = do
 #ifndef mingw32_HOST_OS
  setFileMode home 0o700
 #endif
- environment <- getEnvironment
- binary <- codexBinary
- let name=if os=="mingw32" then map toUpper else id
-     tools=maybe "" (\p -> takeDirectory (takeDirectory p)</>"codex-path") binary
-     path=fromMaybe "" (listToMaybe [value | (key,value)<-environment,name key=="PATH"])
- pure (("CODEX_HOME",home):("PATH",tools<>[searchPathSeparator]<>path):filter (\(key,_) -> name key/="PATH" && not ("CODEX_" `T.isPrefixOf` T.pack (name key) || "OPENAI_" `T.isPrefixOf` T.pack (name key))) environment)
+ pure home
 codexConfig :: [String]
 codexConfig = ["-c","cli_auth_credentials_store=\"file\""]
 codexBinary :: IO (Maybe FilePath)
