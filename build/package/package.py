@@ -33,7 +33,7 @@ def source_dirty(root):
 
 
 def inventory(root, excluded):
-    entries = sorted(root.rglob('*'))
+    entries = sorted(root.rglob('*'), key=lambda path: path.relative_to(root).as_posix())
     if any(p.is_symlink() for p in entries):
         raise ValueError('Package payload may not contain symbolic links')
     return [{'path': p.relative_to(root).as_posix(), 'size': p.stat().st_size, 'sha256': digest(p)}
