@@ -19,7 +19,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: native-${{ github.ref }}-${{ github.event_name }}
+  group: ${{ github.event_name == 'workflow_dispatch' && format('native-manual-{0}', github.run_id) || format('native-{0}-{1}', github.ref, github.event_name) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   native:
