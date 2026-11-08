@@ -2,9 +2,9 @@
 
 These commands prepare the `PoulWalcker/sapiens4` development fork/channel and
 `com.poulwalcker.sapiens4.development` identity. They do not enable production
-update discovery. The active wave permits local builds and commits. Pushes,
-workflow dispatch, release creation/publication, live accounts and real user data
-require separate authorization; none are executed by this runbook itself.
+update discovery. This session performs local edits/checks only. No push, workflow dispatch,
+release publication, live account or real user data operation has been executed.
+The configured trigger policy below supersedes the earlier manual-draft design.
 
 ## Assemble and verify locally
 
@@ -94,33 +94,52 @@ Windows. Check shell/host/Blindly, permissions, WebView2 preflight, shutdown and
 D3 onboarding with authorized synthetic/designated-account contexts. macOS 13,
 Windows x64 and Windows 11 ARM emulation acceptance remain explicit gates.
 
-## CI and separately gated draft release
+## CI trigger and release policy
 
-`native-build.yml` initializes fixed dependency commits using explicit upstream
-URLs (including Blindly's relative-URL override), pins toolchains, acquires D3's
-provider, builds macOS arm64 and Windows x64, then runs the RSpec package scenario.
-It uploads build artifacts only. The acquisition script and unpublished libs4
-registration must be integrated by main before a remote run can work.
+| Event | Work performed | Publication |
+|---|---|---|
+| Feature branch push | No native workflow trigger | None |
+| Pull request targeting main | One host/native/UI/Blindly compilation per platform | No provider acquisition, distribution package or upload |
+| Version tag `vSemVer` on main history | Reuse the same build once, then package/sign/notarize/verify both targets | Publish the complete GitHub Release after both signed asset sets verify |
+| Manual workflow_dispatch on a selected branch | Compile once, assemble and verify test app artifacts | Workflow artifact upload only |
 
-Default macOS assembly accepts only the pinned audited optional voice exception.
-A new provider pin/subtree or a required dependency reaching it requires another
-audit; it cannot inherit an exemption by directory name. Do not add an experimental
-floor override to CI to turn a compatibility failure green. Native runner architecture is
-asserted. Runner images may change despite fixed OS labels; record tool versions
-and input pins rather than claiming byte-for-byte reproducibility.
+`native-build.yml` is reusable so tag releases do not duplicate compilation.
+Platform packaging uses `--skip-build`/`-SkipBuild` against the outputs just built
+in that job. PR runs stop before Ruby package-scenario dependencies, provider
+downloads and packaging. Manual branch selection uses GitHub's workflow-dispatch
+ref selector. Current test artifacts are a Mac app ZIP and Windows portable ZIP;
+Setup.exe/bootstrap remains the separately documented installer follow-on.
 
-Only after separately authorized push/dispatch and review of a successful trusted
-build, invoke `release-development.yml` on the fork's main branch with the explicit
-run ID, matching `dev-vSemVer` and `authorize_draft=true`. Configure the protected
-`development-release` environment before use. Its validator requires exactly two
-complete target receipts, common version/source, clean source state and exact
-artifact hashes. Experimental support-floor artifacts are rejected. It creates
-only a draft prerelease; publishing/promoting it is another authorized action.
-The script does not overwrite an existing release or enable installed update
-checks. Actual CI execution, account setup, per-user Windows installer and
-production signing/publication are outstanding delivery work.
+`release-development.yml` runs only on version tags, requires the tagged commit
+to be an ancestor of origin/main, and calls the reusable build with signing
+enabled. Only its final publish job has contents-write permission. The existing
+release validator requires both complete, clean-source, exact-version targets,
+Developer ID/Authenticode signing metadata and final hashes. A temporary draft
+holds all uploads; the same tag job publishes it only after upload succeeds.
+Manual dispatch has no release/publish job. Existing development fork/app/channel
+identity and disabled production update discovery remain explicit.
 
-References: [GitHub runner architecture](https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
-[Ruby setup](https://github.com/ruby/setup-ruby),
+Tag signing needs repository secrets `MAC_CERTIFICATE_P12` (base64),
+`MAC_CERTIFICATE_PASSWORD` (may be empty), `MAC_SIGN_IDENTITY`,
+`MAC_NOTARY_KEY_P8` (base64), `MAC_NOTARY_KEY_ID`, `MAC_NOTARY_ISSUER`,
+`WINDOWS_CERTIFICATE_PFX` (base64) and `WINDOWS_CERTIFICATE_PASSWORD`.
+Missing signing configuration fails before expensive compilation. Imported
+certificates/keychain material exists only on the ephemeral release runners and
+is removed after the job. No credentials are needed by PR/manual package jobs.
+Actual certificate setup, notarization and signed Windows/target acceptance have
+not been executed in this session.
+
+The explicit upstream submodule URL overrides fix Blindly's fork-relative URL.
+The exact local libs4 integration pin must be published separately with
+authorization before GitHub runners can fetch it; this is a publication/setup
+gate, not an unavailable-resource claim. Local lint/parser/receipt checks do not
+establish a successful remote CI build. Runner images and signature timestamps
+can vary, so source/toolchain records and exact artifact digests remain distinct
+from a reproducibility claim. For caller-provided `--skip-build` acceptance,
+buildId still omits compile flags/input binary hashes; final SHA256 identifies
+those exact bytes, while normal CI executes the prescribed build in the same job.
+
+References: [GitHub reusable workflows](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows),
+[GitHub runner architecture](https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
 [Apple notarization](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution),
 [Microsoft SignTool](https://learn.microsoft.com/en-us/windows/win32/seccrypto/signtool).

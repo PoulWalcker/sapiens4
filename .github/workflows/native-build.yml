@@ -1,18 +1,28 @@
-name: Native development packages
+name: Native verification and test packages
 on:
   pull_request:
-  push:
     branches: [main]
   workflow_dispatch:
     inputs:
       version:
-        description: Development SemVer (no publication)
+        description: Test artifact SemVer (selected branch; no release publication)
         default: 0.1.0-dev
         required: true
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      release:
+        default: false
+        type: boolean
 permissions:
   contents: read
+concurrency:
+  group: native-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  package:
+  native:
     strategy:
       fail-fast: false
       matrix:
@@ -25,67 +35,171 @@ jobs:
     timeout-minutes: 90
     env:
       PACKAGE_VERSION: ${{ inputs.version || '0.1.0-dev' }}
+      PROVIDER_PLATFORM: ${{ matrix.platform }}
       MACOSX_DEPLOYMENT_TARGET: '13.0'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Resolve pinned dependencies from explicit upstream URLs
+      - name: Check release signing prerequisites before expensive builds
+        if: inputs.release
+        shell: python
+        env:
+          MAC_CERTIFICATE_P12: ${{ secrets.MAC_CERTIFICATE_P12 }}
+          MAC_SIGN_IDENTITY: ${{ secrets.MAC_SIGN_IDENTITY }}
+          MAC_NOTARY_KEY_P8: ${{ secrets.MAC_NOTARY_KEY_P8 }}
+          MAC_NOTARY_KEY_ID: ${{ secrets.MAC_NOTARY_KEY_ID }}
+          MAC_NOTARY_ISSUER: ${{ secrets.MAC_NOTARY_ISSUER }}
+          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          import os
+          if os.environ['GITHUB_EVENT_NAME'] != 'push' or os.environ['GITHUB_REPOSITORY'] != 'PoulWalcker/sapiens4' or os.environ['GITHUB_REF'] != 'refs/tags/v' + os.environ['PACKAGE_VERSION']:
+              raise SystemExit('Release signing is restricted to version-tag calls')
+          names = (['MAC_CERTIFICATE_P12', 'MAC_SIGN_IDENTITY', 'MAC_NOTARY_KEY_P8', 'MAC_NOTARY_KEY_ID', 'MAC_NOTARY_ISSUER']
+                   if os.environ['PROVIDER_PLATFORM'] == 'darwin-arm64' else ['WINDOWS_CERTIFICATE_PFX', 'WINDOWS_CERTIFICATE_PASSWORD'])
+          missing = [name for name in names if not os.environ.get(name)]
+          if missing:
+              raise SystemExit('Missing signing configuration: ' + ', '.join(missing))
+      - name: Resolve exact dependency pins from upstream URLs
         shell: bash
         run: |
           git config submodule.blindly4.url https://github.com/aleski-green/blindly4.git
           git config submodule.libs4.url https://github.com/aleski-green/libs4.git
           git submodule update --init --recursive
           git submodule status --recursive
-      - uses: haskell-actions/setup@dff6740730ca3e77557046f6f893af0e94909198 # v2.8.2
+      - uses: haskell-actions/setup@82e8b5066385702e477d9dc98f287070493e8abd # v2.8.2, peeled commit
         with:
           ghc-version: '9.14.1'
           cabal-version: '3.18.2.0'
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22.23.2'
-      - name: Install RSpec dependencies
-        uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1 snapshot, 2026-11-08
-        with:
-          ruby-version: '3.4.11'
-      - name: Install repository gems
-        shell: bash
-        run: ruby submodules/libs4/ruby/bundle.rb install
       - name: Install pinned Rust toolchain
         shell: bash
         run: |
           rustup toolchain install 1.99.0 --profile minimal
           rustup override set 1.99.0
-      - name: Configure isolated Hackage index with HTTPS
+      - name: Configure isolated HTTPS Hackage index
         shell: python
         run: |
           from pathlib import Path
           root = Path('submodules/libs4/haskell/.cabal')
           root.mkdir(parents=True, exist_ok=True)
           (root / 'config').write_text('repository hackage.haskell.org\n  url: https://hackage.haskell.org/\n  secure: True\n')
-      - name: Acquire complete pinned provider
+      - name: Compile host, native application, UI and existing fixture helpers once
         shell: bash
-        run: python build/package/acquire-provider.py --platform '${{ matrix.platform }}' --destination runtime/codex
-      - name: Build macOS arm64 application
+        run: runghc build/Build.hs
+      - name: Compile Blindly on macOS
         if: runner.os == 'macOS'
         shell: bash
         run: |
           test "$(uname -m)" = arm64
-          ./environments/macos/build.sh --version "$PACKAGE_VERSION" --output-directory .build/distribution
-          SAPIENS_TEST_PACKAGE_RUNTIME="$PWD/.build/distribution/Sapiens4 Development.app/Contents/Resources/runtime" ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb
-      - name: Build Windows x64 application
+          ./submodules/blindly4/macos/build.sh
+      - name: Compile Blindly on Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          ./environments/windows/build.ps1 -Runtime win-x64 -Version $env:PACKAGE_VERSION -OutputDirectory .build/distribution/Sapiens4-Development-win-x64
+          ./submodules/blindly4/windows/build.ps1 -Runtime win-x64 -Toolchain msvc
+          if ($LASTEXITCODE -ne 0) { throw 'Blindly compilation failed' }
+      # Pull requests stop at compilation: no provider download, package or upload.
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1 snapshot, 2026-11-08
+        if: github.event_name != 'pull_request'
+        with:
+          ruby-version: '3.4.11'
+      - name: Install package-scenario dependencies
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: ruby submodules/libs4/ruby/bundle.rb install
+      - name: Acquire complete pinned provider
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: python build/package/acquire-provider.py --platform "$PROVIDER_PLATFORM" --destination runtime/codex
+      - name: Configure macOS release signing and notarization
+        if: inputs.release && runner.os == 'macOS'
+        shell: bash
+        env:
+          MAC_CERTIFICATE_P12: ${{ secrets.MAC_CERTIFICATE_P12 }}
+          MAC_CERTIFICATE_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
+          MAC_SIGN_IDENTITY: ${{ secrets.MAC_SIGN_IDENTITY }}
+          MAC_NOTARY_KEY_P8: ${{ secrets.MAC_NOTARY_KEY_P8 }}
+          MAC_NOTARY_KEY_ID: ${{ secrets.MAC_NOTARY_KEY_ID }}
+          MAC_NOTARY_ISSUER: ${{ secrets.MAC_NOTARY_ISSUER }}
+        run: |
+          : "${MAC_CERTIFICATE_P12:?Missing Mac certificate}" "${MAC_SIGN_IDENTITY:?Missing Mac signing identity}"
+          : "${MAC_NOTARY_KEY_P8:?Missing notary key}" "${MAC_NOTARY_KEY_ID:?Missing notary key ID}" "${MAC_NOTARY_ISSUER:?Missing issuer}"
+          umask 077
+          python3 - <<'PYTHON'
+          import base64, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          (root / 'sapiens-release.p12').write_bytes(base64.b64decode(os.environ['MAC_CERTIFICATE_P12'], validate=True))
+          (root / 'sapiens-notary.p8').write_bytes(base64.b64decode(os.environ['MAC_NOTARY_KEY_P8'], validate=True))
+          PYTHON
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 24)
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
+          KEYCHAIN="$RUNNER_TEMP/sapiens-release.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/sapiens-release.p12" -P "$MAC_CERTIFICATE_PASSWORD" -k "$KEYCHAIN" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          xcrun notarytool store-credentials sapiens-release --key "$RUNNER_TEMP/sapiens-notary.p8" --key-id "$MAC_NOTARY_KEY_ID" --issuer "$MAC_NOTARY_ISSUER"
+      - name: Configure Windows release signing
+        if: inputs.release && runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE_PFX -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) { throw 'Windows signing secrets required' }
+          $pfx = Join-Path $env:RUNNER_TEMP 'sapiens-release.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificates = @(Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password | Where-Object HasPrivateKey)
+          if ($certificates.Count -ne 1) { throw 'Expected one signing certificate with a private key' }
+          "SAPIENS_WINDOWS_CERT_THUMBPRINT=$($certificates[0].Thumbprint)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object { [Version]$_.Directory.Parent.Name } -Descending | Select-Object -First 1
+          if (-not $signTool) { throw 'Windows SDK SignTool required' }
+          $signTool.DirectoryName | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Package and verify macOS without recompiling
+        if: github.event_name != 'pull_request' && runner.os == 'macOS'
+        shell: bash
+        env:
+          SAPIENS_MAC_SIGN_IDENTITY: ${{ inputs.release && secrets.MAC_SIGN_IDENTITY || '-' }}
+          SAPIENS_MAC_NOTARY_PROFILE: ${{ inputs.release && 'sapiens-release' || '' }}
+        run: |
+          ./environments/macos/build.sh --skip-build --version "$PACKAGE_VERSION" --output-directory .build/distribution
+          SAPIENS_TEST_PACKAGE_RUNTIME="$PWD/.build/distribution/Sapiens4 Development.app/Contents/Resources/runtime" ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb
+      - name: Package and verify Windows without recompiling
+        if: github.event_name != 'pull_request' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $thumbprint = if ('${{ inputs.release }}' -eq 'true') { $env:SAPIENS_WINDOWS_CERT_THUMBPRINT } else { [string]::Empty }
+          ./environments/windows/build.ps1 -SkipBuild -Runtime win-x64 -Version $env:PACKAGE_VERSION -OutputDirectory .build/distribution/Sapiens4-Development-win-x64 -CertificateThumbprint $thumbprint
           if ($LASTEXITCODE -ne 0) { throw 'Package build failed' }
           $env:SAPIENS_TEST_PACKAGE_RUNTIME = (Resolve-Path .build/distribution/Sapiens4-Development-win-x64/runtime).Path
           ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb
-          if ($LASTEXITCODE -ne 0) { throw 'Package smoke failed' }
+          if ($LASTEXITCODE -ne 0) { throw 'Package scenario failed' }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: github.event_name != 'pull_request'
         with:
           name: sapiens4-development-${{ matrix.platform }}
           path: |
             .build/distribution/*.zip
             .build/distribution/*.release.json
           if-no-files-found: error
+      - name: Remove temporary macOS signing material
+        if: always() && inputs.release && runner.os == 'macOS'
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/sapiens-release.keychain-db" || true
+          rm -f "$RUNNER_TEMP/sapiens-release.p12" "$RUNNER_TEMP/sapiens-notary.p8"
+      - name: Remove temporary Windows signing material
+        if: always() && inputs.release && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if ($env:SAPIENS_WINDOWS_CERT_THUMBPRINT) { Remove-Item "Cert:\CurrentUser\My\$env:SAPIENS_WINDOWS_CERT_THUMBPRINT" -ErrorAction SilentlyContinue }
+          Remove-Item (Join-Path $env:RUNNER_TEMP 'sapiens-release.pfx') -ErrorAction SilentlyContinue
