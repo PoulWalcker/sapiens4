@@ -167,6 +167,41 @@ def sign(app, identity):
     run('codesign', '--verify', '--deep', '--strict', app)
 
 
+def disk_image(app, output, temporary, identity, notary):
+    image = output / 'Sapiens.dmg'
+    if image.exists():
+        raise ValueError('Sapiens.dmg already exists; choose a new output directory')
+    source = temporary / 'disk-image'
+    source.mkdir()
+    run('ditto', app, source / app.name)
+    (source / 'Applications').symlink_to('/Applications')
+    run('hdiutil', 'create', '-volname', 'Sapiens4 Development', '-srcfolder', source,
+        '-format', 'UDZO', image)
+    if identity != '-':
+        run('codesign', '--force', '--sign', identity, '--timestamp', image)
+        run('codesign', '--verify', '--strict', image)
+    if notary:
+        run('xcrun', 'notarytool', 'submit', image, '--keychain-profile', notary, '--wait')
+        run('xcrun', 'stapler', 'staple', image)
+        run('xcrun', 'stapler', 'validate', image)
+        run('spctl', '--assess', '--type', 'open', '--context', 'context:primary-signature', image)
+    run('hdiutil', 'verify', image)
+    mount = temporary / 'mounted'
+    mount.mkdir()
+    run('hdiutil', 'attach', '-readonly', '-nobrowse', '-mountpoint', mount, image)
+    try:
+        if os.readlink(mount / 'Applications') != '/Applications':
+            raise ValueError('DMG Applications link is incorrect')
+        copied = temporary / 'installed copy' / app.name
+        run('ditto', mount / app.name, copied)
+        run('codesign', '--verify', '--deep', '--strict', copied)
+        run(sys.executable, Path(__file__).with_name('package.py'), 'verify',
+            '--runtime', copied / 'Contents/Resources/runtime')
+    finally:
+        run('hdiutil', 'detach', mount)
+    return image
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--version', default='0.1.0-dev')
@@ -245,9 +280,10 @@ def main():
         if artifact.exists():
             raise ValueError('Versioned artifact already exists')
         run('ditto', '-c', '-k', '--keepParent', destination, artifact)
-        run(sys.executable, root / 'build/package/package.py', 'receipt', '--artifact', artifact,
+        image = disk_image(destination, output, Path(temporary), args.sign_identity, args.notary_profile)
+        run(sys.executable, root / 'build/package/package.py', 'receipt', '--artifact', artifact, '--installer', image,
             '--manifest', destination / 'Contents/Resources/runtime/package-manifest.json', '--output', artifact.with_suffix('.release.json'))
-        print(f'Built {destination}\nArtifact {artifact}')
+        print(f'Built {destination}\nInstaller {image}\nPortable {artifact}')
 
 
 if __name__ == '__main__':

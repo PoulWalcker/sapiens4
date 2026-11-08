@@ -188,6 +188,8 @@ jobs:
         with:
           name: sapiens4-development-${{ matrix.platform }}
           path: |
+            .build/distribution/Sapiens.dmg
+            .build/distribution/Sapiens-Setup.exe
             .build/distribution/*.zip
             .build/distribution/*.release.json
           if-no-files-found: error
