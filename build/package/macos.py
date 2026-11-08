@@ -176,7 +176,6 @@ def main():
     parser.add_argument('--allow-missing-provider', action='store_true')
     parser.add_argument('--sign-identity', default=os.environ.get('SAPIENS_MAC_SIGN_IDENTITY', '-'))
     parser.add_argument('--notary-profile', default=os.environ.get('SAPIENS_MAC_NOTARY_PROFILE'))
-    parser.add_argument('--experimental-minimum-os', help='Explicit local experiment only; does not change supported macOS 13 floor')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     os.chdir(root)
@@ -184,8 +183,6 @@ def main():
         parser.error('--version must be SemVer')
     if args.notary_profile and args.sign_identity == '-':
         parser.error('Notarization requires Developer ID signing')
-    if args.experimental_minimum_os and not re.fullmatch(r'\d+\.\d+(?:\.\d+)?', args.experimental_minimum_os):
-        parser.error('--experimental-minimum-os must be a numeric OS version')
     os.environ['MACOSX_DEPLOYMENT_TARGET'] = '13.0'
     if not args.skip_build:
         run('runghc', root / 'build/Build.hs')
@@ -201,8 +198,7 @@ def main():
         shutil.copy2(root / '.build/bin/sapiens-macos', macos / 'Sapiens4')
         stage = [sys.executable, root / 'build/package/package.py', 'stage', '--root', root, '--destination', resources / 'runtime',
                  '--manifest', resources / 'runtime/package-manifest.json', '--version', args.version, '--platform', 'macos', '--architecture', 'arm64',
-                 '--minimum-os', args.experimental_minimum_os or '13.0', '--support-status',
-                 'experimental-minimum-os' if args.experimental_minimum_os else 'declared-target']
+                 '--minimum-os', '13.0']
         if args.provider:
             stage += ['--provider', args.provider]
         if args.allow_missing_provider:
@@ -224,11 +220,7 @@ def main():
         # Fingerprint the complete upstream tree before relocation/signing changes bytes.
         optional, rule = optional_voice(app)
         relocate(app, root)
-        declared = args.experimental_minimum_os or '13.0'
-        audit = audit_macos(app, optional, rule, declared)
-        info['LSMinimumSystemVersion'] = declared
-        with (app / 'Contents/Info.plist').open('wb') as stream:
-            plistlib.dump(info, stream)
+        audit = audit_macos(app, optional, rule, '13.0')
         manifest_path = resources / 'runtime/package-manifest.json'
         manifest = json.loads(manifest_path.read_text())
         manifest['macOSCompatibility'] = audit

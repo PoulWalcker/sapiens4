@@ -3,7 +3,6 @@
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -178,7 +177,7 @@ def stage(args):
     inputs = {**provenance, 'sourceTreeSha256': tree.hexdigest(),
               'platform': args.platform, 'architecture': args.architecture, 'version': args.version,
               'repository': 'PoulWalcker/sapiens4', 'channel': 'development', 'provider': provider_info,
-              'minimumOS': args.minimum_os, 'supportStatus': args.support_status,
+              'minimumOS': args.minimum_os, 'supportStatus': 'declared-target',
               'toolchain': {name: command(root, *cmd).splitlines()[0] for name, cmd in
                             {'ghc': ['ghc', '--numeric-version'], 'cabal': ['cabal', '--numeric-version'],
                              'rustc': ['rustc', '--version'], 'node': ['node', '--version']}.items()}}
@@ -225,7 +224,6 @@ if __name__ == '__main__':
     assemble.add_argument('--platform', choices=('macos', 'windows'), required=True)
     assemble.add_argument('--provider')
     assemble.add_argument('--minimum-os')
-    assemble.add_argument('--support-status', choices=('declared-target', 'experimental-minimum-os'), default='declared-target')
     assemble.add_argument('--allow-missing-provider', action='store_true', help='Native validation only; cannot create user-ready release')
     assemble.set_defaults(run=stage)
     record = commands.add_parser('receipt')
