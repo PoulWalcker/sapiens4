@@ -12,6 +12,7 @@ import Web.Event.Event (Event)
 
 data Action
   = Initialize
+  | CheckSetup
   | LoadRegistry
   | Finalize
   | Poll
@@ -69,6 +70,7 @@ data Action
   | ScanFrame Int
   | UploadQR
   | StopScan
+  | OnboardingPoll Int
   | HostPairPoll Int
   | Install
   | Submit Event Action
@@ -79,7 +81,8 @@ data Action
 data Success = Refresh | CloseAndRefresh String | SavedPrompt String
 
 data DialogIntent
-  = SuggestNames
+  = Setup String
+  | SuggestNames
   | CreateAgent
   | MentionGroup X.Entity
   | ResetRelay

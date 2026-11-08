@@ -466,3 +466,16 @@ body.sapi-workspace .notes-wiki :is(h1,h2) { font-family:Georgia,"Times New Roma
 .connection-status { display:inline-flex;align-items:center;gap:6px;white-space:nowrap;font-size:11px;color:var(--muted); }
 .connection-dot { width:6px;height:6px;flex:none;border-radius:50%;background:#888; }
 .connection-status[data-online="true"] .connection-dot { background:#3b9b69; }
+
+.account-card { border:1px solid var(--line);border-radius:10px;padding:20px;margin:18px 0; }
+.account-card h3 { font-size:15px;margin:0 0 12px; }
+.account-card h4 { font-size:14px;margin:0 0 10px; }
+.account-card p,.account-sign-in p { font-size:13px;line-height:1.6;margin:10px 0; }
+.account-connected { display:flex;align-items:center;gap:8px; }
+.account-connected::before { content:"";width:7px;height:7px;border-radius:50%;background:#3b9b69; }
+.account-actions { display:flex;flex-wrap:wrap;gap:8px;margin:16px 0 8px; }
+.account-sign-in>.button { margin:6px 8px 6px 0; }
+.account-help { margin-top:16px;font-size:12px; }
+.account-help summary { cursor:pointer; }
+.account-device-code strong { display:block;font:600 22px monospace;letter-spacing:2px;margin:14px 0; }
+.account-banner { display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:12px;padding:10px 16px;border-bottom:1px solid var(--line);font-size:12px; }

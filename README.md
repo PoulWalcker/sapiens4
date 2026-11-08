@@ -13,20 +13,25 @@ independent judgment with human oversight.
 | Windows 10/11, ARM64 or x64 | [Portable packages and source setup](environments/windows/README.md) |
 | Remote browser or mobile app | [Pairing and relay setup](docs/remote.md) |
 
-Source builds require GHC 9.14.1, Cabal 3.18.2, Git, authenticated Codex CLI
-0.156.1+, stable Rust, Node.js 22.5+ and npm. Platform build tools are listed in
+Source builds require GHC 9.14.1, Cabal 3.18.2, Git, Python 3.10+, stable Rust,
+Node.js 22.5+ and npm. Supported bundled Codex targets are macOS arm64 and Windows x64. Platform build tools are listed in
 the setup guides. Portable Windows packages bundle the native host and Blindly4.
 
 ```sh
 git clone --recurse-submodules https://github.com/aleski-green/sapiens4.git
 cd sapiens4
-codex login
 ./build/start.sh --open
 ```
 
 On Windows, use `.\build\start.ps1 -Open`. The local UI opens at
 http://127.0.0.1:4174/workspace/. Existing checkouts initialize dependencies with
 `git submodule update --init --recursive`.
+
+The build downloads the pinned Codex payload to `.build/codex` and verifies it on
+subsequent builds. First launch opens Welcome → ChatGPT sign-in → optional
+computer permissions → workspace. Authentication belongs to Sapiens; no separate
+terminal login is needed. Completed setup is retained across restarts.
+`runghc build/Build.hs --no-provider` compiles without acquiring Codex, for CI only.
 
 The UI uses PureScript/Halogen. Source startup builds it when needed; completed
 packages need no Node installation. Third-party dependencies live in the pinned

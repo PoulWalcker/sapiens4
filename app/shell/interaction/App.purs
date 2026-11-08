@@ -65,6 +65,15 @@ handle runtime input = session input
         void $ H.fork $ void $ H.liftAff $ try $ toAffE $ B.registerWorker "/sw.js"
       unless required $ dispatch LoadRegistry
       E.sync
+    CheckSetup -> do
+      m <- H.get
+      unless (M.remote m || m.setupChecked) do
+        H.modify_ _ {setupChecked=true}
+        E.attempt (C.json "/api/host/onboarding" "GET" D.null) \result -> case result of
+          Right value -> do
+            H.modify_ _ {account=value}
+            unless (D.b "completed" value) $ dispatch $ OpenDialog M.Onboarding F.NoRecord
+          Left _ -> pure unit
     Finalize -> liftEffect $ C.dispose runtime
     Poll -> E.runUpdate runtime dispatch U.Poll
     Copy text caption -> do

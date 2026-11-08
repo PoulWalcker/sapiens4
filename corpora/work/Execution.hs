@@ -19,6 +19,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Clock
 import System.Directory
+import System.FileLock (unlockFile)
 import Types
 import qualified Store as DB
 import Population
@@ -60,7 +61,7 @@ trimConversation s a = do
  forM_ archives $ \(ConversationArchive field rows) -> newId >>= \i -> writeJSON (archivePath s a (field<>"/"<>i)) (arr rows)
  when (final/=state) (decodeValue 500 final >>= saveState s a)
 submitTurn :: Service -> Text -> Value -> IO Value
-submitTurn s a d = do
+submitTurn s a d = withReadyProfile $ do
  input <- either (failure 400) pure (messageText (get d "text"))
  let flowValue=get d "flow" `fallback` str "chat"
  attachments <- resolveAttachments s a (get d "attachments" `fallback` arr []) True
@@ -68,7 +69,7 @@ submitTurn s a d = do
  flow <- decodeValue 400 flowValue
  binary <- codexBinary
  require (isJust binary) 503 "Codex CLI is missing. Install it and run codex login."
- when (flow==Computer) $ blindly s >>= doesFileExist >>= \built -> require built 503 "Blindly4 is not built. Run ./build/start.sh to build it."
+ when (flow==Computer) $ blindly s >>= doesFileExist >>= \built -> require built 503 "Computer helper is missing. Reinstall Sapiens to repair it."
  stopped <- readIORef (serviceStopping s)
  require (not stopped) 503 "Server is shutting down"
  requireActive s a
@@ -94,7 +95,7 @@ enqueueTurn identity flow input time state = mapStateFields (appendItems "chat" 
  message = obj [("role",str "user"),("content",str input),("turn",toJSON identity),("time",str time),("origin",Null)]
 
 turnAction :: Service -> Text -> Text -> Text -> IO Value
-turnAction s a identity rawAction = do
+turnAction s a identity rawAction = (if rawAction=="retry" then withReadyProfile else id) $ do
  requireActive s a
  action <- decodeValue 404 (str rawAction)
  state <- agentState s a
@@ -195,28 +196,30 @@ reserveBatch batch tick slot batching state = (marked,snapshot,execution)
  execution=(reserve first) { turnInput = T.intercalate "\n\n" (map turnInput (NE.toList batch)) }
 
 launch :: Service -> Text -> NonEmpty Turn -> Pulse -> Int -> Bool -> IO ()
-launch s a batch tick slot batching = do
- state <- agentState s a
- let (marked,snapshot,execution) = reserveBatch batch tick slot batching state
-     i=turnId (NE.head batch)
- saveState s a marked
- cancel <- newIORef False
- process <- newMVar Nothing
- activity <- newIORef empty
- deadline <- (+1800000000000) <$> getMonotonicTimeNSec
- let run=Run (AgentId a) i slot cancel process activity deadline
- modifyMVar_ (serviceRuns s) (pure . M.insert i run)
- DB.pulseCall s tick a "chatInput" slot (nub [at (turnField t "origin") "group" | t <- NE.toList batch,has (turnField t "origin") "group"])
- DB.project s a
- void $ forkIO $ do
-  result <- try (withActor s a (Just "chatInput") (if has (turnField execution "origin") "group" then G.runGroup s run execution else D.runDecision s run execution snapshot))
-  locked s $ finish s run execution result `finally` do
-   lease <- readIORef (serviceLease s)
-   when (lease==Just (AgentId a,i)) $ writeIORef (serviceLease s) Nothing
-   modifyMVar_ (serviceRuns s) (pure . M.delete i)
-   D.pendingWorks s
-   G.reconcileGroups s
-   G.dispatchGroups s
+launch s a batch tick slot batching = mask_ $ do
+ acquired <- runLease
+ forM_ acquired $ \lease -> flip onException (unlockFile lease) $ do
+  state <- agentState s a
+  let (marked,snapshot,execution) = reserveBatch batch tick slot batching state
+      i=turnId (NE.head batch)
+  saveState s a marked
+  cancel <- newIORef False
+  process <- newMVar Nothing
+  activity <- newIORef empty
+  deadline <- (+1800000000000) <$> getMonotonicTimeNSec
+  let run=Run (AgentId a) i slot cancel process activity deadline
+  modifyMVar_ (serviceRuns s) (pure . M.insert i run)
+  DB.pulseCall s tick a "chatInput" slot (nub [at (turnField t "origin") "group" | t <- NE.toList batch,has (turnField t "origin") "group"])
+  DB.project s a
+  void $ forkIOWithUnmask $ \unmask -> flip finally (unlockFile lease) $ unmask $ do
+   result <- try (withActor s a (Just "chatInput") (if has (turnField execution "origin") "group" then G.runGroup s run execution else D.runDecision s run execution snapshot))
+   locked s $ finish s run execution result `finally` do
+    lease <- readIORef (serviceLease s)
+    when (lease==Just (AgentId a,i)) $ writeIORef (serviceLease s) Nothing
+    modifyMVar_ (serviceRuns s) (pure . M.delete i)
+    D.pendingWorks s
+    G.reconcileGroups s
+    G.dispatchGroups s
 publish :: Service -> Text -> Pulse -> IO ()
 publish s a tick = forM_ [1,2] $ \slot -> do
  state <- agentState s a

@@ -115,7 +115,7 @@ type Device = {name :: String, platform :: String, client :: String}
 type Confirmation = {confirmation_code :: String, peer :: String}
 type PairStatus = {available :: Boolean, paired :: Boolean, enabled :: Boolean, invitation :: X.Invitation, pending :: Maybe Confirmation, device :: Device, paired_at :: Number, last_connected_at :: Number, error :: String}
 
-data Content = NoContent | Prompts (Array Prompt) | RelayRegistry Relays | Pairing PairStatus
+data Content = NoContent | Prompts (Array Prompt) | RelayRegistry Relays | Pairing PairStatus | Setup Json
 derive instance eqContent :: Eq Content
 
 prompt :: Json -> Prompt

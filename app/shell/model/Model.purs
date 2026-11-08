@@ -34,7 +34,7 @@ decodePreview value = case toString (D.get "content" value) of
 
 type Request = { epoch :: Int, sequence :: Int, key :: String, revision :: String, path :: String }
 
-data DialogKind = AppMenu | WorkspaceSettings | Computer | AgentSettings | GroupSettings | Attach | Reference X.AttachmentKind | DecisionPrompts | GroupTask | CreateCorpora | EditCorpora | ConnectRemote | HostPairing | RelayList | RelayAdd | RelaySwitch | RelayTerms | Installation | Notice
+data DialogKind = AppMenu | WorkspaceSettings | Computer | Onboarding | AgentSettings | GroupSettings | Attach | Reference X.AttachmentKind | DecisionPrompts | GroupTask | CreateCorpora | EditCorpora | ConnectRemote | HostPairing | RelayList | RelayAdd | RelaySwitch | RelayTerms | Installation | Notice
 
 derive instance eqDialogKind :: Eq DialogKind
 
@@ -106,8 +106,8 @@ type SessionState =
   , nativeReporting :: Boolean, nativeReports :: Array Browser.NativeReport
   , epoch :: Int, sequence :: Int, now :: Number, env :: Environment
   , records :: Array X.Corpora, active :: String, connection :: ConnectionState
-  , localAvailable :: Boolean, showArchived :: Boolean, installRequired :: Boolean
-  , preferencesSaved :: String
+  , localAvailable :: Boolean, showArchived :: Boolean, installRequired :: Boolean, setupChecked :: Boolean
+  , account :: Json, preferencesSaved :: String
   )
 
 initial :: Environment -> Model
@@ -118,8 +118,8 @@ initial env =
   , polling:false,pollGeneration:0,saving:false,lastPreview:0.0,nativeReporting:false,nativeReports:[]
   , epoch:0, sequence:0, now:0.0, env, panes:[N.ChatPane,N.Sidebar,N.Workspace], search:"", searchOpen:false, menu:Nothing, dialog:Nothing
   , records:[], active:"", connection:Offline, localAvailable:false, showArchived:false
-  , toast:"", feedback:"", theme:if env.dark then "dark" else "light", installRequired:false
-  , dialogStack:[], imageUrls:O.empty, preview:NotAsked, address:"", addressOpen:false, scrollPosition:Nothing, restoringScroll:false, preferencesSaved:""
+  , toast:"", feedback:"", theme:if env.dark then "dark" else "light", installRequired:false, setupChecked:false
+  , dialogStack:[], imageUrls:O.empty, preview:NotAsked, address:"", addressOpen:false, scrollPosition:Nothing, restoringScroll:false, account:D.empty, preferencesSaved:""
   }
 
 agent :: Model -> String -> X.Entity
@@ -290,3 +290,7 @@ valueOf = case _ of
 
 decodeDocument :: Request -> Json -> Either String X.Document
 decodeDocument r = X.decodeDocument (S.take 5 r.key == "tasks")
+
+
+accountBlocked :: Model -> Boolean
+accountBlocked m = not (remote m) && (activeRecord m).location == X.Local && D.n "schema" m.account > 0.0 && (not (D.b "ready" m.account) || D.s "hold" m.account /= "")
