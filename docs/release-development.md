@@ -36,10 +36,12 @@ inventory is retained as `sapiens-provider-upstream.json`.
 python3 build/package/package.py verify --runtime /absolute/path/to/runtime
 ```
 
-The adjacent `.release.json` receipt records the final ZIP size, SHA256 and
+Primary downloads are `Sapiens.dmg` and `Sapiens-Setup.exe`; portable ZIPs remain
+available. Each platform has one `.release.json` binding both final files, their
+sizes, SHA256 values and
 package-manifest hash. `buildId` records source, dependency, provider and toolchain
 inputs; it omits caller-supplied compiler flags and prebuilt binary hashes when
-using `--skip-build`. The final ZIP digest identifies the actual shipped bytes.
+using `--skip-build`. The final artifact digests identify the actual shipped bytes.
 Source exports need `build/source-provenance.json`, generated in the checkout:
 
 ```sh
@@ -57,7 +59,9 @@ identity, add these arguments to the platform build command:
 
 Mac signing uses hardened runtime, timestamps, strict deep verification,
 notarization, stapling and Gatekeeper assessment. Windows signs and verifies
-all EXE/DLL files before final inventories and ZIP creation.
+all application EXE/DLL files before final inventories. Inno signs its generated
+Setup, uninstaller and temporary copies through the configured SignTool; final
+installer hashes are calculated after composition/signing.
 
 Tag workflows require these repository secrets:
 
@@ -71,8 +75,12 @@ certificate/keychain material after the job. Keep signing material out of logs.
 
 ## Outstanding delivery checks
 
-The pinned libs4 integration commit must be available remotely before GitHub
-runners can fetch it. Remote CI and publisher signing/notarization remain unverified.
-Windows currently produces a portable ZIP; per-user installation remains required.
-Native Windows, Windows 11 ARM emulation, macOS 13, and downloaded signed artifact
-acceptance remain open. Use synthetic development data for validation.
+Windows Setup uses pinned Inno Setup for per-user installation only. Velopack,
+update feeds, migration and recovery are separate lifecycle work. WebView2
+Evergreen remains a prerequisite with native Install/Retry/Cancel guidance.
+CI compiler preflight uses a tiny fixture before the expensive Windows build;
+the full real installer is then tested with synthetic state and no auth.
+
+Publisher signing/notarization, clean-machine/normal-user Windows, Windows 11 ARM,
+macOS 13 and downloaded signed-artifact acceptance require recorded results.
+Local ad-hoc DMG success is not evidence of these checks. Use synthetic data.

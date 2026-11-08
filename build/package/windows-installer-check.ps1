@@ -81,6 +81,7 @@ try {
     } finally { $env:SAPIENS_TEST_PACKAGE_RUNTIME=$prior }
     Run-Setup $uninstaller @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') $true 'uninstall'
     if (Test-Path $registration) { throw 'Uninstall registration survived' }
+    if (Test-Path -LiteralPath $shortcut) { throw 'Uninstall shortcut survived' }
     if (Test-Path -LiteralPath (Join-Path $app 'Sapiens4.exe')) { throw 'Installed launcher survived uninstall' }
     if (-not (Test-Path -LiteralPath $unknown)) { throw 'Uninstall deleted an unknown user file' }
     foreach ($path in $sentinels.Keys) { if ((Get-FileHash -LiteralPath $path).Hash -ne $sentinels[$path]) { throw 'External state changed' } }

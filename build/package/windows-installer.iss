@@ -29,7 +29,8 @@ SignedUninstaller=no
 #endif
 
 [Files]
-Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "sapiens-installation.id"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceDir}\sapiens-installation.id"; DestDir: "{app}"; Flags: ignoreversion uninsneveruninstall
 
 [Icons]
 Name: "{userprograms}\Sapiens4 Development"; Filename: "{app}\Sapiens4.exe"

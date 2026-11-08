@@ -14,10 +14,11 @@ git config submodule.blindly4.url https://github.com/aleski-green/blindly4.git
 git submodule update --init --recursive
 python3 build/package/acquire-provider.py --platform darwin-arm64 --destination runtime/codex
 ./environments/macos/build.sh --version 0.1.0-dev --provider "$PWD/runtime/codex"
-open '.build/macos/Sapiens4 Development.app'
+open .build/macos/Sapiens.dmg
 ```
 
-Outputs in `.build/macos/` are the app, `sapiens4-development-0.1.0-dev-macos-arm64.zip`
+Open `Sapiens.dmg`, drag **Sapiens4 Development** to Applications, then launch it.
+Outputs in `.build/macos/` are the DMG, app, `sapiens4-development-0.1.0-dev-macos-arm64.zip`
 and its `.release.json` receipt. Use `--output-directory` for another build;
 existing app/ZIP outputs are rejected. Signing defaults to ad-hoc. Publisher
 signing and CI policy are in the [release runbook](../../docs/release-development.md).
@@ -44,6 +45,8 @@ SAPIENS_TEST_PACKAGE_RUNTIME="$PWD/.build/macos/Sapiens4 Development.app/Content
   ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb
 ```
 
+DMG creation verifies the image, mounts it read-only, copies the app to a temporary
+installation path and verifies its signature/runtime inventory.
 The package scenario checks final inventories, provider version, HTTP assets,
 stable synthetic identity across two launches and graceful exit. Native UI,
 permissions, target-OS and downloaded/notarized artifact acceptance are separate checks.
