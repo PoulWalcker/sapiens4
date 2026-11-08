@@ -183,8 +183,12 @@ jobs:
           $env:SAPIENS_TEST_PACKAGE_RUNTIME = (Resolve-Path .build/distribution/Sapiens4-Development-win-x64/runtime).Path
           ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb
           if ($LASTEXITCODE -ne 0) { throw 'Package scenario failed' }
+      - name: Verify per-user Windows install, native launch and uninstall
+        if: github.event_name != 'pull_request' && runner.os == 'Windows'
+        shell: pwsh
+        run: ./build/package/windows-installer-check.ps1 -Installer .build/distribution/Sapiens-Setup.exe -EvidenceDirectory .build/distribution/installer-check
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: github.event_name != 'pull_request'
+        if: always() && github.event_name != 'pull_request'
         with:
           name: sapiens4-development-${{ matrix.platform }}
           path: |
@@ -192,6 +196,7 @@ jobs:
             .build/distribution/Sapiens-Setup.exe
             .build/distribution/*.zip
             .build/distribution/*.release.json
+            .build/distribution/installer-check/*
           if-no-files-found: error
       - name: Remove temporary macOS signing material
         if: always() && inputs.release && runner.os == 'macOS'
