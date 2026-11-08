@@ -37,6 +37,11 @@ explicitly supplies a rule. Updates omitting the rule preserve the saved policy;
 changing a Routine never changes an admitted Run's contract. Successful quiet
 Personal Runs appear in task history rather than as unanswered chat prompts.
 
+If the host cannot determine a Routine's active Run, its row shows
+"Run status unavailable" with the reason in its details. This does not mean the
+Routine is inactive. Stop is available only when the current Run is known;
+the saved schedule and execution state are unchanged.
+
 If Sapi creation was interrupted after its database profile was saved, restart
 restores missing workspace files and defaults a missing manager to Chief. If the
 original request explicitly named another manager, open the existing Sapi's

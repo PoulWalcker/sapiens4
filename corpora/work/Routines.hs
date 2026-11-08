@@ -311,9 +311,9 @@ routineSummaries s = do
       | Deferred range _ <- dues]
      combine (count,oldest) (otherCount,otherOldest) =
       (count+otherCount,if routineDue (dueRoutineSnapshot oldest) < routineDue (dueRoutineSnapshot otherOldest) then oldest else otherOldest)
-     summarize routine = case parseRoutineId (at routine "id") >>= (`M.lookup` deferred) of
-      Nothing -> routine
-      Just (count,oldest) -> merge routine (obj
+     summarize routine = let value=remove ["activeRun","activeRunError"] routine in case parseRoutineId (at value "id") >>= (`M.lookup` deferred) of
+      Nothing -> value
+      Just (count,oldest) -> merge value (obj
        [("deferredCount",toJSON count)
        ,("oldestDeferredDue",get (toJSON (dueRoutineSnapshot oldest)) "nextDue")])
  fmap catMaybes $ forM routines $ \value -> (do
@@ -324,7 +324,7 @@ routineSummaries s = do
     stored <- readDuesOn db routine
     let recorded=listToMaybe [occurrenceTarget occurrence | Admitted occurrence _ <- stored]
     forM (destination <|> recorded) $ \target -> activeRun s db routine target stored
-   pure (Just (merge (summarize value) (obj [("activeRun",toJSON identity) | identity <- maybeToList (join active)])))) `catch` invalidActive value
+   pure (Just (merge (summarize value) (obj [("activeRun",toJSON identity) | identity <- maybeToList (join active)])))) `catch` invalidActive (summarize value)
  where
  readSummaryDue row = (Just <$> readStoredDue row) `catch` invalidSummary row
  invalidSummary :: Value -> APIError -> IO (Maybe StoredDue)
@@ -333,9 +333,9 @@ routineSummaries s = do
    <> " omitted from routine summaries: " <> show problem)
   pure Nothing
  invalidActive :: Value -> APIError -> IO (Maybe Value)
- invalidActive value problem = do
+ invalidActive value problem@(APIError _ reason) = do
   hPutStrLn stderr ("Routine " <> T.unpack (at value "id") <> " active Run unavailable: " <> show problem)
-  pure (Just value)
+  pure (Just (put "activeRunError" (str reason) value))
 storeRoutine :: Service -> Routine -> IO Value
 storeRoutine s = DB.saveRoutine s . toJSON
 

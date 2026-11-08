@@ -110,7 +110,7 @@ RSpec.describe 'Scheduled work and pulse contracts' do
       code, error = host.request('POST', "/api/agents/#{owner}/control", {op: 'routine_resume', id: item['id']})
       expect(code).to eq(500)
       expect(error['error']).to include('paused')
-      expect(host.state['routines']).to eq([item])
+      expect(host.state.fetch('routines')).to match([item.merge('activeRunError' => a_string_including('paused'))])
       expect(host.calls).to be_empty
     end
   end
