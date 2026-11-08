@@ -24,7 +24,13 @@ jobs:
           python3 - <<'PYTHON'
           import os, re, subprocess
           tag = os.environ['GITHUB_REF_NAME']
-          if not re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?', tag):
+          number = r'(?:0|[1-9][0-9]*)'
+          prerelease = r'(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)'
+          build = r'[0-9A-Za-z-]+'
+          version_pattern = (rf'v{number}\.{number}\.{number}'
+                             rf'(?:-{prerelease}(?:\.{prerelease})*)?'
+                             rf'(?:\+{build}(?:\.{build})*)?')
+          if not re.fullmatch(version_pattern, tag):
               raise SystemExit('Expected vSemVer tag')
           commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
