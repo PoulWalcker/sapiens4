@@ -6,8 +6,9 @@ import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
 import Data.Aeson
+import Data.Char (toUpper)
 import Data.IORef
-import Data.List (stripPrefix)
+import Data.List (stripPrefix, isPrefixOf)
 import Data.Maybe
 import Network.HTTP.Client
 import Network.URI
@@ -43,6 +44,14 @@ hostPaths args executable local dataEnv runtimeEnv = HostPaths
   (fromMaybe (takeDirectory executable </> "runtime") (option "--runtime-dir" `mplus` runtimeEnv))
   where option name = listToMaybe [value | (key,value) <- zip args (drop 1 args), key == name]
 
+hostEnvironment :: [(String,String)] -> [(String,String)] -> [(String,String)]
+-- Windows names are case-insensitive; leave explicit path values unchanged.
+hostEnvironment overrides inherited = overrides ++ filter keep inherited
+  where
+    owned = map (map toUpper . fst) overrides
+    keep (key,_) = let name = map toUpper key in
+      name `notElem` owned && not (any (`isPrefixOf` name) ["CODEX_","OPENAI_"])
+
 prepareHost :: [String] -> IO Host
 prepareHost args = do
   executable <- getExecutablePath
@@ -68,7 +77,7 @@ startHost host = mask $ \restore -> do
   let overrides = [("SAPIENS_DESKTOP_PID", show pid),("SAPIENS_REPOSITORY",runtimeDirectory host),("SAPIENS_CONFIG_DIR",configRoot),("SAPIENS_DATA_DIR",dataDirectory host)]
   (Just input, Just output, Just errors, child) <- createProcess (proc binary ["--port", "0", "--data-dir", dataDirectory host, "--desktop"])
     { cwd = Just (runtimeDirectory host), std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe
-    , env = Just (overrides ++ filter ((`notElem` map fst overrides) . fst) environment)
+    , env = Just (hostEnvironment overrides environment)
     , create_group = True, use_process_jobs = True, detach_console = True }
   let cleanup = terminateProcess child `finally` mapM_ closeStream [input, output, errors]
   mapM_ (\stream -> hSetEncoding stream utf8 >> hSetNewlineMode stream universalNewlineMode) [input, output, errors] `onException` cleanup
