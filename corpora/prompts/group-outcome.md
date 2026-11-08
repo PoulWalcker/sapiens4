@@ -14,6 +14,10 @@ condition or unavailable measurement is Unresolved with a notifying reply.
 Scheduled and manual Runs follow the same saved condition. Other Group tasks and
 handoffs retain their existing response rules. NotApplicable by itself is not
 permission to suppress the result message.
+When scheduledTaskSpecification.notificationPolicy is present, Always requires
+notify; WhenApplicable names the Conditional chat criterion whose Satisfied
+result requires notify and NotApplicable result requires quiet for Completed.
+A missing policy in an accepted specification retains its legacy instructions.
 
 Use the exact criterion IDs from scheduledTaskSpecification. Completed requires
 evidence and coverage of every criterion. NotApplicable is allowed only for an

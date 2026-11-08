@@ -288,7 +288,8 @@ RSpec.describe 'Group collaboration contracts' do
     message('Configure the Group comparison')
     host.idle
     saved = JSON.parse(File.read(File.join(host.root, 'workspaces', @lead, 'group-routines.json'))).fetch('routines').first
-    expect(saved).to include('owner' => gid, 'paused' => true, 'minutes' => 120, 'prompt' => 'Updated Group comparison', 'specification' => JSON.parse(JSON.generate(specification)))
+    expected_specification = specification.merge(notificationPolicy: {kind: 'Always'})
+    expect(saved).to include('owner' => gid, 'paused' => true, 'minutes' => 120, 'prompt' => 'Updated Group comparison', 'specification' => JSON.parse(JSON.generate(expected_specification)))
     expect(host.control(@lead, 'routines').fetch('routines')).to be_empty
     host.configure(rules: {"#{@lead}:group" => {block: true, gate: 'group-resume',
       actions: [{control: {op: 'routine_resume', id: saved.fetch('id')}}]}})

@@ -24,6 +24,19 @@ actions. Never-started queued work resumes after restart; previously running wor
 becomes interrupted and requires explicit retry. Inspect uncertain external
 outcomes before retrying. The shared computer allows one owner at a time.
 
+A Task specification can declare `notificationPolicy: {kind:"Always"}` or
+`{kind:"WhenApplicable",criterion:"alert"}`, where `alert` identifies an existing
+Conditional criterion. For a Completed Routine result, Always requires a chat
+message. WhenApplicable requires a message for Satisfied and history-only output
+for NotApplicable on that criterion. Unresolved results and failures remain
+visible. Scheduled and manual Runs use the same saved rule.
+
+New specifications default to Always. Existing saved specifications without this
+field retain their legacy, model-interpreted notification behavior until the owner
+explicitly supplies a rule. Updates omitting the rule preserve the saved policy;
+changing a Routine never changes an admitted Run's contract. Successful quiet
+Personal Runs appear in task history rather than as unanswered chat prompts.
+
 If Sapi creation was interrupted after its database profile was saved, restart
 restores missing workspace files and defaults a missing manager to Chief. If the
 original request explicitly named another manager, open the existing Sapi's

@@ -16,7 +16,8 @@ import qualified Command as C
 import Data.Aeson hiding (pairs)
 import Data.Aeson.Types (Parser)
 import qualified Data.Aeson.KeyMap as KM
-import Data.List (find, nub, sortOn)
+import Data.List (find, sortOn)
+import Data.Containers.ListUtils (nubOrd)
 import Data.Ord (Down(..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as M
@@ -391,12 +392,14 @@ routineValue time owner interval body specification policy change = do
     PersonalOwner _ -> "This Routine has a structured specification. The text edit template can change its frequency with the prompt unchanged. To change the work, ask this Sapi in an ordinary message to update the full objective, inputs, expected outputs and criteria together. No changes were saved."
     GroupOwner _ -> "This Group Routine has a structured specification. The text edit template can change its frequency with the prompt unchanged. To change its work, ask the Group Lead to update the full objective, inputs, expected outputs and criteria together. No changes were saved.")
   NewRoutine _ -> pure ()
+ preparedSpecification <- traverse (either (Left . APIError 400) Right . D.preparePublicationSpec previousSpecification) specification
  pure $ merge initial (obj (
   [("owner",toJSON owner),("title",str (T.unwords (take 7 (T.words body)))),("minutes",toJSON interval)
   ,("prompt",str body),("updated",str (timestamp time)),("nextDue",toJSON deadline)
   ,("policySelection",toJSON (maybe initialPolicy PolicySelected policy))]
-  ++ [("specification",toJSON spec) | spec <- maybeToList specification]))
+  ++ [("specification",toJSON spec) | spec <- maybeToList preparedSpecification]))
  where
+ previousSpecification = case change of ReviseRoutine existing -> routineSpecification existing; NewRoutine _ -> Nothing
  deadline = case change of
   ReviseRoutine existing | routineMinutes existing == interval -> routineDeadline existing
   _ -> newDeadline (addUTCTime (intervalSeconds interval) time)
@@ -421,8 +424,10 @@ save s rawOwner minutes execution specification policy edit = do
  selected <- validated (decodeRoutineCandidate edit interval body routines >>= selectRoutine edit)
  case selected of
   RoutineReplay existing -> do
-   forM_ specification $ \spec -> require (routineSpecification existing == Just spec)
-    409 "This creation already has a different specification; update the existing routine"
+   forM_ specification $ \spec -> do
+    prepared <- either (failure 400) pure (D.preparePublicationSpec (routineSpecification existing) spec)
+    require (routineSpecification existing == Just prepared)
+     409 "This creation already has a different specification; update the existing routine"
    forM_ policy $ \chosen -> require (routinePolicy existing == PolicySelected chosen)
     409 "This creation already has a different policy; update the existing routine"
    pure (toJSON existing)
@@ -675,13 +680,13 @@ activePersonal s db routine dues = do
  forM_ [turn | turn <- agentTurns state, activeStatus (turnStatus turn)] $ \turn -> void (requireExecutionOrigin (turnOrigin turn))
  let turns = [turn | turn <- agentTurns state, ValidOrigin origin <- [turnOrigin turn], originRoutine origin == Just (routineId routine)]
      admitted = [occurrenceId occurrence | Admitted occurrence _ <- dues]
-     identities = nub (admitted ++ map turnId turns)
+     identities = nubOrd (admitted ++ map turnId turns)
      stopped = S.fromList [occurrenceId occurrence | Admitted occurrence _ <- dues, isJust (occurrenceStoppedAt occurrence)]
  workRows <- readRuns "SELECT id,value FROM workloads" ["id","value"] identities
  savedWorks <- traverse (DB.decodeStored . (`at` "value")) workRows :: IO [D.Workload]
  let calls=concatMap (map D.callIdentity . NE.toList . D.workCalls) savedWorks
      works=M.fromList [(D.workloadId work,work) | work<-savedWorks]
- turnRows <- readRuns "SELECT id,status FROM turns" ["id","status"] (nub (identities++calls))
+ turnRows <- readRuns "SELECT id,status FROM turns" ["id","status"] (nubOrd (identities++calls))
  projected <- fmap M.fromList $ forM turnRows $ \row -> do
   status <- field 500 row "status"
   pure (at row "id",status)

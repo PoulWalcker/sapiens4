@@ -5,7 +5,7 @@ module Delegation
  ( WorkCall(..), Workload, workloadId, workCalls, workOrigin, CallState(..), CallProgress(..)
  , callState, callNode, callOutput, begin, getWork, findWork, readWorks, saveWork, withCall, workItems
  , exceptionText, reconcileWorks, pendingWorks, runDecision, applyDecision, clarify
- , TaskSpec, templates, editTemplate, workTasks, taskList, workSummaries
+ , TaskSpec, preparePublicationSpec, validateTaskPublication, templates, editTemplate, workTasks, taskList, workSummaries
  , Outcome(..), OutcomeStatus(..), Decision(..), DecisionResponse(..), parseGroupDecision
  , StructurallyValidOutcome, validatedOutcome, validateOutcome, outcomeError
  , resultHistory, rejectResult, executionPublication
@@ -155,7 +155,8 @@ data Workload = Workload
 instance FromJSON Workload where
  parseJSON = withObject "Workload" $ \o -> do
   let (contract,encoding)=decodeTask (KM.lookup "task" o)
-  Workload <$> o .: "workloadId" <*> o .: "tracked" <*> o .: "calls" <*> pure contract <*> pure encoding <*> pure (decodeStoredOrigin (KM.lookup "origin" o))
+  identity <- runIdText <$> o .: "workloadId"
+  Workload <$> pure identity <*> o .: "tracked" <*> o .: "calls" <*> pure contract <*> pure encoding <*> pure (decodeStoredOrigin (KM.lookup "origin" o))
    <*> pure (foldr KM.delete o ["workloadId","tracked","calls","task","origin"])
 instance ToJSON Workload where
  toJSON work = mergeFields
@@ -210,19 +211,54 @@ instance ToJSON CompletionCriterion where
   Required identity requirement -> fields identity requirement (obj [("kind",str "Required")])
   Conditional identity condition requirement -> fields identity requirement (obj [("kind",str "Conditional"),("condition",str (conditionText condition))])
   where fields identity requirement applicability = obj [("id",toJSON identity),("requirement",str (requirementText requirement)),("applicability",applicability)]
-data TaskSpec = TaskSpec { specObjective :: Text, specInputs :: [Text], specOutputs :: NonEmpty Text, specCriteria :: NonEmpty CompletionCriterion } deriving (Eq, Show)
+data NotificationRule = AlwaysNotify | NotifyWhenApplicable CriterionId deriving (Eq, Show)
+instance FromJSON NotificationRule where
+ parseJSON value = case at value "kind" of
+  "Always" -> onlyFields ["kind"] value >> pure AlwaysNotify
+  "WhenApplicable" -> onlyFields ["kind","criterion"] value >> NotifyWhenApplicable <$> parseJSON (get value "criterion")
+  _ -> fail "Notification policy must be Always or WhenApplicable"
+instance ToJSON NotificationRule where
+ toJSON rule = case rule of
+  AlwaysNotify -> obj [("kind",str "Always")]
+  NotifyWhenApplicable identity -> obj [("kind",str "WhenApplicable"),("criterion",toJSON identity)]
+
+data TaskSpec = TaskSpec
+ { specObjective :: Text, specInputs :: [Text], specOutputs :: NonEmpty Text, specCriteria :: NonEmpty CompletionCriterion
+ , specNotificationRule :: Maybe NotificationRule
+ } deriving (Eq, Show)
 instance FromJSON TaskSpec where
  parseJSON value = do
-  onlyFields ["objective","inputs","expectedOutputs","completionCriteria"] value
+  onlyFields ["objective","inputs","expectedOutputs","completionCriteria","notificationPolicy"] value
   objective <- textFieldP "objective" 16000 value
   inputs <- stringsP "inputs" False (get value "inputs")
   outputs <- stringsP "expectedOutputs" True (get value "expectedOutputs") >>= maybe (fail "Expected at least one output") pure . NE.nonEmpty
   criteria <- parseJSON (get value "completionCriteria") >>= maybe (fail "Expected at least one criterion") pure . NE.nonEmpty
   let ids=map criterionId (NE.toList criteria)
   unless (length ids <= 50 && length ids == length (nub ids)) (fail "Completion criteria require unique IDs and at most 50 entries")
-  pure (TaskSpec objective inputs outputs criteria)
+  rule <- if has value "notificationPolicy" then Just <$> parseJSON (get value "notificationPolicy") else pure Nothing
+  let specification=TaskSpec objective inputs outputs criteria rule
+  either (fail . T.unpack) pure (validateNotificationReference specification)
+  pure specification
 instance ToJSON TaskSpec where
- toJSON spec = obj [("objective",str (specObjective spec)),("inputs",toJSON (specInputs spec)),("expectedOutputs",toJSON (NE.toList (specOutputs spec))),("completionCriteria",toJSON (NE.toList (specCriteria spec)))]
+ toJSON spec = obj ([("objective",str (specObjective spec)),("inputs",toJSON (specInputs spec)),("expectedOutputs",toJSON (NE.toList (specOutputs spec))),("completionCriteria",toJSON (NE.toList (specCriteria spec)))]
+  ++ [("notificationPolicy",toJSON rule) | rule <- maybeToList (specNotificationRule spec)])
+
+validateNotificationReference :: TaskSpec -> Either Text ()
+validateNotificationReference spec = case specNotificationRule spec of
+ Just (NotifyWhenApplicable identity) -> case find ((==identity) . criterionId) (NE.toList (specCriteria spec)) of
+  Just (Conditional _ _ _) -> Right ()
+  _ -> Left "Notification policy must reference an existing Conditional criterion"
+ _ -> Right ()
+
+-- Missing rules in accepted specifications retain their legacy semantics.
+preparePublicationSpec :: Maybe TaskSpec -> TaskSpec -> Either Text TaskSpec
+preparePublicationSpec previous proposed = do
+ let rule=case specNotificationRule proposed of
+      Just explicit -> Just explicit
+      Nothing -> maybe (Just AlwaysNotify) specNotificationRule previous
+     prepared=proposed { specNotificationRule=rule }
+ validateNotificationReference prepared
+ pure prepared
 data OutcomeStatus = Completed | Unresolved deriving (Eq, Ord, Show, Enum, Bounded)
 instance Wire OutcomeStatus where wireName status = case status of Completed -> "Completed"; Unresolved -> "Unresolved"
 instance FromJSON OutcomeStatus where parseJSON = parseWire
@@ -251,6 +287,18 @@ instance FromJSON Outcome where
   Outcome <$> parseJSON (get value "status") <*> parseJSON (get value "criterionResults") <*> stringsP "artifacts" False (get value "artifacts")
 instance ToJSON Outcome where
  toJSON outcome = obj [("status",toJSON (outcomeStatus outcome)),("criterionResults",toJSON (outcomeResults outcome)),("artifacts",toJSON (outcomeArtifacts outcome))]
+
+validateTaskPublication :: ExecutionOrigin -> Outcome -> TaskSpec -> ResultPublication -> Either Text ()
+validateTaskPublication origin outcome spec publication = do
+ validatePublicationContext origin (outcomeStatus outcome == Completed) publication
+ when (outcomeStatus outcome == Completed) $ case specNotificationRule spec of
+  Nothing -> Right ()
+  Just AlwaysNotify -> when quiet (Left "The accepted Task requires a chat notification")
+  Just (NotifyWhenApplicable identity) -> case find ((==identity) . resultId) (outcomeResults outcome) of
+   Just (Satisfied _ _) -> when quiet (Left "The accepted notification criterion applies; publish the result")
+   Just (NotApplicable _ _) -> unless quiet (Left "The accepted notification criterion does not apply; retain the result in history")
+   Nothing -> Left "The accepted notification criterion has no applicability result"
+ where quiet=case publication of HistoryOnly _ -> True; PublishToChat _ -> False
 
 data Decision
  = ReplyNow Text | ExecuteTask | OutsideSpecialization | SelectSpecialist Text
@@ -532,7 +580,7 @@ applyDecision s owner current decision = do
 data DecisionError
  = TrackedTaskNeedsExecution | OnlyChiefCreates | CriteriaRemoved | RoutineTaskChanged
  | OwnerOnlyPolicySetup
- | InvalidOutcome OutcomeError | UnsupportedSavedTaskSpec | InvalidTaskContract Text | InvalidWorkOrigin Text
+ | InvalidOutcome OutcomeError | InvalidPublication Text | UnsupportedSavedTaskSpec | InvalidTaskContract Text | InvalidWorkOrigin Text
  deriving (Eq, Show)
 data DecisionStep
  = SaveDecision Workload WorkCall
@@ -568,16 +616,20 @@ advanceDecision chief response work call = case decisionBody response of
    origin <- checkedWorkOrigin work
    let fixed=originIsScheduled origin && isJust accepted
    when (fixed && accepted /= Just spec) (Left RoutineTaskChanged)
+   prepared <- if fixed then Right spec else B.first InvalidPublication (preparePublicationSpec accepted spec)
+   case specNotificationRule prepared of
+    Just (NotifyWhenApplicable _) -> unless (originIsScheduled origin) (Left (InvalidPublication "Conditional notification policies require a Routine execution"))
+    _ -> Right ()
    let inherited=maybe [] (NE.toList . specCriteria) accepted
    unless (all (`elem` NE.toList (specCriteria spec)) inherited) (Left CriteriaRemoved)
    let savedType=if originIsScheduled origin then "automated" else taskType
-   Right (finish (if fixed then work else acceptTaskSpec savedType spec work) (RunningAt Execution))
+   Right (finish (if fixed then work else acceptTaskSpec savedType prepared work) (RunningAt Execution))
  Handoff request -> policyDelegation work >> Right (DelegateRequest request)
  ReportOutcome publication outcome -> do
   spec <- acceptedTaskSpec work >>= maybe (Left (InvalidTaskContract "Task has no accepted specification")) Right
   StructurallyValidOutcome checked <- B.first InvalidOutcome (validateOutcome response outcome spec)
   origin <- checkedWorkOrigin work
-  B.first InvalidTaskContract (validatePublication origin (outcomeStatus checked == Completed) publication)
+  B.first InvalidPublication (validateTaskPublication origin checked spec publication)
   let reply=publicationText publication
       fields=publicationFields publication
       saved=mergeFields (fields ++ [("reply",str reply),("evidence",toJSON (decisionEvidence response)),("author",toJSON (callRecipient call))]) (toJSON checked)
@@ -612,6 +664,7 @@ decisionFailure problem = case problem of
  RoutineTaskChanged -> failure 400 "A Routine Run cannot change its accepted specification; update the Routine and start a new Run"
  OwnerOnlyPolicySetup -> failure 409 "Personal routine policy setup must stay with its owner. Save a policy here, or retry this setup with its owner."
  InvalidOutcome reason -> failure 400 (outcomeError reason)
+ InvalidPublication reason -> failure 400 reason
  UnsupportedSavedTaskSpec -> failure 409 "Saved Task specification must use structured completion criteria; create a new Task."
  InvalidTaskContract reason -> failure 500 ("Saved Task specification is malformed: "<>reason)
  InvalidWorkOrigin reason -> failure 500 reason
@@ -690,13 +743,13 @@ executionPublication s identity = do
      record <- maybe (failure 500 "Saved result has no decision record") pure (find ((==decisionId) . (`get` "decisionId")) (workItems work "decisions"))
      response <- parseValue 500 (parseDecision Execution) (get record "response")
      spec <- either decisionFailure (maybe (failure 500 "Saved result has no accepted specification") pure) (acceptedTaskSpec work)
+     origin <- requireExecutionOrigin (workOrigin work)
      case decisionBody response of
       ReportOutcome original outcome -> do
        require (original == publication) 500 "Saved publication does not match its accepted decision"
        either (failure 500 . outcomeError) (const (pure ())) (validateOutcome response outcome spec)
+       either (failure 500) pure (validateTaskPublication origin outcome spec publication)
       _ -> failure 500 "Saved result requires an Outcome decision"
-     origin <- requireExecutionOrigin (workOrigin work)
-     either (failure 500) pure (validatePublication origin (at (get saved "outcome") "status" == "Completed") publication)
      require (callOutput call == Just (publicationText publication)) 500 "Saved result text does not match its completed Call"
      pure (Just publication)
 
@@ -784,7 +837,9 @@ resultHistory work = fmap catMaybes $ forM (workItems work "decisions") $ \recor
    rejection <- traverse (validateValue 500 parseJSON) (if has record "rejection" then Just (get record "rejection") else Nothing) :: Validation (Maybe ResultRejection)
    publication <- validateValue 500 publicationP (if savedHere then current else response)
    origin <- either (Left . APIError 500) Right (checkedOrigin (workOrigin work))
-   either (Left . APIError 500) Right (validatePublication origin (outcomeStatus outcome == Completed) publication)
+   either (Left . APIError 500) Right $ case workTaskContract work of
+    Accepted spec -> validateTaskPublication origin outcome spec publication
+    _ -> validatePublicationContext origin (outcomeStatus outcome == Completed) publication
    Right (Just (obj (publicationFields publication ++ [("result",obj [("decision",identity)]),("call",get record "callId"),("reply",str (publicationText publication)),("outcome",toJSON outcome),("rejection",toJSON rejection)])))
 
 rejectResult :: Service -> RunId -> Text -> ResultRejection -> IO Value

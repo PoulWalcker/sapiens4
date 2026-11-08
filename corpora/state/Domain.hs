@@ -21,7 +21,7 @@ module Domain
  , messageText, AgentProfile(..), rosterMembers, activeStatus, retryableStatus, completedStatus
  , ResultReviewer(..), RejectionReason, mkRejectionReason, ResultRejection(..)
  , ResultText, ResultPublication(..), publicationText, publicationFields, publicationP
- , historyOnlyP, validatePublication
+ , historyOnlyP, validatePublicationContext
  ) where
 
 import Control.Monad
@@ -45,7 +45,13 @@ import qualified Data.Vector as V
 import Text.Read (readMaybe)
 import Data.Time (UTCTime, defaultTimeLocale, formatTime, parseTimeM)
 
-newtype AgentId = AgentId { agentIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
+identityP :: String -> Value -> Parser Text
+identityP label = withText label $ \identity -> do
+ unless (not (T.null (T.strip identity))) (fail (label <> " cannot be empty"))
+ pure identity
+
+newtype AgentId = AgentId { agentIdText :: Text } deriving (Eq, Ord, Show, ToJSON)
+instance FromJSON AgentId where parseJSON value = AgentId <$> identityP "Sapi ID" value
 
 data ResultReviewer = AdminReviewer | SapiReviewer AgentId deriving (Eq, Show)
 instance FromJSON ResultReviewer where
@@ -86,8 +92,10 @@ instance FromJSON MessageId where
   unless (not (T.null (T.strip identity))) (fail "Group message ID cannot be empty")
   pure (MessageId identity)
 instance ToJSON MessageId where toJSON = str . messageIdText
-newtype TaskId = TaskId { taskIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
-newtype RunId = RunId { runIdText :: Text } deriving (Eq, Ord, Show, FromJSON, ToJSON)
+newtype TaskId = TaskId { taskIdText :: Text } deriving (Eq, Ord, Show, ToJSON)
+instance FromJSON TaskId where parseJSON value = TaskId <$> identityP "Task ID" value
+newtype RunId = RunId { runIdText :: Text } deriving (Eq, Ord, Show, ToJSON)
+instance FromJSON RunId where parseJSON value = RunId <$> identityP "Run ID" value
 
 newtype GroupId = GroupId Text deriving (Eq, Ord, Show)
 groupIdText :: GroupId -> Text
@@ -108,7 +116,7 @@ parseRoutineId :: Text -> Maybe RoutineId
 parseRoutineId identity = do
  suffix <- T.stripPrefix "routine_sch_" identity
  sequenceNumber <- readMaybe (T.unpack suffix) :: Maybe Integer
- guard (sequenceNumber >= toInteger (minBound :: Int64) && sequenceNumber <= toInteger (maxBound :: Int64))
+ guard (sequenceNumber > 0 && sequenceNumber <= toInteger (maxBound :: Int64))
  pure (RoutineId identity (fromInteger sequenceNumber))
 instance FromJSON RoutineId where
  parseJSON = withText "Scheduled Routine ID" $ maybe (fail "Invalid scheduled routine ID") pure . parseRoutineId
@@ -489,8 +497,8 @@ publicationP value = do
  quiet <- historyOnlyP value
  pure (if quiet then HistoryOnly content else PublishToChat content)
 
-validatePublication :: ExecutionOrigin -> Bool -> ResultPublication -> Either Text ()
-validatePublication origin completed publication = case publication of
+validatePublicationContext :: ExecutionOrigin -> Bool -> ResultPublication -> Either Text ()
+validatePublicationContext origin completed publication = case publication of
  PublishToChat _ -> Right ()
  HistoryOnly _
   | not completed -> Left "Only a Completed outcome can keep its result in history without a chat message"
