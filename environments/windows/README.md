@@ -1,8 +1,11 @@
 # Sapiens4 Development for Windows
 
-Extract the whole portable ZIP and run **Sapiens4.exe**. The x64 app includes
-the native shell, owned backend, UI, Blindly, complete pinned Codex provider,
-WebView2 loader and licenses. Python, .NET, WSL and build tools are builder-only.
+Run **Sapiens-Setup.exe** to install for the current user without administrator
+rights. Launch **Sapiens4 Development** from Start. Default files are under
+`%LOCALAPPDATA%\Programs\Sapiens4 Development`; uninstall through Windows Settings.
+The portable ZIP remains available: extract it whole and run **Sapiens4.exe**.
+Both contain the native shell, backend, UI, Blindly, pinned Codex provider and
+WebView2 loader. Python, .NET, WSL and build tools are builder-only.
 
 Microsoft Edge WebView2 Evergreen Runtime is required. If it is missing, the
 window offers **Install WebView2**, **Retry** and **Cancel**. Install opens the
@@ -23,7 +26,9 @@ python build/package/acquire-provider.py --platform windows-x64 --destination ru
 .\.build\Sapiens4-Development-win-x64\Sapiens4.exe
 ```
 
-Outputs in `.build/` are `Sapiens4-Development-win-x64/`,
+The build downloads/checks pinned Inno Setup 7.1.1 and installs its compiler below
+`.build/tools/` for the current build user. No compiler is needed by app users.
+Outputs in `.build/` are `Sapiens-Setup.exe`, `Sapiens4-Development-win-x64/`,
 `sapiens4-development-0.1.0-dev-windows-x64.zip` and its `.release.json` receipt.
 Use `-OutputDirectory` for another build; existing package/ZIP outputs are rejected.
 `-SkipBuild` reuses binaries with caller-verified provenance. `-AllowMissingProvider`
@@ -50,13 +55,22 @@ The package scenario checks inventories, provider version and backend restart
 with synthetic state. Desktop checks require an unlocked interactive session,
 accessible controls and matching privilege levels; run them serially.
 
-## Required installer and acceptance work
+## Installer safety and remaining acceptance
 
-Current packaging produces a portable ZIP. A per-user installer remains required,
-including Start-menu/Explorer launch, repeat installation, and uninstall that
-preserves external data/configuration. Its generated helpers and installer need
-publisher signing and final inventory verification. Keep application data outside
-the replaceable installation directory and retain the existing WebView2 UI.
+The installer keeps the development identity and stores data/config/auth outside
+its program directory. It never runs auth, automatically stops apps, restarts
+processes, or deletes external state. Quit Sapiens before repair/uninstall.
+A busy owned executable or failed WMI process check refuses the operation.
+This is a process snapshot, not a race-free lifecycle lock; a launch after the
+check remains a limitation. Elevated uninstaller respawn is not accepted as proven.
 
-Native launch/UI/Blindly/shutdown, WebView2 install/retry/cancel, Windows 11 ARM
-x64 emulation, and downloaded signed installer acceptance remain open.
+Uninstall removes recorded application files, shortcuts and registration. Unknown
+files and a small ownership marker remain so reinstall can recognize that directory.
+An existing nonempty unowned directory or the data root cannot be an install target.
+
+CI exercises silent install/reinstall, isolated native launch/health/close,
+active-process refusal, inventory verification and state-preserving uninstall.
+Native Windows/Windows 11 ARM, missing-WebView2 Install/Retry/Cancel, normal-user
+clean-machine and publisher-trust acceptance require actual recorded results.
+WebView2 Evergreen is an external prerequisite; its download needs Internet.
+Unsigned manual builds may show Windows trust warnings. No updater is installed.

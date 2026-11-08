@@ -87,6 +87,15 @@ jobs:
           root = Path('submodules/libs4/haskell/.cabal')
           root.mkdir(parents=True, exist_ok=True)
           (root / 'config').write_text('repository hackage.haskell.org\n  url: https://hackage.haskell.org/\n  secure: True\n')
+      - name: Compile installer script before the expensive Windows application build
+        if: github.event_name != 'pull_request' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path .build/installer-script-input -Force | Out-Null
+          Set-Content -LiteralPath .build/installer-script-input/Sapiens4.exe -Value 'compiler fixture only'
+          Set-Content -LiteralPath .build/installer-script-input/sapiens-installation.id -Value 'com.poulwalcker.sapiens4.development'
+          ./build/package/windows-installer.ps1 -PackageDirectory .build/installer-script-input -OutputDirectory .build/installer-script-output -Version $env:PACKAGE_VERSION -CertificateThumbprint ([string]::Empty)
+          if ($LASTEXITCODE -ne 0) { throw 'Installer script/compiler preflight failed' }
       - name: Compile host, native application, UI and existing fixture helpers once
         shell: bash
         run: runghc build/Build.hs --no-provider
