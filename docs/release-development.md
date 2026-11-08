@@ -17,9 +17,15 @@ require separate authorization; none are executed by this runbook itself.
    notices. Pass the entire directory to the platform build script. Missing or
    modified inventory entries, symlinks and extra files fail staging.
 3. Use a new output directory. macOS defaults to deployment target/minimum 13.0
-   and fails if any bundled Mach-O requires a higher OS. Until provider
-   compatibility is resolved, `--experimental-minimum-os 14.0` permits only a local
-   experiment; its receipt is rejected by the draft-release validator.
+   and fails if required/unknown Mach-O code requires a higher OS. The exact locked
+   Codex 0.167.0 voice subtree has one audited optional exception, bound to the full
+   upstream provider inventory. Source and released-CLI sentinel evidence shows
+   selected login/status/exec paths do not enter it. Every non-system load-command
+   dependency stays inside its required or optional boundary; optional voice's
+   declared maximum 14.0 is recorded separately. All payload remains inventoried
+   and signed. This does not certify execution on macOS 13. An explicit
+   `--experimental-minimum-os` is still a local experiment rejected by the
+   draft-release validator.
 4. Platform assembly relocates dependencies and signs nested code first. The
    original provider inventory is preserved as `sapiens-provider-upstream.json`.
    `sapiens-provider.json` then describes final packaged bytes, including the
@@ -96,9 +102,10 @@ provider, builds macOS arm64 and Windows x64, then runs the RSpec package scenar
 It uploads build artifacts only. The acquisition script and unpublished libs4
 registration must be integrated by main before a remote run can work.
 
-The current complete provider's macOS 14 helper deliberately makes the default
-macOS 13 job fail until compatibility is resolved. Do not add an experimental
-floor override to CI to turn this gate green. Native runner architecture is
+Default macOS assembly accepts only the pinned audited optional voice exception.
+A new provider pin/subtree or a required dependency reaching it requires another
+audit; it cannot inherit an exemption by directory name. Do not add an experimental
+floor override to CI to turn a compatibility failure green. Native runner architecture is
 asserted. Runner images may change despite fixed OS labels; record tool versions
 and input pins rather than claiming byte-for-byte reproducibility.
 

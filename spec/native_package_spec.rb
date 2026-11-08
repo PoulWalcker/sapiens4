@@ -6,6 +6,12 @@ RSpec.describe 'Installed native package' do
     expect(manifest).to include('appId' => 'com.poulwalcker.sapiens4.development',
       'channel' => 'development', 'repository' => 'PoulWalcker/sapiens4',
       'updateDiscovery' => false, 'packageStatus' => 'provider-complete')
+    if manifest['platform'] == 'macos' && manifest['supportStatus'] == 'declared-target'
+      expect(manifest.fetch('minimumOS')).to eq('13.0')
+      compatibility = manifest.fetch('macOSCompatibility')
+      expect(Gem::Version.new(compatibility.fetch('requiredMinimumOS'))).to be <= Gem::Version.new('13.0')
+      expect(compatibility.fetch('targetOSAcceptance')).to eq('not-run')
+    end
     python = Gem.win_platform? ? 'python' : 'python3'
     _, error, code = Contract.capture(python, 'build/package/package.py', 'verify', '--runtime', runtime, timeout: 120)
     expect(code).to eq(0), error

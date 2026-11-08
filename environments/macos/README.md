@@ -5,11 +5,14 @@ generated UI, prompts, Blindly4, complete pinned Codex payload and licenses.
 It derives its runtime from the installed app, including paths with spaces or
 Unicode. End users do not need a source checkout or build tools.
 
-The supported macOS floor remains **13.0**. The currently selected complete
-provider includes a voice helper declaring 14.0. Packaging rejects that mismatch
-by default. `--experimental-minimum-os 14.0` permits an explicitly labeled local
-experiment; it does not certify macOS 13 compatibility or authorize a support
-change. D3's provider compatibility investigation and integration remain required.
+The app target remains **macOS 13.0**. An audited exception covers only the exact
+locked Codex 0.167.0 voice subtree, whose helper declares 14.0 and is not entered
+by Sapiens's selected login/status/exec paths. The complete provider is retained,
+inventoried and signed. Packaging fingerprints its full acquired inventory and
+audits the dependency boundary; unknown providers and required binaries above
+13.0 fail closed. The manifest records the optional component's higher floor.
+Actual macOS 13 launch/login/exec acceptance remains unrun. An explicit
+`--experimental-minimum-os` still labels unsupported local experiments.
 
 ## Build a development bundle
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build a relocatable development app, then sign its complete payload."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,8 +11,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from package import canonical, inventory
 
-MAGIC = (b'\xfe\xed\xfa\xce', b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe')
+MAGIC = (b'\xfe\xed\xfa\xce', b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xcf\xfa\xed\xfe',
+         b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca', b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca')
 
 
 def run(*args):
@@ -23,6 +26,84 @@ def macho(path):
         return False
     with path.open('rb') as stream:
         return stream.read(4) in MAGIC
+
+
+def optional_voice(app):
+    """The exception applies only before mutation to this exact released payload."""
+    rule = json.loads(Path(__file__).with_name('codex-macos-compatibility.json').read_text())
+    provider = app / 'Contents/Resources/runtime/codex'
+    metadata = provider / 'sapiens-provider.json'
+    if not metadata.exists():
+        return {}, None
+    info = json.loads(metadata.read_text())
+    if any(info.get(key) != value for key, value in rule['providerIdentity'].items()):
+        return {}, None  # Unknown provider: every binary remains required.
+    observed = inventory(provider, {'sapiens-provider.json'})
+    if hashlib.sha256(canonical(observed)).hexdigest() != rule['providerFilesSha256']:
+        raise ValueError('Provider bytes differ from the exact audited optional-voice release')
+    voice = provider / rule['optionalRoot']
+    return {p.resolve(): rule for p in voice.rglob('*') if macho(p)}, rule
+
+
+def os_version(value):
+    numbers = tuple(map(int, value.split('.')))
+    return numbers + (0,) * (3 - len(numbers))
+
+
+def audit_macos(app, optional, rule, declared):
+    """Audit all load-command edges; neither side can cross the optional boundary."""
+    app = app.resolve()
+    required_minimum = '13.0'
+    required, voice = [], []
+    for binary in sorted(p for p in app.rglob('*') if macho(p)):
+        binary = binary.resolve()
+        architectures = subprocess.check_output(['lipo', '-archs', str(binary)], text=True).split()
+        if architectures != ['arm64']:
+            raise ValueError(f'Expected an audited arm64-only payload: {binary}')
+        commands = subprocess.check_output(['otool', '-l', str(binary)], text=True)
+        platforms = re.findall(r'cmd LC_BUILD_VERSION\s+cmdsize \d+\s+platform (\S+)', commands)
+        if any(platform != '1' for platform in platforms):
+            raise ValueError(f'Non-macOS Mach-O platform in {binary}')
+        minimums = re.findall(r'\bminos ([0-9.]+)', commands)
+        minimums += re.findall(r'cmd LC_VERSION_MIN_MACOSX\s+cmdsize \d+\s+version ([0-9.]+)', commands)
+        if not minimums:
+            raise ValueError(f'No macOS minimum found for {binary}')
+        minimum = max(minimums, key=os_version)
+        allowed = rule['maximumMinimumOS'] if binary in optional else declared
+        if os_version(minimum) > os_version(allowed):
+            raise ValueError(f'{binary.relative_to(app)} requires macOS {minimum}; allowed floor is {allowed}')
+        dependencies = []
+        identities = re.findall(r'cmd LC_ID_DYLIB\s+cmdsize \d+\s+name (.*?) \(offset', commands)
+        rpaths = re.findall(r'cmd LC_RPATH\s+cmdsize \d+\s+path (.*?) \(offset', commands)
+        for line in subprocess.check_output(['otool', '-L', str(binary)], text=True).splitlines()[1:]:
+            dependency = line.strip().split(' (')[0]
+            if dependency in identities or dependency.startswith(('/usr/lib/', '/System/Library/')):
+                continue
+            def expand(path):
+                return path.replace('@loader_path', str(binary.parent)).replace('@executable_path', str(app / 'Contents/MacOS'))
+            candidates = ([Path(expand(r)) / dependency.removeprefix('@rpath/') for r in rpaths]
+                          if dependency.startswith('@rpath/') else [Path(expand(dependency))])
+            target = next((p.resolve() for p in candidates if p.is_file()), None)
+            if target is None or not target.is_relative_to(app):
+                raise ValueError(f'Unresolved or external packaged dependency {dependency} in {binary}')
+            if not macho(target):
+                raise ValueError(f'Unrecognized packaged Mach-O dependency: {target}')
+            if (binary in optional) != (target in optional):
+                raise ValueError(f'Dependency crosses audited optional voice boundary: {binary} -> {target}')
+            dependencies.append(target.relative_to(app).as_posix())
+        record = {'path': binary.relative_to(app).as_posix(), 'minimumOS': minimum, 'dependencies': sorted(dependencies)}
+        if binary in optional:
+            voice.append(record)
+        else:
+            required_minimum = max(required_minimum, minimum, key=os_version)
+            required.append(record)
+    return {'declaredMinimumOS': declared, 'requiredMinimumOS': required_minimum,
+            'requiredBinaries': required, 'optionalComponents': ([{
+                'name': 'codex-voice', 'ruleId': rule['ruleId'],
+                'minimumOS': max((item['minimumOS'] for item in voice), key=os_version),
+                'notUsedBySelectedPaths': rule['selectedPaths'], 'binaries': voice,
+                'evidenceCommit': rule['providerIdentity']['upstreamCommit']}] if voice else []),
+            'targetOSAcceptance': 'not-run'}
 
 
 def relocate(app, root):
@@ -140,22 +221,18 @@ def main():
                 'NSAppTransportSecurity': {'NSAllowsLocalNetworking': True, 'NSAllowsArbitraryLoadsInWebContent': True}}
         with (app / 'Contents/Info.plist').open('wb') as stream:
             plistlib.dump(info, stream)
-        # Refuse an accidental support-floor change; experiments require an explicit flag.
+        # Fingerprint the complete upstream tree before relocation/signing changes bytes.
+        optional, rule = optional_voice(app)
         relocate(app, root)
-        declared_minimum = tuple(map(int, (args.experimental_minimum_os or '13.0').split('.')))
-        for binary in (p for p in app.rglob('*') if macho(p)):
-            architectures = subprocess.check_output(['lipo', '-archs', str(binary)], text=True).split()
-            if 'arm64' not in architectures:
-                raise ValueError(f'Payload has no arm64 executable slice: {binary}')
-            load_commands = subprocess.check_output(['otool', '-l', str(binary)], text=True)
-            minimums = re.findall(r'\bminos ([0-9.]+)', load_commands)
-            for version in minimums:
-                if tuple(map(int, version.split('.'))) > declared_minimum:
-                    raise ValueError(f'{binary.relative_to(app)} requires macOS {version}; declared floor is {declared_minimum}. '
-                                     'Resolve provider compatibility or use --experimental-minimum-os for a local experiment.')
-        info['LSMinimumSystemVersion'] = '.'.join(map(str, declared_minimum))
+        declared = args.experimental_minimum_os or '13.0'
+        audit = audit_macos(app, optional, rule, declared)
+        info['LSMinimumSystemVersion'] = declared
         with (app / 'Contents/Info.plist').open('wb') as stream:
             plistlib.dump(info, stream)
+        manifest_path = resources / 'runtime/package-manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['macOSCompatibility'] = audit
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
         sign(app, args.sign_identity)
         if args.notary_profile:
             submitted = Path(temporary) / 'notarization.zip'

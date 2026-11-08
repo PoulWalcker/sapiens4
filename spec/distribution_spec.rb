@@ -53,6 +53,8 @@ RSpec.describe 'Source distribution contract' do
     manifest = JSON.parse(File.read(File.join(@app, 'Contents/Resources/runtime/package-manifest.json')))
     expect(manifest).to include('appId' => 'com.poulwalcker.sapiens4.development',
       'channel' => 'development', 'updateDiscovery' => false)
+    policy = 'build/package/codex-macos-compatibility.json'
+    expect(File.binread(File.join(@release, policy))).to eq(File.binread(File.join(Contract::ROOT, policy)))
     expect(File.exist?(File.join(@app, 'Contents/Resources/Launcher.plist'))).to eq(false)
     expect(File.executable?(File.join(@app, 'Contents/Resources/runtime/.build/bin/sapiens4'))).to eq(true)
     expect(Dir.children(@data)).to eq(['keep.txt'])
