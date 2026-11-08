@@ -294,7 +294,7 @@ saveGroupDecision s run raw = locked s $ do
   D.ReportOutcome reply outcome -> case D.validateOutcome response outcome specification of
    Left problem -> failure 400 (D.outcomeError problem)
    Right _ -> do
-    either (failure 400) pure (validatePublication origin (D.outcomeStatus outcome == D.Completed) reply)
+    either (failure 400) pure (D.validateTaskPublication origin outcome specification reply)
     pure (publicationText reply)
   D.Handoff content -> do
    require (toJSON (requestTarget request) == get group "lead") 403 "Only the Group Lead can hand off scheduled work"
@@ -322,7 +322,7 @@ executionPublication s identity = do
      GroupTask { specification=saved } <- readTask group (taskIdText (requestTaskId link))
      specification <- maybe (failure 500 "Structured Group result has no specification") pure saved
      either (failure 500 . D.outcomeError) (const (pure ())) (D.validateOutcome decision outcome specification)
-     either (failure 500) pure (validatePublication origin (D.outcomeStatus outcome == D.Completed) publication)
+     either (failure 500) pure (D.validateTaskPublication origin outcome specification publication)
      pure (Just publication)
     _ -> pure Nothing
 

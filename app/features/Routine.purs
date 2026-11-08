@@ -44,7 +44,10 @@ viewList m = V.node "section" [V.cls "routine-browser",V.label "Routines"]
         status = routineStatus r
     in V.controlWith [V.cls "routine-row",V.attr "data-routine-anchor" r.id,V.label $ "Open " <> title]
       [V.node "span" [V.cls "routine-line"] [V.span [V.cls "routine-row-title",V.attr "title" title] title,badge status]
-      ,V.span [V.cls "routine-meta",V.attr "title" $ date r.nextDue] $ if r.paused then "Every " <> show (I.floor r.minutes) <> " min" else "Next " <> shortDate r.nextDue]
+      ,V.span [V.cls "routine-meta",V.attr "title" $ date r.nextDue] $ if r.paused then "Every " <> show (I.floor r.minutes) <> " min" else "Next " <> shortDate r.nextDue
+      ,case r.activeRun of
+          Left reason -> V.span [V.cls "routine-error"] reason
+          Right _ -> V.empty]
       (OpenRoutine $ N.Overview ref)
 
 filterLabel :: N.RoutineFilter -> String
@@ -363,9 +366,10 @@ requestAction :: M.Model -> RR.Intent -> Action
 requestAction m intent = OpenDialog M.RoutineRequest $ F.RoutineRequestRecord {intent,origin:m.activity}
 
 routineStatus :: X.Routine -> Badge
-routineStatus routine
-  | isJust routine.activeRun = {label:"Running",tone:"active"}
-  | otherwise = case routine.condition of
+routineStatus routine = case routine.activeRun of
+  Left _ -> {label:"Status unavailable",tone:"attention"}
+  Right (Just _) -> {label:"Running",tone:"active"}
+  Right Nothing -> case routine.condition of
       Left _ -> {label:"Status unavailable",tone:"attention"}
       Right (RD.AttentionRequired _ _) -> {label:"Needs attention",tone:"attention"}
       Right (RD.RepairPending _) -> {label:"Repairing",tone:"active"}

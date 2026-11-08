@@ -8,7 +8,7 @@ module Routines
 
 import Control.Monad
 import Control.Applicative ((<|>))
-import Control.Exception (SomeException, SomeAsyncException, fromException, throwIO, try, mask_)
+import Control.Exception (catch, SomeException, SomeAsyncException, fromException, throwIO, try, mask_)
 import Control.Concurrent (readMVar)
 import Data.IORef (writeIORef)
 import Control.Concurrent.Async (AsyncCancelled)
@@ -17,6 +17,7 @@ import Data.Aeson hiding (pairs)
 import Data.Aeson.Types (Parser)
 import qualified Data.Aeson.KeyMap as KM
 import Data.List (find, nub, sortOn)
+import Data.Containers.ListUtils (nubOrd)
 import Data.Ord (Down(..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as M
@@ -308,10 +309,13 @@ targetOwner target = case target of
 routineSummaries :: Service -> IO [Value]
 routineSummaries s = DB.connection s $ \db -> do
  routineRows <- DB.queryRowsOn db "SELECT value FROM scheduled_routines ORDER BY sequence" ["value"] []
- routines <- traverse (DB.decodeStored . (`at` "value")) routineRows
+ routines <- forM routineRows $ \row -> do
+  value <- DB.decodeStored (at row "value") :: IO Value
+  decoded <- try (decodeValue 500 value) :: IO (Either APIError Routine)
+  pure (remove ["activeRun","activeRunError"] value,decoded)
  rows <- DB.queryRowsOn db "SELECT id,value,status FROM routine_occurrences WHERE status<>'closed' ORDER BY rowid" ["id","value","status"] []
  dues <- traverse readStoredDue rows
- let visible=filter (isNothing . routineDeletedAt) routines
+ let visible=filter (isNothing . routineDeletedAt) [routine | (_,Right routine) <- routines]
      visibleIds=S.fromList (map routineId visible)
      admitted=[(occurrence,status) | Admitted occurrence status <- dues, routineId (occurrenceRoutineSnapshot occurrence) `S.member` visibleIds]
      byRoutine=M.fromListWith (++) [(routineId (occurrenceRoutineSnapshot occurrence),[(occurrence,status)]) | (occurrence,status) <- admitted]
@@ -319,18 +323,30 @@ routineSummaries s = DB.connection s $ \db -> do
       [(routineId (dueRoutineSnapshot (spanFirst range)),(spanCount range,spanFirst range)) | Deferred range _ <- dues]
      combine (count,oldest) (otherCount,otherOldest) =
       (count+otherCount,if routineDue (dueRoutineSnapshot oldest) < routineDue (dueRoutineSnapshot otherOldest) then oldest else otherOldest)
- context <- readSummaryContextOn s db admitted
- forM visible $ \routine -> do
-  summaries <- readRoutineProjection s context (M.findWithDefault [] (routineId routine) byRoutine)
-  condition <- validated (routineCondition summaries)
-  let current=find (not . runFinished) summaries
-      latest=find runFinished summaries
-      dueFields=case M.lookup (routineId routine) deferred of
-       Nothing -> []
-       Just (count,oldest) -> [("deferredCount",toJSON count),("oldestDeferredDue",get (toJSON (dueRoutineSnapshot oldest)) "nextDue")]
-      reference=toJSON . occurrenceId . summaryOccurrence
-  pure (merge (toJSON routine) (obj (dueFields ++ [("condition",toJSON condition),("currentRun",maybe Null reference current),("latestRun",maybe Null reference latest)]
-   ++ [("activeRun",reference active) | active <- maybeToList current])))
+     dueFields identity=case M.lookup identity deferred of
+      Nothing -> []
+      Just (count,oldest) -> [("deferredCount",toJSON count),("oldestDeferredDue",get (toJSON (dueRoutineSnapshot oldest)) "nextDue")]
+ context <- try (readSummaryContextOn s db admitted) :: IO (Either APIError SummaryContext)
+ fmap catMaybes $ forM routines $ \(value,decoded) -> case decoded of
+  Left problem -> Just <$> invalidActive value problem
+  Right routine | isJust (routineDeletedAt routine) -> pure Nothing
+  Right routine -> do
+   let stored=M.findWithDefault [] (routineId routine) byRoutine
+       base=merge (toJSON routine) (obj (dueFields (routineId routine)))
+   Just <$> (do
+    -- Keep the batched fast path; isolate a malformed neighbour on failure.
+    local <- either (const (readSummaryContextOn s db stored)) pure context
+    summaries <- readRoutineProjection s local stored
+    condition <- validated (routineCondition summaries)
+    let current=find (not . runFinished) summaries
+        latest=find runFinished summaries
+        reference=toJSON . occurrenceId . summaryOccurrence
+    pure (merge base (obj ([("condition",toJSON condition),("currentRun",maybe Null reference current),("latestRun",maybe Null reference latest)]
+     ++ [("activeRun",reference active) | active <- maybeToList current])))) `catch` invalidActive base
+ where
+ invalidActive value problem@(APIError _ reason) = do
+  hPutStrLn stderr ("Routine " <> T.unpack (at value "id") <> " active Run unavailable: " <> show problem)
+  pure (put "activeRunError" (str reason) value)
 
 storeRoutine :: Service -> Routine -> IO Value
 storeRoutine s = DB.saveRoutine s . toJSON
@@ -388,12 +404,14 @@ routineValue time owner interval body specification policy change = do
     PersonalOwner _ -> "This Routine has a structured specification. The text edit template can change its frequency with the prompt unchanged. To change the work, ask this Sapi in an ordinary message to update the full objective, inputs, expected outputs and criteria together. No changes were saved."
     GroupOwner _ -> "This Group Routine has a structured specification. The text edit template can change its frequency with the prompt unchanged. To change its work, ask the Group Lead to update the full objective, inputs, expected outputs and criteria together. No changes were saved.")
   NewRoutine _ -> pure ()
+ preparedSpecification <- traverse (either (Left . APIError 400) Right . D.preparePublicationSpec previousSpecification) specification
  pure $ merge initial (obj (
   [("owner",toJSON owner),("title",str (T.unwords (take 7 (T.words body)))),("minutes",toJSON interval)
   ,("prompt",str body),("updated",str (timestamp time)),("nextDue",toJSON deadline)
   ,("policySelection",toJSON (maybe initialPolicy PolicySelected policy))]
-  ++ [("specification",toJSON spec) | spec <- maybeToList specification]))
+  ++ [("specification",toJSON spec) | spec <- maybeToList preparedSpecification]))
  where
+ previousSpecification = case change of ReviseRoutine existing -> routineSpecification existing; NewRoutine _ -> Nothing
  deadline = case change of
   ReviseRoutine existing | routineMinutes existing == interval -> routineDeadline existing
   _ -> newDeadline (addUTCTime (intervalSeconds interval) time)
@@ -418,8 +436,10 @@ save s rawOwner minutes execution specification policy edit = do
  selected <- validated (decodeRoutineCandidate edit interval body routines >>= selectRoutine edit)
  case selected of
   RoutineReplay existing -> do
-   forM_ specification $ \spec -> require (routineSpecification existing == Just spec)
-    409 "This creation already has a different specification; update the existing routine"
+   forM_ specification $ \spec -> do
+    prepared <- either (failure 400) pure (D.preparePublicationSpec (routineSpecification existing) spec)
+    require (routineSpecification existing == Just prepared)
+     409 "This creation already has a different specification; update the existing routine"
    forM_ policy $ \chosen -> require (routinePolicy existing == PolicySelected chosen)
     409 "This creation already has a different policy; update the existing routine"
    pure (toJSON existing)
@@ -677,13 +697,13 @@ activePersonal s db routine dues = do
  forM_ [turn | turn <- agentTurns state, activeStatus (turnStatus turn)] $ \turn -> void (requireExecutionOrigin (turnOrigin turn))
  let turns = [turn | turn <- agentTurns state, ValidOrigin origin <- [turnOrigin turn], originRoutine origin == Just (routineId routine)]
      admitted = [occurrenceId occurrence | Admitted occurrence _ <- dues]
-     identities = nub (admitted ++ map turnId turns)
+     identities = nubOrd (admitted ++ map turnId turns)
      stopped = S.fromList [occurrenceId occurrence | Admitted occurrence _ <- dues, isJust (occurrenceStoppedAt occurrence)]
  workRows <- readRuns "SELECT id,value FROM workloads" ["id","value"] identities
  savedWorks <- traverse (DB.decodeStored . (`at` "value")) workRows :: IO [D.Workload]
  let calls=concatMap (map D.callIdentity . NE.toList . D.workCalls) savedWorks
      works=M.fromList [(D.workloadId work,work) | work<-savedWorks]
- turnRows <- readRuns "SELECT id,status FROM turns" ["id","status"] (nub (identities++calls))
+ turnRows <- readRuns "SELECT id,status FROM turns" ["id","status"] (nubOrd (identities++calls))
  projected <- fmap M.fromList $ forM turnRows $ \row -> do
   status <- field 500 row "status"
   pure (at row "id",status)

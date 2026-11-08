@@ -3,6 +3,7 @@ module Sapiens.Work where
 import Sapiens.Form as F
 import Prelude
 import Data.Array as A
+import Data.Either (Either(..))
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Set as Set
 import Data.String as S
@@ -28,7 +29,7 @@ disclosure m key classes summary content = V.node "details" [V.cls classes,V.boo
 taskRow :: M.Model -> X.Task -> V.Html
 taskRow m task = disclosure m ("task:" <> m.selected <> ":" <> task.id) ("task-row " <> if routine then "task-routine" else "")
   ([V.span [V.cls $ "task-mark " <> tone,V.attr "aria-hidden" "true"] (if state == X.WorkCompleted then "✓" else if tone == "attention" then "!" else "·")
-   ,V.node "span" [V.cls "task-row-copy"] [V.span [V.cls "task-title",V.attr "title" $ task.title] (task.title),V.node "span" [V.cls "task-meta"] [V.span [V.cls $ "task-state " <> tone] (if state == X.WorkWaitingForAdmin then "Needs input" else X.workName state),V.span [V.cls "task-assignee"] (D.fallback route $ task.meta)]]]
+   ,V.node "span" [V.cls "task-row-copy"] [V.span [V.cls "task-title",V.attr "title" $ task.title] (task.title),V.node "span" [V.cls "task-meta"] [V.span [V.cls $ "task-state " <> tone] (if routine && task.error /= "" then X.workName state <> " · Run status unavailable" else if state == X.WorkWaitingForAdmin then "Needs input" else X.workName state),V.span [V.cls "task-assignee"] (D.fallback route $ task.meta)]]]
    <> (if routine then stopControl <> [control "Run routine" "Run" $ PrepareDraft ("@" <> task.id <> "\nRun it now.") "",control "Edit routine" "Edit" $ PrepareDraft ("Edit @" <> task.id <> " ( " <> task.title <> " )\nEdit Frequency (prev every " <> task.minutes <> " minutes): new every XXX minutes\nEdit Execution Prompt as: " <> task.prompt) "XXX",control (if state == X.WorkPaused then "Resume routine" else "Pause routine") (if state == X.WorkPaused then "▶" else "Ⅱ") $ PrepareDraft ((if state == X.WorkPaused then "Resume Scheduled Routine" else "Pause Scheduled Routine") <> "\n@" <> task.id) "",V.node "span" [V.cls "task-reference",V.attr "title" "Scheduled tasks queued in this allowance; pauses automatically at 1000."] [V.textNode "code" [] ("@" <> task.id),V.span [] (show task.runCount <> "/1000")]] else []) <> [V.span [V.cls "task-chevron",V.attr "aria-hidden" "true"] "›"])
   [V.div "task-body-heading" [V.span [] (if routine then "Execution prompt" else "Task body"),V.span [V.cls "task-format"] (if routine then "" else "YAML"),V.control [V.cls "task-copy",V.label $ "Copy " <> if routine then "execution prompt" else "task YAML"] "Copy" (Copy (task.body) (if routine then "Execution prompt copied." else "Task YAML copied."))]
   ,V.textNode "pre" [V.cls "task-body-yaml",V.label $ if routine then "Execution prompt" else "Task body YAML"] (task.body)
@@ -36,13 +37,13 @@ taskRow m task = disclosure m ("task:" <> m.selected <> ":" <> task.id) ("task-r
   ,V.when (task.error /= "") $ V.p "task-error" $ task.error]
   where
   state = task.state
-  tone = if state == X.WorkCompleted then "complete" else if A.elem state [X.WorkFailed,X.WorkInterrupted,X.WorkUnresolved,X.WorkWaitingForAdmin] then "attention" else if A.elem state [X.WorkRunning,X.WorkQueued] then "active" else "neutral"
+  tone = if routine && task.error /= "" then "attention" else if state == X.WorkCompleted then "complete" else if A.elem state [X.WorkFailed,X.WorkInterrupted,X.WorkUnresolved,X.WorkWaitingForAdmin] then "attention" else if A.elem state [X.WorkRunning,X.WorkQueued] then "active" else "neutral"
   name id = (M.agent m id).name
   route = (if task.sender == task.owner then "" else name (task.sender) <> " → ") <> name (task.owner)
   routine = task.routine
-  stopControl = case A.find (\r -> r.id == task.id) m.snapshot.routines >>= _.activeRun of
-    Nothing -> []
-    Just run -> [control "Stop current run; keep schedule" "Stop" $ Mutate ("/api/routines/" <> B.encodeURI task.id <> "/runs/" <> B.encodeURI run <> "/stop") "POST" D.empty Refresh]
+  stopControl = case _.activeRun <$> A.find (\r -> r.id == task.id) m.snapshot.routines of
+    Just (Right (Just run)) -> [control "Stop current run; keep schedule" "Stop" $ Mutate ("/api/routines/" <> B.encodeURI task.id <> "/runs/" <> B.encodeURI run <> "/stop") "POST" D.empty Refresh]
+    _ -> []
   control caption glyph action = V.textNode "button" [V.attr "type" "button",V.cls "task-copy task-routine-action",V.label caption,V.on "click" \e -> Link e action] (glyph)
 
 groupCalls :: M.Model -> X.Entity -> Array X.Task

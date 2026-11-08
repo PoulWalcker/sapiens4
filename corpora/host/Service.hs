@@ -151,7 +151,9 @@ snapshotUnlocked s = do
 -- The browser list needs a title and condition, not the full assignment.
 -- Model-facing routines and exact history retain the complete specification.
 browserRoutine :: Value -> Value
-browserRoutine routine = put "objective" (get (get routine "specification") "objective") (remove ["specification"] routine)
+browserRoutine routine = case get (get routine "specification") "objective" of
+ Null -> remove ["specification"] routine
+ objective -> put "objective" objective (remove ["specification"] routine)
 
 validatePreferenceShape :: Value -> Validation ()
 validatePreferenceShape d = do

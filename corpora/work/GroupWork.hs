@@ -25,7 +25,8 @@ data GroupTask = GroupTask
 instance FromJSON GroupTask where
  parseJSON = withObject "Group task" $ \o -> do
   specification <- if KM.member "specification" o then Just <$> o .: "specification" else pure Nothing
-  GroupTask <$> o .: "id" <*> o .: "title" <*> o .: "body" <*> o .: "assignee" <*> o .: "state" <*> o .: "deleted" <*> o .: "revision" <*> pure specification <*> pure (foldr KM.delete o ["id","title","body","assignee","state","deleted","revision","specification"])
+  revision <- o .: "revision" >>= revisionP
+  GroupTask <$> o .: "id" <*> o .: "title" <*> o .: "body" <*> o .: "assignee" <*> o .: "state" <*> o .: "deleted" <*> pure revision <*> pure specification <*> pure (foldr KM.delete o ["id","title","body","assignee","state","deleted","revision","specification"])
 instance ToJSON GroupTask where
  toJSON task = mergeFields ([("id",toJSON task.identity),("title",str task.title),("body",str task.body),("assignee",toJSON task.assignee),("state",toJSON task.state),("deleted",Bool task.deleted),("revision",num task.revision)] ++ [("specification",toJSON spec) | spec <- maybeToList task.specification]) (Object task.metadata)
 
@@ -37,7 +38,7 @@ instance FromJSON TaskPatch where
  parseJSON value = onlyFields ["title","body","assignee","state","deleted","revision"] value *>
   (TaskPatch <$> optional "title" (\raw -> textFieldP "title" 500 value *> parseJSON raw)
              <*> optional "body" body <*> optional "assignee" parseJSON
-             <*> optional "state" parseJSON <*> optional "deleted" parseJSON <*> optional "revision" parseJSON)
+             <*> optional "state" parseJSON <*> optional "deleted" parseJSON <*> optional "revision" revisionP)
   where
   optional key parser = if has value key then Just <$> parser (get value key) else pure Nothing
   body raw = do
@@ -200,7 +201,7 @@ completionOutcome task request status = do
   case D.decisionBody response of
    D.ReportOutcome publication outcome -> do
     origin <- either (Left . APIError 500) Right (checkedOrigin (requestOrigin request))
-    either (Left . APIError 500) Right (validatePublication origin (D.outcomeStatus outcome == D.Completed) publication)
+    either (Left . APIError 500) Right (D.validateTaskPublication origin outcome specification publication)
     case D.validateOutcome response outcome specification of
      Left problem -> Left (APIError 500 (D.outcomeError problem))
      Right checked -> Right (Just checked)
@@ -209,7 +210,7 @@ completionOutcome task request status = do
 resultHistory :: GroupTask -> Validation [Value]
 resultHistory task = forM (items (Object task.metadata) "results") $ \result -> do
  request <- validateValue 500 parseJSON (get result "turn") :: Validation RunId
- revision <- validateValue 500 parseJSON (get result "revision") :: Validation Int
+ revision <- validateValue 500 revisionP (get result "revision")
  outcome <- traverse (validateValue 500 parseJSON) (if has result "outcome" then Just (get result "outcome") else Nothing) :: Validation (Maybe D.Outcome)
  quiet <- validateValue 500 historyOnlyP result
  when quiet $ do

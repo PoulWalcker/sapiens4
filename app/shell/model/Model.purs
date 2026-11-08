@@ -204,7 +204,7 @@ projectSnapshot snapshot m = normalizeRoutineSelection $ withWorkspaces snapshot
     , preview=D.cut 150 $ D.replace "\\s+" " " $ D.fallback "Ready for your message." $ fromMaybe "" $ _.text <$> (O.lookup a.id personalMessages >>= A.last)}) snapshot.agents
   turns = snapshot.turns
   append owner rows = O.alter (Just <<< (_ <> rows) <<< fromMaybe []) owner
-  personalMessages = foldl (\all t -> if t.group /= "" || not (A.elem t.flow ["chat","computer"]) then all else
+  personalMessages = foldl (\all t -> if t.group /= "" || not (A.elem t.flow ["chat","computer"]) || (t.historyOnly && t.status == X.Done && t.hasOutput && t.error == "") then all else
     let input = {user:true,author:t.origin.caller,text:t.input,created:t.created,attachments:t.attachments,request:Just t,chatKey:"user:" <> t.id,delegated:false,warning:"",turnId:"",stale:false,outputOrder:0.0}
         reply = result t
         output = {user:false,author:"",text:reply.text,warning:reply.warning,created:D.fallback t.created t.output_at,outputOrder:t.output_order,turnId:t.id,chatKey:"assistant:" <> t.id,attachments:[],request:Nothing,delegated:false,stale:false}
