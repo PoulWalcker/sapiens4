@@ -34,7 +34,7 @@ decodePreview value = case toString (D.get "content" value) of
 
 type Request = { epoch :: Int, sequence :: Int, key :: String, revision :: String, path :: String }
 
-data DialogKind = AppMenu | WorkspaceSettings | Computer | AgentSettings | GroupSettings | Attach | Reference X.AttachmentKind | DecisionPrompts | GroupTask | CreateCorpora | EditCorpora | ConnectRemote | HostPairing | RelayList | RelayAdd | RelaySwitch | RelayTerms | Installation | Notice
+data DialogKind = AppMenu | WorkspaceSettings | Computer | Onboarding | AgentSettings | GroupSettings | Attach | Reference X.AttachmentKind | DecisionPrompts | GroupTask | CreateCorpora | EditCorpora | ConnectRemote | HostPairing | RelayList | RelayAdd | RelaySwitch | RelayTerms | Installation | Notice
 
 derive instance eqDialogKind :: Eq DialogKind
 
@@ -106,7 +106,7 @@ type SessionState =
   , nativeReporting :: Boolean, nativeReports :: Array Browser.NativeReport
   , epoch :: Int, sequence :: Int, now :: Number, env :: Environment
   , records :: Array X.Corpora, active :: String, connection :: ConnectionState
-  , localAvailable :: Boolean, showArchived :: Boolean, installRequired :: Boolean
+  , localAvailable :: Boolean, showArchived :: Boolean, installRequired :: Boolean, setupChecked :: Boolean
   , preferencesSaved :: String
   )
 
@@ -118,7 +118,7 @@ initial env =
   , polling:false,pollGeneration:0,saving:false,lastPreview:0.0,nativeReporting:false,nativeReports:[]
   , epoch:0, sequence:0, now:0.0, env, panes:[N.ChatPane,N.Sidebar,N.Workspace], search:"", searchOpen:false, menu:Nothing, dialog:Nothing
   , records:[], active:"", connection:Offline, localAvailable:false, showArchived:false
-  , toast:"", feedback:"", theme:if env.dark then "dark" else "light", installRequired:false
+  , toast:"", feedback:"", theme:if env.dark then "dark" else "light", installRequired:false, setupChecked:false
   , dialogStack:[], imageUrls:O.empty, preview:NotAsked, address:"", addressOpen:false, scrollPosition:Nothing, restoringScroll:false, preferencesSaved:""
   }
 

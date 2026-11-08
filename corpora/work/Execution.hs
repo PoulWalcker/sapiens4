@@ -68,7 +68,7 @@ submitTurn s a d = do
  flow <- decodeValue 400 flowValue
  binary <- codexBinary
  require (isJust binary) 503 "Codex CLI is missing. Install it and run codex login."
- when (flow==Computer) $ blindly s >>= doesFileExist >>= \built -> require built 503 "Blindly4 is not built. Run ./build/start.sh to build it."
+ when (flow==Computer) $ blindly s >>= doesFileExist >>= \built -> require built 503 "Computer helper is missing. Reinstall Sapiens to repair it."
  stopped <- readIORef (serviceStopping s)
  require (not stopped) 503 "Server is shutting down"
  requireActive s a

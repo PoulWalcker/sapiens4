@@ -33,6 +33,7 @@ import System.Timeout
 import Text.Regex.TDFA ((=~))
 #ifndef mingw32_HOST_OS
 import System.Posix.Signals
+import System.Posix.Files (setFileMode)
 #endif
 import Types
 import Population (executionSettings)
@@ -82,11 +83,39 @@ providerStep time event state activity = case event of
 
 modelDefaults :: IO (Text,Text)
 modelDefaults = (,) <$> (maybe "gpt-6-sol" T.pack <$> lookupEnv "SAPIENS_CODEX_MODEL") <*> (maybe "high" T.pack <$> lookupEnv "SAPIENS_CODEX_REASONING_EFFORT")
+-- Login and execution deliberately share an app-owned credential/config root.
+-- Never inherit a shell's Codex home, API key or workload identity credentials.
+codexEnvironment :: IO [(String,String)]
+codexEnvironment = do
+ config <- lookupEnv "SAPIENS_CONFIG_DIR" >>= maybe (do
+  home <- getHomeDirectory
+  base <- if os=="mingw32" then fromMaybe (home</>"AppData/Local") <$> lookupEnv "LOCALAPPDATA" else pure (home</>"Library/Application Support")
+  pure (base</>"Sapiens4 Development/config")) pure
+ home <- makeAbsolute (config</>"codex")
+ createDirectoryIfMissing True home
+#ifndef mingw32_HOST_OS
+ setFileMode home 0o700
+#endif
+ environment <- getEnvironment
+ binary <- codexBinary
+ let tools=maybe "" (\p -> takeDirectory (takeDirectory p)</>"codex-path") binary
+     path=maybe "" id (lookup "PATH" environment)
+ pure (("CODEX_HOME",home):("PATH",tools<>[searchPathSeparator]<>path):filter (\(key,_) -> key/="PATH" && not ("CODEX_" `T.isPrefixOf` T.pack key || "OPENAI_" `T.isPrefixOf` T.pack key)) environment)
+codexConfig :: [String]
+codexConfig = ["-c","cli_auth_credentials_store=\"file\""]
 codexBinary :: IO (Maybe FilePath)
 codexBinary = do
  override <- lookupEnv "SAPIENS_CODEX_BINARY"
+ root <- lookupEnv "SAPIENS_REPOSITORY"
+ packaged <- maybe (pure False) (doesFileExist . (</>"package-manifest.json")) root
+ payload <- maybe (pure False) (doesDirectoryExist . (</>"codex")) root
+ managed <- isJust <$> lookupEnv "SAPIENS_CONFIG_DIR"
  case override of
   Just p | not (null p) -> findExecutable p
+  _ | packaged || payload || managed -> do
+   let candidate=fromMaybe "" root</>"codex/bin"</>if os=="mingw32" then "codex.exe" else "codex"
+   exists <- doesFileExist candidate
+   pure (if exists then Just candidate else Nothing)
   _ -> do
    path <- findExecutable "codex"
    home <- getHomeDirectory
@@ -157,13 +186,13 @@ invokeModel s run input = do
  require (not cancelled) 409 "Stopped by Admin"
  before <- getMonotonicTimeNSec
  require (before < runDeadline run) 504 "Call time limit exhausted between decision nodes"
- binary <- codexBinary >>= maybe (failure 503 "Codex CLI was not found. Install Codex and run codex login.") pure
+ binary <- codexBinary >>= maybe (failure 503 "Codex is missing. Open Sapiens setup or reinstall the application.") pure
  (model,defaultEffort) <- modelDefaults
  settings <- executionSettings s (agentIdText (runOwner run))
  let effort = if executionMode settings == Deep then "xhigh" else defaultEffort
      workdir = workspaceRoot s (agentIdText (runOwner run))
-     args = ["exec","-c","model_reasoning_effort=" ++ T.unpack (jsonText (str effort)),"-c","model=" ++ T.unpack (jsonText (str model)),"--skip-git-repo-check","--json","--dangerously-bypass-approvals-and-sandbox","--cd",workdir,"--color","never","-"]
- environment <- getEnvironment
+     args = codexConfig ++ ["exec","-c","model_reasoning_effort=" ++ T.unpack (jsonText (str effort)),"-c","model=" ++ T.unpack (jsonText (str model)),"--skip-git-repo-check","--json","--dangerously-bypass-approvals-and-sandbox","--cd",workdir,"--color","never","-"]
+ environment <- codexEnvironment
  started <- realToFrac . (*1000) <$> getPOSIXTime :: IO Double
  writeIORef (runActivity run) (obj [("started",toJSON started),("updated",toJSON started),("phase",str "Waiting for model"),("last_action",str "")])
  bracket (createProcess (proc binary args) { cwd=Just workdir,env=Just (("SAPIENS_AGENCY_RUN",T.unpack (runIdText (runId run))):filter ((/="SAPIENS_AGENCY_RUN") . fst) environment),std_in=CreatePipe,std_out=CreatePipe,std_err=CreatePipe,create_group=True,use_process_jobs=True,detach_console=os=="mingw32" }) cleanup $ \handles -> do

@@ -32,6 +32,7 @@ make kind record m = {kind,title,record,fields,content:F.NoContent,status:M.Edit
     M.AppMenu -> D.fallback "CORPORA" $ m.snapshot.corpora.name
     M.WorkspaceSettings -> "Workspace & settings"
     M.Computer -> "Shared computer"
+    M.Onboarding -> "Set up Sapiens"
     M.AgentSettings -> name <> " settings"
     M.GroupSettings -> name <> " settings"
     M.Attach -> "Attach"
@@ -70,9 +71,43 @@ view m = case m.dialog of
 
 body :: M.Model -> M.Dialog -> V.Html
 body m d = case d.kind of
-  M.AppMenu -> V.node "nav" [V.label "Corpora menu"] [V.button "app-menu-row" "Workspace & settings" $ OpenDialog M.WorkspaceSettings F.NoRecord,V.button "app-menu-row" "Shared computer" $ OpenDialog M.Computer F.NoRecord]
+  M.AppMenu -> V.node "nav" [V.label "Corpora menu"] [V.button "app-menu-row" "Workspace & settings" $ OpenDialog M.WorkspaceSettings F.NoRecord,V.button "app-menu-row" "Shared computer" $ OpenDialog M.Computer F.NoRecord,V.when m.localAvailable $ V.button "app-menu-row" "Set up Sapiens" $ OpenDialog M.Onboarding F.NoRecord]
   M.WorkspaceSettings -> V.div "" [V.p "" "Talk to your Sapis in chat, manage their notes, and save documents in their workspaces. Sapis can delegate requests through ChiefSapi.",V.p "" "Use the corpora menu to switch workspaces. Active and Paused describe execution on the host; Connecting means this device is restoring its connection.",V.button "button" "Edit decision prompts" $ OpenDialog M.DecisionPrompts F.NoRecord]
-  M.Computer -> V.div "" [V.p "" "Blindly4 is the main computer-use tool. Ask a Sapi in chat to work on your computer.",V.div "settings-row" [V.span [] (if m.snapshot.computer.built then "Blindly4 is built" else "Build required: run " <> if windows then ".\\start.ps1" else "./start.sh"),V.span [V.cls "tag"] (if owner == "" then "Available" else "In use · " <> (M.agent m owner).name)],V.p "" $ "Sapis share one computer. " <> if windows then "Windows UI Automation works with accessible apps on your desktop. Elevated apps and secure system dialogs cannot be controlled." else "macOS Accessibility access is required for desktop interaction; permission failures appear in chat."]
+  M.Computer -> V.div "" [V.p "" "Ask a Sapi in chat to work on your computer.",V.div "settings-row" [V.span [] (if m.snapshot.computer.built then "Computer helper is installed" else "Computer helper is missing. Reinstall Sapiens to repair it."),V.span [V.cls "tag"] (if owner == "" then "Available" else "In use · " <> (M.agent m owner).name)],V.p "" $ "Sapis share one computer. " <> if windows then "Windows UI Automation works with accessible apps on your desktop. Elevated apps and secure system dialogs cannot be controlled." else "macOS Accessibility access is required for desktop interaction.",V.when m.localAvailable $ V.button "button" "Check setup and permissions" $ OpenDialog M.Onboarding F.NoRecord]
+  M.Onboarding -> case d.content of
+    F.Setup value ->
+      let provider = D.s "provider" value
+          login = D.get "login" value
+          state = D.s "state" login
+          permission = D.s "computer_permission" value
+      in V.div "setup-screen"
+        [V.p "" "Sign in with your ChatGPT account to use Codex in Sapiens. Sapiens keeps this sign-in separate from your other Codex installations."
+        ,V.textNode "p" [V.attr "role" "status"] $ case provider of
+          "signed_in" -> "Codex is signed in. Send a chat message to run your first task. Your account's model access and usage limits apply."
+          "missing" -> "Codex is missing from this installation. Reinstall Sapiens to repair it."
+          "unavailable" -> "Codex could not start. Retry, or reinstall Sapiens if the problem continues."
+          "signing_in" -> "Waiting for you to finish signing in…"
+          _ -> "Sign in to Codex to run AI tasks."
+        ,V.when (state == "failed" || state == "expired" || state == "cancelled") $ V.p "" $ case state of
+          "cancelled" -> "Sign-in cancelled. You can try again."
+          "expired" -> "Sign-in expired. Start again for a new code."
+          _ -> "Sign-in failed. Check your connection and enable device code authorization in your ChatGPT security settings, then try again."
+        ,V.when (provider == "sign_in_required" || provider == "unavailable") $ V.button "button" "Sign in with ChatGPT" $ DialogCommand $ Intent.Setup "login"
+        ,V.when (D.s "code" login /= "") $ V.div ""
+          [V.p "" "Open the official sign-in page and enter this one-time code. Continue only if you started this sign-in in Sapiens."
+          ,V.textNode "strong" [] (D.s "code" login)
+          ,V.button "button" "Open sign-in page" $ DialogCommand $ Intent.Setup "open-login"]
+        ,V.when (provider == "signing_in") $ V.button "button" "Cancel sign-in" $ DialogCommand $ Intent.Setup "cancel"
+        ,V.p "" $ case permission of
+          "missing" -> "Computer helper is missing. Reinstall Sapiens to repair it."
+          "granted" -> "Accessibility access is enabled."
+          "denied" -> "Enable Sapiens in System Settings > Privacy & Security > Accessibility, then recheck. Chat and Notes remain available."
+          "not_required" -> "Computer control is available for accessible desktop applications."
+          _ -> "Computer control needs macOS Accessibility access. You can do this later."
+        ,V.when (permission == "not_requested" || permission == "denied" || permission == "granted") $ V.button "button" "Allow / recheck Accessibility" $ DialogCommand $ Intent.Setup "permission"
+        ,V.button "button" "Recheck setup" $ DialogCommand $ Intent.Setup "refresh"
+        ,V.button "button" (if D.b "ready" value then "Done" else "Continue to workspace") CloseDialog]
+    _ -> V.p "" "Checking setup…"
   M.AgentSettings -> form "Save"
     [V.node "div" [V.cls "settings-tabs",V.attr "role" "tablist",V.label "Sapi settings"] $ map (\caption -> V.textNode "button" [V.attr "type" "button",V.attr "role" "tab",V.attr "aria-selected" $ show $ caption == "Profile",V.disabled $ caption /= "Profile"] (caption)) ["Profile","Context","Usage","Limits"]
     ,input "Name" F.Name [V.bool "required" true,V.attr "maxlength" "24",V.attr "aria-describedby" "name-help",V.attr "autocomplete" "off"]

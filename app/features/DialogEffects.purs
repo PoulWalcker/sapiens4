@@ -43,10 +43,15 @@ handle runtime dispatch action = case action of
       case kind of
         M.DecisionPrompts -> receive d.identity (\value -> E.modifyDialog d.identity _ {content=F.Prompts $ map F.prompt $ D.rows "prompts" value,fields=F.decode $ D.first $ D.rows "prompts" value,status=M.Editing}) $ E.api runtime m "/api/decision-prompts" "GET" D.null
         M.RelayList -> receive d.identity (\value -> E.modifyDialog d.identity _ {content=F.relayRegistry value,status=M.Editing}) $ C.json "/api/host/relays" "GET" D.null
+        M.Onboarding -> dispatch $ OnboardingPoll d.identity
         M.HostPairing -> dispatch $ HostPairPoll d.identity
         M.EditCorpora -> liftEffect $ B.focus "#corpora-dialog textarea"
         M.ConnectRemote -> liftEffect $ B.focus "#paste-invitation textarea"
         _ -> pure unit
+  OnboardingPoll id -> E.inDialog id \d -> when (d.kind == M.Onboarding) do
+    receive id (\value -> do
+      E.modifyDialog id _ {content=F.Setup value,status=M.Editing}
+      when (D.s "provider" value == "signing_in") $ E.later 1000.0 $ dispatch $ OnboardingPoll id) $ C.json "/api/host/onboarding" "GET" D.null
   CloseDialog -> do
     void $ H.fork $ H.liftAff $ C.cancelPairing runtime
     H.modify_ Dialog.close
@@ -196,6 +201,9 @@ handle runtime dispatch action = case action of
       Intent.InstallPrompt -> void $ H.fork $ void $ H.liftAff $ try $ toAffE B.installPrompt
       _ -> traverse_ (\d -> unless (M.dialogBusy d) $ dialogCommand m d command) m.dialog
   dialogCommand m d command = case command of
+    Intent.Setup setupAction -> runDialog d (\value -> do
+      E.modifyDialog d.identity _ {content=F.Setup value,status=M.Editing}
+      when (setupAction == "login" && D.s "provider" value == "signing_in") $ E.later 1000.0 $ dispatch $ OnboardingPoll d.identity) $ C.json "/api/host/onboarding" "POST" $ D.json {action: setupAction}
     Intent.SuggestNames -> do
       E.modifyDialog d.identity (\s -> s {identity=s.identity+1})
       H.modify_ (\s -> s {sequence=s.sequence+1})

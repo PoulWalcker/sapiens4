@@ -134,7 +134,7 @@ update action m = case action of
           localPair = not (M.remote m) && S.contains (S.Pattern "pairing=local") m.env.search
           local = A.find ((_ == X.Local) <<< _.location) registry.records
           connect = case selected of
-            Nothing -> []
+            Nothing -> [Dispatch Shell.CheckSetup]
             Just record -> [if record.key == m.active then ConnectRecord record else Dispatch $ Shell.EnterCorpora record.key]
           pairing = if localPair then [ReplaceHistory m.env.path] <> (case local of
             Nothing -> []
@@ -205,7 +205,7 @@ update action m = case action of
               updated = projected {polling=false,now=now,connection=M.connectionResult true m.connection,feedback="",records=map (\r -> if r.key == active then X.updateCorpora r snapshot.corpora else r) m.records
                 ,address=if m.addressOpen then m.address else D.fallback (if tab.url == "about:blank" then "" else tab.url) $ tab.path
                 ,lastPreview=if previewDue then now else m.lastPreview}
-          in Changed updated ([RestoreScroll,LoadDocument] <> (if previewDue then [LoadPreview] else []) <> [Sync] <> schedulePoll updated)
+          in Changed updated ([RestoreScroll,LoadDocument] <> (if previewDue then [LoadPreview] else []) <> [Sync,Dispatch Shell.CheckSetup] <> schedulePoll updated)
   Persist ->
     let value = D.encode $ M.preferences m
     in if (M.online m) && not (M.busy m) && not m.saving && value /= m.preferencesSaved then
