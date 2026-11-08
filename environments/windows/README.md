@@ -11,7 +11,7 @@ official Microsoft download; run that installer and choose Retry. Cancel exits.
 ## Build
 
 Use x64 GHC 9.14.1, Cabal 3.18.2.0, Node 22.23.2, Rust 1.99.0 with MSVC C++
-build tools, Python 3.10+, Git, a POSIX shell and GNU Make. Checks use Ruby 3.4.11.
+build tools, Python 3.10+, Git, a POSIX shell and GNU Make. Checks use Ruby 3.4.11 and Bundler 4.0.21.
 Keep GHC, shell and Make paths free of spaces. Use x64 GHC and Node on Windows ARM.
 Initialize the pinned submodules, then run from the repository root:
 
@@ -39,6 +39,7 @@ allow synthetic validation. The app owns its host, uses a dynamic loopback port,
 and stops the host on close. Production update discovery is disabled.
 
 ```powershell
+ruby submodules/libs4/ruby/bundle.rb install
 $env:SAPIENS_TEST_PACKAGE_RUNTIME = (Resolve-Path .build/Sapiens4-Development-win-x64/runtime).Path
 ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb
 $env:SAPIENS_TEST_WINDOWS_PACKAGE = (Resolve-Path .build/Sapiens4-Development-win-x64).Path

@@ -6,7 +6,7 @@ Codex provider and licenses. End users need macOS arm64 13.0+.
 ## Build
 
 Use GHC 9.14.1, Cabal 3.18.2.0, Node 22.23.2, Rust 1.99.0, Python 3.10+,
-Git and Xcode Command Line Tools. Checks use Ruby 3.4.11. Initialize the pinned
+Git and Xcode Command Line Tools. Checks use Ruby 3.4.11 and Bundler 4.0.21. Initialize the pinned
 submodules, then run from the repository root:
 
 ```sh
@@ -38,6 +38,7 @@ for synthetic validation. The app starts its own host on a dynamic loopback port
 running; Quit stops its host. No login item is installed.
 
 ```sh
+ruby submodules/libs4/ruby/bundle.rb install
 codesign --verify --deep --strict '.build/macos/Sapiens4 Development.app'
 SAPIENS_TEST_PACKAGE_RUNTIME="$PWD/.build/macos/Sapiens4 Development.app/Contents/Resources/runtime" \
   ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb
