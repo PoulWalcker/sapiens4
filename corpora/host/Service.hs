@@ -124,6 +124,7 @@ snapshotUnlocked s = do
  groups <- G.snapshotGroups s
  routines <- R.routineSummaries s
  creation <- prompt s "creation-request"
+ routineTemplates <- forM ["create","create-run","change","run","reply"] $ \key -> (key,) . str . T.strip <$> prompt s ("routine-request-"<>key)
  agentRows <- forM rows $ \row -> put "retired" . Bool <$> retired s (at row "id") <*> pure row
  owner <- maybe Null (toJSON . fst) <$> readIORef (serviceLease s)
  built <- blindly s >>= doesFileExist
@@ -146,7 +147,14 @@ snapshotUnlocked s = do
   pure (run,merge value (obj [("turn",str (runIdText (runId run))),("stopping",Bool stopping),("agencyKind",str "chatInput"),("slot",num (runSlot run))]))
  let groupTurns=M.fromList [(at request "id",at g "id") | g<-groups,request<-items g "requests"]
      projected=[maybe t (\gid->put "group" (str gid) t) (M.lookup (at t "id") groupTurns) | t<-turns]
- pure $ obj [("agents",arr agentRows),("turns",arr projected),("preferences",prefs),("corpora",corpora),("groups",arr groups),("routines",arr routines),("creation_template",str (T.strip creation)),("computer",obj [("owner",owner),("built",Bool built),("platform",str (if os=="mingw32" then "win32" else T.pack os))]),("pulses",arr pulses),("events",events),("pulse",pulse),("provider",str "codex"),("activity",obj [(agentIdText (runOwner r),v) | (r,v)<-activity]),("run_activity",obj [(runIdText (runId r),v) | (r,v)<-activity]),("main_agent_id",str chief),("workloads",arr (D.workSummaries works)),("attachment_drafts",obj drafts),("orchestration",obj orchestration)]
+ pure $ obj [("agents",arr agentRows),("turns",arr projected),("preferences",prefs),("corpora",corpora),("groups",arr groups),("routines",arr (map browserRoutine routines)),("creation_template",str (T.strip creation)),("routine_request_templates",obj routineTemplates),("computer",obj [("owner",owner),("built",Bool built),("platform",str (if os=="mingw32" then "win32" else T.pack os))]),("pulses",arr pulses),("events",events),("pulse",pulse),("provider",str "codex"),("activity",obj [(agentIdText (runOwner r),v) | (r,v)<-activity]),("run_activity",obj [(runIdText (runId r),v) | (r,v)<-activity]),("main_agent_id",str chief),("workloads",arr (D.workSummaries works)),("attachment_drafts",obj drafts),("orchestration",obj orchestration)]
+-- The browser list needs a title and condition, not the full assignment.
+-- Model-facing routines and exact history retain the complete specification.
+browserRoutine :: Value -> Value
+browserRoutine routine = case get (get routine "specification") "objective" of
+ Null -> remove ["specification"] routine
+ objective -> put "objective" objective (remove ["specification"] routine)
+
 validatePreferenceShape :: Value -> Validation ()
 validatePreferenceShape d = do
  check (all (`elem` ["selected","panel","scope","groupView","panes","drafts","attachment_drafts"]) (keys d)) 400 "Unknown preference field"
@@ -217,6 +225,10 @@ dispatch s method target body = locked s $ do
   ("POST",["api","groups",gid,"tasks"]) -> json 201 (GW.createTask s gid d "admin")
   ("PUT",["api","groups",gid,"tasks",tid]) -> json 200 (GW.updateTask s gid tid d "admin")
   ("POST",["api","groups",gid,"tasks",tid,"run"]) -> json 202 (R.ensureTaskAvailable s (TaskId tid) >> GW.runTask s gid tid (get d "revision") "admin")
+  ("POST",["api","routines",rid,action]) | action `elem` ["pause","resume"] -> json 200 $ do
+   require (null (keys d)) 400 "Schedule controls accept an empty object"
+   identity <- decodeValue 400 (str rid)
+   R.setRoutinePaused s "admin" identity (action == "pause")
   ("POST",["api","routines",rid,"runs",run,"stop"]) -> json 200 $ do
    identity <- decodeValue 400 (str rid)
    targetRun <- decodeValue 400 (str run)

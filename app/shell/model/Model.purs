@@ -10,6 +10,7 @@ import Data.Foldable (foldl)
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Set as Set
 import Data.String as S
+import Data.String.CodePoints as CP
 import Data.Tuple (Tuple(..))
 import Foreign.Object as O
 import Libs4.Browser as B
@@ -17,6 +18,8 @@ import Sapiens.Data as D
 import Sapiens.Browser as Browser
 import Sapiens.Domain as X
 import Sapiens.Navigation as N
+import Sapiens.RoutineData as RD
+import Sapiens.RoutineRequest as RR
 
 data RemoteData error a = NotAsked | Loading Request (Maybe a) | Ready Request a | Failed Request error
 
@@ -34,7 +37,10 @@ decodePreview value = case toString (D.get "content" value) of
 
 type Request = { epoch :: Int, sequence :: Int, key :: String, revision :: String, path :: String }
 
-data DialogKind = AppMenu | WorkspaceSettings | Computer | AgentSettings | GroupSettings | Attach | Reference X.AttachmentKind | DecisionPrompts | GroupTask | CreateCorpora | EditCorpora | ConnectRemote | HostPairing | RelayList | RelayAdd | RelaySwitch | RelayTerms | Installation | Notice
+type DocumentRequest = {request :: Request, kind :: X.DocumentKind, refresh :: Boolean}
+type RoutineScroll = {anchor :: String, offset :: Number, top :: Number, width :: Number}
+
+data DialogKind = AppMenu | WorkspaceSettings | Computer | AgentSettings | GroupSettings | Attach | Reference X.AttachmentKind | DecisionPrompts | GroupTask | CreateCorpora | EditCorpora | ConnectRemote | HostPairing | RelayList | RelayAdd | RelaySwitch | RelayTerms | Installation | Notice | RoutineControl | RoutineRequest
 
 derive instance eqDialogKind :: Eq DialogKind
 
@@ -99,6 +105,14 @@ type ContentState r =
   , workspaces :: O.Object X.Workspace, workspaceRevision :: Number, documents :: O.Object (RemoteData String X.Document)
   , expanded :: Set.Set String, imageUrls :: O.Object String, preview :: RemoteData PreviewError String
   , scrollPosition :: Maybe Browser.ScrollPosition, restoringScroll :: Boolean
+  , routineFilters :: O.Object N.RoutineFilter, routineHistories :: O.Object (Array N.HistoryPosition)
+  , routineRequestDrafts :: O.Object Dialog
+  , routineChatReturn :: O.Object N.Activity
+  , routineReceipts :: O.Object RR.SendReceipt
+  , routineControls :: O.Object (RemoteData String RD.ControlReceipt)
+  , routineResultSelections :: O.Object RD.ExactResultRef
+  , routineScroll :: O.Object RoutineScroll, restoringRoutine :: Maybe String
+  , documentFetched :: O.Object Number
   | r )
 
 type SessionState =
@@ -120,6 +134,7 @@ initial env =
   , records:[], active:"", connection:Offline, localAvailable:false, showArchived:false
   , toast:"", feedback:"", theme:if env.dark then "dark" else "light", installRequired:false
   , dialogStack:[], imageUrls:O.empty, preview:NotAsked, address:"", addressOpen:false, scrollPosition:Nothing, restoringScroll:false, preferencesSaved:""
+  , routineRequestDrafts:O.empty,routineChatReturn:O.empty,routineReceipts:O.empty,routineControls:O.empty, routineFilters:O.empty, routineHistories:O.empty, routineResultSelections:O.empty, routineScroll:O.empty, restoringRoutine:Nothing, documentFetched:O.empty
   }
 
 agent :: Model -> String -> X.Entity
@@ -182,7 +197,7 @@ project :: Json -> Model -> Model
 project raw m = projectSnapshot (X.snapshot raw) m
 
 projectSnapshot :: X.Snapshot -> Model -> Model
-projectSnapshot snapshot m = withWorkspaces snapshot.preferences m { snapshot=snapshot, agents=agents, messages=messages, selected=id, groupView=groupView, scope=scope }
+projectSnapshot snapshot m = normalizeRoutineSelection $ withWorkspaces snapshot.preferences m { snapshot=snapshot, agents=agents, messages=messages, selected=id, groupView=groupView, scope=scope }
   where
   personal = map (\a -> a {busy=A.any (\t -> t.agent == a.id && t.status == X.Running) turns
     , lastActivity=B.parseTime $ D.fallback a.created $ fromMaybe "" $ _.created <$> A.last (A.filter (\t -> t.agent == a.id) turns)
@@ -225,7 +240,8 @@ resetSnapshot snapshot old = projectSnapshot snapshot old
   {selected=p.selected,activity=p.activity,scope=p.scope,groupView=p.groupView,drafts=p.drafts
   ,attachments=snapshot.attachment_drafts,sending=Set.empty,uploading=0,clarification=Nothing,documents=O.empty,expanded=Set.empty,epoch=old.epoch+1
   ,panes=p.panes,workspaces=p.workspaces,workspaceRevision=p.workspaceRevision,search="",searchOpen=false
-  ,preview=NotAsked,address="",scrollPosition=p.scrollPosition,restoringScroll=p.scrollPosition /= Nothing}
+  ,preview=NotAsked,address="",scrollPosition=p.scrollPosition,restoringScroll=p.scrollPosition /= Nothing
+  ,routineRequestDrafts=O.empty,routineChatReturn=O.empty,routineReceipts=O.empty,routineControls=O.empty,routineFilters=O.empty,routineHistories=O.empty,routineResultSelections=O.empty,routineScroll=O.empty,restoringRoutine=Nothing,documentFetched=O.empty}
   where
   p = snapshot.preferences
 
@@ -234,7 +250,7 @@ select id m = if target.id == "" then m else m
   { selected=id, activity=N.Chat N.Conversation, search="", groupView=if group then Just id else Nothing
   , scope=if group then N.Groups else if m.groupView /= Nothing || m.scope == N.Groups then N.All else m.scope
   , menu=Nothing, dialog=Nothing, addressOpen=false, address="", panes=N.togglePane false (N.limit m.env) (hasTab m) N.ChatPane m.panes
-  , scrollPosition=Nothing, restoringScroll=false, preview=NotAsked
+  , scrollPosition=Nothing, restoringScroll=false, preview=NotAsked, restoringRoutine=Nothing
   }
   where
   target = fromMaybe X.emptyEntity $ X.findEntity id m.agents
@@ -261,15 +277,103 @@ preferences m = D.merge (N.encodeActivity m.activity) $ D.json
   , workspaces: m.workspaces, chatPosition: m.scrollPosition
   }
 
-currentDocument :: Model -> Maybe Request
-currentDocument m = case m.activity of
-  N.Work N.Memo _ | info.revision /= "missing" -> Just $ make "memo" (info.revision) "/notes"
-  N.Work view _ | A.elem view [N.Tasks,N.Automated] && not (isGroup a) -> Just $ make "tasks" (D.encode $ D.json $ map _.revision $ A.filter (\w -> A.elem m.selected w.participants) m.snapshot.workloads) "/tasks?format=json"
+selectedOwner :: Model -> N.OwnerRef
+selectedOwner m = if isGroup (selected m) then N.GroupOwner m.selected else N.PersonalOwner m.selected
+
+normalizeRoutineSelection :: Model -> Model
+normalizeRoutineSelection m = case m.activity of
+  N.Work (N.RoutineView route) _ | (N.routeRoutine route).owner /= selectedOwner m ->
+    m {activity=N.Chat N.Conversation,restoringRoutine=Nothing}
+  _ -> m
+
+routineFilter :: Model -> N.RoutineFilter
+routineFilter m = fromMaybe fallback $ O.lookup m.selected m.routineFilters
+  where fallback = if N.period m.activity == N.Paused then N.PausedRoutines else N.AllRoutines
+
+routineKey :: N.RoutineRef -> String
+routineKey ref = "routine:" <> ownerKey ref.owner <> ":" <> N.routineId ref.id
+  where
+  ownerKey = case _ of
+    N.PersonalOwner id -> "sapi:" <> id
+    N.GroupOwner id -> "group:" <> id
+
+overviewKey :: N.RoutineRef -> String
+overviewKey ref = routineKey ref <> ":overview"
+
+historyKey :: N.RoutineRef -> Maybe N.RunId -> String
+historyKey ref before = routineKey ref <> ":history:" <> fromMaybe "first" (N.runId <$> before)
+
+runKey :: N.RunRef -> String
+runKey ref = routineKey ref.routine <> ":run:" <> N.runId ref.id
+
+routinePath :: N.RoutineRef -> String
+routinePath ref = "/api/" <> (case ref.owner of
+  N.PersonalOwner _ -> "agents/"
+  N.GroupOwner _ -> "groups/") <> B.encodeURI (N.ownerId ref.owner) <> "/routines/" <> B.encodeURI (N.routineId ref.id) <> "/runs"
+
+historyPositions :: Model -> N.RoutineRef -> Array N.HistoryPosition
+historyPositions m ref = fromMaybe [N.firstHistoryPosition] $ O.lookup (routineKey ref) m.routineHistories
+
+historyPage :: Model -> N.RoutineRef -> Maybe N.RunId -> Maybe RD.RoutineHistoryPage
+historyPage m ref before = historyDocument m (historyKey ref before)
+
+historyDocument :: Model -> String -> Maybe RD.RoutineHistoryPage
+historyDocument m key = case O.lookup key m.documents >>= valueOf of
+  Just (X.RoutineHistoryDocument page) -> Just page
   _ -> Nothing
+
+routineTitle :: Model -> N.RoutineRef -> String
+routineTitle m ref = fromMaybe "Routine" $ routineDisplayTitle <$> A.find (\r -> r.id == N.routineId ref.id && r.owner == N.ownerId ref.owner) m.snapshot.routines
+
+-- The stored title is a prompt excerpt, not an authored name. Prefer the saved
+-- objective; keep full paths in Assignment rather than in a navigation label.
+routineDisplayTitle :: X.Routine -> String
+routineDisplayTitle routine = if CP.length title > 80 then S.trim (CP.take 79 title) <> "…" else title
+  where
+  title = D.fallback "Routine" $ S.joinWith " " $ map compactPath $ S.split (S.Pattern " ") source
+  source = D.fallback routine.title $ fromMaybe "" routine.objective
+  compactPath word
+    | S.startsWith (S.Pattern "/") word || S.startsWith (S.Pattern "\\") word || S.contains (S.Pattern ":\\") word =
+        fromMaybe word $ A.last $ A.filter (_ /= "") $ S.split (S.Pattern "/") $ S.replaceAll (S.Pattern "\\") (S.Replacement "/") word
+    | otherwise = word
+
+routineViewKey :: Model -> Maybe String
+routineViewKey m = case m.activity of
+  N.Work N.Scheduled _ -> Just $ "routine-list:" <> m.selected
+  N.Work (N.RoutineView route) _ -> Just $ case route of
+    N.Overview ref -> overviewKey ref
+    N.History ref position -> historyKey ref position.before <> (if position.half == N.FirstTen then ":0" else ":10")
+    N.RunDetails ref _ -> runKey ref
+  _ -> Nothing
+
+currentDocuments :: Model -> Array DocumentRequest
+currentDocuments m = case m.activity of
+  N.Work N.Memo _ | info.revision /= "missing" -> [make X.MemoKind "memo" info.revision "/notes"]
+  N.Work view _ | A.elem view [N.Tasks,N.Automated] && not (isGroup a) ->
+    [make X.TasksKind "tasks" (D.encode $ D.json $ map _.revision $ A.filter (\w -> A.elem m.selected w.participants) m.snapshot.workloads) "/tasks?format=json"]
+  N.Work (N.RoutineView route) _
+    | (N.routeRoutine route).owner == selectedOwner m
+      && A.elem N.ChatPane (visiblePanes m)
+      && A.any (\r -> r.owner == m.selected && r.id == N.routineId (N.routeRoutine route).id) m.snapshot.routines -> routineDocuments route
+  _ -> []
   where
   a = selected m
   info = notes m
-  make kind revision suffix = {key:kind <> ":" <> m.selected,revision,path:ownerPath m <> suffix,epoch:m.epoch,sequence:m.sequence+1}
+  request kind key revision path refresh = {kind,refresh,request:{key,revision,path,epoch:m.epoch,sequence:m.sequence+1}}
+  make kind prefix revision suffix = request kind (prefix <> ":" <> m.selected) revision (ownerPath m <> suffix) false
+  exact ref revision refresh = request (X.RoutineRunKind ref) (runKey ref) revision (routinePath ref.routine <> "/" <> B.encodeURI (N.runId ref.id)) refresh
+  routineDocuments = case _ of
+    N.Overview ref ->
+      [request (X.RoutineHistoryKind ref Nothing) (overviewKey ref) "overview" (routinePath ref) true] <>
+      (case historyDocument m (overviewKey ref) of
+        Just page | page.routine.deletedAt == Nothing -> case page.latest of
+          Just latest -> [exact {routine:ref,id:latest.id} latest.revision false]
+          Nothing -> []
+        _ -> [])
+    N.History ref position ->
+      [request (X.RoutineHistoryKind ref position.before) (historyKey ref position.before) "history"
+        (routinePath ref <> fromMaybe "" ((\id -> "?before=" <> B.encodeURI (N.runId id)) <$> position.before)) false]
+    N.RunDetails ref _ -> [exact ref "run" true]
 
 nativeWorkspace :: Model -> Boolean
 nativeWorkspace m = m.env.native && (activeRecord m).location /= X.Remote
@@ -293,5 +397,10 @@ valueOf = case _ of
   Ready _ value -> Just value
   _ -> Nothing
 
-decodeDocument :: Request -> Json -> Either String X.Document
-decodeDocument r = X.decodeDocument (S.take 5 r.key == "tasks")
+decodeDocument :: DocumentRequest -> Json -> Either String X.Document
+decodeDocument r = X.decodeDocument r.kind
+
+routineControlBusy :: Model -> N.RoutineRef -> Boolean
+routineControlBusy m ref = case O.lookup (routineKey ref) m.routineControls of
+  Just (Loading _ _) -> true
+  _ -> false

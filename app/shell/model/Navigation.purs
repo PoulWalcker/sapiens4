@@ -3,7 +3,7 @@ module Sapiens.Navigation where
 import Prelude
 import Sapiens.Environment (Environment)
 import Data.Array as A
-import Data.Maybe (fromMaybe)
+import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Argonaut.Core (Json)
 import Sapiens.Data as D
 
@@ -15,7 +15,51 @@ data ChatView = Conversation | Pins | Threads | Comments
 
 derive instance eqChatView :: Eq ChatView
 
-data WorkView = Memo | Tasks | TaskCall | Backlog | Automated | Automation | Scheduled | Callbacks | Jobs | Agentic | Pipelines | Composers | ComposeWorkflow | ComposeRoutine | ComposeCall
+newtype RoutineId = RoutineId String
+newtype RunId = RunId String
+derive instance eqRoutineId :: Eq RoutineId
+derive instance eqRunId :: Eq RunId
+
+data OwnerRef = PersonalOwner String | GroupOwner String
+derive instance eqOwnerRef :: Eq OwnerRef
+
+type RoutineRef = { owner :: OwnerRef, id :: RoutineId }
+type RunRef = { routine :: RoutineRef, id :: RunId }
+
+data RoutineFilter = AllRoutines | ActiveRoutines | PausedRoutines
+derive instance eqRoutineFilter :: Eq RoutineFilter
+
+data HistoryHalf = FirstTen | SecondTen
+derive instance eqHistoryHalf :: Eq HistoryHalf
+type HistoryPosition = { before :: Maybe RunId, half :: HistoryHalf }
+
+data ReturnTarget = BackToOverview | BackToHistory HistoryPosition
+derive instance eqReturnTarget :: Eq ReturnTarget
+
+data RoutineRoute = Overview RoutineRef | History RoutineRef HistoryPosition | RunDetails RunRef ReturnTarget
+derive instance eqRoutineRoute :: Eq RoutineRoute
+
+routineId :: RoutineId -> String
+routineId (RoutineId value) = value
+
+runId :: RunId -> String
+runId (RunId value) = value
+
+ownerId :: OwnerRef -> String
+ownerId = case _ of
+  PersonalOwner value -> value
+  GroupOwner value -> value
+
+routeRoutine :: RoutineRoute -> RoutineRef
+routeRoutine = case _ of
+  Overview ref -> ref
+  History ref _ -> ref
+  RunDetails ref _ -> ref.routine
+
+firstHistoryPosition :: HistoryPosition
+firstHistoryPosition = {before:Nothing,half:FirstTen}
+
+data WorkView = Memo | Tasks | TaskCall | Backlog | Automated | Automation | Scheduled | RoutineView RoutineRoute | Callbacks | Jobs | Agentic | Pipelines | Composers | ComposeWorkflow | ComposeRoutine | ComposeCall
 
 derive instance eqWorkView :: Eq WorkView
 
@@ -45,6 +89,7 @@ workId = case _ of
   Automated -> "tasks-automated"
   Automation -> "automation"
   Scheduled -> "routine-scheduled"
+  RoutineView _ -> "routine-scheduled"
   Callbacks -> "routine-callback"
   Jobs -> "routine-job"
   Agentic -> "workflow-agentic"
@@ -63,6 +108,10 @@ workLabel = case _ of
   Automated -> "Automated"
   Automation -> "Automation"
   Scheduled -> "Scheduled"
+  RoutineView route -> case route of
+    Overview _ -> "Routine"
+    History _ _ -> "Run history"
+    RunDetails _ _ -> "Run"
   Callbacks -> "Callbacks"
   Jobs -> "Jobs"
   Agentic -> "Agentic"
@@ -146,6 +195,8 @@ readActivity group prefs =
     _ -> Chat $ fromMaybe Conversation $ A.find ((_ == D.s "view" prefs) <<< chatId) [Conversation,Pins,Threads,Comments]
 
 encodeActivity :: Activity -> Json
+-- Routine documents and cursor windows are session state. Reload returns to the
+-- scheduled list instead of persisting a pointer into an empty document cache.
 encodeActivity a = D.json {panel: panel a, view: view a, period: periodId $ period a}
 
 ios :: Environment -> Boolean

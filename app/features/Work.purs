@@ -4,7 +4,6 @@ import Sapiens.Form as F
 import Prelude
 import Data.Array as A
 import Data.Either (Either(..))
-import Data.Int as I
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Set as Set
 import Data.String as S
@@ -17,6 +16,7 @@ import Sapiens.Domain as X
 import Sapiens.Html as V
 import Sapiens.Model as M
 import Sapiens.Navigation as N
+import Sapiens.Routine as Routine
 import Sapiens.Text as T
 
 emptyTasks :: String -> String -> V.Html
@@ -104,18 +104,7 @@ tasks m view period = V.node "section" [V.cls "task-browser"] [V.node "div" [V.i
   groupContent = if A.null groupRows && A.null calls then [V.p "empty" "No tasks here yet."] else map (groupTask m group) groupRows <> map (taskRow m) calls
 
 routines :: M.Model -> N.Period -> V.Html
-routines m period = V.node "section" [V.cls "task-browser"] [V.node "div" [V.cls "task-list",V.label $ N.periodLabel period <> " scheduled routines"] $ if A.null rows then [emptyTasks (if period == N.Paused then "No paused routines" else "No planned routines") (if period == N.Paused then "Paused routines will appear here." else "Create a scheduled routine through chat.")] else map (taskRow m) rows]
-  where
-  rows = map routineRow $ A.filter (\r -> r.owner == m.selected && r.paused == (period == N.Paused)) m.snapshot.routines
-  routineRow r =
-    let frequency = "Every " <> show (I.floor r.minutes) <> " minutes"
-        next = if r.paused then "" else " · " <> B.formatDate "" D.empty r.nextDue
-        waiting = if r.deferredCount > 0.0 then " · " <> show (I.floor r.deferredCount) <> " due waiting since " <> B.formatDate "" D.empty r.oldestDeferredDue else ""
-        policy = X.routinePolicyLabel r.policy
-        problem = case r.activeRun of
-          Left reason -> reason
-          Right _ -> ""
-    in {id:r.id,title:r.title,owner:r.owner,sender:r.owner,state:if r.paused then X.WorkPaused else X.WorkPlanned,routine:true,minutes:show $ I.floor r.minutes,prompt:r.prompt,runCount:I.floor r.runCount,meta:frequency <> next <> waiting <> " · " <> policy,body:"Frequency: every " <> show (I.floor r.minutes) <> " minutes\n" <> policy <> "\nExecute: " <> r.prompt,result:"",error:problem,taskType:""}
+routines m _ = Routine.viewList m
 
 events :: M.Model -> V.Html
 events m = V.node "section" [V.cls "event-log"] [V.div "event-columns event-head" $ map (\s -> V.span [] (s)) ["Timestamp","Actor","Entity","Event","Agency",""],V.div "event-rows" $ if A.null rows then [V.p "empty" "No events yet."] else map event rows]

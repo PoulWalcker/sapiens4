@@ -23,6 +23,8 @@ import Sapiens.Data as D
 import Sapiens.Domain as X
 import Sapiens.Memo as Memo
 import Sapiens.Model as M
+import Sapiens.RoutineData as RD
+import Sapiens.RoutineRequest as RR
 import Sapiens.Navigation as N
 import Sapiens.Remote as R
 import Sapiens.Workspace as W
@@ -51,17 +53,17 @@ modifyDialog id f = H.modify_ \m -> m {dialog=map (\d -> if d.identity == id the
 
 refresh :: C.Runtime -> Dispatch -> M.Model -> Aff Json -> UI Unit
 refresh runtime dispatch requested operation = attempt operation \result -> inEpoch requested.epoch \m ->
-  when (requested.active == m.active) $ case result of
-    Left failure -> runUpdate runtime dispatch $ U.SnapshotReceived requested.epoch requested.active $ Left $ message failure
+  when (requested.active == m.active && requested.pollGeneration == m.pollGeneration) $ case result of
+    Left failure -> runUpdate runtime dispatch $ U.SnapshotReceived requested.epoch requested.active requested.pollGeneration $ Left $ message failure
     Right raw -> do
       captureScroll
       snapshot <- liftEffect $ if m.snapshot.corpora.id /= "" && m.snapshot.corpora.id == D.str (D.at ["corpora","id"] raw) then pure raw else C.decorate requested.active raw
       now <- liftEffect B.now
       case X.decodeSnapshot snapshot of
-        Left failure -> runUpdate runtime dispatch $ U.SnapshotReceived requested.epoch requested.active $ Left failure
+        Left failure -> runUpdate runtime dispatch $ U.SnapshotReceived requested.epoch requested.active requested.pollGeneration $ Left failure
         Right decoded -> do
           liftEffect $ C.cache requested.active raw
-          runUpdate runtime dispatch $ U.SnapshotReceived requested.epoch requested.active $ Right {snapshot:decoded,now}
+          runUpdate runtime dispatch $ U.SnapshotReceived requested.epoch requested.active requested.pollGeneration $ Right {snapshot:decoded,now}
 
 api :: C.Runtime -> M.Model -> String -> String -> Json -> Aff Json
 api runtime m path method body = do
@@ -151,13 +153,26 @@ runUpdate runtime dispatch action = do
     U.SelectRange target start end -> liftEffect $ B.selectRange target start end
     U.Sync -> sync
     U.PersistTheme theme -> void $ liftEffect $ B.storageWrite "sapi-color-theme" theme
-    U.FetchDocument request -> attempt (api runtime requested request.path "GET" D.null) $
-      runUpdate runtime dispatch <<< U.ReceiveDocument request <<< either (Left <<< message) (M.decodeDocument request)
+    U.SubmitRoutineControl request control ->
+      let ref = RD.controlRoutine control
+          path = "/api/routines/" <> B.encodeURI (N.routineId ref.id) <> (case control of
+            RD.StopRun run -> "/runs/" <> B.encodeURI (N.runId run.id) <> "/stop"
+            _ -> "/" <> RD.controlAction control)
+      in attempt (api runtime requested path "POST" D.empty) $ \result ->
+        runUpdate runtime dispatch $ U.RoutineControlReceived request control $ case result of
+          Left failure -> Left $ message failure
+          Right value -> RD.decodeControlReceipt control value
+    U.FetchDocument document -> attempt (api runtime requested document.request.path "GET" D.null) $
+      runUpdate runtime dispatch <<< U.ReceiveDocument document.request <<< either (Left <<< message) (M.decodeDocument document)
+    U.RestoreRoutineScroll -> later 0.0 restoreRoutineScroll
+    U.FocusRoutine -> do
+      current <- H.get
+      later 0.0 $ inEpoch current.epoch \m -> when (m.activity == current.activity) $ liftEffect $ B.focus "#routine-heading"
     U.LoadMemoImages request document -> memoImages runtime request document
     U.SendMessage request ->
       let payload = D.obj $ [Tuple "text" (D.text request.text),Tuple "attachments" (D.array $ map D.text request.attachments)] <> maybe [] (\id -> [Tuple "workload" $ D.text id]) request.workload
       in attempt (api runtime requested request.path "POST" payload) $
-        runUpdate runtime dispatch <<< U.MessageReceived request <<< either (Left <<< message) (const $ Right unit)
+        runUpdate runtime dispatch <<< U.MessageReceived request <<< either (Left <<< message) (RR.decodeReceipt request.destination)
     U.Notify caption -> notify caption
     U.PollNow -> dispatch Poll
     U.ResizeComposer -> resizeComposer
@@ -185,6 +200,50 @@ captureScroll = do
           position = {selected:m.selected,bottom:viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 2.0,key:maybe "" Browser.chatKey first,offset:maybe 0.0 _.top first - viewport.top,width:viewport.clientWidth,height:viewport.clientHeight}
           sameSize = maybe true (\saved -> saved.width == viewport.clientWidth && saved.height == viewport.clientHeight) m.scrollPosition
       when sameSize $ H.modify_ _ {scrollPosition=Just position}
+  captureRoutineScroll
+
+captureRoutineScroll :: UI Unit
+captureRoutineScroll = do
+  m <- H.get
+  let unavailable document = case O.lookup document.request.key m.documents >>= M.valueOf of
+        Nothing -> true
+        Just _ -> false
+  unless (m.env.hidden || m.restoringRoutine /= Nothing || A.any unavailable (M.currentDocuments m)) $
+    traverse_ capture $ M.routineViewKey m
+  where
+  capture key = do
+    viewport <- liftEffect $ Platform.measure "#conversation-body"
+    rows <- liftEffect $ Platform.measureChildren "#routine-rows"
+    when (viewport.clientHeight > 0.0) do
+      let first = A.find (\row -> row.bottom > viewport.top && O.member "routineAnchor" row.dataset) rows
+          saved = {anchor:maybe "" (\row -> maybe "" identity $ O.lookup "routineAnchor" row.dataset) first
+            ,offset:maybe 0.0 _.top first - viewport.top,top:viewport.scrollTop,width:viewport.clientWidth}
+      H.modify_ \s -> s {routineScroll=O.insert key saved s.routineScroll}
+
+restoreRoutineScroll :: UI Unit
+restoreRoutineScroll = do
+  m <- H.get
+  let loading document = case O.lookup document.request.key m.documents of
+        Nothing -> true
+        Just (M.Loading _ _) -> true
+        Just M.NotAsked -> true
+        _ -> false
+  unless (m.env.hidden || A.any loading (M.currentDocuments m)) $ traverse_ (restore m) m.restoringRoutine
+  where
+  restore m key = when (M.routineViewKey m == Just key) do
+    viewport <- liftEffect $ Platform.measure "#conversation-body"
+    rows <- liftEffect $ Platform.measureChildren "#routine-rows"
+    when (viewport.clientHeight > 0.0) do
+      let saved = O.lookup key m.routineScroll
+          anchor = saved >>= \position -> A.find (\row -> O.lookup "routineAnchor" row.dataset == Just position.anchor) rows
+          top = case saved of
+            Nothing -> 0.0
+            Just position -> case anchor of
+              Just row -> viewport.scrollTop + row.top - viewport.top - (if position.width == viewport.clientWidth then position.offset else 0.0)
+              Nothing -> position.top
+      liftEffect $ B.focus "#routine-heading"
+      liftEffect $ B.scroll "#conversation-body" top
+      H.modify_ _ {restoringRoutine=Nothing}
 
 restoreScroll :: UI Unit
 restoreScroll = do

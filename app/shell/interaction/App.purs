@@ -125,6 +125,8 @@ handle runtime input = session input
       when plan.prevent $ liftEffect $ Event.preventDefault event
       when plan.stop $ liftEffect $ Event.stopPropagation event
       traverse_ (E.runUpdate runtime dispatch) plan.actions
+    SubmitRoutineRequest -> E.captureScroll *> E.runUpdate runtime dispatch U.SubmitRoutineRequest
+    BackFromRoutineChat -> E.runUpdate runtime dispatch U.BackFromRoutineChat
     Send -> E.runUpdate runtime dispatch U.Send
     ToggleExpanded key -> E.runUpdate runtime dispatch $ U.ToggleExpanded key
     Clarify work -> dispatch (Select work.owner) *> E.runUpdate runtime dispatch (U.SetClarification work)
@@ -146,6 +148,14 @@ handle runtime input = session input
       dispatch $ Select $ m.snapshot.main_agent_id
       E.runUpdate runtime dispatch $ U.SetScope scope
     Navigate activity -> E.captureScroll *> E.runUpdate runtime dispatch (U.Navigate activity)
+    OpenRoutine route -> E.captureScroll *> E.runUpdate runtime dispatch (U.OpenRoutine route)
+    OpenRoutineHistory ref -> E.captureScroll *> E.runUpdate runtime dispatch (U.OpenRoutineHistory ref)
+    RoutineBack -> E.captureScroll *> E.runUpdate runtime dispatch U.RoutineBack
+    RoutineHistoryPage older -> E.captureScroll *> E.runUpdate runtime dispatch (U.RoutineHistoryPage older)
+    ControlRoutine control -> E.runUpdate runtime dispatch $ U.ControlRoutine control
+    RefreshRoutine -> E.runUpdate runtime dispatch U.RefreshRoutine
+    SelectRoutineResult ref selected -> E.runUpdate runtime dispatch (U.SelectRoutineResult ref selected)
+    SetRoutineFilter filter -> E.runUpdate runtime dispatch (U.SetRoutineFilter filter)
     DefaultWork -> H.get >>= dispatch <<< Navigate <<< Work.defaultActivity
     SetPeriod period -> E.runUpdate runtime dispatch $ U.SetPeriod period
     Search search -> E.runUpdate runtime dispatch $ U.Search search
@@ -165,7 +175,7 @@ handle runtime input = session input
     Menu key -> E.runUpdate runtime dispatch $ U.SetMenu key
     CloseMenu -> E.runUpdate runtime dispatch U.CloseMenu
     Scroll -> E.captureScroll *> E.persistLocal
-    UserScroll -> H.modify_ _ {scrollPosition=Nothing,restoringScroll=false}
+    UserScroll -> H.modify_ _ {scrollPosition=Nothing,restoringScroll=false,restoringRoutine=Nothing}
     NativeReport report -> E.runUpdate runtime dispatch $ U.QueueNative report
     DrainNative -> E.runUpdate runtime dispatch U.DrainNative
     Browser command -> do

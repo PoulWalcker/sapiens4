@@ -10,6 +10,7 @@ import Data.Traversable (traverse)
 import Foreign.Object as O
 import Sapiens.Data as D
 import Sapiens.Navigation as N
+import Sapiens.RoutineData as RD
 import Sapiens.Browser as Browser
 
 data EntityKind = Sapi | Group
@@ -271,18 +272,22 @@ routinePolicyLabel = case _ of
   Right SkipMissedDeadlines -> "Missed runs: skip"
 
 type Routine =
-  { id :: String, owner :: String, title :: String, prompt :: String, minutes :: Number, nextDue :: String, runCount :: Number, paused :: Boolean, activeRun :: Either String (Maybe String), deferredCount :: Number, oldestDeferredDue :: String, policy :: Either String RoutinePolicy }
+  { id :: String, owner :: String, title :: String, objective :: Maybe String, prompt :: String, minutes :: Number, nextDue :: String, runCount :: Number, paused :: Boolean, condition :: Either String RD.RoutineCondition, activeRun :: Either String (Maybe String), deferredCount :: Number, oldestDeferredDue :: String, policy :: Either String RoutinePolicy }
 
 routine :: Json -> Routine
 routine value =
   { id: D.s "id" value
   , owner: D.s "owner" value
   , title: D.s "title" value
+  , objective: toString $ D.get "objective" value
   , prompt: D.s "prompt" value
   , minutes: D.n "minutes" value
   , nextDue: D.s "nextDue" value
   , runCount: D.n "runCount" value
   , paused: D.b "paused" value
+  , condition: case toString $ D.get "activeRunError" value of
+      Just reason -> Left reason
+      Nothing -> RD.decodeCondition $ D.get "condition" value
   , activeRun: case toString $ D.get "activeRunError" value of
       Just reason -> Left reason
       Nothing -> Right $ toString $ D.get "activeRun" value
@@ -335,7 +340,7 @@ type Snapshot =
   { agents :: Array Entity, groups :: Array Entity, turns :: Array Turn, workloads :: Array Workload
   , routines :: Array Routine, events :: O.Object (Array Event), activity :: O.Object Activity
   , run_activity :: O.Object Activity, orchestration :: O.Object Orchestration
-  , main_agent_id :: String, creation_template :: String, corpora :: Corpora, preferences :: Preferences
+  , main_agent_id :: String, creation_template :: String, routine_request_templates :: O.Object String, corpora :: Corpora, preferences :: Preferences
   , attachment_drafts :: O.Object (Array Attachment), computer :: {owner :: String, built :: Boolean, platform :: String} }
 
 snapshot :: Json -> Snapshot
@@ -350,7 +355,7 @@ snapshot value =
   , run_activity: map activity $ object "run_activity" value
   , orchestration: map orchestration $ object "orchestration" value
   , attachment_drafts: map (map attachment <<< D.arr) $ object "attachment_drafts" value
-  , main_agent_id: D.s "main_agent_id" value, creation_template: D.s "creation_template" value
+  , main_agent_id: D.s "main_agent_id" value, creation_template: D.s "creation_template" value, routine_request_templates:D.objectStrings $ D.get "routine_request_templates" value
   , corpora: corpora $ D.get "corpora" value, preferences: preferences (A.any (\g -> D.s "id" g == D.str (D.at ["preferences","selected"] value)) $ D.rows "groups" value) $ D.get "preferences" value
   , computer: {owner:D.str $ D.at ["computer","owner"] value,built:D.flag $ D.at ["computer","built"] value,platform:D.str $ D.at ["computer","platform"] value}
   }
@@ -367,17 +372,21 @@ emptyEntity = entity D.empty
 emptySnapshot :: Snapshot
 emptySnapshot = snapshot D.empty
 
-data Document = TaskDocument (Array Task) | MemoDocument MemoDocument
+data DocumentKind = TasksKind | MemoKind | RoutineHistoryKind N.RoutineRef (Maybe N.RunId) | RoutineRunKind N.RunRef
+
+data Document = TaskDocument (Array Task) | MemoDocument MemoDocument | RoutineHistoryDocument RD.RoutineHistoryPage | RoutineRunDocument RD.RoutineRunDetail
 derive instance eqDocument :: Eq Document
 
-decodeDocument :: Boolean -> Json -> Either String Document
-decodeDocument tasks value
-  | tasks = case toArray $ D.get "tasks" value of
+decodeDocument :: DocumentKind -> Json -> Either String Document
+decodeDocument kind value = case kind of
+  RoutineHistoryKind ref _ -> RoutineHistoryDocument <$> RD.decodeHistory ref value
+  RoutineRunKind ref -> RoutineRunDocument <$> RD.decodeRun ref value
+  TasksKind -> case toArray $ D.get "tasks" value of
       Nothing -> Left "Invalid tasks response"
       Just rows -> TaskDocument <$> traverse decodeTask rows
-  | isJust (toString $ D.get "content" value) && isJust (toString $ D.get "path" value) =
+  MemoKind | isJust (toString $ D.get "content" value) && isJust (toString $ D.get "path" value) ->
       Right $ MemoDocument {content:D.s "content" value,path:D.s "path" value,metadata:noteMetadata $ D.get "metadata" value}
-  | otherwise = Left "Invalid Memo response"
+  MemoKind -> Left "Invalid Memo response"
 
 decodeTask :: Json -> Either String Task
 decodeTask row = if A.all (\key -> isJust $ toString $ D.get key row) ["id","title","body","state","owner","sender"]
@@ -621,11 +630,11 @@ checkOrchestration :: Check
 checkOrchestration = record [optional "manager" stringValue, optional "notes" checkNotes]
 
 checkRoutine :: Check
-checkRoutine = record [checkRoutineRun, optional "id" stringValue, optional "owner" stringValue, optional "title" stringValue, optional "prompt" stringValue, optional "minutes" numberValue, optional "nextDue" stringValue, optional "runCount" numberValue, optional "paused" booleanValue, optional "activeRun" stringValue, optional "deferredCount" numberValue, optional "oldestDeferredDue" stringValue, field "policySelection" (void <<< routinePolicy)]
+checkRoutine = record [checkRoutineRun, optional "objective" stringValue,optional "id" stringValue, optional "owner" stringValue, optional "title" stringValue, optional "prompt" stringValue, optional "minutes" numberValue, optional "nextDue" stringValue, optional "runCount" numberValue, optional "paused" booleanValue, optional "activeRun" stringValue, optional "deferredCount" numberValue, optional "oldestDeferredDue" stringValue, field "policySelection" (void <<< routinePolicy)]
 
 checkRoutineRun :: Check
 checkRoutineRun value = case toObject value >>= O.lookup "activeRunError" of
-  Nothing -> Right unit
+  Nothing -> void $ RD.decodeCondition $ D.get "condition" value
   Just raw -> case toString raw of
     Just reason | reason /= "" -> if D.valid (D.get "activeRun" value) then Left "activeRun and activeRunError are mutually exclusive" else Right unit
     _ -> Left "activeRunError must be a nonempty string"

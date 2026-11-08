@@ -5,9 +5,11 @@ import Prelude (class Eq)
 import Sapiens.Form as F
 import Sapiens.Browser as Browser
 import Data.Argonaut.Core (Json)
+import Data.Maybe (Maybe)
+import Sapiens.RoutineData as RD
 import Sapiens.Domain as X
 import Sapiens.Model (DialogKind)
-import Sapiens.Navigation (Activity, Scope, Pane, Period)
+import Sapiens.Navigation (Activity, Scope, Pane, Period, RoutineRoute, RoutineRef, RoutineFilter, RunRef)
 import Web.Event.Event (Event)
 
 data Action
@@ -20,6 +22,16 @@ data Action
   | Navigate Activity
   | DefaultWork
   | SetPeriod Period
+  | OpenRoutine RoutineRoute
+  | OpenRoutineHistory RoutineRef
+  | RoutineBack
+  | RoutineHistoryPage Boolean
+  | SubmitRoutineRequest
+  | BackFromRoutineChat
+  | ControlRoutine RD.RoutineControl
+  | RefreshRoutine
+  | SelectRoutineResult RunRef (Maybe RD.ExactResultRef)
+  | SetRoutineFilter RoutineFilter
   | Search String
   | ToggleSearch
   | TogglePane Pane
