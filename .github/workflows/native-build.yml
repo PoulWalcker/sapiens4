@@ -65,7 +65,7 @@ jobs:
         shell: bash
         run: |
           git config submodule.blindly4.url https://github.com/aleski-green/blindly4.git
-          git config submodule.libs4.url https://github.com/aleski-green/libs4.git
+          git config submodule.libs4.url https://github.com/PoulWalcker/libs4.git
           git submodule update --init --recursive
           git submodule status --recursive
       - uses: haskell-actions/setup@82e8b5066385702e477d9dc98f287070493e8abd # v2.8.2, peeled commit
