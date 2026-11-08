@@ -185,8 +185,12 @@ def main():
         parser.error('Notarization requires Developer ID signing')
     os.environ['MACOSX_DEPLOYMENT_TARGET'] = '13.0'
     if not args.skip_build:
-        run('runghc', root / 'build/Build.hs')
+        run('runghc', root / 'build/Build.hs', '--no-provider')
         run(root / 'submodules/blindly4/macos/build.sh')
+    if not args.provider and not args.allow_missing_provider:
+        args.provider = root / '.build/codex'
+        run(sys.executable, root / 'build/package/acquire-provider.py', '--platform', 'darwin-arm64',
+            '--destination', args.provider, '--ensure')
     output = Path(args.output_directory or root / '.build/macos').resolve()
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='sapiens-package-', dir=output) as temporary:

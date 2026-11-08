@@ -89,7 +89,7 @@ jobs:
           (root / 'config').write_text('repository hackage.haskell.org\n  url: https://hackage.haskell.org/\n  secure: True\n')
       - name: Compile host, native application, UI and existing fixture helpers once
         shell: bash
-        run: runghc build/Build.hs
+        run: runghc build/Build.hs --no-provider
       - name: Compile Blindly on macOS
         if: runner.os == 'macOS'
         shell: bash
@@ -171,14 +171,14 @@ jobs:
           SAPIENS_MAC_SIGN_IDENTITY: ${{ inputs.release && secrets.MAC_SIGN_IDENTITY || '-' }}
           SAPIENS_MAC_NOTARY_PROFILE: ${{ inputs.release && 'sapiens-release' || '' }}
         run: |
-          ./environments/macos/build.sh --skip-build --version "$PACKAGE_VERSION" --output-directory .build/distribution
+          ./environments/macos/build.sh --skip-build --provider "$PWD/runtime/codex" --version "$PACKAGE_VERSION" --output-directory .build/distribution
           SAPIENS_TEST_PACKAGE_RUNTIME="$PWD/.build/distribution/Sapiens4 Development.app/Contents/Resources/runtime" ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb
       - name: Package and verify Windows without recompiling
         if: github.event_name != 'pull_request' && runner.os == 'Windows'
         shell: pwsh
         run: |
           $thumbprint = if ('${{ inputs.release }}' -eq 'true') { $env:SAPIENS_WINDOWS_CERT_THUMBPRINT } else { [string]::Empty }
-          ./environments/windows/build.ps1 -SkipBuild -Runtime win-x64 -Version $env:PACKAGE_VERSION -OutputDirectory .build/distribution/Sapiens4-Development-win-x64 -CertificateThumbprint $thumbprint
+          ./environments/windows/build.ps1 -SkipBuild -ProviderDirectory (Join-Path $PWD "runtime/codex") -Runtime win-x64 -Version $env:PACKAGE_VERSION -OutputDirectory .build/distribution/Sapiens4-Development-win-x64 -CertificateThumbprint $thumbprint
           if ($LASTEXITCODE -ne 0) { throw 'Package build failed' }
           $env:SAPIENS_TEST_PACKAGE_RUNTIME = (Resolve-Path .build/distribution/Sapiens4-Development-win-x64/runtime).Path
           ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb

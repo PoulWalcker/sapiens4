@@ -23,10 +23,15 @@ try {
     if (-not $SkipBuild) {
         $target = & ghc --print-target-platform
         if ($LASTEXITCODE -ne 0 -or $target -notmatch '^x86_64-.*mingw') { throw "Windows x64 GHC required; got $target" }
-        & runghc build/Build.hs
+        & runghc build/Build.hs --no-provider
         if ($LASTEXITCODE -ne 0) { throw 'Haskell application build failed' }
         & (Join-Path $BlindlySource 'windows/build.ps1') -Runtime $Runtime -Toolchain $BlindlyToolchain
         if ($LASTEXITCODE -ne 0) { throw 'Blindly4 build failed' }
+    }
+    if (-not $ProviderDirectory -and -not $AllowMissingProvider) {
+        $ProviderDirectory = Join-Path $repo '.build/codex'
+        & python build/package/acquire-provider.py --platform windows-x64 --destination $ProviderDirectory --ensure
+        if ($LASTEXITCODE -ne 0) { throw 'Codex provider acquisition failed' }
     }
     $payload = Join-Path $destination 'runtime'
     $manifest = Join-Path $payload 'package-manifest.json'
