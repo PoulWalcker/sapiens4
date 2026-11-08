@@ -44,7 +44,8 @@ main = do
     compiler <- mapM (\key -> maybe (ioError $ userError $ "GHC did not report "<>key) pure (lookup key settings)) ["C compiler command","C compiler flags"]
     setEnv "CC" (map (\c -> if c=='\\' then '/' else c) (unwords compiler))
    callProcess "sh" ["configure","--disable-shared","--enable-static","--disable-dependency-tracking"]
-   callProcess "make" ["-j4"]
+   -- Override generated Git shell paths, including in recursive make recipes.
+   callProcess "make" (["-j4"] ++ ["SHELL=sh" | os=="mingw32"])
  when (os=="mingw32") $ do
   createDirectoryIfMissing True build
   callProcess "windres" ["-I",root</>"environments/windows",root</>"environments/windows/resources.rc","-O","coff","-o",build</>"windows-resources.o"]
