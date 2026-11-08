@@ -20,6 +20,7 @@ import qualified Navigation as Navigation
 import System.Environment
 import System.FilePath
 import System.IO
+import System.Process (createProcess, proc)
 import qualified Data.ByteString.Char8 as B
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -42,6 +43,9 @@ desktopSession memory probe = do
   statusRef <- newIORef nullPtr
   focusRef <- newIORef nullPtr
   closing <- newIORef False
+  retrySetup <- newIORef (pure ())
+  workerRef <- newIORef Nothing
+  starting <- newIORef False
   let resize hwnd = do
         (width, height) <- rectangle hwnd
         offset <- readIORef top
@@ -73,6 +77,11 @@ desktopSession memory probe = do
           resize hwnd
           defaultProc hwnd message wparam lparam
         0x02 -> (stop `finally` quitMessage 0) >> pure 0
+        0x0111 -> case wparam .&. 0xffff of
+          101 -> void (createProcess (proc "rundll32.exe" ["url.dll,FileProtocolHandler", "https://go.microsoft.com/fwlink/p/?LinkId=2124703"])) >> pure 0
+          102 -> readIORef retrySetup >>= id >> pure 0
+          103 -> void (destroyWindow hwnd) >> pure 0
+          _ -> defaultProc hwnd message wparam lparam
         0x802A -> runPending >> pure 0
         _ -> defaultProc hwnd message wparam lparam
   proc <- wrapWindowProc $ \hwnd message wparam lparam -> procedure hwnd message wparam lparam `catch` \(e :: SomeException) -> reportException e >> defaultProc hwnd message wparam lparam
@@ -81,6 +90,9 @@ desktopSession memory probe = do
   hwnd <- createMainWindow instanceHandle proc
   label <- withWide "STATIC" $ \className -> withWide "Starting Sapiens4…" $ \title ->
     createWindow 0 className title 0x50000201 0 0 1440 960 hwnd nullPtr instanceHandle nullPtr
+  setupButtons <- forM [(101,"Install WebView2"),(102,"Retry"),(103,"Cancel")] $ \(ident,title) ->
+    withWide "BUTTON" $ \className -> withWide title $ \caption ->
+      createWindow 0 className caption 0x40010000 (360 + (ident-101)*170) 230 160 38 hwnd (intPtrToPtr (fromIntegral ident)) instanceHandle nullPtr
   writeIORef statusRef label
   resize hwnd
   light <- loadIconFile $ runtimeDirectory host </> "environments/windows/AppIcon.ico"
@@ -143,16 +155,31 @@ desktopSession memory probe = do
             readIORef (origin host) >>= mapM_ (putStrLn . ("Sapiens4: " ++) . show)
             void $ forkIO $ probeInput post hwnd top resize
       launch = do
-        result <- try $ startHost host
-        post $ case result of
-          Left (e :: SomeException) -> failStart (displayException e)
-          Right url -> newView memory hwnd (dataDirectory host </> "WebView2/Shell") (\created -> loaded url created `catch` \(e :: SomeException) -> failStart (displayException e)) `catch` \(e :: SomeException) -> failStart (displayException e)
+        available <- try webViewRuntimeAvailable
+        case available of
+          Left (e :: SomeException) -> post (failStart (displayException e))
+          Right False -> post $ do
+            windowTitle label "Microsoft Edge WebView2 is required.\n\nChoose Install WebView2 to open Microsoft's official installer.\nRun the downloaded installer, then choose Retry.\nCancel closes Sapiens4 without starting its server."
+            mapM_ (\button -> void (showWindow button 5)) setupButtons
+            writeIORef starting False
+          Right True -> do
+            result <- try $ startHost host
+            post $ case result of
+              Left (e :: SomeException) -> failStart (displayException e)
+              Right url -> newView memory hwnd (dataDirectory host </> "WebView2/Shell") (\created -> loaded url created `catch` \(e :: SomeException) -> failStart (displayException e)) `catch` \(e :: SomeException) -> failStart (displayException e)
+      begin = do
+        busy <- atomicModifyIORef' starting (\value -> (True,value))
+        unless busy $ do
+          mapM_ (\button -> void (showWindow button 0)) setupButtons
+          windowTitle label "Starting Sapiens4…"
+          async launch >>= writeIORef workerRef . Just
   hSetBuffering stdout LineBuffering
-  worker <- async launch
+  writeIORef retrySetup begin
+  begin
   void $ showWindow hwnd 5
   void $ updateWindow hwnd
   void $ foregroundWindow hwnd
-  pumpMessages memory `finally` (cancel worker `finally` closeHost host)
+  pumpMessages memory `finally` ((readIORef workerRef >>= mapM_ cancel) `finally` closeHost host)
 
 createMainWindow :: Object -> FunPtr WindowProc -> IO Window
 createMainWindow instanceHandle procedure = do

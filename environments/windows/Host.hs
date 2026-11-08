@@ -39,7 +39,7 @@ data HostPaths = HostPaths { dataPath :: FilePath, runtimePath :: FilePath }
 
 hostPaths :: [String] -> FilePath -> FilePath -> Maybe FilePath -> Maybe FilePath -> HostPaths
 hostPaths args executable local dataEnv runtimeEnv = HostPaths
-  (fromMaybe (local </> "Sapiens4") (option "--data-dir" `mplus` dataEnv))
+  (fromMaybe (local </> "Sapiens4 Development/data") (option "--data-dir" `mplus` dataEnv))
   (fromMaybe (takeDirectory executable </> "runtime") (option "--runtime-dir" `mplus` runtimeEnv))
   where option name = listToMaybe [value | (key,value) <- zip args (drop 1 args), key == name]
 
@@ -61,10 +61,14 @@ startHost host = mask $ \restore -> do
   available <- doesFileExist binary
   unless available $ ioError $ userError $ "Haskell runtime is missing. Extract the complete Sapiens4 package: " ++ binary
   environment <- getEnvironment
+  local <- lookupEnv "LOCALAPPDATA" >>= maybe getHomeDirectory pure
+  configRoot <- lookupEnv "SAPIENS_CONFIG_DIR" >>= maybe (pure (local </> "Sapiens4 Development/config")) makeAbsolute
+  createDirectoryIfMissing True configRoot
   pid <- processId
+  let overrides = [("SAPIENS_DESKTOP_PID", show pid),("SAPIENS_REPOSITORY",runtimeDirectory host),("SAPIENS_CONFIG_DIR",configRoot),("SAPIENS_DATA_DIR",dataDirectory host)]
   (Just input, Just output, Just errors, child) <- createProcess (proc binary ["--port", "0", "--data-dir", dataDirectory host, "--desktop"])
     { cwd = Just (runtimeDirectory host), std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe
-    , env = Just (("SAPIENS_DESKTOP_PID", show pid) : filter ((/= "SAPIENS_DESKTOP_PID") . fst) environment)
+    , env = Just (overrides ++ filter ((`notElem` map fst overrides) . fst) environment)
     , create_group = True, use_process_jobs = True, detach_console = True }
   let cleanup = terminateProcess child `finally` mapM_ closeStream [input, output, errors]
   mapM_ (\stream -> hSetEncoding stream utf8 >> hSetNewlineMode stream universalNewlineMode) [input, output, errors] `onException` cleanup
@@ -113,7 +117,10 @@ stopServer server = stop `finally` (cancel (errorReader server) `finally` mapM_ 
       let input = processInput server
       (hPutStrLn input "stop" >> hFlush input >> hClose input) `catch` \(_ :: IOException) -> pure ()
       result <- timeout 10000000 (waitForProcess (processHandle server))
-      when (isNothing result) $ terminateProcess (processHandle server) `catch` \(_ :: IOException) -> pure ()
+      when (isNothing result) $ do
+        terminateProcess (processHandle server)
+        confirmed <- timeout 5000000 (waitForProcess (processHandle server))
+        when (isNothing confirmed) $ ioError $ userError "The application server could not be stopped"
 
 closeStream :: Handle -> IO ()
 closeStream stream = hClose stream `catch` \(_ :: IOException) -> pure ()
