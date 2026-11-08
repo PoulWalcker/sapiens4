@@ -44,12 +44,15 @@ handle runtime dispatch action = case action of
         M.DecisionPrompts -> receive d.identity (\value -> E.modifyDialog d.identity _ {content=F.Prompts $ map F.prompt $ D.rows "prompts" value,fields=F.decode $ D.first $ D.rows "prompts" value,status=M.Editing}) $ E.api runtime m "/api/decision-prompts" "GET" D.null
         M.RelayList -> receive d.identity (\value -> E.modifyDialog d.identity _ {content=F.relayRegistry value,status=M.Editing}) $ C.json "/api/host/relays" "GET" D.null
         M.HostPairing -> dispatch $ HostPairPoll d.identity
+        M.RoutineRequest -> liftEffect $ B.focus "#modal textarea"
         M.EditCorpora -> liftEffect $ B.focus "#corpora-dialog textarea"
         M.ConnectRemote -> liftEffect $ B.focus "#paste-invitation textarea"
         _ -> pure unit
   CloseDialog -> do
     void $ H.fork $ H.liftAff $ C.cancelPairing runtime
-    H.modify_ Dialog.close
+    H.modify_ \m -> case m.dialog of
+      Just d | A.elem d.kind [M.RoutineControl,M.RoutineRequest] && M.dialogBusy d -> m
+      _ -> Dialog.close m
     E.sync
   Field key value -> do
     H.modify_ \m -> m {dialog=map (Dialog.updateField key value) m.dialog}
@@ -102,6 +105,7 @@ handle runtime dispatch action = case action of
     kind | kind == M.AgentSettings || kind == M.GroupSettings -> case Dialog.saveEntity d of
       Left failure -> E.modifyDialog d.identity $ M.setDialogError failure
       Right request -> runSave m d request
+    M.RoutineRequest -> dispatch SubmitRoutineRequest
     M.GroupTask -> saveTask m d false
     M.Reference kind -> if A.length (M.attachments m) >= 8 then E.modifyDialog d.identity (M.setDialogError $ "Attach up to 8 items per message.") else do
       H.modify_ _ {uploading=m.uploading+1}

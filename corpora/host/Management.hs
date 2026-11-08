@@ -51,7 +51,7 @@ prepare s a = do
  let context= obj [("currentSapi",str a),("chief",get facts "main_agent_id"),("groups",get facts "groups"),("team",get facts "team"),("workspace",obj [("path",str (T.pack (workspaceRoot s a)))])]
  writeText (agentRoot s a </> "manifests/corpora-state.md") (jsonText context)
 data WorkspaceOperation = OpenWorkspace | ZoomWorkspace | CloseWorkspace | FocusWorkspace | ReloadWorkspace | BackWorkspace | ForwardWorkspace | BookmarkWorkspace | UnbookmarkWorkspace deriving (Eq, Show)
-data Operation = ReadCorpora | UpdateCorpora | Batch | ReadStatus | Delegate | ReadRoutines | CreateRoutine | UpdateRoutine | SelectRoutinePolicy | PauseRoutine | ResumeRoutine | RunRoutine | StopRoutine | DeleteRoutine | ReadRoutineRun | RejectRoutineResult | CreateAgent | RetireAgent | RehireAgent | AcquireComputer | ChangeManager | ReadWorkspace | GroupCommand G.GroupOperation | WorkspaceCommand WorkspaceOperation deriving (Eq, Show)
+data Operation = ReadCorpora | UpdateCorpora | Batch | ReadStatus | Delegate | ReadRoutines | CreateRoutine | UpdateRoutine | SelectRoutinePolicy | PauseRoutine | ResumeRoutine | RunRoutine | StopRoutine | DeleteRoutine | ReadRoutineRun | RejectRoutineResult | ConfirmRoutineRepair | CreateAgent | RetireAgent | RehireAgent | AcquireComputer | ChangeManager | ReadWorkspace | GroupCommand G.GroupOperation | WorkspaceCommand WorkspaceOperation deriving (Eq, Show)
 operationSchema :: [(Text,Operation,[Text])]
 operationSchema =
  [ ("corpora_get", ReadCorpora, [])
@@ -70,6 +70,7 @@ operationSchema =
  , ("routine_delete", DeleteRoutine, ["id"])
  , ("routine_result", ReadRoutineRun, ["id","run"])
  , ("routine_reject_result", RejectRoutineResult, ["id","run","result","reason"])
+ , ("routine_repair_confirm", ConfirmRoutineRepair, ["id","problem","key","description"])
  , ("group_create", GroupCommand G.GroupCreate, ["name","description","lead","members"])
  , ("group_get", GroupCommand G.GroupGet, ["group"])
  , ("group_update", GroupCommand G.GroupUpdate, ["group","revision","name","description","lead","members","archived"])
@@ -232,6 +233,9 @@ control s a payload = do
    i <- routineIdentity
    run <- decodeValue 400 (get d "run")
    R.readRunResult s a i run
+  ConfirmRoutineRepair -> do
+   i <- routineIdentity
+   receipt <$> R.confirmRepair s a i (get d "problem") (get d "key") (get d "description")
   RejectRoutineResult -> do
    i <- routineIdentity
    run <- decodeValue 400 (get d "run")

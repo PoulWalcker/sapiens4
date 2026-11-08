@@ -1,14 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Routines
  ( Minutes, Routine, routineSummaries, storeRoutine, initializeRoutines
- , MissedDuePolicy(..), RoutineEdit(..), save, setPolicy, setPaused, command, receipt, acknowledge, dispatch, restoreOccurrences
+ , MissedDuePolicy(..), RoutineEdit(..), save, setPolicy, setPaused, setRoutinePaused, command, receipt, acknowledge, dispatch, restoreOccurrences
  , verifyPolicyPreparationCompletion, ensureRetryAvailable, runNow, stopRun, ensureExecutionAllowed, ensureTaskAvailable
- , runHistory, runDetail, deleteRoutine, ensureOriginAvailable, stopDeletedForwarding, rejectRunResult, readRunResult
+ , runHistory, runDetail, deleteRoutine, ensureOriginAvailable, stopDeletedForwarding, rejectRunResult, readRunResult, confirmRepair
  ) where
 
 import Control.Monad
 import Control.Applicative ((<|>))
-import Control.Exception (SomeException, SomeAsyncException, fromException, throwIO, try, catch, mask_)
+import Control.Exception (SomeException, SomeAsyncException, fromException, throwIO, try, mask_)
 import Control.Concurrent (readMVar)
 import Data.IORef (writeIORef)
 import Control.Concurrent.Async (AsyncCancelled)
@@ -135,20 +135,25 @@ data ScheduledOccurrence = ScheduledOccurrence
  , occurrenceTarget :: ScheduledTarget, occurrenceAdmittedAt :: UTCTime
  , occurrenceTrigger :: RunTrigger
  , occurrenceStoppedAt :: Maybe UTCTime
+ , occurrenceRepairs :: [AppliedRepair]
  } deriving (Eq, Show)
 instance FromJSON ScheduledOccurrence where
  parseJSON = withObject "Scheduled occurrence" $ \o -> do
   created <- o .: "created" >>= maybe (fail "Invalid occurrence creation time") pure . parseTime
   trigger <- if KM.member "trigger" o then o .: "trigger" else pure ScheduledTrigger
   stopped <- if KM.member "stoppedAt" o then Just <$> (o .: "stoppedAt" >>= maybe (fail "Invalid Run stop time") pure . parseTime) else pure Nothing
-  occurrence <- ScheduledOccurrence <$> o .: "id" <*> o .: "routine" <*> o .: "target" <*> pure created <*> pure trigger <*> pure stopped
+  occurrence <- ScheduledOccurrence <$> o .: "id" <*> o .: "routine" <*> o .: "target" <*> pure created <*> pure trigger <*> pure stopped <*> o .:? "repairs" .!= []
   unless (occurrenceId occurrence == triggeredId (occurrenceRoutineSnapshot occurrence) trigger && validTarget occurrence)
    (fail "Invalid scheduled occurrence identity or target")
+  unless (all ((==occurrenceId occurrence) . problemRun . repairProblem) (occurrenceRepairs occurrence)
+    && length (nub (map repairKey (occurrenceRepairs occurrence))) == length (occurrenceRepairs occurrence))
+   (fail "Invalid Routine repair history")
   pure occurrence
 instance ToJSON ScheduledOccurrence where
  toJSON occurrence = obj $
   [("id",toJSON (occurrenceId occurrence)),("routine",toJSON (occurrenceRoutineSnapshot occurrence))
   ,("target",toJSON (occurrenceTarget occurrence)),("created",str (timestamp (occurrenceAdmittedAt occurrence)))]
+  ++ [("repairs",toJSON (occurrenceRepairs occurrence)) | not (null (occurrenceRepairs occurrence))]
   ++ [("stoppedAt",str (timestamp stopped)) | stopped <- maybeToList (occurrenceStoppedAt occurrence)]
   ++ case occurrenceTrigger occurrence of
       ScheduledTrigger -> []
@@ -301,40 +306,32 @@ targetOwner target = case target of
  PersonalTarget agent -> PersonalOwner agent
  GroupTarget group _ -> GroupOwner group
 routineSummaries :: Service -> IO [Value]
-routineSummaries s = do
- routines <- DB.values s DB.ScheduledRoutines
- rows <- DB.queryRows s "SELECT id,value,status FROM routine_occurrences WHERE status='deferred' ORDER BY rowid" ["id","value","status"] []
- dues <- catMaybes <$> traverse readSummaryDue rows
- let deferred=M.fromListWith combine
-      [(routineId (dueRoutineSnapshot (spanFirst range)),(spanCount range,spanFirst range))
-      | Deferred range _ <- dues]
+routineSummaries s = DB.connection s $ \db -> do
+ routineRows <- DB.queryRowsOn db "SELECT value FROM scheduled_routines ORDER BY sequence" ["value"] []
+ routines <- traverse (DB.decodeStored . (`at` "value")) routineRows
+ rows <- DB.queryRowsOn db "SELECT id,value,status FROM routine_occurrences WHERE status<>'closed' ORDER BY rowid" ["id","value","status"] []
+ dues <- traverse readStoredDue rows
+ let visible=filter (isNothing . routineDeletedAt) routines
+     visibleIds=S.fromList (map routineId visible)
+     admitted=[(occurrence,status) | Admitted occurrence status <- dues, routineId (occurrenceRoutineSnapshot occurrence) `S.member` visibleIds]
+     byRoutine=M.fromListWith (++) [(routineId (occurrenceRoutineSnapshot occurrence),[(occurrence,status)]) | (occurrence,status) <- admitted]
+     deferred=M.fromListWith combine
+      [(routineId (dueRoutineSnapshot (spanFirst range)),(spanCount range,spanFirst range)) | Deferred range _ <- dues]
      combine (count,oldest) (otherCount,otherOldest) =
       (count+otherCount,if routineDue (dueRoutineSnapshot oldest) < routineDue (dueRoutineSnapshot otherOldest) then oldest else otherOldest)
-     summarize routine = case parseRoutineId (at routine "id") >>= (`M.lookup` deferred) of
-      Nothing -> routine
-      Just (count,oldest) -> merge routine (obj
-       [("deferredCount",toJSON count)
-       ,("oldestDeferredDue",get (toJSON (dueRoutineSnapshot oldest)) "nextDue")])
- fmap catMaybes $ forM routines $ \value -> (do
-  routine <- decodeValue 500 value
-  if isJust (routineDeletedAt routine) then pure Nothing else do
-   destination <- scheduledTarget s routine
-   active <- DB.connection s $ \db -> do
-    stored <- readDuesOn db routine
-    let recorded=listToMaybe [occurrenceTarget occurrence | Admitted occurrence _ <- stored]
-    forM (destination <|> recorded) $ \target -> activeRun s db routine target stored
-   pure (Just (merge (summarize value) (obj [("activeRun",toJSON identity) | identity <- maybeToList (join active)])))) `catch` invalidActive value
- where
- readSummaryDue row = (Just <$> readStoredDue row) `catch` invalidSummary row
- invalidSummary :: Value -> APIError -> IO (Maybe StoredDue)
- invalidSummary row problem = do
-  hPutStrLn stderr ("Deferred due " <> T.unpack (at row "id")
-   <> " omitted from routine summaries: " <> show problem)
-  pure Nothing
- invalidActive :: Value -> APIError -> IO (Maybe Value)
- invalidActive value problem = do
-  hPutStrLn stderr ("Routine " <> T.unpack (at value "id") <> " active Run unavailable: " <> show problem)
-  pure (Just value)
+ context <- readSummaryContextOn s db admitted
+ forM visible $ \routine -> do
+  summaries <- readRoutineProjection s context (M.findWithDefault [] (routineId routine) byRoutine)
+  condition <- validated (routineCondition summaries)
+  let current=find (not . runFinished) summaries
+      latest=find runFinished summaries
+      dueFields=case M.lookup (routineId routine) deferred of
+       Nothing -> []
+       Just (count,oldest) -> [("deferredCount",toJSON count),("oldestDeferredDue",get (toJSON (dueRoutineSnapshot oldest)) "nextDue")]
+      reference=toJSON . occurrenceId . summaryOccurrence
+  pure (merge (toJSON routine) (obj (dueFields ++ [("condition",toJSON condition),("currentRun",maybe Null reference current),("latestRun",maybe Null reference latest)]
+   ++ [("activeRun",reference active) | active <- maybeToList current])))
+
 storeRoutine :: Service -> Routine -> IO Value
 storeRoutine s = DB.saveRoutine s . toJSON
 
@@ -477,6 +474,11 @@ setPolicy s actor identity expectedPrompt expectedSelection policy = do
    DB.recordOn s db [routineOwnerText (routineOwner updated)] (routineIdText identity) "routine.policy_selected"
     (obj [("policy",toJSON policy)]) actor Nothing
   pure (toJSON updated)
+setRoutinePaused :: Service -> Text -> RoutineId -> Bool -> IO Value
+setRoutinePaused s actor identity paused = do
+ routine <- resultRoutine s actor identity
+ setPaused s (routineOwnerText (routineOwner routine)) identity paused
+
 setPaused :: Service -> Text -> RoutineId -> Bool -> IO Value
 setPaused s rawOwner identity paused = do
  owner <- decodeValue 400 (str rawOwner)
@@ -778,7 +780,7 @@ prepareOccurrence time current target due = do
       Just title -> KM.insert "title" title (routineFields original)
      snapshot=original { routinePrompt=routinePrompt current, routinePolicy=routinePolicy current
                        , routineSpecification=routineSpecification current, routineFields=fields }
-     occurrence=ScheduledOccurrence (occurrenceIdFor snapshot) snapshot target time ScheduledTrigger Nothing
+     occurrence=ScheduledOccurrence (occurrenceIdFor snapshot) snapshot target time ScheduledTrigger Nothing []
  check (dueId due == dueIdFor snapshot && validTarget occurrence) 409 "Due identity or target changed before admission"
  pure occurrence
 
@@ -787,7 +789,7 @@ prepareManualOccurrence time routine target request active = do
  forM_ active $ \run -> check False 409
   ("Another Run of this Routine is active or awaiting publication: " <> runIdText run <> ". Wait for its result to be published, or stop it if it is still running, before running it again.")
  let trigger=ManualTrigger request
-     occurrence=ScheduledOccurrence (triggeredId routine trigger) routine target time trigger Nothing
+     occurrence=ScheduledOccurrence (triggeredId routine trigger) routine target time trigger Nothing []
  check (validTarget occurrence) 409 "Routine target changed before admission"
  pure occurrence
 
@@ -961,7 +963,8 @@ cancelWorkload s work = do
 
 stopOccurrenceOn :: SQL.Connection -> UTCTime -> ScheduledOccurrence -> IO ScheduledOccurrence
 stopOccurrenceOn db time occurrence = do
- let stopped=occurrence { occurrenceStoppedAt=occurrenceStoppedAt occurrence <|> Just time }
+ (latest,_) <- readOccurrenceOn db (occurrenceId occurrence)
+ let stopped=latest { occurrenceStoppedAt=occurrenceStoppedAt latest <|> Just time }
  DB.executeOn db "UPDATE routine_occurrences SET value=?,status='admitted_pending' WHERE id=?"
   [SQL.SQLText (jsonText (toJSON stopped)),SQL.SQLText (runIdText (occurrenceId occurrence))]
  pure stopped
@@ -1133,6 +1136,164 @@ rejectRunResult s actor identity run target reason = do
    pure (toJSON saved)
  pure (obj [("routine",toJSON identity),("run",toJSON run),("result",target),("rejection",rejection)])
 
+data ProblemRef = ProblemRef { problemRun :: RunId, problemVersion :: Text } deriving (Eq, Show)
+instance FromJSON ProblemRef where
+ parseJSON = withObject "Routine problem" $ \o -> do
+  onlyFields ["run","version"] (Object o)
+  ProblemRef <$> o .: "run" <*> textFieldP "version" 128 (Object o)
+instance ToJSON ProblemRef where
+ toJSON problem = obj [("run",toJSON (problemRun problem)),("version",str (problemVersion problem))]
+
+data ProblemReason = PhysicalFailure Text | UnresolvedOutcome Text | RejectedResult Text | StaleResult | MissingOutcome deriving (Eq, Show)
+instance ToJSON ProblemReason where
+ toJSON reason = obj [("kind",str kind),("message",str (T.take 240 message))]
+  where
+  (kind,message)=case reason of
+   PhysicalFailure detail -> ("physical_failure",detail)
+   UnresolvedOutcome detail -> ("unresolved",detail)
+   RejectedResult detail -> ("rejected",detail)
+   StaleResult -> ("stale","This result belongs to an earlier revision. Review the saved run.")
+   MissingOutcome -> ("missing_outcome","No verifiable outcome was recorded. Review the saved run.")
+
+data RoutineCondition = NoIssue | AttentionRequired ProblemRef ProblemReason | RepairPending AppliedRepair deriving (Eq, Show)
+instance ToJSON RoutineCondition where
+ toJSON NoIssue = obj [("kind",str "clear")]
+ toJSON (AttentionRequired problem reason) = obj [("kind",str "attention"),("problem",toJSON problem),("reason",toJSON reason)]
+ toJSON (RepairPending repair) = obj [("kind",str "repairing"),("repair",toJSON repair)]
+
+runProblem :: RunSummary -> Maybe (ProblemRef,ProblemReason)
+runProblem summary
+ | not (runFinished summary) || isJust (occurrenceStoppedAt occurrence) = Nothing
+ | otherwise = fmap (\reason -> (ProblemRef (occurrenceId occurrence) version,reason)) issue
+ where
+ occurrence=summaryOccurrence summary
+ issue
+  | summaryExecutionStatus summary `elem` map Just [Failed,Interrupted,Cancelled]
+      || summaryCallState summary `elem` map Just [D.CallFailed,D.CallInterrupted,D.CallCancelled] || isJust (summaryError summary) =
+     Just (PhysicalFailure (fromMaybe "Execution did not finish successfully. Review the saved run." (summaryError summary)))
+  | Just rejection <- summaryRejection summary = Just (RejectedResult (at (toJSON rejection) "reason"))
+  | summaryStale summary = Just StaleResult
+  | Just outcome <- summaryOutcome summary = case D.outcomeStatus outcome of
+     D.Completed -> Nothing
+     D.Unresolved -> Just (UnresolvedOutcome (fromMaybe "The assignment could not be completed. Review the saved run." (summaryResult summary)))
+  | otherwise = Just MissingOutcome
+ version=runIdText (stableRunId ("routine-problem:" <> jsonText (obj
+  [("run",toJSON (occurrenceId occurrence)),("result",toJSON (summaryResultTarget summary)),("outcome",toJSON (summaryOutcome summary))
+  ,("rejection",toJSON (summaryRejection summary)),("stale",Bool (summaryStale summary)),("error",toJSON (summaryError summary))
+  ,("execution",toJSON (summaryExecutionStatus summary)),("call",toJSON (summaryCallState summary)),("attempt",toJSON (summaryAttempt summary))])))
+
+newtype RepairKey = RepairKey Text deriving (Eq, Show)
+instance FromJSON RepairKey where parseJSON value = RepairKey <$> textFieldP "key" 128 (obj [("key",value)])
+instance ToJSON RepairKey where toJSON (RepairKey value) = str value
+newtype RepairDescription = RepairDescription Text deriving (Eq, Show)
+instance FromJSON RepairDescription where parseJSON value = RepairDescription <$> textFieldP "description" 1000 (obj [("description",value)])
+instance ToJSON RepairDescription where toJSON (RepairDescription value) = str value
+
+data AppliedRepair = AppliedRepair
+ { repairKey :: RepairKey, repairProblem :: ProblemRef, repairDescription :: RepairDescription
+ , repairActor :: AgentId, repairConfirmedAt :: UTCTime, repairAdmissionFence :: RunId
+ } deriving (Eq, Show)
+instance FromJSON AppliedRepair where
+ parseJSON = withObject "Applied Routine repair" $ \o -> do
+  onlyFields ["key","problem","description","actor","confirmedAt","admissionFence"] (Object o)
+  time <- o .: "confirmedAt" >>= maybe (fail "Invalid repair confirmation time") pure . parseTime
+  AppliedRepair <$> o .: "key" <*> o .: "problem" <*> o .: "description" <*> (o .: "actor" >>= personalAgentP . str) <*> pure time <*> o .: "admissionFence"
+instance ToJSON AppliedRepair where
+ toJSON repair = obj [("key",toJSON (repairKey repair)),("problem",toJSON (repairProblem repair)),("description",toJSON (repairDescription repair))
+  ,("actor",toJSON (repairActor repair)),("confirmedAt",str (timestamp (repairConfirmedAt repair))),("admissionFence",toJSON (repairAdmissionFence repair))]
+
+data RepairVerification = AwaitingVerification | VerificationRunning RunId | VerificationPassed RunId | VerificationFailed RunId deriving (Eq, Show)
+instance ToJSON RepairVerification where
+ toJSON verification = case verification of
+  AwaitingVerification -> obj [("kind",str "pending")]
+  VerificationRunning run -> entry "running" run
+  VerificationPassed run -> entry "passed" run
+  VerificationFailed run -> entry "failed" run
+  where entry kind run = obj [("kind",str kind),("run",toJSON run)]
+
+repairVerification :: [RunSummary] -> AppliedRepair -> Validation RepairVerification
+repairVerification summaries repair = do
+ fence <- maybe (Left (APIError 500 "Repair admission fence is missing")) Right
+  (find ((==repairAdmissionFence repair) . occurrenceId . summaryOccurrence) summaries)
+ let following=sortOn (admissionOrder . summaryOccurrence)
+      [summary | summary <- summaries, admissionOrder (summaryOccurrence summary) > admissionOrder (summaryOccurrence fence)
+       , isNothing (occurrenceStoppedAt (summaryOccurrence summary))]
+ pure $ case following of
+  [] -> AwaitingVerification
+  summary:_ -> let run=occurrenceId (summaryOccurrence summary) in
+   if not (runFinished summary) then VerificationRunning run else
+    if isJust (runProblem summary) then VerificationFailed run else VerificationPassed run
+
+latestProblem :: [RunSummary] -> Maybe (ProblemRef,ProblemReason)
+latestProblem summaries = find (\summary -> runFinished summary && isNothing (occurrenceStoppedAt (summaryOccurrence summary)))
+ (sortOn (Down . admissionOrder . summaryOccurrence) summaries) >>= runProblem
+
+routineCondition :: [RunSummary] -> Validation RoutineCondition
+routineCondition summaries = do
+ let repairs=concatMap (occurrenceRepairs . summaryOccurrence) summaries
+     latest=listToMaybe (sortOn (Down . (\repair -> (repairConfirmedAt repair,jsonText (toJSON (repairKey repair))))) repairs)
+     base=maybe NoIssue (uncurry AttentionRequired) (latestProblem summaries)
+ case latest of
+  Nothing -> pure base
+  Just repair -> do
+   verification <- repairVerification summaries repair
+   pure $ case verification of
+    AwaitingVerification -> pendingCondition repair base
+    VerificationRunning _ -> pendingCondition repair base
+    VerificationPassed _ -> base
+    VerificationFailed _ -> base
+ where
+ pendingCondition repair condition = case condition of
+  AttentionRequired problem _ | problem /= repairProblem repair -> condition
+  _ -> RepairPending repair
+
+repairHistory :: [RunSummary] -> ScheduledOccurrence -> Validation [Value]
+repairHistory summaries occurrence = forM (occurrenceRepairs occurrence) $ \repair -> do
+ verification <- repairVerification summaries repair
+ pure (merge (toJSON repair) (obj [("verification",toJSON verification)]))
+
+-- A single grouped read serves list/history projection and the transactional repair guard.
+-- No provider traces or per-run HTTP reads are involved.
+data SummaryContext = SummaryContext
+ { contextWorks :: M.Map RunId D.Workload, contextGroups :: M.Map GroupId Value
+ , contextTurns :: M.Map RunId Value, contextLive :: S.Set RunId }
+
+summaryRowsOn :: SQL.Connection -> Text -> [Text] -> [Text] -> IO [Value]
+summaryRowsOn _ _ _ [] = pure []
+summaryRowsOn db query columns identities = do
+ let (batch,remaining)=splitAt 128 identities
+     placeholders=T.intercalate "," (replicate (length batch) "?")
+ rows <- DB.queryRowsOn db (query <> " WHERE id IN (" <> placeholders <> ")") columns (map SQL.SQLText batch)
+ (rows++) <$> summaryRowsOn db query columns remaining
+
+readSummaryContextOn :: Service -> SQL.Connection -> [(ScheduledOccurrence,MaterializationStatus)] -> IO SummaryContext
+readSummaryContextOn s db admitted = do
+ let personal=nub [occurrenceId occurrence | (occurrence,_) <- admitted, PersonalTarget _ <- [occurrenceTarget occurrence]]
+     groups=nub [group | (occurrence,_) <- admitted, GroupTarget group _ <- [occurrenceTarget occurrence]]
+ workRows <- summaryRowsOn db "SELECT id,value FROM workloads" ["id","value"] (map runIdText personal)
+ works <- forM workRows $ \row -> do
+  work <- DB.decodeStored (at row "value")
+  pure (RunId (at row "id"),work)
+ groupRows <- summaryRowsOn db "SELECT id,value FROM groups" ["id","value"] (map groupIdText groups)
+ savedGroups <- forM groupRows $ \row -> do
+  group <- DB.decodeStored (at row "value") :: IO G.GroupRecord
+  pure (G.groupIdentity group,toJSON group)
+ requests <- concat <$> traverse (G.readRequests . snd) savedGroups
+ let admissions=S.fromList (map (occurrenceId . fst) admitted)
+ related <- filterM (\request -> do
+  lineage <- G.requireRequestLineage request
+  pure (maybe False (`S.member` admissions) (groupAdmission lineage))) requests
+ let calls=nub (personal ++ concatMap (map D.callIdentity . NE.toList . D.workCalls . snd) works ++ map G.requestId related)
+ turns <- summaryRowsOn db "SELECT id,agent,status,output,error FROM turns" ["id","agent","status","output","error"] (map runIdText calls)
+ live <- M.keysSet <$> readMVar (serviceRuns s)
+ pure (SummaryContext (M.fromList works) (M.fromList savedGroups) (M.fromList [(RunId (at row "id"),row) | row <- turns]) live)
+
+summaryTurn :: SummaryContext -> RunId -> IO (Maybe AgentId,Maybe TurnStatus,Maybe Text,Maybe Text)
+summaryTurn context identity = case M.lookup identity (contextTurns context) of
+ Nothing -> pure (Nothing,Nothing,Nothing,Nothing)
+ Just row -> (,,,) <$> (Just <$> parseValue 500 personalAgentP (get row "agent"))
+   <*> (Just <$> field 500 row "status") <*> field 500 row "output" <*> field 500 row "error"
+
 data RunSummary = RunSummary
  { summaryOccurrence :: ScheduledOccurrence, summaryMaterialization :: MaterializationStatus
  , summaryCallState :: Maybe D.CallState, summaryExecutionStatus :: Maybe TurnStatus
@@ -1140,6 +1301,7 @@ data RunSummary = RunSummary
  , summaryError :: Maybe Text, summaryStale :: Bool, summaryAttempt :: Maybe Int
  , summaryTaskRevision :: Maybe Int, summaryGroupSettled :: Maybe Bool
  , summaryOutcome :: Maybe D.Outcome, summaryRejection :: Maybe ResultRejection, summaryResultTarget :: Maybe Value
+ , summaryQuiet :: Bool
  }
 
 runFinished :: RunSummary -> Bool
@@ -1163,7 +1325,8 @@ instance ToJSON RunSummary where
   ,("executor",toJSON (summaryExecutor summary)),("live",Bool (summaryLive summary)),("finished",Bool (runFinished summary))
   ,("result",toJSON (T.take 240 <$> summaryResult summary)),("error",toJSON (T.take 240 <$> summaryError summary))
   ,("stale",Bool (summaryStale summary)),("attempt",toJSON (summaryAttempt summary)),("taskRevision",toJSON (summaryTaskRevision summary)),("groupSettled",toJSON (summaryGroupSettled summary))]
-  `merge` obj [("outcome",toJSON (summaryOutcome summary)),("rejection",toJSON (summaryRejection summary)),("resultTarget",toJSON (summaryResultTarget summary))]
+  `merge` obj [("outcome",toJSON (summaryOutcome summary)),("rejection",toJSON (summaryRejection summary)),("resultTarget",toJSON (summaryResultTarget summary)),("notification",str (if summaryQuiet summary then "quiet" else "notify"))
+  ,("problem",toJSON (fst <$> runProblem summary)),("reason",maybe Null (toJSON . snd) (runProblem summary))]
   where occurrence=summaryOccurrence summary; routine=occurrenceRoutineSnapshot occurrence
 
 historyTurn :: Service -> RunId -> IO (Maybe AgentId,Maybe TurnStatus,Maybe Text,Maybe Text)
@@ -1175,12 +1338,61 @@ historyTurn s identity = do
   row:_ -> (,,,) <$> (Just <$> parseValue 500 personalAgentP (get row "agent"))
    <*> (Just <$> field 500 row "status") <*> field 500 row "output" <*> field 500 row "error"
 
-readRunSummary :: Service -> (ScheduledOccurrence,MaterializationStatus) -> IO RunSummary
-readRunSummary s (occurrence,materialization) = do
+-- Only decode business results needed for the visible condition/current/latest.
+-- Older admissions remain cheap metadata for the stable repair verification fence.
+readRoutineProjection :: Service -> SummaryContext -> [(ScheduledOccurrence,MaterializationStatus)] -> IO [RunSummary]
+readRoutineProjection s context admitted = do
+ let ordered=sortOn (Down . admissionOrder . fst) admitted
+ recent <- recentFinished False ordered
+ active <- filterM possiblyActive admitted
+ let repairs=concatMap (occurrenceRepairs . fst) admitted
+     latestRepair=listToMaybe (sortOn (Down . (\repair -> (repairConfirmedAt repair,jsonText (toJSON (repairKey repair))))) repairs)
+ links <- repairEntries admitted (maybeToList latestRepair)
+ let known=S.fromList (map (occurrenceId . summaryOccurrence) recent)
+     remaining=nub (active ++ links)
+ extra <- traverse (readRunSummaryWith s context) (filter ((`S.notMember` known) . occurrenceId . fst) remaining)
+ pure (sortOn (Down . admissionOrder . summaryOccurrence) (recent ++ extra))
+ where
+ recentFinished _ [] = pure []
+ recentFinished foundTerminal (entry:rest)
+  | foundTerminal && isJust (occurrenceStoppedAt (fst entry)) = recentFinished True rest
+  | otherwise = do
+     summary <- readRunSummaryWith s context entry
+     if runFinished summary && isNothing (occurrenceStoppedAt (fst entry)) then pure [summary]
+      else (summary:) <$> recentFinished (foundTerminal || runFinished summary) rest
+ possiblyActive (occurrence,status) = do
+  let stopped=isJust (occurrenceStoppedAt occurrence)
+  case occurrenceTarget occurrence of
+   PersonalTarget _ -> do
+    let work=M.lookup (occurrenceId occurrence) (contextWorks context)
+        calls=maybe [occurrenceId occurrence] (map D.callIdentity . NE.toList . D.workCalls) work
+        live=any (`S.member` contextLive context) calls
+        frontier=NE.last . D.workCalls <$> work
+        callActive=maybe False ((`elem` [D.CallQueued,D.CallRunning,D.CallDelegated,D.CallWaiting]) . D.callState) frontier
+    statuses <- forM calls $ \call -> case M.lookup call (contextTurns context) of
+     Nothing -> pure Nothing
+     Just turn -> Just <$> field 500 turn "status"
+    pure (live || not stopped && (status == MaterializationPending || callActive || any (maybe False activeStatus) statuses))
+   GroupTarget groupId _ -> do
+    group <- maybe (failure 500 "Routine Group is unavailable") pure (M.lookup groupId (contextGroups context))
+    requests <- occurrenceRequests occurrence group
+    let live=any ((`S.member` contextLive context) . G.requestId) requests
+        active request=not (G.requestSettled request) && G.requestStatus request `elem` [Queued,Running,OutputPending,Done,Warning]
+    pure (live || not stopped && (status == MaterializationPending || any active requests))
+
+repairEntries :: [(ScheduledOccurrence,MaterializationStatus)] -> [AppliedRepair] -> IO [(ScheduledOccurrence,MaterializationStatus)]
+repairEntries admitted repairs = fmap (nub . concat) $ forM repairs $ \repair -> do
+ fence <- maybe (failure 500 "Repair admission fence is missing") pure (find ((==repairAdmissionFence repair) . occurrenceId . fst) admitted)
+ problem <- maybe (failure 500 "Repair problem Run is missing") pure (find ((==problemRun (repairProblem repair)) . occurrenceId . fst) admitted)
+ let following=listToMaybe (sortOn (admissionOrder . fst)
+      [entry | entry <- admitted, admissionOrder (fst entry) > admissionOrder (fst fence), isNothing (occurrenceStoppedAt (fst entry))])
+ pure ([problem,fence] ++ maybeToList following)
+
+readRunSummaryWith :: Service -> SummaryContext -> (ScheduledOccurrence,MaterializationStatus) -> IO RunSummary
+readRunSummaryWith s context (occurrence,materialization) = do
  (call,execution,executor,result,problem,stale,attempt,revision,settled,identities,businessResult) <- case occurrenceTarget occurrence of
   PersonalTarget owner -> do
-   rows <- DB.queryRows s "SELECT value FROM workloads WHERE id=?" ["value"] [SQL.SQLText (runIdText (occurrenceId occurrence))]
-   work <- traverse (DB.decodeStored . (`at` "value")) (listToMaybe rows) :: IO (Maybe D.Workload)
+   let work=M.lookup (occurrenceId occurrence) (contextWorks context)
    forM_ work $ \saved -> do
     origin <- requireExecutionOrigin (D.workOrigin saved)
     require (originRoutine origin == Just (routineId (occurrenceRoutineSnapshot occurrence))) 500 "Routine Run workload has inconsistent provenance"
@@ -1188,7 +1400,7 @@ readRunSummary s (occurrence,materialization) = do
        current=maybe (occurrenceId occurrence) D.callIdentity frontier
        recipient=maybe owner D.callRecipient frontier
        state=D.callState <$> frontier
-   (actual,status,output,err) <- historyTurn s current
+   (actual,status,output,err) <- summaryTurn context current
    require (materialization == MaterializationPending || isJust status || state == Just D.CallQueued || isJust (occurrenceStoppedAt occurrence))
     500 "Materialized Routine Run has no persisted execution"
    callError <- maybe (pure Nothing) (\saved -> field 500 (toJSON saved) "error") frontier
@@ -1198,7 +1410,7 @@ readRunSummary s (occurrence,materialization) = do
    pure (state,status,actual <|> (recipient <$ frontier),(frontier >>= D.callOutput) <|> output,err <|> callError,False,number,Nothing,Nothing
     ,maybe [current] (map D.callIdentity . NE.toList . D.workCalls) work,business)
   GroupTarget groupId _ -> do
-   group <- G.getGroup s (groupIdText groupId) False
+   group <- maybe (failure 500 "Routine Group is unavailable") pure (M.lookup groupId (contextGroups context))
    requests <- occurrenceRequests occurrence group
    ranked <- forM requests $ \request -> do
     lineage <- G.requireRequestLineage request
@@ -1211,7 +1423,7 @@ readRunSummary s (occurrence,materialization) = do
    case current of
     Nothing -> pure (Nothing,Nothing,Nothing,Nothing,Nothing,False,Nothing,Nothing,Nothing,[],Nothing)
     Just (request,link) -> do
-     (actual,status,output,err) <- historyTurn s (G.requestId request)
+     (actual,status,output,err) <- summaryTurn context (G.requestId request)
      task <- GW.readTask group (taskIdText (G.requestTaskId link))
      let results=items (toJSON task) "results"
          matches value=get value "turn" == toJSON (G.requestId request) && get value "revision" == toJSON (G.requestTaskRevision link)
@@ -1228,11 +1440,12 @@ readRunSummary s (occurrence,materialization) = do
      archivedOutput <- field 500 archive "output"
      pure (Nothing,Just execution,actual <|> Just (G.requestTarget request),savedText <|> output <|> archivedOutput,err <|> savedError,earlier,Nothing
       ,Just (G.requestTaskRevision link),Just (G.requestSettled request),map G.requestId requests,business)
- runs <- readMVar (serviceRuns s)
+
  outcome <- maybe (pure Nothing) (\value -> field 500 value "outcome") businessResult
  rejection <- maybe (pure Nothing) (\value -> field 500 value "rejection") businessResult
- let live=any (`M.member` runs) identities
-     initial=RunSummary occurrence materialization call execution executor live Nothing problem stale attempt revision settled outcome rejection (get <$> businessResult <*> pure "result")
+ quiet <- maybe (pure False) (parseValue 500 historyOnlyP) businessResult
+ let live=any (`S.member` contextLive context) identities
+     initial=RunSummary occurrence materialization call execution executor live Nothing problem stale attempt revision settled outcome rejection (get <$> businessResult <*> pure "result") quiet
      successful=execution `elem` map Just [OutputPending,Done,Warning]
       && call `notElem` map Just [D.CallQueued,D.CallRunning,D.CallDelegated,D.CallWaiting,D.CallFailed,D.CallInterrupted,D.CallCancelled]
       && isNothing (occurrenceStoppedAt occurrence) && runFinished initial
@@ -1249,18 +1462,65 @@ historyRoutine s rawOwner identity = do
  require (routineId routine == identity && routineOwner routine == owner) 404 "Unknown Routine in this conversation"
  pure routine
 
-historyAdmission :: Service -> Routine -> RunId -> IO (ScheduledOccurrence,MaterializationStatus)
-historyAdmission s routine run = do
- rows <- DB.queryRows s "SELECT id,value,status FROM routine_occurrences WHERE id=?" ["id","value","status"] [SQL.SQLText (runIdText run)]
+readOccurrenceOn :: SQL.Connection -> RunId -> IO (ScheduledOccurrence,MaterializationStatus)
+readOccurrenceOn db run = do
+ rows <- DB.queryRowsOn db "SELECT id,value,status FROM routine_occurrences WHERE id=?" ["id","value","status"] [SQL.SQLText (runIdText run)]
  row <- maybe (failure 404 "Unknown Run of this Routine") pure (listToMaybe rows)
  stored <- readStoredDue row
  case stored of
-  Admitted occurrence status -> do
-   let snapshot=occurrenceRoutineSnapshot occurrence
-   require (routineId snapshot == routineId routine) 404 "Unknown Run of this Routine"
-   require (routineOwner snapshot == routineOwner routine) 500 "Routine Run owner does not match its Routine"
-   pure (occurrence,status)
-  _ -> failure 404 "Unknown Run of this Routine"
+  Admitted occurrence status -> pure (occurrence,status)
+  _ -> failure 404 "This deadline has no admitted Run"
+
+historyAdmission :: Service -> Routine -> RunId -> IO (ScheduledOccurrence,MaterializationStatus)
+historyAdmission s routine run = DB.connection s $ \db -> do
+ entry@(occurrence,_) <- readOccurrenceOn db run
+ let snapshot=occurrenceRoutineSnapshot occurrence
+ require (routineId snapshot == routineId routine) 404 "Unknown Run of this Routine"
+ require (routineOwner snapshot == routineOwner routine) 500 "Routine Run owner does not match its Routine"
+ pure entry
+
+confirmRepair :: Service -> Text -> RoutineId -> Value -> Value -> Value -> IO Value
+confirmRepair s actor identity rawProblem rawKey rawDescription = do
+ actorId <- parseValue 400 personalAgentP (str actor)
+ requireActive s actor
+ chief <- DB.mainAgent s
+ problem <- decodeValue 400 rawProblem
+ key <- decodeValue 400 rawKey
+ description <- decodeValue 400 rawDescription
+ DB.connection s $ \db -> SQL.withTransaction db $ do
+  routine <- readRoutineOn db identity
+  validated (availableRoutine routine)
+  stored <- readDuesOn db routine
+  let admitted=[(occurrence,status) | Admitted occurrence status <- stored]
+  context <- readSummaryContextOn s db admitted
+  case routineOwner routine of
+   PersonalOwner owner -> require (owner == actorId) 404 "Unknown Scheduled Routine in this conversation"
+   GroupOwner groupId -> do
+    group <- case M.lookup groupId (contextGroups context) of
+     Just value -> pure value
+     Nothing -> do
+      rows <- DB.queryRowsOn db "SELECT value FROM groups WHERE id=?" ["value"] [SQL.SQLText (groupIdText groupId)]
+      maybe (failure 404 "Unknown Group") (DB.decodeStored . (`at` "value")) (listToMaybe rows)
+    validated (G.groupPermission chief group actor Management)
+  let repairs=concatMap (occurrenceRepairs . fst) admitted
+  case find ((==key) . repairKey) repairs of
+   Just repair -> do
+    require (repairProblem repair == problem && repairDescription repair == description) 409 "Repair key already identifies a different confirmation"
+    pure (obj [("routine",toJSON identity),("repair",toJSON repair)])
+   Nothing -> do
+    summaries <- readRoutineProjection s context admitted
+    require ((fst <$> latestProblem summaries) == Just problem) 409 "Routine problem changed; read its current problem before confirming a repair"
+    entry <- maybe (failure 404 "Problem Run does not belong to this Routine") pure
+     (find ((==problemRun problem) . occurrenceId . fst) admitted)
+    fence <- maybe (failure 409 "Routine has no admitted Run") (pure . occurrenceId . fst)
+     (listToMaybe (sortOn (Down . admissionOrder . fst) admitted))
+    time <- getCurrentTime
+    let repair=AppliedRepair key problem description actorId time fence
+        occurrence=(fst entry) { occurrenceRepairs=occurrenceRepairs (fst entry) ++ [repair] }
+    DB.executeOn db "UPDATE routine_occurrences SET value=? WHERE id=?"
+     [SQL.SQLText (jsonText (toJSON occurrence)),SQL.SQLText (runIdText (occurrenceId occurrence))]
+    DB.recordOn s db [routineOwnerText (routineOwner routine)] (routineIdText identity) "routine.repair_confirmed" (toJSON repair) actor Nothing
+    pure (obj [("routine",toJSON identity),("repair",toJSON repair)])
 
 historyAdmissions :: Service -> Text -> RoutineId -> IO (Routine,[(ScheduledOccurrence,MaterializationStatus)])
 historyAdmissions s rawOwner identity = do
@@ -1279,32 +1539,29 @@ runHistory s owner identity before = do
  (routine,admitted) <- historyAdmissions s owner identity
  cutoff <- forM before $ \cursor -> maybe (failure 404 "Unknown history cursor") (pure . admissionOrder . fst)
   (find ((==cursor) . occurrenceId . fst) admitted)
- let eligible=filter (\(occurrence,_) -> maybe True (admissionOrder occurrence <) cutoff) admitted
-     page=take 20 eligible
- rows <- traverse (readRunSummary s) page
- active <- DB.connection s $ \db -> do
-  case admitted of
-   [] -> pure Nothing
-   (occurrence,_):_ -> activeRun s db routine (occurrenceTarget occurrence) [Admitted saved status | (saved,status) <- admitted]
- current <- case active >>= \run -> find ((==run) . occurrenceId . fst) admitted of
-  Nothing -> pure Nothing
-  Just entry -> do
-   summary <- readRunSummary s entry
-   pure (if runFinished summary then Nothing else Just summary)
- latest <- latestRun admitted
- pure (obj [("routine",toJSON routine),("runs",toJSON rows),("current",toJSON current),("latest",toJSON latest)
-  ,("next",if length eligible>20 then maybe Null (toJSON . occurrenceId . fst) (listToMaybe (reverse page)) else Null)])
- where
- latestRun [] = pure Nothing
- latestRun (entry:rest) = do
-  summary <- readRunSummary s entry
-  if runFinished summary then pure (Just summary) else latestRun rest
+ context <- DB.connection s (\db -> readSummaryContextOn s db admitted)
+ projection <- readRoutineProjection s context admitted
+ condition <- validated (routineCondition projection)
+ let eligible=filter (\entry -> maybe True (admissionOrder (fst entry) <) cutoff) admitted
+     current=find (not . runFinished) projection
+     latest=find runFinished projection
+ page <- forM (take 20 eligible) $ \entry -> case find ((==occurrenceId (fst entry)) . occurrenceId . summaryOccurrence) projection of
+  Just summary -> pure summary
+  Nothing -> readRunSummaryWith s context entry
+ pure (obj [("routine",toJSON routine),("runs",toJSON page),("current",toJSON current),("latest",toJSON latest),("condition",toJSON condition)
+  ,("next",if length eligible>20 then maybe Null (toJSON . occurrenceId . summaryOccurrence) (listToMaybe (reverse page)) else Null)])
 
 runDetail :: Service -> Text -> RoutineId -> RunId -> IO Value
 runDetail s owner identity run = do
  routine <- historyRoutine s owner identity
  entry <- historyAdmission s routine run
- summary <- readRunSummary s entry
+ admitted <- if null (occurrenceRepairs (fst entry)) then pure [entry] else snd <$> historyAdmissions s owner identity
+ links <- repairEntries admitted (occurrenceRepairs (fst entry))
+ let selected=nub (entry:links)
+ context <- DB.connection s (\db -> readSummaryContextOn s db selected)
+ summaries <- traverse (readRunSummaryWith s context) selected
+ summary <- maybe (failure 404 "Unknown Run of this Routine") pure (find ((==run) . occurrenceId . summaryOccurrence) summaries)
+ repairs <- validated (repairHistory summaries (summaryOccurrence summary))
  references <- case occurrenceTarget (fst entry) of
   PersonalTarget _ -> do
    work <- D.findWork s run
@@ -1331,7 +1588,7 @@ runDetail s owner identity run = do
    rows <- maybe (pure []) (validated . GW.resultHistory) task
    pure (filter (\value -> get (get value "result") "request" `elem` map (toJSON . G.requestId) requests) rows)
  pure (merge (toJSON summary) (obj [("snapshot",toJSON (occurrenceRoutineSnapshot (fst entry)))
-  ,("result",toJSON (summaryResult summary)),("error",toJSON (summaryError summary)),("results",arr results),("providerTraces",arr traces)]))
+  ,("result",toJSON (summaryResult summary)),("error",toJSON (summaryError summary)),("results",arr results),("providerTraces",arr traces),("repairs",arr repairs)]))
 
 readRoutineOn :: SQL.Connection -> RoutineId -> IO Routine
 readRoutineOn db identity = do
@@ -1536,7 +1793,8 @@ ensurePolicyPreparation s routine = unless (isJust (routineDeletedAt routine)) $
          ,("revision",num (int (get value "revision")+1)),("updated",str time)]))
 
 materializeOccurrence :: Service -> ScheduledOccurrence -> IO ()
-materializeOccurrence s original = do
+materializeOccurrence s saved = do
+ (original,_) <- DB.connection s (\db -> readOccurrenceOn db (occurrenceId saved))
  routine <- DB.connection s (\db -> readRoutineOn db (routineId (occurrenceRoutineSnapshot original)))
  occurrence <- case (routineDeletedAt routine,occurrenceStoppedAt original) of
   (Just time,Nothing) -> DB.connection s $ \db -> SQL.withTransaction db (stopOccurrenceOn db time original)
@@ -1549,7 +1807,7 @@ materializeOccurrence s original = do
  when (materialization == Materialized) $
   DB.executeSQL s "UPDATE routine_occurrences SET status='admitted_ready' WHERE id=? AND status='admitted_pending'"
    [SQL.SQLText (runIdText (occurrenceId occurrence))]
- where specification=routineSpecification (occurrenceRoutineSnapshot original)
+ where specification=routineSpecification (occurrenceRoutineSnapshot saved)
 
 data PersonalMaterializationPlan = CreateTurn | KeepActiveTurn | KeepTerminalTurn | KeepRetainedHistory deriving (Eq)
 data PersonalRecoveryError = MissingLiveActiveTurn

@@ -1,8 +1,10 @@
 module Sapiens.Update where
 
 import Prelude
+import Libs4.Browser as B
 import Data.Either (Either(..), either)
 import Data.Array as A
+import Data.Foldable (foldl)
 import Data.Argonaut.Core (Json)
 import Data.Set as Set
 import Data.String as S
@@ -16,6 +18,8 @@ import Sapiens.Data as D
 import Sapiens.Domain as X
 import Sapiens.Model as M
 import Sapiens.Navigation as N
+import Sapiens.RoutineData as RD
+import Sapiens.RoutineRequest as RR
 
 -- Pure application decisions. Commands are interpreted by Sapiens.Effects.
 data Action
@@ -28,7 +32,7 @@ data Action
   | DrainNative
   | NativeCompleted Int Browser.NativeReport (Either String Json)
   | Poll
-  | SnapshotReceived Int String (Either String {snapshot :: X.Snapshot, now :: Number})
+  | SnapshotReceived Int String Int (Either String {snapshot :: X.Snapshot, now :: Number})
   | Persist
   | Persisted Int String (Either String Json)
   | MentionAt Int Int
@@ -48,13 +52,24 @@ data Action
   | RetryDocument String
   | Draft String
   | Send
-  | MessageReceived Submission (Either String Unit)
+  | MessageReceived Submission (Either String RR.SendReceipt)
   | RemoveAttachment String
   | ToggleExpanded String
   | Select String
   | SetScope N.Scope
   | Navigate N.Activity
   | SetPeriod N.Period
+  | OpenRoutine N.RoutineRoute
+  | OpenRoutineHistory N.RoutineRef
+  | RoutineBack
+  | RoutineHistoryPage Boolean
+  | SubmitRoutineRequest
+  | BackFromRoutineChat
+  | ControlRoutine RD.RoutineControl
+  | RoutineControlReceived M.Request RD.RoutineControl (Either String RD.ControlReceipt)
+  | RefreshRoutine
+  | SelectRoutineResult N.RunRef (Maybe RD.ExactResultRef)
+  | SetRoutineFilter N.RoutineFilter
   | Search String
   | ToggleSearch
   | TogglePane N.Pane
@@ -82,7 +97,10 @@ data Command
   | SelectRange String Int Int
   | Sync
   | PersistTheme String
-  | FetchDocument M.Request
+  | SubmitRoutineControl M.Request RD.RoutineControl
+  | FetchDocument M.DocumentRequest
+  | RestoreRoutineScroll
+  | FocusRoutine
   | LoadMemoImages M.Request X.MemoDocument
   | SendMessage Submission
   | Notify String
@@ -101,7 +119,8 @@ data Command
 
 type Submission =
   { epoch :: Int, owner :: String, text :: String, attachments :: Array String
-  , workload :: Maybe String, path :: String }
+  , workload :: Maybe String, path :: String, destination :: N.OwnerRef
+  , routine :: Maybe {identity :: Int, origin :: N.Activity, intent :: RR.Intent} }
 
 submission :: M.Model -> Maybe Submission
 submission m =
@@ -109,7 +128,7 @@ submission m =
       items = M.attachments m
       owner = M.selected m
   in if (text == "" && A.null items) || Set.member m.selected m.sending || m.uploading > 0 || not (M.online m) || (M.busy m) || owner.retired || owner.archived || A.elem (m.snapshot.corpora.status) [X.Paused,X.Archived] then Nothing
-     else Just {epoch:m.epoch,owner:m.selected,text,attachments:map (_.id) items,path:M.ownerPath m <> "/messages",workload:case m.clarification of
+     else Just {epoch:m.epoch,owner:m.selected,text,attachments:map (_.id) items,destination:M.selectedOwner m,routine:Nothing,path:M.ownerPath m <> "/messages",workload:case m.clarification of
        Just work | work.owner == m.selected -> Just $ work.id
        _ -> Nothing}
 
@@ -141,7 +160,8 @@ update action m = case action of
             Just record -> [Dispatch $ Shell.OpenDialog M.HostPairing $ F.CorporaRecord record false]) else []
       in Changed (if localPair then next {env=m.env {search=""}} else next) ([SaveRegistry registry.records] <> connect <> pairing <> [Sync])
   Entered record cached ->
-    let current = m {active=record.key,connection=M.Offline,polling=true,saving=false,nativeReporting=false,nativeReports=[],epoch=m.epoch+1,dialog=Nothing,scrollPosition=Nothing}
+    let current = m {active=record.key,connection=M.Offline,polling=true,saving=false,nativeReporting=false,nativeReports=[],epoch=m.epoch+1,dialog=Nothing,scrollPosition=Nothing
+          ,routineRequestDrafts=O.empty,routineChatReturn=O.empty,routineReceipts=O.empty,routineControls=O.empty,routineFilters=O.empty,routineHistories=O.empty,routineResultSelections=O.empty,routineScroll=O.empty,restoringRoutine=Nothing,documentFetched=O.empty}
         updated = case cached of
           Just snapshot -> M.resetSnapshot snapshot current
           Nothing -> current {snapshot=X.emptySnapshot,agents=[],documents=O.empty}
@@ -191,8 +211,8 @@ update action m = case action of
   Poll
     | m.polling || (M.busy m) || m.active == "" || m.installRequired || m.env.hidden -> Unchanged
     | otherwise -> Changed (m {polling=true,pollGeneration=m.pollGeneration+1}) [FetchSnapshot $ m.pollGeneration+1]
-  SnapshotReceived epoch active result
-    | epoch /= m.epoch || active /= m.active -> Unchanged
+  SnapshotReceived epoch active generation result
+    | epoch /= m.epoch || active /= m.active || generation /= m.pollGeneration -> Unchanged
     | otherwise -> case result of
         Left failure ->
           let updated = m {polling=false,connection=M.connectionResult false m.connection,feedback=if D.matches "revoked|another window|^Invalid snapshot response:" failure then failure else m.feedback}
@@ -270,23 +290,44 @@ update action m = case action of
                 ,panes=if op == "close" && not (tab.id /= "") then A.filter (_ /= N.Workspace) current.panes else if navigated then N.togglePane false (N.limit current.env) (tab.id /= "") N.Workspace current.panes else current.panes
                 ,preview=if opened || op == "focus" then M.NotAsked else current.preview}
           in Changed updated ((if owner == m.selected && opened && tab.url == "about:blank" then [Focus "#browser-address"] else []) <> [Sync,LoadPreview,SavePreferences])
-  RequestDocument -> case M.currentDocument m of
-    Nothing -> Unchanged
-    Just request ->
-      let old = fromMaybe M.NotAsked $ O.lookup request.key m.documents
-      in if (_.revision <$> M.requestOf old) == Just request.revision then Unchanged
-         else Changed (m {sequence=request.sequence,documents=O.insert request.key (M.Loading request $ M.valueOf old) m.documents}) [FetchDocument request]
+  RequestDocument ->
+    let plan = foldl requestDocument {model:m,commands:[]} (M.currentDocuments m)
+    in if A.null plan.commands then Unchanged else Changed plan.model plan.commands
   ReceiveDocument request result
     | request.epoch /= m.epoch -> Unchanged
     | otherwise -> case O.lookup request.key m.documents >>= M.requestOf of
         Just pending | pending == request -> Changed
-          (m {documents=O.insert request.key (either (M.Failed request) (M.Ready request) result) m.documents})
+          (m {documents=O.insert request.key (either (M.Failed request) (M.Ready request) result) m.documents
+             ,documentFetched=O.insert request.key m.now m.documentFetched})
           (case result of
             Right (X.MemoDocument document) -> [LoadMemoImages request document]
-            _ -> [])
+            Right (X.RoutineHistoryDocument _) -> [LoadDocument,RestoreRoutineScroll]
+            Right (X.RoutineRunDocument _) -> [LoadDocument,RestoreRoutineScroll]
+            _ -> [RestoreRoutineScroll])
         _ -> Unchanged
-  RetryDocument key -> Changed (m {documents=O.delete key m.documents}) [LoadDocument]
+  RetryDocument key -> Changed (m {documents=O.delete key m.documents,restoringRoutine=M.routineViewKey m}) [LoadDocument]
   Draft value -> Changed (m {drafts=O.insert m.selected value m.drafts}) [ResizeComposer,UpdateMention,SavePreferences]
+  BackFromRoutineChat -> case O.lookup m.selected m.routineChatReturn of
+    Nothing -> Unchanged
+    Just activity ->
+      let updated = m {activity=activity}
+      in Changed (updated {restoringRoutine=M.routineViewKey updated}) [LoadDocument,SaveView,RestoreRoutineScroll]
+  SubmitRoutineRequest -> case m.dialog of
+    Just d | not (M.dialogBusy d) && M.online m && not (M.busy m) -> case d.record of
+      F.RoutineRequestRecord target
+        | not (Set.member (N.ownerId $ RR.owner target.intent) m.sending) ->
+          case RR.message m.snapshot.routine_request_templates target.intent d.fields.message (d.fields.accepted == "true") of
+            Left failure -> Changed (m {dialog=Just $ d {status=M.Rejected failure}}) []
+            Right text ->
+              let destination = RR.owner target.intent
+                  owner = N.ownerId destination
+                  path = "/api/" <> (case destination of
+                    N.PersonalOwner _ -> "agents/"
+                    N.GroupOwner _ -> "groups/") <> B.encodeURI owner <> "/messages"
+                  request = {epoch:m.epoch,owner,text,attachments:[],workload:Nothing,path,destination,routine:Just {identity:d.identity,origin:target.origin,intent:target.intent}}
+              in Changed (m {sending=Set.insert owner m.sending,routineRequestDrafts=O.insert owner d m.routineRequestDrafts,dialog=Just $ d {status=M.Submitting "Sending request…"}}) [SendMessage request]
+      _ -> Unchanged
+    _ -> Unchanged
   Send -> case submission m of
     Nothing -> Unchanged
     Just request -> Changed (m {sending=Set.insert m.selected m.sending,mention=Nothing}) [SendMessage request]
@@ -294,20 +335,75 @@ update action m = case action of
     | request.epoch /= m.epoch -> Unchanged
     | otherwise ->
         let current = m {sending=Set.delete request.owner m.sending}
-        in case result of
-          Left failure -> Changed current [Notify failure]
-          Right _ -> Changed
-            (current {drafts=if S.trim (fromMaybe "" $ O.lookup request.owner m.drafts) == request.text then O.insert request.owner "" m.drafts else m.drafts
-              , attachments=O.insert request.owner (A.filter (\item -> not $ A.elem (item.id) request.attachments) $ fromMaybe [] $ O.lookup request.owner m.attachments) m.attachments
-              , clarification=Nothing})
-            [SavePreferences,ScrollToBottom,PollNow]
+        in case request.routine of
+          Just target -> finishRoutineRequest request target result current
+          Nothing -> case result of
+           Left failure -> Changed current [Notify failure]
+           Right _ -> Changed
+             (current {drafts=if S.trim (fromMaybe "" $ O.lookup request.owner m.drafts) == request.text then O.insert request.owner "" m.drafts else m.drafts
+               , attachments=O.insert request.owner (A.filter (\item -> not $ A.elem (item.id) request.attachments) $ fromMaybe [] $ O.lookup request.owner m.attachments) m.attachments
+               , clarification=Nothing})
+             [SavePreferences,ScrollToBottom,PollNow]
   RemoveAttachment id -> Changed (m {attachments=O.alter (Just <<< A.filter ((_ /= id) <<< _.id) <<< fromMaybe []) m.selected m.attachments}) [SavePreferences]
   ToggleExpanded key -> Changed (m {expanded=(if Set.member key m.expanded then Set.delete else Set.insert) key m.expanded}) []
-  Select id -> Changed (M.select id m) [ScrollToBottom,LoadPreview,SaveView]
+  Select id ->
+    let kept = case m.dialog of
+          Just d | d.kind == M.RoutineRequest -> m {routineRequestDrafts=O.insert m.selected d m.routineRequestDrafts}
+          _ -> m
+    in Changed (M.select id kept) [ScrollToBottom,LoadPreview,SaveView]
   SetScope scope -> Changed
     (m {scope=scope,groupView=Nothing,panes=if N.limit m.env < 3 then N.togglePane false (N.limit m.env) (M.hasTab m) N.Sidebar m.panes else m.panes})
     [SaveView]
-  Navigate activity -> Changed (m {activity=activity,menu=Nothing}) [ScrollToStart,LoadDocument,SaveView]
+  Navigate activity -> Changed (m {activity=activity,menu=Nothing,restoringRoutine=Nothing}) [ScrollToStart,LoadDocument,SaveView]
+  OpenRoutine route
+    | (N.routeRoutine route).owner /= M.selectedOwner m -> Unchanged
+    | otherwise ->
+        let documents = case route of
+              N.RunDetails ref _ -> O.delete (M.runKey ref) m.documents
+              _ -> m.documents
+            updated = m {activity=N.Work (N.RoutineView route) N.Planned,menu=Nothing,restoringRoutine=Nothing,documents=documents
+              ,routineFilters=O.insert m.selected (M.routineFilter m) m.routineFilters}
+        in Changed updated [ScrollToStart,LoadDocument,SaveView,FocusRoutine]
+  OpenRoutineHistory ref
+    | ref.owner /= M.selectedOwner m -> Unchanged
+    | otherwise -> update (OpenRoutine $ N.History ref N.firstHistoryPosition) m
+  RoutineBack -> case m.activity of
+    N.Work (N.RoutineView route) _ ->
+      let target = case route of
+            N.Overview _ -> N.Work N.Scheduled N.Planned
+            N.History ref _ -> N.Work (N.RoutineView $ N.Overview ref) N.Planned
+            N.RunDetails ref N.BackToOverview -> N.Work (N.RoutineView $ N.Overview ref.routine) N.Planned
+            N.RunDetails ref (N.BackToHistory position) -> N.Work (N.RoutineView $ N.History ref.routine position) N.Planned
+          updated = m {activity=target,menu=Nothing}
+      in Changed (updated {restoringRoutine=M.routineViewKey updated}) [LoadDocument,SaveView,RestoreRoutineScroll]
+    _ -> Unchanged
+  RoutineHistoryPage older -> historyPageTransition older m
+  ControlRoutine control
+    | M.routineControlBusy m (RD.controlRoutine control) || not (M.online m) -> Unchanged
+    | otherwise ->
+      let ref = RD.controlRoutine control
+          path = "/api/routines/" <> N.routineId ref.id <> (case control of
+            RD.StopRun run -> "/runs/" <> N.runId run.id <> "/stop"
+            _ -> "/" <> RD.controlAction control)
+          request = {epoch:m.epoch,sequence:m.sequence+1,key:M.routineKey ref,revision:RD.controlAction control,path}
+          submitting d = case d.record of
+            F.RoutineControlRecord target | target.control == control -> d {status=M.Submitting ""}
+            _ -> d
+      in Changed (m {sequence=request.sequence,menu=Nothing,routineControls=O.insert request.key (M.Loading request Nothing) m.routineControls,dialog=map submitting m.dialog}) [SubmitRoutineControl request control]
+  RoutineControlReceived request control result
+    | request.epoch /= m.epoch -> Unchanged
+    | otherwise -> case O.lookup request.key m.routineControls of
+        Just (M.Loading pending _) | pending == request -> finishRoutineControl request control result m
+        _ -> Unchanged
+  RefreshRoutine -> refreshRoutine m
+  SelectRoutineResult ref selected -> case m.activity of
+    N.Work (N.RoutineView (N.RunDetails current _)) _ | current == ref ->
+      Changed (m {routineResultSelections=case selected of
+        Nothing -> O.delete (M.runKey ref) m.routineResultSelections
+        Just result -> O.insert (M.runKey ref) result m.routineResultSelections}) []
+    _ -> Unchanged
+  SetRoutineFilter filter -> Changed
+    (m {routineFilters=O.insert m.selected filter m.routineFilters,restoringRoutine=Nothing,menu=Nothing}) [ScrollToStart,SaveView]
   SetPeriod period -> Changed
     (m {menu=Nothing,activity=case m.activity of
       N.Work view _ -> N.Work view period
@@ -333,6 +429,76 @@ update action m = case action of
           Changed (m {preview=either (M.Failed requested) (M.Ready requested) result}) []
     _ -> Unchanged
 
+-- Routine history has a fixed membership until explicit refresh. Live documents
+-- use the existing poll, with one request in flight and no automatic failure retry.
+requestDocument :: {model :: M.Model, commands :: Array Command} -> M.DocumentRequest -> {model :: M.Model, commands :: Array Command}
+requestDocument plan document =
+  let m = plan.model
+      expected = document.request
+      old = fromMaybe M.NotAsked $ O.lookup expected.key m.documents
+      routine = case document.kind of
+        X.RoutineHistoryKind _ _ -> true
+        X.RoutineRunKind _ -> true
+        _ -> false
+      changed = (_.revision <$> M.requestOf old) /= Just expected.revision
+      due = document.refresh && not m.env.hidden && m.now - fromMaybe 0.0 (O.lookup expected.key m.documentFetched) >= 5000.0
+      fetch = case old of
+        M.NotAsked -> true
+        M.Loading _ _ -> not routine && changed
+        M.Failed _ _ -> not routine && changed
+        M.Ready _ _ -> changed || due
+      request = expected {sequence=m.sequence+1}
+  in if not fetch then plan else
+    {model:m {sequence=request.sequence,documents=O.insert request.key (M.Loading request $ M.valueOf old) m.documents}
+    ,commands:A.snoc plan.commands $ FetchDocument $ document {request=request}}
+
+historyPageTransition :: Boolean -> M.Model -> Transition
+historyPageTransition older m = case m.activity of
+  N.Work (N.RoutineView (N.History ref position)) _ ->
+    let positions = M.historyPositions m ref
+        index = fromMaybe 0 $ A.elemIndex position positions
+        next = if not older then A.index positions (index-1) else do
+          page <- M.historyPage m ref position.before
+          if position.half == N.FirstTen && A.length page.runs > 10
+            then Just $ position {half=N.SecondTen}
+            else (\before -> {before:Just before,half:N.FirstTen}) <$> page.next
+    in case next of
+      Nothing -> Unchanged
+      Just target ->
+        let saved = if A.elem target positions then positions else A.snoc positions target
+            updated = m {routineHistories=O.insert (M.routineKey ref) saved m.routineHistories}
+        in update (OpenRoutine $ N.History ref target) updated
+  _ -> Unchanged
+
+refreshRoutine :: M.Model -> Transition
+refreshRoutine m = case m.activity of
+  N.Work (N.RoutineView route) _ ->
+    let ref = N.routeRoutine route
+        prefix = M.routineKey ref <> ":history:"
+        historyKeys = A.filter (S.contains (S.Pattern prefix)) $ O.keys m.documents
+        keys = case route of
+          N.History _ _ -> historyKeys
+          N.Overview _ -> [M.overviewKey ref] <> (case M.historyDocument m (M.overviewKey ref) >>= _.latest of
+            Just latest -> [M.runKey {routine:ref,id:latest.id}]
+            Nothing -> [])
+          N.RunDetails run _ -> [M.runKey run]
+        fresh = case route of
+          N.History _ _ -> N.History ref N.firstHistoryPosition
+          _ -> route
+        updated = m {documents=foldl (flip O.delete) m.documents keys
+          ,documentFetched=foldl (flip O.delete) m.documentFetched keys
+          ,routineHistories=case route of
+            N.History _ _ -> O.delete (M.routineKey ref) m.routineHistories
+            _ -> m.routineHistories
+          ,routineScroll=case route of
+            N.History _ _ -> foldl (flip O.delete) m.routineScroll $ A.filter (S.contains (S.Pattern prefix)) $ O.keys m.routineScroll
+            _ -> m.routineScroll
+          ,activity=N.Work (N.RoutineView fresh) N.Planned,restoringRoutine=Nothing}
+    in Changed updated ([LoadDocument] <> case route of
+      N.History _ _ -> [ScrollToStart,FocusRoutine]
+      _ -> [])
+  _ -> Commands [PollNow]
+
 type KeyPlan = {prevent :: Boolean, stop :: Boolean, actions :: Array Action}
 
 messageKey :: Browser.Key -> M.Model -> KeyPlan
@@ -355,3 +521,53 @@ finishNative base = case _ of
 
 shortcut :: Browser.Key -> M.Model -> Boolean
 shortcut key m = m.dialog == Nothing && (key.key == "/" && not (Browser.editing key) || S.toLower key.key == "l" && (key.ctrl || key.meta) && A.elem N.Workspace m.panes)
+
+finishRoutineControl :: M.Request -> RD.RoutineControl -> Either String RD.ControlReceipt -> M.Model -> Transition
+finishRoutineControl request control result m = case result of
+  Left failure ->
+    let message = "The change was not confirmed. " <> failure <> " Refresh to check its current state before trying again."
+        rejected d = case d.record of
+          F.RoutineControlRecord target | target.control == control -> d {status=M.Rejected message}
+          _ -> d
+    in Changed (m {routineControls=O.insert request.key (M.Failed request message) m.routineControls,dialog=map rejected m.dialog}) []
+  Right receipt ->
+    let ref = RD.controlRoutine control
+        belongs r = r.owner == N.ownerId ref.owner && r.id == N.routineId ref.id
+        routines = case receipt of
+          RD.RoutineDeleted -> A.filter (not <<< belongs) m.snapshot.routines
+          RD.ScheduleChanged saved -> map (\r -> if belongs r then r {paused=saved.paused,nextDue=saved.nextDue} else r) m.snapshot.routines
+          _ -> m.snapshot.routines
+        dialog = m.dialog >>= \d -> case d.record of
+          F.RoutineControlRecord target | target.control == control -> Nothing
+          _ -> Just d
+        activity = case receipt, m.activity of
+          RD.RoutineDeleted, N.Work (N.RoutineView route) _ | N.routeRoutine route == ref -> N.Work N.Scheduled N.Planned
+          _, current -> current
+        keep key = not $ S.startsWith (S.Pattern $ M.routineKey ref <> ":") key
+        caption = case receipt of
+          RD.ScheduleChanged saved -> if saved.paused then "Schedule paused. Current work continues." else "Schedule resumed. Next run rescheduled."
+          RD.RunStopReceived RD.AlreadyFinished -> "This run has already finished. Its saved result is unchanged."
+          RD.RunStopReceived RD.Stopping -> "Stopping this run…"
+          RD.RunStopReceived RD.Stopped -> "This run was stopped."
+          RD.RoutineDeleted -> "Routine deleted. Saved history is retained."
+        updated = m {snapshot=m.snapshot {routines=routines},dialog=dialog,activity=activity
+          ,documents=O.filterWithKey (\key _ -> keep key) m.documents,documentFetched=O.filterWithKey (\key _ -> keep key) m.documentFetched
+          ,routineControls=O.insert request.key (M.Ready request receipt) m.routineControls
+          ,polling=false,pollGeneration=m.pollGeneration+1}
+    in Changed updated [Notify caption,Sync,PollNow,LoadDocument,SaveView]
+
+finishRoutineRequest :: Submission -> {identity :: Int, origin :: N.Activity, intent :: RR.Intent} -> Either String RR.SendReceipt -> M.Model -> Transition
+finishRoutineRequest request target result m = case result of
+  Left failure ->
+    let message = "Delivery was not confirmed. Your request is kept here. Check the chat before sending again; it may already have been accepted. " <> failure
+        rejected d = if d.identity == target.identity then d {status=M.Rejected message} else d
+    in Changed (m {dialog=map rejected m.dialog,routineRequestDrafts=O.alter (map rejected) request.owner m.routineRequestDrafts}) [Notify message]
+  Right receipt ->
+    let matching = (_.identity <$> m.dialog) == Just target.identity
+        follow = matching && m.selected == request.owner && m.activity == target.origin
+        updated = m {dialog=if matching then Nothing else m.dialog
+          ,routineRequestDrafts=O.delete request.owner m.routineRequestDrafts
+          ,routineReceipts=O.insert request.owner receipt m.routineReceipts
+          ,routineChatReturn=O.insert request.owner target.origin m.routineChatReturn
+          ,activity=if follow then N.Chat N.Conversation else m.activity}
+    in Changed updated ([PollNow] <> if follow then [SaveView,ScrollToBottom,Focus "#message-input"] else [])

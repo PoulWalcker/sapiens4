@@ -18,6 +18,8 @@ import Sapiens.Html as V
 import Sapiens.Model as M
 import Sapiens.Navigation as N
 import Sapiens.Remote as Remote
+import Sapiens.RoutineData as RD
+import Sapiens.RoutineRequest as RR
 import Sapiens.Text as T
 import Sapiens.Work as W
 
@@ -49,7 +51,18 @@ make kind record m = {kind,title,record,fields,content:F.NoContent,status:M.Edit
     M.RelayTerms -> "Use beta relay?"
     M.Installation -> "Add to Home Screen"
     M.Notice -> "Connection notice"
+    M.RoutineRequest -> case record of
+      F.RoutineRequestRecord target -> RR.label target.intent
+      _ -> "Request to Sapi"
+    M.RoutineControl -> case record of
+      F.RoutineControlRecord target -> RD.controlLabel target.control <> "?"
+      _ -> "Routine control"
   fields = case kind of
+    M.RoutineRequest -> case record of
+      F.RoutineRequestRecord target -> case O.lookup (N.ownerId $ RR.owner target.intent) m.routineRequestDrafts of
+        Just saved | saved.record == record -> saved.fields
+        _ -> base
+      _ -> base
     M.AgentSettings -> base {mode=(orchestration m $ F.contextId record).mode,manager=(orchestration m $ F.contextId record).manager}
     M.GroupTask -> case record of
       F.TaskRecord _ -> base
@@ -111,6 +124,31 @@ body m d = case d.kind of
   M.RelaySwitch -> V.div "" [V.node "dl" [V.cls "pairing-details"] [V.textNode "dt" [] "From",V.textNode "dd" [] ((F.contextChange d.record).from),V.textNode "dt" [] "To",V.textNode "dd" [] ((F.contextChange d.record).to)],V.p "" "Switching revokes all paired devices and remote corpora connections for this local app.",V.p "" "Pair all devices and reconnect all remote corpora again.",V.div "pairing-actions" [V.button "" "Cancel" $ DialogCommand Intent.BackRelay,V.control [V.disabled (M.dialogBusy d)] "Switch & revoke all" (DialogCommand Intent.ConfirmRelay)]]
   M.RelayTerms -> V.div "" [V.p "" "For sensitive work, use your own securely maintained relay.",V.p "" "Provided “as is,” without warranties. Use at your own risk.",V.p "" "To the extent permitted by law, authors, contributors, and operators disclaim liability for losses or damages from this service.",V.p "" "Non-excludable rights and liabilities remain unaffected.",V.node "label" [V.cls "relay-check"] [V.node "input" [V.attr "type" "checkbox",V.bool "checked" $ field F.Accepted == "true",V.check $ \b -> Field F.Accepted $ show b] [],V.text "I accept these beta terms."],V.div "pairing-actions" [V.button "" "Back" $ DialogCommand Intent.BackRelay,V.button "" "Use my relay" $ DialogCommand Intent.AddRelay,V.control [V.disabled $ field F.Accepted /= "true" || (M.dialogBusy d)] "Use beta" (DialogCommand Intent.AcceptRelay)]]
   M.Installation -> V.div "" [V.node "ol" [] $ map (\s -> V.textNode "li" [] (s)) (if ios then ["In Safari, tap Share.","Add to Home Screen. Open as Web App on → Add.","Open Sapiens4 from Home Screen."] else ["In Chrome, tap ⋮.","Install and create shortcut. Then tap Install.","Open Sapiens4 from Home Screen."]),V.button "" "Install Sapiens4" $ DialogCommand Intent.InstallPrompt,V.link "https://sapiens4.ai/help?q=add2homescreen" "Need help? ↗"]
+  M.RoutineRequest -> case d.record of
+    F.RoutineRequestRecord target -> form (if M.dialogBusy d then "Sending…" else case target.intent of
+      RR.CreateRoutine _ -> if d.fields.accepted == "true" then "Create & request run" else "Create"
+      RR.RequestRun _ -> "Ask Sapi to run"
+      _ -> "Send to Sapi") $
+      (case target.intent of
+        RR.RequestRun _ -> [V.p "" "Request one run now. The schedule and pause state stay unchanged."]
+        _ -> [textarea (case target.intent of
+          RR.CreateRoutine _ -> "What should Sapi do, and how often?"
+          RR.ChangeRoutine _ -> "What should change for future runs?"
+          _ -> "Your reply") F.Message 6 [V.bool "required" true,V.attr "maxlength" "16000",V.disabled $ M.dialogBusy d]]) <>
+      (case target.intent of
+        RR.CreateRoutine _ -> [V.node "label" [V.cls "routine-request-check"] [V.node "input" [V.attr "type" "checkbox",V.bool "checked" $ d.fields.accepted == "true",V.disabled $ M.dialogBusy d,V.check $ \b -> Field F.Accepted $ show b] [],V.text "Run once now"],V.p "form-hint" "Schedules use intervals. The first run follows the schedule unless you request one now."]
+        _ -> []) <>
+      [V.p "form-hint" "Your Sapi may ask for details. After sending, continue in chat.",V.control [V.disabled $ M.dialogBusy d] "Cancel" CloseDialog]
+    _ -> V.empty
+  M.RoutineControl -> case d.record of
+    F.RoutineControlRecord target -> V.div "routine-confirm"
+      [V.p "routine-confirm-title" target.title
+      ,V.p "" $ case target.control of
+        RD.DeleteRoutine _ -> "Future runs will be cancelled. " <> (if target.running then "The current run will be stopped. " else "") <> "Saved history remains available to your Sapi."
+        RD.StopRun _ -> "Only this run will be stopped. The schedule stays " <> (if target.paused then "paused" else "active") <> ". Actions already completed will not be undone."
+        _ -> "Change the schedule without stopping the current run."
+      ,V.div "routine-confirm-actions" [V.control [V.disabled $ M.dialogBusy d] "Cancel" CloseDialog,V.control [V.cls "danger",V.disabled $ M.dialogBusy d] (if M.dialogBusy d then "Sending…" else RD.controlLabel target.control) (ControlRoutine target.control)]]
+    _ -> V.empty
   M.Notice -> V.div "" [V.p "" $ field F.Message,V.button "" "OK" CloseDialog]
   where
   field key = F.fieldValue key d.fields

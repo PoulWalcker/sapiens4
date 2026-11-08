@@ -5,6 +5,9 @@ import Data.Argonaut.Core (Json)
 import Data.Array as A
 import Data.Maybe (Maybe(..))
 import Sapiens.Domain as X
+import Sapiens.Navigation as N
+import Sapiens.RoutineData as RD
+import Sapiens.RoutineRequest as RR
 import Foreign.Object as O
 import Sapiens.Data as D
 
@@ -173,6 +176,8 @@ data Context
   | RelayRecord {id :: String, name :: String, connection :: Json}
   | ChangeRecord {change :: Json, saving :: Boolean, from :: String, to :: String}
   | NoticeRecord String
+  | RoutineRequestRecord {intent :: RR.Intent, origin :: N.Activity}
+  | RoutineControlRecord {control :: RD.RoutineControl, title :: String, running :: Boolean, paused :: Boolean}
 
 derive instance eqContext :: Eq Context
 

@@ -75,10 +75,10 @@ view m = case document of
   M.Failed _ error -> V.div "" [V.p "empty" error,V.button "button" "Try again" $ RetryDocument key]
   _ -> case M.valueOf document of
     Nothing -> if info.revision == "missing" then V.p "empty" "No shared Memo yet." else V.text "Loading Memo…"
-    Just (X.TaskDocument _) -> V.p "empty" "Invalid Memo response"
     Just (X.MemoDocument row) -> case wiki m row info of
       Left error -> V.p "empty" error
       Right html -> html
+    Just _ -> V.p "empty" "Invalid Memo response"
   where
   key = "memo:" <> m.selected
   document = fromMaybe M.NotAsked $ O.lookup key m.documents
