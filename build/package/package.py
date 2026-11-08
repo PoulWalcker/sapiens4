@@ -127,20 +127,7 @@ def stage(args):
         entry = Path(info['entrypoint'])
         if entry.is_absolute() or '..' in entry.parts:
             raise ValueError('Provider entrypoint must stay inside codex/')
-        for item in info['files']:
-            path = Path(item['path'])
-            if path.is_absolute() or '..' in path.parts:
-                raise ValueError('Provider file path escapes payload')
-            source = provider / path
-            if source.is_symlink() or not source.is_file() or source.stat().st_size != item['size'] or digest(source) != item['sha256']:
-                raise ValueError('Provider content does not match acquisition inventory: ' + str(path))
-        entries = list(provider.rglob('*'))
-        if any(p.is_symlink() for p in entries):
-            raise ValueError('Provider payload may not contain symbolic links')
-        actual = {p.relative_to(provider).as_posix() for p in entries if p.is_file()}
-        expected_files = {item['path'] for item in info['files']} | {'sapiens-provider.json'}
-        if actual != expected_files:
-            raise ValueError('Provider inventory does not cover the complete payload')
+        verify_inventory(provider, info['files'], {'sapiens-provider.json'})
         shutil.copytree(provider, destination / 'codex', symlinks=False)
         if not (destination / 'codex' / entry).is_file():
             raise ValueError('Provider entrypoint is missing')

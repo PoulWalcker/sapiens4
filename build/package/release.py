@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Verify the complete signed artifact set before the tag workflow publishes it."""
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import re
+from package import digest
 
 
 def verify(args):
@@ -35,11 +35,7 @@ def verify(args):
         if Path(item['assetName']).name != item['assetName'] or '\n' in item['assetName'] or '\r' in item['assetName']:
             raise ValueError('Invalid asset name')
         artifact = receipt.parent / item['assetName']
-        digest = hashlib.sha256()
-        with artifact.open('rb') as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b''):
-                digest.update(chunk)
-        if artifact.stat().st_size != item['size'] or digest.hexdigest() != item['sha256']:
+        if artifact.stat().st_size != item['size'] or digest(artifact) != item['sha256']:
             raise ValueError('Final artifact does not match receipt')
         assets += [artifact, receipt]
     if targets != {('macos', 'arm64'), ('windows', 'x64')}:
