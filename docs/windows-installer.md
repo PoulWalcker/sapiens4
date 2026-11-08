@@ -47,6 +47,114 @@ finds a need for static linking/new module registration, main owns those shared
 files and D1 must report the exact patch before edits. Main owns the combined
 checkout and provider integration; D1 must not copy changes into it independently.
 
+## Explicit choices and remaining integration decisions
+
+| Item | Current proposal choice | Remaining work or decision |
+|---|---|---|
+| Installer | Velopack 1.2.161 per-user Setup.exe, x64; existing portable ZIP retained for diagnostics | Implement native bootstrap/assembly, then execute actual installation |
+| Identity/channel | Existing development package ID/name/channel above | No production identity or feed promotion in this wave |
+| Startup ownership | Dynamic C ABI in existing WindowsMain/Native, startup auto-apply disabled | Confirm native hook/compatibility-check behavior; no Build.hs/libs4 edit planned |
+| WebView2 | Keep existing native Install/Retry/Cancel UX | Native absent/install/retry/cancel acceptance; no second prerequisite flow |
+| Package replacement | Full packages, delta off initially | Main's Sapiens lifecycle/recovery transaction remains authoritative; D2 stays research-only |
+| Persistent state | Existing external development data/config roots | No adoption/migration or legacy routine semantics changes |
+| Publisher signing | Existing certificate-thumbprint/SignTool integration plus engine-generated artifact signing | Main/operator must supply expected publisher/profile when signing is authorized; no signing account chosen or operated here |
+| Release metadata | Preserve current two-ZIP contract until explicitly extended | Main/D1 must bind actual native Setup/full-package/feed output names and final digests in one reviewed asset-set change before publication |
+
+Windows x64 and Windows 11 ARM x64-emulation acceptance remain required checks,
+not optional product-scope decisions. A VC runtime dependency is an empirical PE
+import/clean-target question; configure it only if actual evidence requires it.
+No further installer framework or update owner needs selection.
+
+## Operator-ready native validation setup
+
+Use a disposable existing Windows test context with synthetic state and an
+unlocked desktop. These are prepared commands, not steps executed by this report.
+The Windows checkout must be main's frozen combined source (including D3's
+Windows environment/credential fixes), not the D1-only branch. Keep GHC, Make and
+shell paths free of spaces. Reuse the version/toolchain setup in
+[the Windows README](../environments/windows/README.md): x64 GHC 9.14.1, Cabal
+3.18.2, Node 22.5+, Ruby 3.4, Python 3.10+, Rust 1.99.0/MSVC, Git, sh and Make.
+Record tool versions, source SHA/patch receipt, exact submodule pins and OS/process
+architecture; do not collect complete environment variables or credentials.
+
+Transfer the existing handoff `results/assessment_v2/windows_probe/` as a whole,
+and D3's complete verified `windows-codex/` directory including its metadata.
+The acquired Windows archive is already retained by D3: SHA256
+`60567ca940bbaf6c10501805d9909d1328179231e2d47a0deec7a1368bb21641`,
+201675464 bytes. D1 independently rechecked its archive digest and all 48 upstream
+file hashes on November 8. This verifies inputs, not Windows execution. Do not
+copy only codex.exe. Existing package staging will reverify all provider bytes.
+
+In x64 Windows PowerShell as a normal user, first run the existing fixture:
+
+```powershell
+$Checkout = 'C:\sapiens4-combined'
+$Handoff = 'C:\sapiens4-handoff'
+$Provider = 'C:\verified\windows-codex'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  (Join-Path $Handoff 'results\assessment_v2\windows_probe\Run-Probe.ps1')
+```
+
+Read the existing probe README and return its printed result ZIP, including
+failures. It uses its own synthetic tree, pinned downloads and built-in fixture
+compiler; it does not install Sapiens. It requires an AMD64/x64 process and does
+not itself certify native ARM64. Do not substitute a Mac parser result for this
+run or count result-ZIP presence as success. Its A/B/corrupt-package observations
+remain research evidence, not production update/migration acceptance.
+
+Then validate the combined native portable app with the already acquired provider:
+
+```powershell
+Set-Location -LiteralPath $Checkout
+$Evidence = Join-Path $env:TEMP ('Sapiens D1 evidence ' + [Guid]::NewGuid())
+New-Item -ItemType Directory -Path $Evidence | Out-Null
+$env:SAPIENS_CONFIG_DIR = Join-Path $Evidence 'synthetic config'
+$env:SAPIENS_DATA_DIR = Join-Path $Evidence 'synthetic data'
+ruby submodules/libs4/ruby/bundle.rb install
+if ($LASTEXITCODE -ne 0) { throw 'Ruby setup failed' }
+$Package = Join-Path $Checkout ('.build\native-validation-' + [Guid]::NewGuid())
+.\environments\windows\build.ps1 -Runtime win-x64 -Version 0.1.0-dev.20261108 `
+  -ProviderDirectory $Provider -OutputDirectory $Package
+if ($LASTEXITCODE -ne 0) { throw 'Native package build failed' }
+$env:SAPIENS_TEST_PACKAGE_RUNTIME = Join-Path $Package 'runtime'
+$env:SAPIENS_TEST_CODEX = Join-Path $Checkout '.build\bin\sapiens-provider.exe'
+$env:SAPIENS_TEST_WINDOWS_PACKAGE = $Package
+ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb `
+  --format documentation --out (Join-Path $Evidence 'package-rspec.txt')
+if ($LASTEXITCODE -ne 0) { throw 'Installed runtime acceptance failed' }
+ruby submodules/libs4/ruby/bundle.rb exec rspec spec/windows_package_spec.rb `
+  spec/windows_startup_spec.rb --format documentation `
+  --out (Join-Path $Evidence 'desktop-rspec.txt')
+if ($LASTEXITCODE -ne 0) { throw 'Native desktop acceptance failed' }
+```
+
+These existing RSpec scenarios use synthetic state/controlled model executables.
+The package scenario uses the real bundled CLI only for `--version`. Keep desktop
+runs serial. Use the normal Explorer launch and existing prerequisite controls in
+an appropriate fresh VM state for missing-WebView2 cases; do not remove a working
+runtime from a personal machine. Do not start account login or submit a real
+model request as part of these checks. Preserve outputs/logs on failure and report
+which dependent steps stayed NOT_RUN; do not replace the expected behavior with
+mock-success results.
+
+**Concrete D3/main review fix before API acceptance:** the currently supplied
+`D3_WINDOWS_ACCEPTANCE.ps1` hard-codes 48 provider inventory entries. D1 finalizes
+48 upstream Windows content files plus `sapiens-provider-upstream.json`, so the
+active final inventory has 49 entries, whether the package is unsigned or signed.
+D3 should make its operator script understand the preserved upstream/final
+inventory distinction and reuse `package.py verify` for final package hashes.
+Do not delete metadata or bypass the count/check to make the script pass. Run that
+existing script against the final `$Package` only after this fix is integrated;
+it must continue to avoid login/model requests. D1 has not edited D3's script.
+
+Only after the native bootstrap/assembler exists should the Setup command below
+be exercised. Until then, installer install/reinstall/uninstall and generated
+helper signing remain NOT_RUN. For every actual native run retain source/pins,
+manifest/buildId, final receipts, package/public-route assertions, owned-process
+exit evidence, prerequisite results and sanitized failure logs under `$Evidence`.
+Record Windows 11 ARM x64-emulation separately from x64-PC results. Reuse these
+existing scenarios and the probe; no second PowerShell test framework is needed.
+
 ## Fixed builder inputs and prepared command
 
 Both are pinned official release assets already recorded in assessment v2:
