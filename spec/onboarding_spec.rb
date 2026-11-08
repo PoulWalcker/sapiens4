@@ -234,6 +234,15 @@ RSpec.describe 'Local Codex setup' do
     expect(File.read(File.join(external, 'auth.json'))).to eq('external synthetic authentication')
     expect(File.stat(File.join(config, 'codex')).mode & 0777).to eq(0700)
     # Managed configuration must fail closed instead of selecting Codex on PATH.
+    runtime = File.join(host.root, 'missing provider runtime')
+    %w[app/shell/index.html .build/web/app.js].each do |relative|
+      destination = File.join(runtime, relative)
+      FileUtils.mkdir_p(File.dirname(destination))
+      FileUtils.cp(File.join(Contract::ROOT, relative), destination)
+    end
+    FileUtils.cp_r(File.join(Contract::ROOT, 'corpora'), runtime)
+    File.write(File.join(runtime, 'package-manifest.json'), '{}')
+    host.environment['SAPIENS_REPOSITORY'] = runtime
     host.environment['SAPIENS_CODEX_BINARY'] = ''
     host.environment['PATH'] = host.root + File::PATH_SEPARATOR + ENV.fetch('PATH')
     count = invocations.length

@@ -12,6 +12,8 @@ import System.Process
 
 main :: IO ()
 main = do
+ args <- getArgs
+ unless (all (=="--no-provider") args) (die "Usage: runghc build/Build.hs [--no-provider]")
  root <- getCurrentDirectory >>= buildPath
  -- Source releases omit test helpers; development checkouts build the probes.
  helpers <- filterM (doesFileExist . (root </>) . snd)
@@ -59,6 +61,13 @@ main = do
   when (os=="darwin") (packageMac root (destination<>".installing"))
   renameFile (destination<>".installing") destination
  callProcess (root </> ".build/bin/sapiens4"<>suffix) ["build-ui"]
+ unless ("--no-provider" `elem` args) $ do
+  platform <- case (os,arch) of
+   ("darwin","aarch64") -> pure "darwin-arm64"
+   ("mingw32","x86_64") -> pure "windows-x64"
+   _ -> die "Bundled Codex supports macOS arm64 and Windows x64. Use --no-provider for compilation only."
+  callProcess (if os=="mingw32" then "python" else "python3")
+   [root</>"build/package/acquire-provider.py","--platform",platform,"--destination",root</>".build/codex","--ensure"]
  when (os=="mingw32") $ do
   let runtime = case arch of "x86_64" -> "win-x64"; "aarch64" -> "win-arm64"; _ -> error ("Unsupported Windows architecture: "<>arch)
   -- Windows PowerShell must not inherit PowerShell 7's incompatible modules.

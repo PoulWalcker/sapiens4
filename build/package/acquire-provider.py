@@ -18,6 +18,15 @@ def digest(path):
         return checksum.hexdigest()
 
 
+def provider_files(root):
+    paths = sorted(root.rglob("*"))
+    if any(path.is_symlink() for path in paths):
+        raise ValueError("Provider payload may not contain symbolic links")
+    return [{"path": path.relative_to(root).as_posix(), "size": path.stat().st_size,
+             "sha256": digest(path)} for path in paths
+            if path.is_file() and path.relative_to(root).as_posix() != "sapiens-provider.json"]
+
+
 def download(record, destination):
     with urllib.request.urlopen(record["url"], timeout=120) as source, destination.open("wb") as target:
         shutil.copyfileobj(source, target)
@@ -31,13 +40,24 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", required=True, choices=["darwin-arm64", "windows-x64"])
     parser.add_argument("--destination", required=True, type=pathlib.Path)
+    parser.add_argument("--ensure", action="store_true", help="Verify an existing payload or acquire it when absent")
     parser.add_argument("--cache", type=pathlib.Path, help="Verified download cache (build time only)")
     args = parser.parse_args()
     lock = json.loads((pathlib.Path(__file__).resolve().parents[2] / "submodules/libs4/tools/codex-provider-lock.json").read_text())
     asset = lock["platforms"][args.platform]
     destination = args.destination.resolve()
     if destination.exists():
-        raise ValueError("Provider destination already exists; use a fresh staging directory")
+        if not args.ensure:
+            raise ValueError("Provider destination already exists; use --ensure to verify it")
+        metadata = json.loads((destination / "sapiens-provider.json").read_text())
+        expected = {"schema": 1, "version": lock["version"], "platform": args.platform,
+                    "archiveSha256": asset["sha256"], "entrypoint": asset["entrypoint"]}
+        if any(metadata.get(key) != value for key, value in expected.items()):
+            raise ValueError("Existing provider does not match the pinned release; use a fresh destination")
+        if provider_files(destination) != metadata["files"]:
+            raise ValueError("Existing provider inventory does not match its files")
+        print(json.dumps({"version": lock["version"], "destination": str(destination), "verified": True}))
+        return
     destination.parent.mkdir(parents=True, exist_ok=True)
     cache = args.cache or destination.parent / ".downloads"
     cache.mkdir(parents=True, exist_ok=True)
@@ -82,7 +102,7 @@ def main():
                 raise ValueError("Incomplete provider package: " + path)
         for notice in lock["notices"]:
             download(notice, payload / notice["path"])
-        files = [{"path": path.relative_to(payload).as_posix(), "size": path.stat().st_size, "sha256": digest(path)} for path in sorted(payload.rglob("*")) if path.is_file()]
+        files = provider_files(payload)
         metadata = {"schema": 1, "version": lock["version"], "upstreamCommit": lock["upstreamCommit"], "platform": args.platform, "entrypoint": asset["entrypoint"], "archiveSha256": asset["sha256"], "upstreamPackage": manifest, "files": files}
         (payload / "sapiens-provider.json").write_text(json.dumps(metadata, indent=2) + "\n")
         payload.rename(destination)
