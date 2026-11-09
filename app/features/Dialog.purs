@@ -71,8 +71,13 @@ view m = case m.dialog of
       ,V.when (A.elem d.kind [M.Onboarding,M.WorkspaceSettings] && M.dialogError d /= "") $ V.button "button" "Try again" $ OnboardingPoll d.identity]]
 
 dismissible :: M.Dialog -> Boolean
-dismissible d = d.kind /= M.Onboarding || case d.content of
+dismissible d = finishOnClose d || d.kind /= M.Onboarding || case d.content of
   F.Setup value -> D.b "completed" value
+  _ -> false
+
+finishOnClose :: M.Dialog -> Boolean
+finishOnClose d = d.kind == M.Onboarding && case d.content of
+  F.Setup value -> not (D.b "completed" value) && D.b "ready" value && D.s "step" value == "permissions"
   _ -> false
 
 dialogTitle :: M.Dialog -> String
@@ -100,19 +105,18 @@ body m d = case d.kind of
           ,setup "begin" "Get started"]
         "sign_in" -> [V.p "form-hint" "Step 2 of 3 · ChatGPT account",signInView value]
         _ ->
-          [V.p "form-hint" "Step 3 of 3 · System permissions"
-          ,V.p "" "ChatGPT is connected. Chat and Notes do not need extra system permissions."
+          [V.p "form-hint" "Step 3 of 3"
+          ,V.p "" "ChatGPT connected."
           ,V.p "" $ case permission of
-            "missing" -> "The optional computer helper is missing. You can use chat now and reinstall Sapiens to repair computer control later."
-            "granted" -> "Accessibility access is enabled for computer control."
-            "denied" -> "For optional computer control, enable Sapiens in System Settings > Privacy & Security > Accessibility, then recheck. You can do this later."
-            "unavailable" -> "Accessibility status is unavailable. Recheck setup or open System Settings > Privacy & Security > Accessibility."
-            "not_required" -> "Optional computer control works with accessible Windows applications. Elevated apps and secure system dialogs cannot be controlled."
-            _ -> "Optional computer control uses macOS Accessibility access. You can enable it now or later in Settings."
+            "missing" -> "Chat is ready. Reinstall Sapiens to enable computer control."
+            "granted" -> "Computer control enabled."
+            "denied" -> "Computer control is optional. Enable Accessibility in System Settings to use it."
+            "unavailable" -> "Couldn’t check Accessibility. Recheck or open System Settings."
+            "not_required" -> "Computer control works with accessible Windows apps."
+            _ -> "Computer control is optional and needs Accessibility access."
           ,V.when (permission == "not_requested" || permission == "denied" || permission == "granted" || permission == "unavailable") $ setup (if permission == "granted" then "refresh" else "permission") (if permission == "granted" then "Recheck Accessibility" else "Allow Accessibility")
-          ,V.p "" "You can revisit setup and permissions in Workspace & settings."
-          ,setup "refresh" "Recheck setup"
-          ,setup "finish" "Enter workspace"]
+          ,V.when (permission == "denied" || permission == "unavailable") $ setup "refresh" "Recheck"
+          ,setup "finish" "Done"]
     _ -> V.p "" "Checking setup…"
   M.AgentSettings -> form "Save"
     [V.node "div" [V.cls "settings-tabs",V.attr "role" "tablist",V.label "Sapi settings"] $ map (\caption -> V.textNode "button" [V.attr "type" "button",V.attr "role" "tab",V.attr "aria-selected" $ show $ caption == "Profile",V.disabled $ caption /= "Profile"] (caption)) ["Profile","Context","Usage","Limits"]
