@@ -11,6 +11,8 @@ import Data.Word
 import Foreign hiding (void)
 import Foreign.C
 import System.IO
+import System.Environment (getExecutablePath)
+import System.FilePath ((</>), takeDirectory)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as B
@@ -68,6 +70,7 @@ foreign import ccall "dynamic" invokeInt :: FunPtr (Object -> Int32 -> IO HRESUL
 foreign import ccall "dynamic" invokeDouble :: FunPtr (Object -> Double -> IO HRESULT) -> Object -> Double -> IO HRESULT
 foreign import ccall "dynamic" invoke2 :: FunPtr (Object -> Ptr a -> Ptr b -> IO HRESULT) -> Object -> Ptr a -> Ptr b -> IO HRESULT
 foreign import ccall "dynamic" invoke3 :: FunPtr (Object -> Ptr a -> Ptr b -> Ptr c -> IO HRESULT) -> Object -> Ptr a -> Ptr b -> Ptr c -> IO HRESULT
+foreign import ccall "dynamic" availableBrowserVersion :: FunPtr (Wide -> Ptr Wide -> IO HRESULT) -> Wide -> Ptr Wide -> IO HRESULT
 foreign import ccall "dynamic" createEnvironment :: FunPtr (Wide -> Wide -> Object -> Object -> IO HRESULT) -> Wide -> Wide -> Object -> Object -> IO HRESULT
 foreign import ccall "wrapper" wrapQuery :: (Object -> Ptr Word8 -> Ptr Object -> IO HRESULT) -> IO (FunPtr (Object -> Ptr Word8 -> Ptr Object -> IO HRESULT))
 foreign import ccall "wrapper" wrapRef :: (Object -> IO Word32) -> IO (FunPtr (Object -> IO Word32))
@@ -180,10 +183,28 @@ completion arena iid action = wrapCompletion (\_ result object -> guardCallback 
 
 data View = View { controller :: Object, core :: Object, container :: Window }
 
+webViewLoader :: IO Object
+webViewLoader = do
+  executable <- getExecutablePath
+  loader <- withWide (takeDirectory executable </> "WebView2Loader.dll") loadLibrary
+  when (loader == nullPtr) $ ioError $ userError "WebView2Loader.dll is missing from the application package"
+  pure loader
+
+webViewRuntimeAvailable :: IO Bool
+webViewRuntimeAvailable = do
+  loader <- webViewLoader
+  entry <- withCString "GetAvailableCoreWebView2BrowserVersionString" (getProcAddress loader)
+  when (entry == nullFunPtr) $ ioError $ userError "WebView2 runtime detection is unavailable"
+  alloca $ \version -> do
+    poke version nullPtr
+    result <- availableBrowserVersion entry nullPtr version
+    value <- peek version
+    when (value /= nullPtr) (coFree value)
+    pure (result >= 0 && value /= nullPtr)
+
 newView :: Arena -> Window -> String -> (Either String View -> IO ()) -> IO ()
 newView arena parent profile done = do
-  loader <- withWide "WebView2Loader.dll" loadLibrary
-  when (loader == nullPtr) $ ioError $ userError "WebView2Loader.dll is missing from the application package"
+  loader <- webViewLoader
   entry <- withCString "CreateCoreWebView2EnvironmentWithOptions" (getProcAddress loader)
   when (entry == nullFunPtr) $ ioError $ userError "WebView2 loader entry point is unavailable"
   environment <- completion arena "{4E8A3389-C9D8-4BD2-B6B5-124FEE6CC14D}" $ \result env ->

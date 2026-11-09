@@ -6,8 +6,9 @@ import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
 import Data.Aeson
+import Data.Char (toUpper)
 import Data.IORef
-import Data.List (stripPrefix)
+import Data.List (stripPrefix, isPrefixOf)
 import Data.Maybe
 import Network.HTTP.Client
 import Network.URI
@@ -39,9 +40,17 @@ data HostPaths = HostPaths { dataPath :: FilePath, runtimePath :: FilePath }
 
 hostPaths :: [String] -> FilePath -> FilePath -> Maybe FilePath -> Maybe FilePath -> HostPaths
 hostPaths args executable local dataEnv runtimeEnv = HostPaths
-  (fromMaybe (local </> "Sapiens4") (option "--data-dir" `mplus` dataEnv))
+  (fromMaybe (local </> "Sapiens4 Development/data") (option "--data-dir" `mplus` dataEnv))
   (fromMaybe (takeDirectory executable </> "runtime") (option "--runtime-dir" `mplus` runtimeEnv))
   where option name = listToMaybe [value | (key,value) <- zip args (drop 1 args), key == name]
+
+hostEnvironment :: [(String,String)] -> [(String,String)] -> [(String,String)]
+-- Windows names are case-insensitive; leave explicit path values unchanged.
+hostEnvironment overrides inherited = overrides ++ filter keep inherited
+  where
+    owned = map (map toUpper . fst) overrides
+    keep (key,_) = let name = map toUpper key in
+      name `notElem` owned && not (any (`isPrefixOf` name) ["CODEX_","OPENAI_"])
 
 prepareHost :: [String] -> IO Host
 prepareHost args = do
@@ -56,15 +65,20 @@ prepareHost args = do
 
 startHost :: Host -> IO String
 startHost host = mask $ \restore -> do
+  closeHost host
   createDirectoryIfMissing True (dataDirectory host)
   let binary = runtimeDirectory host </> ".build/bin/sapiens4.exe"
   available <- doesFileExist binary
   unless available $ ioError $ userError $ "Haskell runtime is missing. Extract the complete Sapiens4 package: " ++ binary
   environment <- getEnvironment
+  local <- lookupEnv "LOCALAPPDATA" >>= maybe getHomeDirectory pure
+  configRoot <- lookupEnv "SAPIENS_CONFIG_DIR" >>= maybe (pure (local </> "Sapiens4 Development/config")) makeAbsolute
+  createDirectoryIfMissing True configRoot
   pid <- processId
+  let overrides = [("SAPIENS_DESKTOP_PID", show pid),("SAPIENS_REPOSITORY",runtimeDirectory host),("SAPIENS_CONFIG_DIR",configRoot),("SAPIENS_DATA_DIR",dataDirectory host)]
   (Just input, Just output, Just errors, child) <- createProcess (proc binary ["--port", "0", "--data-dir", dataDirectory host, "--desktop"])
     { cwd = Just (runtimeDirectory host), std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe
-    , env = Just (("SAPIENS_DESKTOP_PID", show pid) : filter ((/= "SAPIENS_DESKTOP_PID") . fst) environment)
+    , env = Just (hostEnvironment overrides environment)
     , create_group = True, use_process_jobs = True, detach_console = True }
   let cleanup = terminateProcess child `finally` mapM_ closeStream [input, output, errors]
   mapM_ (\stream -> hSetEncoding stream utf8 >> hSetNewlineMode stream universalNewlineMode) [input, output, errors] `onException` cleanup
@@ -101,9 +115,12 @@ awaitHost host output errors = do
     _ -> ioError $ userError "Server readiness check failed"
 
 closeHost :: Host -> IO ()
-closeHost host = do
+closeHost host = mask_ $ do
   writeIORef (origin host) Nothing
-  atomicModifyIORef' (serverProcess host) (\value -> (Nothing, value)) >>= mapM_ stopServer
+  current <- readIORef (serverProcess host)
+  forM_ current $ \server -> do
+    stopServer server
+    writeIORef (serverProcess host) Nothing
 
 stopServer :: ServerProcess -> IO ()
 stopServer server = stop `finally` (cancel (errorReader server) `finally` mapM_ closeStream streams)
@@ -113,7 +130,10 @@ stopServer server = stop `finally` (cancel (errorReader server) `finally` mapM_ 
       let input = processInput server
       (hPutStrLn input "stop" >> hFlush input >> hClose input) `catch` \(_ :: IOException) -> pure ()
       result <- timeout 10000000 (waitForProcess (processHandle server))
-      when (isNothing result) $ terminateProcess (processHandle server) `catch` \(_ :: IOException) -> pure ()
+      when (isNothing result) $ do
+        terminateProcess (processHandle server)
+        confirmed <- timeout 5000000 (waitForProcess (processHandle server))
+        when (isNothing confirmed) $ ioError $ userError "The application server could not be stopped"
 
 closeStream :: Handle -> IO ()
 closeStream stream = hClose stream `catch` \(_ :: IOException) -> pure ()

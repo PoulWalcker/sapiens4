@@ -1,59 +1,57 @@
-# Sapiens4 for macOS
+# Sapiens4 Development for macOS
 
-An AppKit/WebKit window with a Dock icon. Requires macOS 13+, Command Line Tools,
-stable Rust, GHC 9.14.1, Cabal 3.18.2, Node.js 22.5+, npm, Git and authenticated
-Codex CLI 0.156.1 or newer.
+The app bundles the native shell, owned backend, UI, Blindly, complete pinned
+Codex provider and licenses. End users need macOS arm64 13.0+.
 
-## Build and open
+## Build
 
-From the repository root:
+Use GHC 9.14.1, Cabal 3.18.2.0, Node 22.23.2, Rust 1.99.0,
+Git and Xcode Command Line Tools. The builder and packager are Haskell; they use
+the existing Cabal dependencies and platform tools. Checks use Python 3.10+,
+Ruby 3.4.11 and Bundler 4.0.21. Initialize the pinned
+submodules, then run from the repository root:
 
 ```sh
+git submodule sync --recursive
 git submodule update --init --recursive
-./submodules/blindly4/macos/build.sh
-./environments/macos/build.sh
-open .build/macos/Sapiens4.app
+./environments/macos/build.sh --version 0.1.0-dev --output-directory .build/macos
+open .build/macos/Sapiens.dmg
 ```
 
-The build records the compiled backend executable, PATH, repository location
-and data directory. Keep the checkout and its build output in place.
-The app starts the local backend when needed; closing or quitting its window
-leaves the backend running so conversations can finish. It installs no login item.
-Right-click the Dock icon → Options → Keep in Dock.
+Open `Sapiens.dmg`, drag **Sapiens4 Development** to Applications, then launch it.
+Outputs in `.build/macos/` are the DMG, app, `sapiens4-development-0.1.0-dev-macos-arm64.zip`
+and its `.release.json` receipt. Use `--output-directory` for another build;
+existing app/DMG/ZIP outputs are rejected. The integrated build acquires or
+verifies the pinned provider in `.build/codex`; use `--provider` for an already
+verified payload elsewhere. Signing defaults to ad-hoc. Publisher
+signing and CI policy are in the [release runbook](../../docs/release-development.md).
+`--build-only` compiles the backend/UI/native shell and Blindly without packaging
+or acquiring Codex. `--skip-build` packages existing outputs with caller-verified
+provenance. `runghc build/Build.hs` alone does not build Blindly.
+`--allow-missing-provider` supports native validation only.
 
-Data defaults to the checkout's `.sapiens4` directory. Set `SAPIENS_DATA_DIR` when
-building to retain an existing data location. The backend log is
-`desktop-server.log` inside that directory. Builds do not move or delete data.
+The macOS audit rejects required binaries above 13.0. Only the exact locked
+Codex 0.167.0 optional voice subtree may require 14.0; its inventory fingerprint
+and dependency boundary are checked. All provider files remain bundled and signed.
+Actual macOS 13 launch/login/exec acceptance remains open.
 
-## Manual version changes
+## Run and verify
 
-Desktop update checks, update controls, managed installation, and automatic
-backup/rollback are removed. Build and open each new version manually. The
-app is locally ad-hoc signed, not notarized or portable.
-
-For an existing managed installation, first let active work finish, quit the old
-app, and gracefully stop its backend before opening the replacement. Reuse the
-exact data directory recorded by the old installation:
+Data and configuration default to `~/Library/Application Support/Sapiens4 Development/data`
+and the adjacent `config` directory. Use `SAPIENS_DATA_DIR` and `SAPIENS_CONFIG_DIR`
+for synthetic validation. The app starts its own host on a dynamic loopback port;
+`desktop-server.log` is in the data directory. Closing the window leaves the app
+running; Quit stops its host. No login item is installed.
 
 ```sh
-SAPIENS_DATA_DIR="/absolute/path/to/existing/data" ./environments/macos/build.sh
-open .build/macos/Sapiens4.app
+ruby submodules/libs4/ruby/bundle.rb install
+codesign --verify --deep --strict '.build/macos/Sapiens4 Development.app'
+SAPIENS_TEST_PACKAGE_RUNTIME="$PWD/.build/macos/Sapiens4 Development.app/Contents/Resources/runtime" \
+  ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb
 ```
 
-Keep the old data directory and backups. The new build does not read or modify
-old managed releases, and an old Dock shortcut still opens the old app; pin the
-new app instead. Never run two backends against the same data directory.
-
-## Workspace and verification
-
-Native tabs support links, local files, bookmarks, back/forward, reload and zoom.
-WebKit tabs keep their own browser sessions. File selection, editing shortcuts,
-external links, themes and the favicon-derived Dock icon remain available.
-
-```sh
-ruby submodules/libs4/ruby/bundle.rb exec rspec spec/distribution_spec.rb spec/workspace_accessibility_spec.rb
-codesign --verify --strict .build/macos/Sapiens4.app
-```
-
-Tests use temporary data and controlled model executables; see
-[coverage and platform requirements](../../docs/testing.md).
+DMG creation verifies the image, mounts it read-only, copies the app to a temporary
+installation path and verifies its signature/runtime inventory.
+The package scenario checks final inventories, provider version, HTTP assets,
+stable synthetic identity across two launches and graceful exit. Native UI,
+permissions, target-OS and downloaded/notarized artifact acceptance are separate checks.
