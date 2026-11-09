@@ -1,22 +1,12 @@
 # Development packaging and releases
 
-Dev packages use channel `development`, name `Sapiens4 Development`, and app ID
-`com.poulwalcker.sapiens4.development`. Prod packages use channel `stable`, name
-`Sapiens4`, and app ID `com.poulwalcker.sapiens4`. Both use `PoulWalcker/sapiens4`.
-The Stable identity belongs to this packaging flow; it does not claim or migrate
-older installations with a different bundle ID. Update discovery stays disabled.
-
-Stable defaults to `~/Library/Application Support/Sapiens4/{data,config}` on Mac
-and `%LOCALAPPDATA%\Sapiens4\{data,config}` on Windows. Dev keeps its existing
-`Sapiens4 Development` directories. Explicit data/config overrides still work;
-no profiles are moved or deleted. Both channels can be installed alongside each other.
-
-`--local dev` selects Development and ad-hoc signing; `--local prod` selects
-Stable and requires Developer ID plus notarization. Actions `mode=prod` likewise
-selects Stable and Authenticode. Low-level packagers accept `--channel stable`
-(Mac) / `-Channel stable` (Windows) for local unsigned/ad-hoc acceptance builds;
-these cannot pass production release verification. Portable Stable ZIPs are named
-`sapiens4-VERSION-PLATFORM-ARCH.zip`; Dev names are unchanged.
+`PoulWalcker/sapiens4`: Dev uses `development` / `Sapiens4 Development` /
+`com.poulwalcker.sapiens4.development`; Prod uses `stable` / `Sapiens4` /
+`com.poulwalcker.sapiens4`. Stable data/config paths replace `Sapiens4 Development`
+with `Sapiens4`; profiles stay separate, with no migration or update discovery.
+`--local prod` and Actions `mode=prod` select Stable with publisher signing.
+Low-level `--channel stable` / `-Channel stable` allows unsigned acceptance builds,
+which cannot pass Prod verification. Stable ZIPs: `sapiens4-VERSION-PLATFORM-ARCH.zip`.
 
 Targets are macOS arm64 (13.0+) and Windows x64, including Windows 11 ARM x64
 emulation. See the platform instructions for requirements, build commands and checks:
@@ -77,14 +67,10 @@ insufficient for this command. Keychain credentials are provisioned separately.
 
 ### Build Windows, combine and publish manually
 
-For Dev, after pushing the approved commit, choose that exact ref in **Native
-verification and test packages**, enter the same version and `mode=dev`.
-For Prod, use a commit in main history and create/push its `vVERSION` tag first;
-that tag runs the signed Stable Windows build. Build Mac locally from the same
-commit/version. Use that existing tag when creating the draft, so publication
-will not cause a second Windows build. A manual `mode=prod` run is also available,
-but do not build manually and then push a new version tag for the same release.
-No run publishes a release.
+Dev: dispatch **Native verification and test packages** on the approved ref/version,
+`mode=dev`. Prod: push `vVERSION` on main history to build signed Stable Windows
+packages; reuse that tag for the draft to avoid rebuilding. Manual `mode=prod`
+is also available. Mac must match the commit/version. Neither workflow publishes.
 After a successful run, download its Windows artifact (replace RUN_ID):
 
 ```sh
@@ -180,7 +166,7 @@ runghc -ibuild/package build/Package.hs provenance --output build/source-provena
 ## Publisher signing
 
 PR and Dev builds need no signing credentials. Dev Mac builds use ad-hoc
-signing; Dev Windows builds are unsigned. Prod requires publisher credentials. For a locally configured signing
+signing; Dev Windows builds are unsigned. For a locally configured signing
 identity, add these arguments to the platform build command:
 
 - macOS: `--sign-identity 'Developer ID Application: ORGANIZATION (TEAMID)' --notary-profile PROFILE`

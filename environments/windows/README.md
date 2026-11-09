@@ -1,9 +1,8 @@
 # Sapiens4 for Windows
 
 Run **Sapiens-Setup.exe** to install for the current user without administrator
-rights. Stable installs as **Sapiens4**, Dev as **Sapiens4 Development**. Launch
-the corresponding Start shortcut. Files are under `%LOCALAPPDATA%\Programs\`
-in the matching app directory; uninstall through Windows Settings.
+rights. Launch **Sapiens4** (Stable) or **Sapiens4 Development** (Dev) from Start.
+Files are under `%LOCALAPPDATA%\Programs\APP_NAME`; uninstall through Windows Settings.
 The portable ZIP remains available: extract it whole and run **Sapiens4.exe**.
 Both contain the native shell, backend, UI, Blindly, pinned Codex provider and
 WebView2 loader. No Python, .NET, WSL or build tools are needed to run the app.
@@ -40,8 +39,7 @@ is for native validation only. `-BlindlyToolchain gnullvm` selects LLVM-MinGW
 instead of MSVC. The WebView2 loader is checksum-pinned. Publisher signing uses
 `-CertificateThumbprint`; see the [release runbook](../../docs/release-development.md).
 
-`-Channel stable` selects `Sapiens4-win-x64/` and `sapiens4-VERSION-windows-x64.zip`.
-Actions `mode=prod` selects Stable with publisher signing. Dev remains the default.
+`-Channel stable`: `Sapiens4-win-x64/`, `sapiens4-VERSION-windows-x64.zip`; default is Dev.
 
 ## State and verification
 
@@ -59,8 +57,7 @@ $env:SAPIENS_TEST_WINDOWS_PACKAGE = (Resolve-Path .build/windows/Sapiens4-Develo
 ruby submodules/libs4/ruby/bundle.rb exec rspec spec/windows_package_spec.rb
 ```
 
-For Stable checks, set `$env:PACKAGE_CHANNEL = 'stable'` and use
-`Sapiens4-win-x64` in those paths.
+For Stable checks: `$env:PACKAGE_CHANNEL = 'stable'`, paths use `Sapiens4-win-x64`.
 
 The package scenario checks inventories, provider version and backend restart
 with synthetic state. Desktop checks require an unlocked interactive session,
