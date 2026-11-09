@@ -123,6 +123,11 @@ onboardingView onboarding@(Onboarding root _ progress _ _) = do
     "accessibility_permission_denied" -> "denied"
     _ -> "unavailable"
    _ -> "unavailable"
+ initial <- setupState onboarding
+ -- Reconcile a completed login after success or a restart. Persist before the
+ -- UI can close onboarding; a failed write stays a recoverable setup error.
+ when (provider=="signed_in" && boolean (get initial "welcomed") && not (boolean (get initial "completed"))) $
+  saveSetup onboarding (put "completed" (Bool True))
  saved <- setupState onboarding
  hold <- P.profileHold
  let welcomed=boolean (get saved "welcomed")
@@ -135,6 +140,16 @@ onboardingAction :: Onboarding -> Value -> IO Value
 onboardingAction onboarding@(Onboarding root worker progress _ _) value = do
  case at value "action" of
   "begin" -> saveSetup onboarding (put "welcomed" (Bool True))
+  "connect" -> do
+   saveSetup onboarding (put "welcomed" (Bool True))
+   status <- checkedProviderStatus onboarding
+   unless (status=="signed_in") $ startAuth onboarding "login"
+  "choose" -> do
+   login <- readIORef progress
+   require (at login "state" `notElem` ["signing_in","signing_out"]) 409 "Cancel sign-in first."
+   saved <- setupState onboarding
+   require (not (boolean (get saved "completed"))) 409 "Setup is already complete."
+   saveSetup onboarding (put "welcomed" (Bool False))
   "finish" -> do
    saved <- setupState onboarding
    require (boolean (get saved "welcomed")) 409 "Start setup from the welcome screen."
@@ -249,7 +264,11 @@ openLoginURL url = do
 browserPortAvailable :: IO Bool
 browserPortAvailable = Socket.withSocketsDo $
  (bracket (Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol) Socket.close $ \socket -> do
+   -- Match the CLI listener: a recently closed callback may still have
+   -- TIME_WAIT connections. Only an active listener should block a new login.
+   Socket.setSocketOption socket Socket.ReuseAddr 1
    Socket.bind socket (Socket.SockAddrInet 1455 (Socket.tupleToHostAddress (127,0,0,1)))
+   Socket.listen socket 1
    pure True) `catch` (\(_::IOException) -> pure False)
 
 signIn :: FilePath -> [(String,String)] -> IORef Value -> Bool -> IO T.Text

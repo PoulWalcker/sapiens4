@@ -58,9 +58,21 @@ RSpec.describe 'Local Codex setup' do
       load #{File.join(__dir__, 'support/provider.rb').inspect}
     RUBY
     host.start
+    %w[codex claude gemini kimi].each do |provider|
+      code, icon, headers = host.request('GET', "/ai-#{provider}.svg")
+      expect(code).to eq(200)
+      expect(headers.fetch('content-type').first).to include('image/svg+xml')
+      expect(icon).to include('<svg')
+    end
     expect(host.api('GET', '/api/host/onboarding')).to include('provider' => 'sign_in_required', 'step' => 'welcome', 'completed' => false)
     host.api('POST', '/api/host/onboarding', {action: 'finish'}, status: 409)
+    # Connect follows the supplied onboarding flow: begin, then immediate login.
     expect(host.api('POST', '/api/host/onboarding', action: 'begin')).to include('step' => 'sign_in', 'completed' => false)
+    expect(host.api('POST', '/api/host/onboarding', action: 'login').fetch('provider')).to eq('signing_in')
+    Contract.wait { host.api('GET', '/api/host/onboarding').dig('login', 'url').to_s.include?('response_type=code') }
+    host.api('POST', '/api/host/onboarding', {action: 'login'}, status: 409)
+    expect(host.api('POST', '/api/host/onboarding', action: 'cancel').dig('login', 'state')).to eq('cancelled')
+
     host.api('POST', '/api/host/onboarding', {action: 'finish'}, status: 409)
     File.write(File.join(host.root, 'slow-status'), '')
     uri = URI(host.url + '/api/host/onboarding')
@@ -117,9 +129,20 @@ RSpec.describe 'Local Codex setup' do
     Contract.wait { host.api('GET', '/api/host/onboarding').dig('login', 'state') == 'failed' }
     File.delete(File.join(host.root, 'fail-login'))
     host.api('POST', '/api/host/onboarding', action: 'device-login')
+    # Auth may succeed while completion persistence fails. GET retries reconcile
+    # without launching auth again or falsely marking setup complete.
+    setup_path = File.join(config, 'onboarding.json')
+    File.rename(setup_path, setup_path + '.saved')
+    Dir.mkdir(setup_path)
     File.write(File.join(host.root, 'finish-login'), '')
+    Contract.wait do
+      status, value, = host.request('GET', '/api/host/onboarding')
+      status == 503 && value.fetch('error').include?('Could not save setup')
+    end
+    Dir.rmdir(setup_path)
+    File.rename(setup_path + '.saved', setup_path)
     Contract.wait { host.api('GET', '/api/host/onboarding').fetch('ready') }
-    expect(host.api('GET', '/api/host/onboarding')).to include('step' => 'permissions', 'completed' => false)
+    expect(host.api('GET', '/api/host/onboarding')).to include('step' => 'complete', 'completed' => true)
     auth_file = File.join(config, 'codex/auth.json')
     saved_auth = File.binread(auth_file)
     File.write(File.join(host.root, 'fail-status'), '')
@@ -141,7 +164,7 @@ RSpec.describe 'Local Codex setup' do
     File.rename(setup_file, setup_file + '.preserved')
     host.restart
     expect(host.api('GET', '/api/host/onboarding').fetch('step')).to eq('welcome')
-    expect(host.api('POST', '/api/host/onboarding', action: 'begin').fetch('step')).to eq('permissions')
+    expect(host.api('POST', '/api/host/onboarding', action: 'connect').fetch('step')).to eq('complete')
     expect(File.binread(auth_file)).to eq(saved_auth)
     host.api('POST', '/api/host/onboarding', action: 'finish')
     id = host.submit(host.state.fetch('main_agent_id'), 'Hello')
@@ -256,6 +279,73 @@ RSpec.describe 'Local Codex setup' do
     end
     occupied&.close
     other&.close
+    host&.close
+  end
+
+  it 'keeps pending work paused across cancelled replacement, reconnection and restart until explicit resume' do
+    skip 'The fixture executable uses a POSIX script' if Gem.win_platform?
+    host = Host.new(start: false)
+    File.write(host.environment.fetch('SAPIENS_CODEX_BINARY'), <<~RUBY)
+      #!#{RbConfig.ruby}
+      require 'fileutils'
+      root, home = ENV.fetch('SAPIENS_CONTRACT_ENV'), ENV.fetch('CODEX_HOME')
+      if ARGV.include?('logout')
+        File.delete(File.join(home, 'auth.json')) if File.exist?(File.join(home, 'auth.json'))
+        exit
+      end
+      if ARGV.include?('login')
+        exit(File.exist?(File.join(home, 'auth.json')) ? 0 : 1) if ARGV.include?('status')
+        $stdout.sync = true
+        if ARGV.include?('--device-auth')
+          puts 'Enter this one-time code'
+          puts 'ABCD-EFGH'
+        else
+          warn 'https://auth.openai.com/oauth/authorize?state=synthetic&response_type=code'
+        end
+        sleep 0.02 until File.exist?(File.join(root, 'finish-login'))
+        File.write(File.join(home, 'auth.json'), 'synthetic replacement authentication')
+        exit
+      end
+      load #{File.join(__dir__, 'support/provider.rb').inspect}
+    RUBY
+    host.start
+    host.configure(block: true)
+    agents = [host.state.fetch('main_agent_id')] + %w[Second Third Fourth Fifth].map { |name| host.agent(name) }
+    turns = agents.map { |id| host.submit(id, "Pending work for #{id}") }
+    Contract.wait { host.calls.size == 4 }
+    queued = host.state.fetch('turns').find { |t| t['status'] == 'queued' }.fetch('id')
+    metadata = host.api('GET', '/api/corpora')
+    host.api('PUT', '/api/corpora/lifecycle', action: 'pause', revision: metadata['revision'], operation: SecureRandom.uuid)
+    Contract.wait { !host.api('GET', '/api/corpora').fetch('stopping') }
+    Contract.wait do
+      code, value, = host.request('POST', '/api/host/onboarding', action: 'change-account')
+      raise value.inspect unless [200, 409].include?(code)
+      code == 200
+    end
+    Contract.wait { host.api('GET', '/api/host/onboarding').dig('login', 'url').to_s.include?('response_type=code') }
+    expect(host.api('POST', '/api/host/onboarding', action: 'cancel')).to include('ready' => false, 'hold' => 'disconnected')
+    host.configure(block: false)
+    host.restart
+    metadata = host.api('GET', '/api/corpora')
+    host.api('PUT', '/api/corpora/lifecycle', action: 'activate', revision: metadata['revision'], operation: SecureRandom.uuid)
+    sleep 2.2 # Allow the scheduler to attempt pending work while disconnected.
+    expect(host.calls.size).to eq(4)
+    expect(host.state.fetch('turns').find { |t| t['id'] == queued }.fetch('status')).to eq('queued')
+    host.api('POST', '/api/host/onboarding', action: 'device-login')
+    File.write(File.join(host.root, 'finish-login'), '')
+    Contract.wait { host.api('GET', '/api/host/onboarding').fetch('ready') }
+    expect(host.api('GET', '/api/host/onboarding').fetch('hold')).to eq('review')
+    host.restart
+    sleep 2.2 # A connected replacement account still must not release the queue.
+    expect(host.api('GET', '/api/host/onboarding')).to include('ready' => true, 'hold' => 'review')
+    expect(host.calls.size).to eq(4)
+    expect(host.state.fetch('turns').find { |t| t['id'] == queued }.fetch('status')).to eq('queued')
+    host.api('POST', '/api/host/onboarding', action: 'resume')
+    host.turn(queued)
+    expect(host.calls.size).to eq(5)
+    expect(host.state.fetch('turns').map { |t| t['id'] }).to match_array(turns)
+    expect(host.state.fetch('turns').reject { |t| t['id'] == queued }.map { |t| t['status'] }).to all(eq('interrupted'))
+  ensure
     host&.close
   end
 end

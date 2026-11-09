@@ -1,5 +1,6 @@
 module Sapiens.Action where
 
+import Sapiens.Model as M
 import Prelude (class Eq)
 
 import Sapiens.Form as F
@@ -70,6 +71,7 @@ data Action
   | ScanFrame Int
   | UploadQR
   | StopScan
+  | ProviderNavigate M.ProviderPage
   | OnboardingPoll Int
   | HostPairPoll Int
   | Install

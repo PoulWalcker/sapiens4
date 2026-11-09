@@ -9,7 +9,7 @@ import Control.Parallel (parallel, sequential)
 import Control.Promise (toAffE)
 import Data.Array as A
 import Data.Either (Either(..), either)
-import Data.Maybe (Maybe(..))
+import Data.Maybe (Maybe(..), maybe)
 import Data.Foldable (traverse_)
 import Data.Tuple (Tuple(..))
 import Effect.Aff (Aff, Milliseconds(..), delay, try)
@@ -67,13 +67,17 @@ handle runtime input = session input
       E.sync
     CheckSetup -> do
       m <- H.get
-      unless (M.remote m || m.setupChecked) do
-        H.modify_ _ {setupChecked=true}
+      now <- liftEffect B.now
+      unless (M.remote m || m.env.hidden || m.accountChecking || m.setupChecked && now - m.accountCheckedAt < 30000.0 || maybe false (\d -> A.elem d.kind [M.Onboarding,M.AIProviders,M.Computer]) m.dialog) do
+        H.modify_ _ {accountChecking=true,accountCheckedAt=now}
         E.attempt (C.json "/api/host/onboarding" "GET" D.null) \result -> case result of
           Right value -> do
-            H.modify_ _ {account=value}
-            unless (D.b "completed" value) $ dispatch $ OpenDialog M.Onboarding F.NoRecord
-          Left _ -> H.modify_ _ {setupChecked=false}
+            H.modify_ _ {accountChecking=false}
+            current <- H.get
+            when (current.sequence == m.sequence) do
+              H.modify_ _ {account=value,setupChecked=true}
+              unless (D.b "completed" value) $ dispatch $ OpenDialog M.Onboarding F.NoRecord
+          Left _ -> H.modify_ _ {accountChecking=false}
     Finalize -> liftEffect $ C.dispose runtime
     Poll -> E.runUpdate runtime dispatch U.Poll
     Copy text caption -> do
