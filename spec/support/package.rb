@@ -43,7 +43,11 @@ module PackageExamples
           _, error, code = process.finish
           expect(code).to eq(0), error
         ensure
+          failure = $!
           process.close
+          if failure
+            warn "Packaged runtime stdout:\n#{process.stdout}\nPackaged runtime stderr:\n#{process.stderr}"
+          end
         end
       end
     end

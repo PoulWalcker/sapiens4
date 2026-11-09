@@ -13,6 +13,10 @@ on:
         type: choice
         options: [dev, prod]
         default: dev
+      diagnose_run:
+        description: Existing Windows artifact run ID (diagnose only, no compilation)
+        required: false
+        default: ''
   workflow_call:
     inputs:
       version:
@@ -28,6 +32,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   native:
+    if: ${{ !inputs.diagnose_run }}
     runs-on: windows-2025
     timeout-minutes: 90
     env:
@@ -186,3 +191,77 @@ jobs:
         run: |
           if ($env:SAPIENS_WINDOWS_CERT_THUMBPRINT) { Remove-Item "Cert:\CurrentUser\My\$env:SAPIENS_WINDOWS_CERT_THUMBPRINT" -ErrorAction SilentlyContinue }
           Remove-Item (Join-Path $env:RUNNER_TEMP 'sapiens-release.pfx') -ErrorAction SilentlyContinue
+  diagnose:
+    if: github.event_name == 'workflow_dispatch' && inputs.diagnose_run != ''
+    runs-on: windows-2025
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Download and verify existing Windows package
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ inputs.diagnose_run }}
+        run: |
+          if ($env:SOURCE_RUN -notmatch '^\d+$') { throw 'Expected an existing run ID' }
+          $source = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Source run unavailable' }
+          gh run download $env:SOURCE_RUN --repo $env:GITHUB_REPOSITORY --name sapiens4-development-windows-x64 --dir .build/diagnose-artifact
+          if ($LASTEXITCODE -ne 0) { throw 'Artifact download failed' }
+          $receipts = @(Get-ChildItem .build/diagnose-artifact -Filter '*.release.json')
+          if ($receipts.Count -ne 1) { throw 'Expected one Windows receipt' }
+          $receipt = Get-Content $receipts[0].FullName -Raw | ConvertFrom-Json
+          if ($receipt.sourceCommit -ne $source.head_sha -or $receipt.sourceDirty -or $receipt.packageStatus -ne 'provider-complete') { throw 'Wrong-source, dirty or incomplete artifact' }
+          foreach ($item in $receipt.artifacts) {
+            if ([IO.Path]::GetFileName($item.assetName) -ne $item.assetName) { throw 'Unsafe artifact name' }
+            $file = Join-Path $receipts[0].DirectoryName $item.assetName
+            if ((Get-Item $file).Length -ne $item.size -or (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $item.sha256) { throw 'Artifact checksum mismatch' }
+          }
+          $zip = @($receipt.artifacts | Where-Object kind -eq 'portable-zip')
+          if ($zip.Count -ne 1) { throw 'Expected one portable ZIP' }
+          Expand-Archive (Join-Path $receipts[0].DirectoryName $zip[0].assetName) .build/diagnose-package
+          $runtime = (Resolve-Path .build/diagnose-package/Sapiens4-Development-win-x64/runtime).Path
+          "SAPIENS_TEST_PACKAGE_RUNTIME=$runtime" >> $env:GITHUB_ENV
+          Write-Output "Diagnosing existing package: source=$($receipt.sourceCommit), version=$($receipt.version)"
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1 snapshot
+        with:
+          ruby-version: '3.4.11'
+      - name: Observe packaged backend without compiling
+        shell: bash
+        run: |
+          ruby - <<'RUBY'
+          require_relative 'spec/support/process'
+          runtime = ENV.fetch('SAPIENS_TEST_PACKAGE_RUNTIME')
+          Dir.mktmpdir('sapiens-package-smoke-') do |folder|
+            data = File.join(folder, 'synthetic-data')
+            env = ENV.keys.grep(/\A(SAPIENS_|CODEX_|OPENAI_)/).to_h { |key| [key, nil] }.merge(
+              'SAPIENS_REPOSITORY' => runtime, 'SAPIENS_CONFIG_DIR' => File.join(folder, 'config'),
+              'SAPIENS_DATA_DIR' => data, 'SAPIENS_CODEX_BINARY' => File.join(folder, 'provider-disabled'),
+              'PATH' => File.join(ENV.fetch('SystemRoot'), 'System32'))
+            process = Contract::Child.new(File.join(runtime, '.build/bin/sapiens4.exe'),
+              '--port', '0', '--data-dir', data, '--desktop', env: env, chdir: folder)
+            begin
+              address = Contract.wait(timeout: 40, description: 'existing packaged backend readiness') do
+                thread = process.instance_variable_get(:@thread)
+                raise "Backend exited: #{process.finish.inspect}" unless thread.alive?
+                process.stdout[/Sapiens4: (http:\/\/127\.0\.0\.1:\d+)/, 1]
+              end
+              status, = Contract.http(address + '/api/health', 'GET')
+              raise "Health status #{status}" unless status == 200
+              puts "Backend ready: #{address}"
+              process.input.write("stop\n")
+              process.input.flush
+            ensure
+              puts "Before cleanup: stdout=#{process.stdout.inspect}, stderr=#{process.stderr.inspect}"
+              puts "Reader states: #{process.instance_variable_get(:@readers).map(&:status).inspect}"
+              process.close
+              puts "After cleanup: #{process.finish.inspect}"
+              puts "Created data files: #{Dir.glob(File.join(data, '**/*')).map { |p| File.basename(p) }.inspect}"
+            end
+          end
+          RUBY
