@@ -3,7 +3,6 @@ param(
     [string]$OutputDirectory,
     [string]$Version = '0.1.0-dev',
     [string]$ProviderDirectory,
-    [string]$BlindlySource = (Join-Path $PSScriptRoot '../../submodules/blindly4'),
     [ValidateSet('msvc','gnullvm')][string]$BlindlyToolchain = 'msvc',
     [switch]$BuildOnly,
     [switch]$SkipBuild,
@@ -14,13 +13,13 @@ param(
 $ErrorActionPreference = 'Stop'
 if ($BuildOnly -and $SkipBuild) { throw 'Choose BuildOnly or SkipBuild' }
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
-if ($Version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$') { throw 'Version must be SemVer' }
+& runghc ("-i"+(Join-Path $repo 'build/package')) (Join-Path $repo 'build/Package.hs') version $Version
+if ($LASTEXITCODE -ne 0) { throw 'Version must be SemVer' }
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repo ".build/windows" }
 $output = [IO.Path]::GetFullPath($OutputDirectory)
 $destination = Join-Path $output "Sapiens4-Development-$Runtime"
 if (-not $BuildOnly -and (Test-Path -LiteralPath $destination)) { throw 'Output must be new; refusing to mix old and new payloads' }
 if ($destination -eq $repo -or $repo.StartsWith($destination + [IO.Path]::DirectorySeparatorChar)) { throw 'Output must not replace the source checkout' }
-if ([IO.Path]::GetFullPath($BlindlySource) -ne (Join-Path $repo 'submodules/blindly4')) { throw 'Use the pinned Blindly4 submodule for distribution' }
 Push-Location $repo
 try {
     if (-not $SkipBuild) {
@@ -36,7 +35,7 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Dark icon preparation failed' }
         & runghc build/Build.hs
         if ($LASTEXITCODE -ne 0) { throw 'Haskell application build failed' }
-        & (Join-Path $BlindlySource 'windows/build.ps1') -Runtime $Runtime -Toolchain $BlindlyToolchain
+        & (Join-Path $repo 'submodules/blindly4/windows/build.ps1') -Runtime $Runtime -Toolchain $BlindlyToolchain
         if ($LASTEXITCODE -ne 0) { throw 'Blindly4 build failed' }
     }
     & (Join-Path $repo 'submodules/libs4/windows/webview2.ps1') -Runtime $Runtime -Destination (Join-Path $repo '.build/bin')

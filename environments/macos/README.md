@@ -7,8 +7,7 @@ Codex provider and licenses. End users need macOS arm64 13.0+.
 
 Use GHC 9.14.1, Cabal 3.18.2.0, Node 22.23.2, Rust 1.99.0,
 Git and Xcode Command Line Tools. The builder and packager are Haskell; they use
-the existing Cabal dependencies and platform tools. Checks use Python 3.10+,
-Ruby 3.4.11 and Bundler 4.0.21. For the combined Windows/local release flow, run from a clean checkout:
+the existing Cabal dependencies and platform tools. Checks use Ruby 3.4.11 and Bundler 4.0.21. For the combined Windows/local release flow, run from a clean checkout:
 
 ```sh
 ./environments/macos/build.sh --local dev "$(git rev-parse HEAD)" 0.1.0-dev.local1

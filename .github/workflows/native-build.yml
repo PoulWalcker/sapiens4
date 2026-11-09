@@ -28,18 +28,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   native:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: windows-2025
-            platform: windows-x64
-            compile: pwsh -NoProfile -File ./environments/windows/build.ps1 -BuildOnly
-    runs-on: ${{ matrix.runner }}
+    runs-on: windows-2025
     timeout-minutes: 90
     env:
       PACKAGE_VERSION: ${{ inputs.version || '0.1.0-dev' }}
-      PROVIDER_PLATFORM: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -47,22 +39,16 @@ jobs:
           fetch-depth: 0
       - name: Check release signing prerequisites before expensive builds
         if: inputs.release || inputs.mode == 'prod'
-        shell: python
+        shell: pwsh
         env:
           WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
-          import os
-          import subprocess
-          if os.environ['GITHUB_REPOSITORY'] != 'PoulWalcker/sapiens4':
-              raise SystemExit('Production signing is restricted to the development repository')
-          if os.environ['GITHUB_EVENT_NAME'] == 'push' and os.environ['GITHUB_REF'] != 'refs/tags/v' + os.environ['PACKAGE_VERSION']:
-              raise SystemExit('Expected matching version tag')
-          subprocess.run(['git', 'merge-base', '--is-ancestor', 'HEAD', 'origin/main'], check=True)
-          names = ['WINDOWS_CERTIFICATE_PFX', 'WINDOWS_CERTIFICATE_PASSWORD']
-          missing = [name for name in names if not os.environ.get(name)]
-          if missing:
-              raise SystemExit('Missing signing configuration: ' + ', '.join(missing))
+          if ($env:GITHUB_REPOSITORY -ne 'PoulWalcker/sapiens4') { throw 'Production signing is restricted to the development repository' }
+          if ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF -ne "refs/tags/v$env:PACKAGE_VERSION") { throw 'Expected matching version tag' }
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) { throw 'Production builds require main ancestry' }
+          if (-not $env:WINDOWS_CERTIFICATE_PFX -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) { throw 'Windows signing configuration required' }
       - name: Resolve exact dependency pins from committed URLs
         shell: bash
         run: |
@@ -78,7 +64,6 @@ jobs:
         with:
           node-version: '22.23.2'
       - name: Verify Windows UI tools before application compilation
-        if: runner.os == 'Windows'
         timeout-minutes: 10
         shell: pwsh
         run: ./build/windows-ui-preflight.ps1
@@ -88,17 +73,15 @@ jobs:
           rustup toolchain install 1.99.0 --profile minimal
           rustup override set 1.99.0
       - name: Configure isolated HTTPS Hackage index
-        shell: python
+        shell: pwsh
         run: |
-          from pathlib import Path
-          root = Path('submodules/libs4/haskell/.cabal')
-          root.mkdir(parents=True, exist_ok=True)
-          (root / 'config').write_text('repository hackage.haskell.org\n  url: https://hackage.haskell.org/\n  secure: True\n')
+          New-Item -ItemType Directory -Force submodules/libs4/haskell/.cabal | Out-Null
+          Set-Content submodules/libs4/haskell/.cabal/config "repository hackage.haskell.org`n  url: https://hackage.haskell.org/`n  secure: True`n"
       - name: Key isolated Cabal dependencies
         id: cabal-key
         if: github.repository == 'PoulWalcker/sapiens4' && github.event_name != 'pull_request'
-        shell: bash
-        run: python build/package/cabal-cache.py key
+        shell: pwsh
+        run: ./build/package/cabal-cache.ps1 key
       - name: Restore trusted Cabal dependencies
         id: cabal-restore
         if: github.repository == 'PoulWalcker/sapiens4' && github.event_name != 'pull_request'
@@ -109,7 +92,7 @@ jobs:
             submodules/libs4/haskell/.cabal/store
             submodules/libs4/haskell/.cabal/packages
       - name: Compile installer script before the expensive Windows application build
-        if: github.event_name != 'pull_request' && runner.os == 'Windows'
+        if: github.event_name != 'pull_request'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path .build/installer-script-input -Force | Out-Null
@@ -120,12 +103,12 @@ jobs:
       - name: Compile host, native application, UI and existing fixture helpers once
         id: compile
         shell: bash
-        run: ${{ matrix.compile }}
+        run: pwsh -NoProfile -File ./environments/windows/build.ps1 -BuildOnly
       - name: Check completed dependencies even if UI compilation failed
         id: cabal-ready
         if: ${{ !cancelled() && github.repository == 'PoulWalcker/sapiens4' && github.event_name != 'pull_request' && steps.compile.outcome != 'skipped' && steps.cabal-restore.outputs.cache-hit != 'true' }}
-        shell: bash
-        run: python build/package/cabal-cache.py check
+        shell: pwsh
+        run: ./build/package/cabal-cache.ps1 check
       - name: Save verified Cabal dependencies before packaging
         if: ${{ !cancelled() && steps.cabal-ready.outputs.ready == 'true' }}
         uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
@@ -144,7 +127,7 @@ jobs:
         shell: bash
         run: ruby submodules/libs4/ruby/bundle.rb install
       - name: Configure Windows release signing
-        if: (inputs.release || inputs.mode == 'prod') && runner.os == 'Windows'
+        if: (inputs.release || inputs.mode == 'prod')
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
@@ -161,7 +144,7 @@ jobs:
           if (-not $signTool) { throw 'Windows SDK SignTool required' }
           $signTool.DirectoryName | Out-File $env:GITHUB_PATH -Append -Encoding utf8
       - name: Package and verify Windows without recompiling
-        if: github.event_name != 'pull_request' && runner.os == 'Windows'
+        if: github.event_name != 'pull_request'
         shell: pwsh
         run: |
           $thumbprint = if ('${{ inputs.release || inputs.mode == 'prod' }}' -eq 'true') { $env:SAPIENS_WINDOWS_CERT_THUMBPRINT } else { [string]::Empty }
@@ -171,13 +154,17 @@ jobs:
           ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb
           if ($LASTEXITCODE -ne 0) { throw 'Package scenario failed' }
       - name: Verify per-user Windows install, native launch and uninstall
-        if: github.event_name != 'pull_request' && runner.os == 'Windows'
+        if: github.event_name != 'pull_request'
         shell: pwsh
-        run: ./build/package/windows-installer-check.ps1 -Installer .build/distribution/Sapiens-Setup.exe -EvidenceDirectory .build/distribution/installer-check
+        run: |
+          $env:SAPIENS_TEST_INSTALLER = (Resolve-Path .build/distribution/Sapiens-Setup.exe).Path
+          $env:SAPIENS_TEST_INSTALLER_EVIDENCE = [IO.Path]::GetFullPath('.build/distribution/installer-check')
+          ruby submodules/libs4/ruby/bundle.rb exec rspec spec/windows_package_spec.rb
+          if ($LASTEXITCODE -ne 0) { throw 'Installer scenario failed' }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always() && github.event_name != 'pull_request'
         with:
-          name: sapiens4-development-${{ matrix.platform }}
+          name: sapiens4-development-windows-x64
           path: |
             .build/distribution/Sapiens-Setup.exe
             .build/distribution/*.zip
@@ -185,7 +172,7 @@ jobs:
             .build/distribution/installer-check/*
           if-no-files-found: error
       - name: Remove temporary Windows signing material
-        if: always() && (inputs.release || inputs.mode == 'prod') && runner.os == 'Windows'
+        if: always() && (inputs.release || inputs.mode == 'prod')
         shell: pwsh
         run: |
           if ($env:SAPIENS_WINDOWS_CERT_THUMBPRINT) { Remove-Item "Cert:\CurrentUser\My\$env:SAPIENS_WINDOWS_CERT_THUMBPRINT" -ErrorAction SilentlyContinue }

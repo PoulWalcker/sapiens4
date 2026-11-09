@@ -4,29 +4,33 @@ module Format
  , ProviderLayout, layoutRelease, layoutPlatform, layoutEntry, layoutExec, layoutResources, layoutPath
  , ProviderLock(..), Download(..), lockAsset, newProvider, packagedProvider
  , Provenance(..), PackageIdentity(..), ProviderSummary, summaryVersion, Manifest, manifestIdentity, manifestProvider
- , manifestSigning, manifestProviderHash, newManifest, sealManifest, compatibilityManifest
- , ReceiptInput(..), ArtifactKind(..), Artifact(..), Receipt(..)
+ , manifestSigning, manifestProviderHash, FinalizedManifest, finalizedManifest, finalizedSigning, providerSummary, newManifest, sealManifest, compatibilityManifest
+ , Artifact(..), ArtifactPair(..), Receipt(..)
  , CompatibilityRule(..), BinaryAudit(..), CompatibilityAudit(..)
  , readJSON, writeJSON, printJSON, obj, canonical, hash, hex, safeRelativePath ) where
 
 import Control.Monad
 import Data.Aeson
+import qualified Data.Aeson.Encoding as E
 import Data.Aeson.Types (Parser)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
 import qualified Crypto.Hash.SHA256 as SHA
-import Data.Char (isHexDigit, isLower, isDigit, ord)
+import Data.Char (isHexDigit, isLower, isDigit)
 import Data.Foldable (toList)
 import Data.List (sortOn, isPrefixOf)
-import Data.Maybe (isJust, isNothing)
+import Data.Maybe (isJust)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
 import Numeric (showHex)
 import System.FilePath
 import Options hiding (required)
+
+instance FromJSON Version where
+ parseJSON = withText "SemVer" (either fail pure . parseVersion . T.unpack)
+instance ToJSON Version where toJSON = toJSON . versionText
 
 obj :: [(T.Text,Value)] -> Value
 obj = Object . KM.fromList . map (\(key,value) -> (K.fromText key,value))
@@ -114,8 +118,8 @@ instance FromJSON Provider where
  parseJSON value = withObject "provider metadata" (\o -> do
   schema<-o .: "schema";check (schema==(1::Int)) "Unsupported provider metadata schema"
   identity<-parseJSON value;entries<-o .: "files" >>= decodeEntries
-  layout<-optional o "upstreamPackage"
-  forM_ layout $ \l -> check (layoutRelease l==identityVersion identity && layoutPlatform l==identityPlatform identity && layoutEntry l==identityEntry identity) "Provider identity/layout mismatch"
+  layout<-o .: "upstreamPackage"
+  check (layoutRelease layout==identityVersion identity && layoutPlatform layout==identityPlatform identity && layoutEntry layout==identityEntry identity) "Provider identity/layout mismatch"
   stage<-optional o "inventoryStage"
   forM_ stage $ \s -> check (s `elem` ["packaged","signed-package"::String]) "Invalid provider inventory stage"
   void (optional o "upstreamInventory" :: Parser (Maybe String))
@@ -168,7 +172,7 @@ instance ToJSON ProviderSummary where
  toJSON p = obj [("name",String "codex"),("version",toJSON $ summaryVersion p),("entrypoint",toJSON $ summaryEntry p),("archiveSha256",toJSON $ summaryArchive p)]
 
 data PackageIdentity = PackageIdentity
- { packageVersion :: String, packagePlatform :: Platform, packageBuildId :: T.Text, packageCommit :: T.Text, packageDirty :: Bool, packageComplete :: Bool }
+ { packageVersion :: Version, packagePlatform :: Platform, packageBuildId :: T.Text, packageCommit :: T.Text, packageDirty :: Bool, packageComplete :: Bool } deriving Eq
 instance FromJSON PackageIdentity where
  parseJSON = withObject "package identity" $ \o -> do
   app<-o .: "appId";repository<-o .: "repository";channel<-o .: "channel";support<-o .: "supportStatus"
@@ -176,7 +180,7 @@ instance FromJSON PackageIdentity where
   platform<-o .: "platform" >>= platformJSON;arch<-o .: "architecture";floor<-o .: "minimumOS"
   check (arch==architecture platform && floor==(if platform==MacOS then Just "13.0" else Nothing :: Maybe String)) "Platform/architecture/minimumOS mismatch"
   status<-o .: "packageStatus";complete<-case status :: String of "provider-complete"->pure True;"validation-provider-incomplete"->pure False;_->fail "Invalid package status"
-  version<-o .: "version";check (validVersion version) "Invalid package SemVer"
+  version<-o .: "version"
   PackageIdentity version platform <$> (o .: "buildId" >>= checksum 64) <*> (o .: "sourceCommit" >>= checksum 40) <*> o .: "sourceDirty" <*> pure complete
 
 data Manifest = Manifest { manifestIdentity :: PackageIdentity, manifestProvider :: Maybe ProviderSummary, manifestSigning :: Maybe Signing, manifestProviderHash :: Maybe T.Text, manifestWire :: Object }
@@ -187,19 +191,29 @@ instance FromJSON Manifest where
   void (o .: "submodules" >>= traverse (checksum 40) :: Parser (M.Map T.Text T.Text))
   void (o .: "sourceTreeSha256" >>= checksum 64)
   void (o .: "toolchain" :: Parser (M.Map T.Text String))
-  epochs<-o .: "dataEpoch";mapM_ (\key -> void (epochs .: key :: Parser (Maybe Integer))) ["minReadable","maxReadable","target"]
-  void (o .: "migrationSetId" :: Parser (Maybe String));void (o .: "legacyAdoption" :: Parser String);void (o .: "updateDiscovery" :: Parser Bool)
+  discovery<-o .: "updateDiscovery";check (not discovery) "D1 update discovery must be disabled"
   signing<-traverse signingJSON (KM.lookup "signing" o);digest<-optional o "providerInventorySha256" >>= traverse (checksum 64)
   forM_ signing $ either fail pure . validateSigning (packagePlatform identity)
-  check (isNothing signing || isNothing provider || isJust digest) "Signed provider inventory hash missing"
+  check (isJust digest == (isJust signing && isJust provider)) "Inconsistent provider inventory seal"
   pure (Manifest identity provider signing digest o)) value
 instance ToJSON Manifest where toJSON = Object . manifestWire
 
--- Build identity uses precisely the legacy canonical JSON input document.
-newManifest :: Provenance -> T.Text -> Platform -> String -> Maybe Provider -> [(T.Text,String)] -> Manifest
+-- A receipt/verification boundary cannot accidentally accept a staged manifest.
+data FinalizedManifest = FinalizedManifest { finalizedManifest :: Manifest, finalizedSigning :: Signing }
+instance FromJSON FinalizedManifest where
+ parseJSON value = do
+  manifest<-parseJSON value
+  signing<-maybe (fail "Finalized manifest signing mode missing") pure (manifestSigning manifest)
+  pure (FinalizedManifest manifest signing)
+
+providerSummary :: Provider -> ProviderSummary
+providerSummary p = let i=providerIdentity p in ProviderSummary (identityVersion i) ("codex/"++identityEntry i) (identityArchive i)
+
+-- Build identity hashes the current deterministic input document.
+newManifest :: Provenance -> T.Text -> Platform -> Version -> Maybe Provider -> [(T.Text,String)] -> Manifest
 newManifest source tree platform version provider tools = Manifest identity summary Nothing Nothing document
  where
- summary = (\p -> let i=providerIdentity p in ProviderSummary (identityVersion i) ("codex/"++identityEntry i) (identityArchive i)) <$> provider
+ summary = providerSummary <$> provider
  inputs = KM.fromList
   [("sourceTreeSha256",String tree)
   ,("platform",toJSON $ platformName platform)
@@ -221,9 +235,6 @@ newManifest source tree platform version provider tools = Manifest identity summ
   ,("appId",String "com.poulwalcker.sapiens4.development")
   ,("buildId",String buildId)
   ,("packageStatus",String $ if isJust provider then "provider-complete" else "validation-provider-incomplete")
-  ,("dataEpoch",obj [("minReadable",Null),("maxReadable",Null),("target",Null)])
-  ,("migrationSetId",Null)
-  ,("legacyAdoption",String "not-implemented")
   ,("updateDiscovery",Bool False)]) inputs
 
 sealManifest :: Signing -> Maybe T.Text -> Manifest -> Manifest
@@ -234,19 +245,9 @@ sealManifest signing digest m = m
 compatibilityManifest :: CompatibilityAudit -> Manifest -> Manifest
 compatibilityManifest report m = m {manifestWire=KM.insert "macOSCompatibility" (toJSON report) (manifestWire m)}
 
--- Receipts consume only the identity/signing portion, including older fixtures
--- that do not contain a complete staging manifest.
-data ReceiptInput = ReceiptInput PackageIdentity Signing
-instance FromJSON ReceiptInput where
- parseJSON value = withObject "receipt source" (\o -> do
-  identity <- parseJSON value
-  signing <- o .: "signing" >>= signingJSON
-  either fail pure $ validateSigning (packagePlatform identity) signing
-  pure (ReceiptInput identity signing)) value
-
-data ArtifactKind = Installer | PortableZip
-data Artifact = Artifact ArtifactKind FilePath Integer T.Text T.Text
-data Receipt = Receipt PackageIdentity Signing [Artifact]
+data Artifact = Artifact FilePath Integer T.Text T.Text
+data ArtifactPair = ArtifactPair { installerArtifact :: Artifact, portableArtifact :: Artifact }
+data Receipt = Receipt PackageIdentity Signing ArtifactPair
 instance ToJSON Receipt where
  toJSON (Receipt i signing artifacts) = obj
   [("schemaVersion",toJSON (1::Int))
@@ -257,20 +258,47 @@ instance ToJSON Receipt where
   ,("sourceCommit",toJSON $ packageCommit i)
   ,("sourceDirty",Bool $ packageDirty i)
   ,("packageStatus",String $ if packageComplete i then "provider-complete" else "validation-provider-incomplete")
-  ,("artifacts",toJSON $ map item artifacts)]
+  ,("artifacts",toJSON [item "installer" (installerArtifact artifacts), item "portable-zip" (portableArtifact artifacts)])]
   where
-  item (Artifact kind path size digest manifestHash) = obj
+  item kind (Artifact path size digest manifestHash) = obj
    [("platform",toJSON $ platformName $ packagePlatform i)
    ,("architecture",toJSON $ architecture $ packagePlatform i)
    ,("buildId",toJSON $ packageBuildId i)
    ,("minimumOS",if packagePlatform i==MacOS then String "13.0" else Null)
    ,("supportStatus",String "declared-target")
    ,("signing",toJSON $ signingName signing)
-   ,("kind",String $ case kind of Installer->"installer";PortableZip->"portable-zip")
+   ,("kind",String kind)
    ,("assetName",toJSON $ takeFileName path)
    ,("size",toJSON size)
    ,("sha256",String digest)
    ,("packageManifestSha256",String manifestHash)]
+
+instance FromJSON Receipt where
+ parseJSON = withObject "release receipt" $ \o -> do
+  schema<-o .: "schemaVersion";check (schema==(1::Int)) "Unsupported receipt schema"
+  let keys=["appId","version","repository","channel","sourceCommit","sourceDirty","packageStatus"]
+  check (all (`KM.member` o) keys) "Missing receipt identity fields"
+  values<-o .: "artifacts"
+  parsed<-mapM (withObject "release artifact" $ \a -> do
+   kind<-a .: "kind" :: Parser String
+   -- Top-level identity fields cannot be overridden by artifact fields.
+   let header=KM.filterWithKey (\key _ -> key `elem` keys) o
+   identity<-parseJSON (Object $ KM.union header a)
+   signing<-a .: "signing" >>= signingJSON
+   either fail pure $ validateSigning (packagePlatform identity) signing
+   path<-a .: "assetName" >>= relative;check (takeFileName path==path) "Artifact must be a basename"
+   size<-a .: "size";check (size>=0) "Negative artifact size"
+   digest<-a .: "sha256" >>= checksum 64
+   manifestHash<-a .: "packageManifestSha256" >>= checksum 64
+   pure (kind,(identity,signing,Artifact path size digest manifestHash))) values
+  case parsed of
+   [("installer",a),("portable-zip",b)] -> pair a b
+   [("portable-zip",a),("installer",b)] -> pair b a
+   _ -> fail "Exactly one installer and one portable ZIP required"
+  where
+  pair (i,s,a@(Artifact _ _ _ h)) (j,t,b@(Artifact _ _ _ k)) = do
+   check (i==j && s==t && h==k) "Contradictory release artifact bindings"
+   pure (Receipt i s $ ArtifactPair a b)
 
 data CompatibilityRule = CompatibilityRule
  { ruleIdentity :: ProviderIdentity, ruleFingerprint :: T.Text, ruleRoot :: FilePath, ruleMaximum :: String, ruleId :: String, ruleSelected :: [String], ruleCommit :: T.Text }
@@ -304,25 +332,10 @@ hex = T.pack . concatMap (\byte -> let value=showHex byte "" in if length value=
 hash :: L.ByteString -> T.Text
 hash = hex . SHA.hashlazy
 
--- Python's existing sort_keys/separators/ensure_ascii encoding is part of the
--- provider fingerprint and buildId contract, not the pretty-printing format.
+-- Stable key ordering; Aeson owns JSON escaping and scalar encoding.
 canonical :: Value -> L.ByteString
-canonical input = L.fromStrict $ TE.encodeUtf8 $ render input
+canonical = E.encodingToLazyByteString . ordered
  where
- render (Object values) = "{"<>T.intercalate "," [quoted (K.toText key)<>":"<>render item | (key,item)<-sortOn (K.toText.fst) (KM.toList values)]<>"}"
- render (Array values) = "["<>T.intercalate "," (map render $ toList values)<>"]"
- render (String value) = quoted value
- render other = TE.decodeUtf8 (L.toStrict $ encode other)
- quoted value = "\""<>T.concatMap escape value<>"\""
- escape '"' = "\\\""
- escape '\\' = "\\\\"
- escape '\b' = "\\b"
- escape '\f' = "\\f"
- escape '\n' = "\\n"
- escape '\r' = "\\r"
- escape '\t' = "\\t"
- escape character
-  | code < 32 || code > 126 = if code <= 65535 then unicode code else unicode (55296 + (code-65536) `div` 1024) <> unicode (56320 + (code-65536) `mod` 1024)
-  | otherwise = T.singleton character
-  where code=ord character
- unicode code = let value=showHex code "" in T.pack ("\\u"++replicate (4-length value) '0'++value)
+ ordered (Object values) = E.pairs $ foldMap (\(key,value) -> E.pair key (ordered value)) (sortOn (K.toText . fst) $ KM.toList values)
+ ordered (Array values) = E.list ordered (toList values)
+ ordered value = toEncoding value
