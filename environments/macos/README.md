@@ -8,8 +8,20 @@ Codex provider and licenses. End users need macOS arm64 13.0+.
 Use GHC 9.14.1, Cabal 3.18.2.0, Node 22.23.2, Rust 1.99.0,
 Git and Xcode Command Line Tools. The builder and packager are Haskell; they use
 the existing Cabal dependencies and platform tools. Checks use Python 3.10+,
-Ruby 3.4.11 and Bundler 4.0.21. Initialize the pinned
-submodules, then run from the repository root:
+Ruby 3.4.11 and Bundler 4.0.21. For the combined Windows/local release flow, run from a clean checkout:
+
+```sh
+./environments/macos/build.sh --local dev "$(git rev-parse HEAD)" 0.1.0-dev.local1
+```
+
+This checks prerequisites and initializes pinned submodules while preserving all
+compilation/download caches. Install missing tools first (GHC/Cabal via ghcup,
+Node22.23.2 and Rust1.99.0 via your tool manager; `xcode-select --install` for
+Xcode CLI tools). Nothing is installed globally by the command. See the
+[combined release runbook](../../docs/release-development.md) for exact commit/version
+matching, Prod signing and manual publication. macOS is not built on Actions.
+
+For direct low-level builds, initialize the pinned submodules and run:
 
 ```sh
 git submodule sync --recursive

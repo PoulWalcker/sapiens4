@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the complete signed artifact set before the tag workflow publishes it."""
+"""Verify a complete local macOS + CI Windows set before manual publication."""
 import argparse
 import json
 from pathlib import Path
@@ -32,10 +32,11 @@ def verify(args):
         if target not in expected:
             raise ValueError('Unsupported release target')
         signing, installer = expected[target]
+        allowed_signing = {signing} if args.mode == 'prod' else ({'ad-hoc', 'none'} if target[0] == 'macos' else {'none'})
         names = set()
         for item in items:
-            if (item['platform'], item['architecture']) != target or item.get('signing') != signing or item.get('supportStatus') != 'declared-target':
-                raise ValueError('Publisher-signed supported-target artifacts are required')
+            if (item['platform'], item['architecture']) != target or item.get('signing') not in allowed_signing or item.get('supportStatus') != 'declared-target':
+                raise ValueError('Expected signing mode and supported-target artifacts are required')
             if target[0] == 'macos' and item.get('minimumOS') != '13.0':
                 raise ValueError('Experimental support-floor artifacts cannot be released')
             name = item['assetName']
@@ -60,4 +61,5 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('repository', 'directory', 'source-commit', 'version', 'output'):
         parser.add_argument('--' + name, required=True)
+    parser.add_argument('--mode', choices=['dev', 'prod'], default='prod')
     verify(parser.parse_args())

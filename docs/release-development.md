@@ -8,24 +8,99 @@ emulation. See the platform instructions for requirements, build commands and ch
 - [macOS](../environments/macos/README.md)
 - [Windows](../environments/windows/README.md)
 
-## CI policy
+## Local macOS + Windows Actions policy
 
 | Event | Work | Publication |
 |---|---|---|
-| Feature branch push | No native workflow | None |
-| Pull request to main | Compile host, UI, native shell and Blindly once per platform | None |
-| `vSemVer` tag in main history | Compile once, package, sign, verify both targets | GitHub Release |
-| Manual `workflow_dispatch`, selected branch | Compile once, package and verify test artifacts | Workflow artifacts only |
+| Feature push | No native workflow | None |
+| PR to main | Windows compilation only | None |
+| Manual native workflow, selected ref | Windows compile once, package/verify Dev or Prod | Workflow artifacts only |
+| Version tag in main history | Signed Windows packages | Workflow artifacts only |
+| macOS | Build locally using the same commit/version | Manual complete release only |
 
-`native-build.yml` uses GHC 9.14.1, Cabal 3.18.2.0, Node 22.23.2, Rust 1.99.0
-and Ruby 3.4.11. PR jobs stop before provider acquisition and packaging. Tag and
-manual jobs reuse that job's compilation through `--skip-build`/`-SkipBuild`.
-Local builds and CI use the same platform entry points: `--build-only`/`-BuildOnly`
-compiles once; the default mode compiles and packages.
-`release-development.yml` validates SemVer and main ancestry, then requires both
-signed receipts to match the tag, clean source commit, supported targets and
-final asset hashes. Its publish job uploads to a draft and publishes the complete
-release after successful upload; only that job has contents-write permission.
+There are no macOS Actions jobs and no automatic release publication job.
+Windows still uses GHC9.14.1, Cabal3.18.2.0, Node22.23.2, Rust1.99.0 and
+Ruby3.4.11, existing caches, installer validation and `-SkipBuild` packaging.
+Production Windows runs require main ancestry and signing secrets before compilation.
+
+### One local macOS command
+
+From a clean checkout of the exact Windows workflow commit:
+
+```sh
+COMMIT=$(git rev-parse HEAD)
+VERSION=0.1.0-dev.local1
+./environments/macos/build.sh --local dev "$COMMIT" "$VERSION" ".build/release/$VERSION/mac"
+```
+
+`--local` checks macOS ARM64, Xcode CLI tools and the pinned compilers, selects
+installed GHC9.14.1 without changing global ghcup settings, initializes committed
+submodules and creates an isolated HTTPS Cabal configuration if absent. Missing
+tools fail with a prerequisite message; it does not install global software.
+Cabal, UI, Rust, provider/download and packaging caches are preserved. It invokes
+the existing compilation and DMG packaging exactly once, without `--skip-build`.
+Output directories must be fresh. The full commit SHA must equal HEAD and the
+checkout must be clean; receipts record that identity. Use the same VERSION in
+Windows Actions and confirm the run's `headSha` before combining artifacts.
+
+Dev forces ad-hoc Mac signing (required for ARM64 execution, no publisher identity)
+and unsigned Windows packages. For Prod, configure the existing local keychain:
+
+```sh
+export SAPIENS_MAC_SIGN_IDENTITY='Developer ID Application: ORGANIZATION (TEAMID)'
+export SAPIENS_MAC_NOTARY_PROFILE=sapiens-release
+./environments/macos/build.sh --local prod "$COMMIT" "$VERSION" ".build/release/$VERSION/mac"
+```
+
+Prod requires both variables; the existing packager signs, notarizes and staples
+both the app and DMG and runs signature/Gatekeeper checks. An identity alone is
+insufficient for this command. Keychain credentials are provisioned separately.
+
+### Build Windows, combine and publish manually
+
+After pushing the approved commit, choose that exact ref in **Native verification
+and test packages**, enter the same version and `mode=dev` or `mode=prod`.
+No run publishes a release. Production builds must be in main history.
+After a successful run, download its Windows artifact (replace RUN_ID):
+
+```sh
+gh run view RUN_ID --repo PoulWalcker/sapiens4 --json headSha,conclusion
+# Require conclusion=success and headSha=$COMMIT before downloading.
+gh run download RUN_ID --repo PoulWalcker/sapiens4 \
+  --name sapiens4-development-windows-x64 --dir ".build/release/$VERSION/windows"
+```
+
+Validate the complete set with the existing receipt checker. It requires exactly
+one receipt per supported platform, both installer and ZIP, matching clean source
+commit/version and final file hashes. Prod additionally requires publisher signing
+and the supported macOS13 floor; Dev permits Mac ad-hoc/unsigned and Windows unsigned.
+Keep the default mode `prod` when validating production packages.
+
+```sh
+python3 build/package/release.py --mode dev --repository PoulWalcker/sapiens4 \
+  --directory ".build/release/$VERSION" --source-commit "$COMMIT" \
+  --version "$VERSION" --output .build/verified-assets.txt
+```
+
+Only after this command succeeds, create a draft with all six verified assets
+(two installers, two portable ZIPs and two receipts). This shell block runs on
+macOS Bash3.2 as well as newer Bash:
+
+```sh
+# Use --mode prod above for a production release. Run only after verification succeeds.
+bash -eu -c '
+  assets=()
+  while IFS= read -r asset; do assets+=("$asset"); done < .build/verified-assets.txt
+  gh release create "v$1" "${assets[@]}" --repo PoulWalcker/sapiens4 \
+    --target "$2" --draft --title "Sapiens4 $1"
+' _ "$VERSION" "$COMMIT"
+```
+
+Review the complete draft in GitHub, then publish it manually. No credentials or
+workflow can automatically publish a Windows-only production release. A failed
+verification must stop the process; never reuse a previous verified-assets list.
+The receipt signing labels supplement, rather than replace, native signing checks
+performed on the build hosts. Do not use arbitrary untrusted receipts.
 
 ## Payload integrity
 
@@ -87,15 +162,10 @@ all application EXE/DLL files before final inventories. Inno signs its generated
 Setup, uninstaller and temporary copies through the configured SignTool; final
 installer hashes are calculated after composition/signing.
 
-Tag workflows require these repository secrets:
-
-- `MAC_CERTIFICATE_P12` and `MAC_NOTARY_KEY_P8`: base64-encoded certificate and key.
-- `MAC_CERTIFICATE_PASSWORD` (may be empty), `MAC_SIGN_IDENTITY`,
-  `MAC_NOTARY_KEY_ID`, `MAC_NOTARY_ISSUER`.
-- `WINDOWS_CERTIFICATE_PFX` (base64) and `WINDOWS_CERTIFICATE_PASSWORD`.
-
-Missing credentials fail before compilation. Release runners remove temporary
-certificate/keychain material after the job. Keep signing material out of logs.
+Windows production workflows require repository secrets `WINDOWS_CERTIFICATE_PFX`
+(base64) and `WINDOWS_CERTIFICATE_PASSWORD`. Missing credentials fail before
+compilation; temporary certificates are removed after the job. Mac credentials
+stay in the local keychain and are no longer required as Actions secrets.
 
 ## Outstanding delivery checks
 
