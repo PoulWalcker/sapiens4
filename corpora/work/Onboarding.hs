@@ -264,7 +264,11 @@ openLoginURL url = do
 browserPortAvailable :: IO Bool
 browserPortAvailable = Socket.withSocketsDo $
  (bracket (Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol) Socket.close $ \socket -> do
+   -- Match the CLI listener: a recently closed callback may still have
+   -- TIME_WAIT connections. Only an active listener should block a new login.
+   Socket.setSocketOption socket Socket.ReuseAddr 1
    Socket.bind socket (Socket.SockAddrInet 1455 (Socket.tupleToHostAddress (127,0,0,1)))
+   Socket.listen socket 1
    pure True) `catch` (\(_::IOException) -> pure False)
 
 signIn :: FilePath -> [(String,String)] -> IORef Value -> Bool -> IO T.Text

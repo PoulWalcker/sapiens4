@@ -41,6 +41,9 @@ derive instance eqDialogKind :: Eq DialogKind
 corporaDialog :: DialogKind -> Boolean
 corporaDialog kind = A.elem kind [CreateCorpora,EditCorpora,ConnectRemote,HostPairing,RelayList,RelayAdd,RelaySwitch,RelayTerms,Notice]
 
+data ProviderPage = Providers | CodexDetails | CodexAuth | ConfirmChange | ConfirmDisconnect
+derive instance eqProviderPage :: Eq ProviderPage
+
 data DialogStatus = Editing | Submitting String | Rejected String
 derive instance eqDialogStatus :: Eq DialogStatus
 
@@ -61,7 +64,7 @@ setDialogBusy running d = d {status=if running then Submitting (dialogError d) e
 setDialogError :: String -> Dialog -> Dialog
 setDialogError message d = d {status=if dialogBusy d then Submitting message else if message == "" then Editing else Rejected message}
 
-type Dialog = { kind :: DialogKind, title :: String, record :: F.Context, fields :: F.Fields, content :: F.Content, status :: DialogStatus, identity :: Int }
+type Dialog = { providerPage :: ProviderPage, kind :: DialogKind, title :: String, record :: F.Context, fields :: F.Fields, content :: F.Content, status :: DialogStatus, identity :: Int }
 
 data ConnectionState = Offline | Online | ChangingLifecycle Boolean
 derive instance eqConnectionState :: Eq ConnectionState
@@ -107,7 +110,7 @@ type SessionState =
   , epoch :: Int, sequence :: Int, now :: Number, env :: Environment
   , records :: Array X.Corpora, active :: String, connection :: ConnectionState
   , localAvailable :: Boolean, showArchived :: Boolean, installRequired :: Boolean, setupChecked :: Boolean
-  , account :: Json, preferencesSaved :: String
+  , account :: Json, accountCheckedAt :: Number, accountChecking :: Boolean, preferencesSaved :: String
   )
 
 initial :: Environment -> Model
@@ -119,7 +122,7 @@ initial env =
   , epoch:0, sequence:0, now:0.0, env, panes:[N.ChatPane,N.Sidebar,N.Workspace], search:"", searchOpen:false, menu:Nothing, dialog:Nothing
   , records:[], active:"", connection:Offline, localAvailable:false, showArchived:false
   , toast:"", feedback:"", theme:if env.dark then "dark" else "light", installRequired:false, setupChecked:false
-  , dialogStack:[], imageUrls:O.empty, preview:NotAsked, address:"", addressOpen:false, scrollPosition:Nothing, restoringScroll:false, account:D.empty, preferencesSaved:""
+  , dialogStack:[], imageUrls:O.empty, preview:NotAsked, address:"", addressOpen:false, scrollPosition:Nothing, restoringScroll:false, account:D.empty, accountCheckedAt:0.0, accountChecking:false, preferencesSaved:""
   }
 
 agent :: Model -> String -> X.Entity
