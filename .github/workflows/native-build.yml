@@ -97,14 +97,6 @@ jobs:
           path: |
             submodules/libs4/haskell/.cabal/store
             submodules/libs4/haskell/.cabal/packages
-      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1 snapshot, 2026-11-08
-        if: github.event_name != 'pull_request'
-        with:
-          ruby-version: '3.4.11'
-      - name: Install package-scenario dependencies
-        if: github.event_name != 'pull_request'
-        shell: bash
-        run: ruby submodules/libs4/ruby/bundle.rb install
       - name: Compile installer script before the expensive Windows application build
         if: github.event_name != 'pull_request'
         shell: pwsh
@@ -132,6 +124,16 @@ jobs:
             submodules/libs4/haskell/.cabal/store
             submodules/libs4/haskell/.cabal/packages
       # Pull requests stop at compilation: no provider download, package or upload.
+      # Ruby prepends MSYS2/pkg-config paths; install it after native compilation
+      # so Cabal does not link the backend against Ruby's external zlib1.dll.
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1 snapshot, 2026-11-08
+        if: github.event_name != 'pull_request'
+        with:
+          ruby-version: '3.4.11'
+      - name: Install package-scenario dependencies
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: ruby submodules/libs4/ruby/bundle.rb install
       - name: Configure Windows release signing
         if: (inputs.release || inputs.mode == 'prod')
         shell: pwsh
@@ -246,6 +248,14 @@ jobs:
           }
           $env:PATH = $originalPath
           exit 0
+      - name: Confirm missing DLL in disposable diagnostic copy
+        shell: pwsh
+        run: |
+          $candidates = @($env:PATH -split ';' | Where-Object { $_ } | ForEach-Object { Join-Path $_ 'zlib1.dll' } | Where-Object { Test-Path $_ -PathType Leaf })
+          if (-not $candidates.Count) { throw 'No zlib DLL available for controlled diagnosis' }
+          Get-FileHash $candidates[0] -Algorithm SHA256
+          Copy-Item $candidates[0] (Join-Path $env:SAPIENS_TEST_PACKAGE_RUNTIME '.build/bin/zlib1.dll')
+          Write-Output 'Added DLL to disposable extracted copy only; original ZIP and receipt unchanged'
       - name: Observe packaged backend without compiling
         shell: bash
         run: |
