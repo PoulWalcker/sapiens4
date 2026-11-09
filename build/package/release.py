@@ -10,6 +10,9 @@ from package import digest
 def verify(args):
     if args.repository != 'PoulWalcker/sapiens4' or not re.fullmatch(r'[a-f0-9]{40}', args.source_commit):
         raise ValueError('Expected development fork and exact tagged source commit')
+    test_release = getattr(args, 'test_release', False)
+    if test_release and not re.fullmatch(r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)-dev\.release-check\.[1-9][0-9]*', args.version):
+        raise ValueError('Test signing is restricted to dev.release-check prereleases')
     receipts = sorted(Path(args.directory).resolve().rglob('*.release.json'))
     if len(receipts) != 2:
         raise ValueError('Exactly the Mac arm64 and Windows x64 receipts are required')
@@ -32,6 +35,8 @@ def verify(args):
         if target not in expected:
             raise ValueError('Unsupported release target')
         signing, installer = expected[target]
+        if test_release:
+            signing = 'ad-hoc' if target[0] == 'macos' else 'none'
         names = set()
         for item in items:
             if (item['platform'], item['architecture']) != target or item.get('signing') != signing or item.get('supportStatus') != 'declared-target':
@@ -60,4 +65,5 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('repository', 'directory', 'source-commit', 'version', 'output'):
         parser.add_argument('--' + name, required=True)
+    parser.add_argument('--test-release', action='store_true')
     verify(parser.parse_args())

@@ -113,3 +113,12 @@ Publisher signing/notarization, clean-machine/normal-user Windows, Windows 11 AR
 macOS 13 and downloaded signed-artifact acceptance require recorded results.
 Unsigned/ad-hoc CI evidence does not establish signing, target-OS or real-account
 acceptance. Use synthetic data.
+
+## Explicit release-flow test
+
+Tags `vSemVer-dev.release-check.N` (N starts at1) may release commits from
+`codex/verify-clean-composition` history as test prereleases. Both native builds
+and package/lifecycle checks must succeed. The publisher verifies exact source,
+version, both target receipts and final hashes, expecting macOS ad-hoc signing
+and unsigned Windows only in this mode. These releases are prereleases and never
+Latest. Other version tags retain main ancestry and publisher-signing requirements.
