@@ -31,7 +31,7 @@ make kind record m = {providerPage:M.Providers,kind,title,record,fields,content:
   title = case kind of
     M.AppMenu -> D.fallback "CORPORA" $ m.snapshot.corpora.name
     M.WorkspaceSettings -> "Workspace & settings"
-    M.AIProviders -> "AI Providers"
+    M.AIProviders -> "AI Connections"
     M.Computer -> "Shared computer"
     M.Onboarding -> "Set up Sapiens"
     M.AgentSettings -> name <> " settings"
@@ -68,8 +68,8 @@ view m = case m.dialog of
   Nothing -> V.node "dialog" [V.id "modal"] []
   Just d -> V.node "dialog" [V.id $ if M.corporaDialog d.kind then "corpora-dialog" else "modal",V.cls $ if d.kind == M.AppMenu then "app-menu-sheet" else "",V.attr "aria-labelledby" "dialog-title",V.on "cancel" \e -> Link e CloseDialog]
     [V.div (if M.corporaDialog d.kind then "corpora-menu-heading" else "modal-top") [V.span [V.cls "tiny-label"] "SAPIENS4",V.when (dismissible d) $ V.icon (if M.corporaDialog d.kind then "Close" else "Close dialog") "×" CloseDialog]
-    ,V.node "div" [V.id $ if M.corporaDialog d.kind then "corpora-dialog-body" else "modal-content"] [V.when (d.kind == M.AIProviders && d.providerPage /= M.Providers && not (authenticating d)) $ V.control [V.cls "ai-provider-back"] "‹  AI Providers" $ ProviderNavigate M.Providers,V.node "h2" [V.id "dialog-title",V.attr "tabindex" "-1",V.cls (if d.kind == M.AIProviders then "provider-title" else "")] ((if d.kind == M.AIProviders && d.providerPage /= M.Providers then [providerIcon "codex"] else []) <> [V.text $ dialogTitle d]),body m d,V.textNode "p" [V.cls "corpora-feedback",V.attr "role" "status"] ((M.dialogError d))
-      ,V.when (A.elem d.kind [M.Onboarding,M.AIProviders,M.Computer] && M.dialogError d /= "") $ V.button "button" "Recheck" $ OnboardingPoll d.identity]]
+    ,V.node "div" [V.id $ if M.corporaDialog d.kind then "corpora-dialog-body" else "modal-content"] [V.when (d.kind == M.AIProviders && d.providerPage /= M.Providers && not (authenticating d)) $ V.control [V.cls "ai-provider-back"] "‹  AI Connections" $ ProviderNavigate M.Providers,V.node "h2" [V.id "dialog-title",V.attr "tabindex" "-1",V.cls (if d.kind == M.AIProviders then "provider-title" else "")] ((if d.kind == M.AIProviders && d.providerPage /= M.Providers then [providerIcon "codex"] else []) <> [V.text $ dialogTitle d]),body m d,V.textNode "p" [V.cls "corpora-feedback",V.attr "role" "status"] ((M.dialogError d))
+      ,V.when (A.elem d.kind [M.Onboarding,M.AIProviders,M.Computer] && M.dialogError d /= "") $ V.button "button" "Check again" $ OnboardingPoll d.identity]]
 
 authenticating :: M.Dialog -> Boolean
 authenticating d = M.dialogBusy d || case d.content of
@@ -86,25 +86,36 @@ dismissible d
 
 dialogTitle :: M.Dialog -> String
 dialogTitle d
+  | d.kind == M.Computer = case d.content of
+      F.Setup value -> if A.elem (D.s "computer_permission" value) ["not_requested","denied"] then "Computer access needed" else "Computer access"
+      _ -> "Computer access"
   | d.kind == M.AIProviders = case d.providerPage of
-      M.Providers -> "AI Providers"
-      M.CodexAuth -> "Connect Codex"
+      M.Providers -> "Your AI lineup"
+      M.CodexAuth -> case d.content of
+        F.Setup value -> connectionTitle value
+        _ -> "Connecting Codex"
       _ -> "Codex"
   | d.kind == M.Onboarding = case d.content of
-      F.Setup value -> if D.s "step" value == "welcome" then "Choose your AI" else "Connect Codex"
+      F.Setup value -> if D.s "step" value == "welcome" then "Choose your AI" else connectionTitle value
       _ -> "Choose your AI"
   | otherwise = d.title
+
+connectionTitle :: Json -> String
+connectionTitle value = case D.s "provider" value of
+  "missing" -> "Codex isn't available"
+  "unavailable" -> "Couldn't check Codex"
+  _ -> if A.elem (D.s "state" (D.get "login" value)) ["failed","expired"] then "Couldn't connect Codex" else "Connecting Codex"
 
 body :: M.Model -> M.Dialog -> V.Html
 body m d = case d.kind of
   M.AppMenu -> V.node "nav" [V.label "Corpora menu"]
     [V.button "app-menu-row" "Workspace & settings" $ OpenDialog M.WorkspaceSettings F.NoRecord
-    ,V.when m.localAvailable $ V.button "app-menu-row" "AI Providers" $ OpenDialog M.AIProviders F.NoRecord
+    ,V.when m.localAvailable $ V.button "app-menu-row" "AI Connections" $ OpenDialog M.AIProviders F.NoRecord
     ,V.button "app-menu-row" "Shared computer" $ OpenDialog M.Computer F.NoRecord]
   M.WorkspaceSettings -> V.div ""
     [V.p "" "Talk to your Sapis in chat, manage their notes, and save documents in their workspaces. Sapis can delegate requests through ChiefSapi."
     ,V.p "" "Use the corpora menu to switch workspaces. Active and Paused describe execution on the host; Connecting means this device is restoring its connection."
-    ,V.when m.localAvailable $ V.button "button" "AI Providers" $ OpenDialog M.AIProviders F.NoRecord
+    ,V.when m.localAvailable $ V.button "button" "AI Connections" $ OpenDialog M.AIProviders F.NoRecord
     ,V.button "button" "Edit decision prompts" $ OpenDialog M.DecisionPrompts F.NoRecord
     ,V.when m.localAvailable $ V.button "button" "Computer access" $ OpenDialog M.Computer F.NoRecord]
   M.AIProviders -> case d.content of
@@ -250,15 +261,15 @@ setupButton d name caption = V.control [V.cls "button",V.disabled $ M.dialogBusy
 
 signInView :: Json -> V.Html
 signInView value = V.div "account-sign-in" $
-  [V.textNode "p" [V.attr "role" "status"] $ if signing then "Waiting for sign-in… Complete it in your browser. If it didn’t open, use the sign-in link below." else "Connect Codex with your ChatGPT account."
-  ,V.when (provider == "missing") $ V.p "" "Codex is missing from this installation. Reinstall Sapiens to repair it."
-  ,V.when (provider == "unavailable") $ V.p "" "We couldn’t check your sign-in. Recheck your connection. If this keeps happening, reinstall Sapiens to repair its runtime."
+  [V.textNode "p" [V.attr "role" "status"] $ if signing then "Finish signing in with ChatGPT in your browser. Waiting for sign-in…" else if provider == "sign_in_required" && not (A.elem state ["failed","expired"]) then "Finish signing in with ChatGPT in your browser." else ""
+  ,V.when (provider == "missing") $ V.p "" "The Codex installation is missing or couldn't start. Reinstall Sapiens if the problem persists."
+  ,V.when (provider == "unavailable") $ V.p "" "Your account may still be connected. Try checking again."
   ,V.when (state == "failed" || state == "expired" || state == "browser_busy" || state == "logout_failed" || state == "cancelled") $ V.p "" $ case state of
-    "expired" -> "Sign-in timed out. Please try again."
+    "expired" -> "Sign-in expired. Try again or use a one-time code."
     "browser_busy" -> "Another sign-in is using the browser callback. Finish it and try again, or use a one-time code."
     "logout_failed" -> "We couldn’t finish signing out. Recheck your connection, then try signing out again."
     "cancelled" -> "Sign-in cancelled. You can try again when you’re ready."
-    _ -> "Sign-in failed. Check your connection and try again. If this keeps happening, reinstall Sapiens to repair its runtime."
+    _ -> "Sign-in didn't finish. Try again or use a one-time code."
   ,V.when (provider == "sign_in_required") $ V.button "button primary" (if state == "failed" || state == "expired" then "Try again" else "Connect") $ DialogCommand $ Intent.Setup "login"
   ,V.when (provider == "sign_in_required") $ V.p "form-hint" "Your browser will open to complete sign-in."
   ,V.when (signing && D.s "url" login /= "") $ V.div "account-actions"
@@ -268,7 +279,7 @@ signInView value = V.div "account-sign-in" $
     [V.p "" "Enter this one-time code on the official OpenAI page. Only continue if you started this sign-in in Sapiens."
     ,V.textNode "strong" [] (D.s "code" login)]
   ,V.when signing $ V.control [V.cls "button",V.id "cancel-codex-login"] "Cancel" $ DialogCommand $ Intent.Setup "cancel"
-  ,V.when (not signing && provider /= "missing") $ V.button "button" "Recheck connection" $ DialogCommand $ Intent.Setup "refresh"
+  ,V.when (not signing && provider /= "missing") $ V.button "button" "Check again" $ DialogCommand $ Intent.Setup "refresh"
   ,V.when (provider == "sign_in_required") $ V.node "details" [V.cls "account-help"]
     [V.textNode "summary" [] "Having trouble signing in?"
     ,V.p "form-hint" "You can connect the same ChatGPT account using a one-time code. Device code login must be enabled in your ChatGPT security settings."
@@ -289,18 +300,18 @@ accountView d = V.node "section" [V.cls "ai-provider-detail-body",V.label "Codex
       in if provider == "signing_out" then [V.textNode "p" [V.attr "role" "status"] "Signing out…"]
       else if confirmation then
         [V.textNode "h4" [] (if d.providerPage == M.ConfirmChange then "Change Codex account?" else "Disconnect Codex?")
-        ,V.p "" (if d.providerPage == M.ConfirmChange then "Your current account will be signed out first. Cancelling the next sign-in leaves Codex disconnected." else "Codex will no longer be available to agents. Your local chats and settings remain.")
+        ,V.p "" (if d.providerPage == M.ConfirmChange then "We'll sign out of your current account first. If you cancel the new sign-in, Codex will stay disconnected." else "Your Sapis won't be able to use Codex until you reconnect. Your chats and settings will stay on this device.")
         ,V.div "account-actions" [setupButton d (if d.providerPage == M.ConfirmChange then "change-account" else "sign-out") (if d.providerPage == M.ConfirmChange then "Continue" else "Disconnect"),V.control [V.cls "button",V.disabled $ M.dialogBusy d] "Cancel" $ ProviderNavigate M.CodexDetails]]
       else if provider == "signed_in" then
         [V.textNode "p" [V.cls "account-connected",V.attr "role" "status"] "Connected"
         ,V.when (D.s "hold" value == "review") $ V.div ""
-          [V.p "form-hint" "AI work is paused. Review any pending tasks before resuming with this account."
+          [V.p "form-hint" "AI work is paused. Review any pending tasks before continuing with this account."
           ,V.control [V.cls "button",V.id "resume-ai-work",V.disabled $ M.dialogBusy d] "Resume AI work" $ DialogCommand $ Intent.Setup "resume"]
         ,V.when (D.s "hold" value /= "" && D.s "hold" value /= "review") $ V.p "" "The last account change was interrupted. Sign out and reconnect before resuming AI work."
         ,V.div "ai-provider-actions"
           [V.control [V.cls "ai-provider-action",V.disabled $ M.dialogBusy d] "Change account  ›" $ ProviderNavigate M.ConfirmChange
           ,V.control [V.cls "ai-provider-action ai-provider-action-danger",V.disabled $ M.dialogBusy d] "Disconnect  ›" $ ProviderNavigate M.ConfirmDisconnect]]
-      else [V.when (provider /= "signing_in") $ V.p "" (if provider == "unavailable" then "Unable to check connection" else "Not connected")
+      else [V.when (provider /= "signing_in") $ V.p "" (if provider == "unavailable" then "Couldn't check Codex" else if provider == "missing" then "Codex isn't available" else "Not connected")
            ,signInView value
            ,V.when (provider == "unavailable" || state == "logout_failed") $ V.control [V.cls "button",V.disabled $ M.dialogBusy d] "Sign out" $ ProviderNavigate M.ConfirmDisconnect]
     _ -> [V.p "" "Checking connection…"]
@@ -336,10 +347,10 @@ aiProvidersView d value =
       inAuth = page == M.CodexAuth
       needsAttention = A.elem (D.s "state" (D.get "login" value)) ["failed","expired","browser_busy","logout_failed"]
       status = case provider of
-        "signed_in" -> if hold == "review" then "Connected · AI work paused" else if hold /= "" then "Connected · Needs attention" else "Connected"
+        "signed_in" -> if hold == "review" then "Connected" else if hold /= "" then "Needs attention" else "Connected"
         "signing_in" -> "Connecting…"
         "signing_out" -> "Disconnecting…"
-        "missing" -> "Installation needs repair"
+        "missing" -> "Needs attention"
         "unavailable" -> "Needs attention"
         _ -> if needsAttention then "Needs attention" else "Not connected"
       navigate = ProviderNavigate M.CodexDetails
@@ -354,7 +365,7 @@ aiProvidersView d value =
     ,V.when (A.elem provider ["signing_in","signing_out"]) $ V.p "form-hint" "Stay here until sign-in finishes, or cancel sign-in to leave."]
   else if details then [accountView d]
   else
-    [V.p "form-hint" "Manage AI connections for your agents."
+    [V.p "form-hint" "Connect the AI tools your Sapis can use."
     ,V.div "ai-provider-list" $ [codex] <> comingSoonProviders]
 
 
@@ -366,7 +377,7 @@ providersView d value =
       alreadyConnected = D.s "provider" value == "signed_in"
   in V.div "setup-screen" $ case D.s "step" value of
     "welcome" ->
-      [V.p "form-hint" "Connect an AI provider to get started."
+      [V.p "form-hint" "Start with Codex. More AI tools are on the way."
       ,V.div "ai-provider-list" $ [providerRow "codex" "Codex" (if alreadyConnected then "Already connected" else "OpenAI")
           (V.control [V.cls "button primary",V.disabled $ M.dialogBusy d] (if alreadyConnected then "Continue" else "Connect") $ DialogCommand $ Intent.Setup "connect")] <> comingSoonProviders]
     "sign_in" ->
@@ -378,23 +389,23 @@ providersView d value =
       ,V.p "" $ case permission of
         "missing" -> "The computer helper is missing. Reinstall Sapiens to repair it."
         "granted" -> "Computer control is enabled."
-        "denied" -> "Enable Accessibility in System Settings when you want agents to use the computer."
-        "unavailable" -> "Couldn't check Accessibility. Recheck or open System Settings."
+        "denied" -> "To interact with apps on your Mac, Sapiens needs Accessibility permission."
+        "unavailable" -> "Couldn't check Accessibility. Check again or open System Settings."
         "not_required" -> "Computer control works with accessible Windows apps."
         _ -> "Computer control needs macOS Accessibility permission."
       ,V.when (A.elem permission ["not_requested","denied","unavailable"]) $ setup "permission" "Enable Accessibility"
-      ,V.when (permission == "granted" || permission == "unavailable") $ setup "refresh" "Recheck"
-      ,V.button "button" "Done" CloseDialog]
+      ,V.when (permission == "granted" || permission == "unavailable") $ setup "refresh" "Check again"
+      ,V.button "button" (if A.elem permission ["not_requested","denied","unavailable"] then "Not now" else "Done") CloseDialog]
 
 computerAccess :: M.Dialog -> Json -> V.Html
 computerAccess d value = V.div "setup-screen"
   [V.p "" $ case permission of
     "missing" -> "Computer helper missing. Reinstall Sapiens to repair it."
     "granted" -> "Computer control enabled."
-    "denied" -> "Enable Accessibility in System Settings to use computer control."
+    "denied" -> "To interact with apps on your Mac, Sapiens needs Accessibility permission."
     "not_required" -> "Computer control works with accessible Windows apps."
-    _ -> "Accessibility access is unavailable. Recheck or open System Settings."
+    _ -> "Couldn't check Accessibility. Check again or open System Settings."
   ,V.when (A.elem permission ["not_requested","denied","unavailable"]) $ setupButton d "permission" "Enable Accessibility"
-  ,V.when (permission /= "missing" && permission /= "not_required") $ setupButton d "refresh" "Recheck"
-  ,V.button "button" "Done" CloseDialog]
+  ,V.when (permission /= "missing" && permission /= "not_required") $ setupButton d "refresh" "Check again"
+  ,V.button "button" (if A.elem permission ["not_requested","denied","unavailable"] then "Not now" else "Done") CloseDialog]
   where permission = D.s "computer_permission" value
