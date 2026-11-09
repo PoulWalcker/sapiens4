@@ -1,0 +1,191 @@
+name: Native verification and test packages
+'on':
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Verification label (no package or release)
+        required: true
+        default: 0.1.0-dev.d3-clean
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - runner: macos-15
+          platform: darwin-arm64
+          compile: ./environments/macos/build.sh --build-only
+        - runner: windows-2025
+          platform: windows-x64
+          compile: pwsh -NoProfile -File ./environments/windows/build.ps1 -BuildOnly
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      PACKAGE_VERSION: ${{ inputs.version || '0.1.0-dev' }}
+      PROVIDER_PLATFORM: ${{ matrix.platform }}
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      with:
+        persist-credentials: false
+    - name: Resolve exact dependency pins from upstream URLs
+      shell: bash
+      run: 'git config submodule.blindly4.url https://github.com/aleski-green/blindly4.git
+
+        git config submodule.libs4.url https://github.com/PoulWalcker/libs4.git
+
+        git submodule update --init --recursive
+
+        git submodule status --recursive
+
+        '
+    - uses: haskell-actions/setup@82e8b5066385702e477d9dc98f287070493e8abd
+      with:
+        ghc-version: 9.14.1
+        cabal-version: 3.18.2.0
+        cabal-update: false
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      with:
+        node-version: 22.23.2
+    - name: Verify Windows UI tools before application compilation
+      if: runner.os == 'Windows'
+      timeout-minutes: 10
+      shell: pwsh
+      run: "$ErrorActionPreference = 'Stop'\n$repo = (Get-Location).Path\n$libs = Join-Path $repo 'submodules/libs4'\n$bin\
+        \ = Join-Path $libs '.cache/bin'\n& npm ci --prefix $libs\nif ($LASTEXITCODE -ne 0) { throw 'UI dependency installation\
+        \ failed' }\nNew-Item -ItemType Directory -Force $bin | Out-Null\nCopy-Item (Join-Path $libs 'node_modules/purescript/purs.bin')\
+        \ (Join-Path $bin 'purs.exe') -Force\n$env:PATH = $bin + ';' + $env:PATH\n$env:LOCALAPPDATA = Join-Path $libs '.cache'\n\
+        $env:XDG_CACHE_HOME = $env:LOCALAPPDATA\n& (Join-Path $bin 'purs.exe') --version\nif ($LASTEXITCODE -ne 0) { throw\
+        \ 'Native PureScript compiler failed' }\n& node (Join-Path $libs 'node_modules/esbuild/bin/esbuild') --version\nif\
+        \ ($LASTEXITCODE -ne 0) { throw 'esbuild failed' }\nPush-Location (Join-Path $libs 'purescript')\ntry {\n    $spago\
+        \ = Join-Path $libs 'node_modules/spago/bin/bundle.js'\n    & node $spago install --verbose\n    if ($LASTEXITCODE\
+        \ -ne 0) { throw 'Spago install failed' }\n    $sources = & node $spago sources --json --quiet\n    if ($LASTEXITCODE\
+        \ -ne 0 -or @($sources | ConvertFrom-Json).Count -eq 0) { throw 'Spago sources failed' }\n} finally { Pop-Location\
+        \ }\nWrite-Output 'Windows UI tools passed before application compilation'\n"
+    - name: Install pinned Rust toolchain
+      shell: bash
+      run: 'rustup toolchain install 1.99.0 --profile minimal
+
+        rustup override set 1.99.0
+
+        '
+    - name: Configure isolated HTTPS Hackage index
+      shell: python
+      run: 'from pathlib import Path
+
+        root = Path(''submodules/libs4/haskell/.cabal'')
+
+        root.mkdir(parents=True, exist_ok=True)
+
+        (root / ''config'').write_text(''repository hackage.haskell.org\n  url: https://hackage.haskell.org/\n  secure: True\n'')
+
+        '
+    - name: Key isolated Cabal dependencies
+      id: cabal-key
+      if: github.repository == 'PoulWalcker/sapiens4' && github.event_name != 'pull_request'
+      shell: python
+      run: "import sys\nsys.argv = [\"cache\", \"key\"]\n#!/usr/bin/env python3\n\"\"\"Key the isolated dependency cache and\
+        \ admit only checked Cabal stores.\"\"\"\nimport argparse\nimport hashlib\nimport json\nimport os\nfrom pathlib import\
+        \ Path\nimport subprocess\ndef digest(path):\n    return hashlib.sha256(path.read_bytes()).hexdigest()\n\nparser =\
+        \ argparse.ArgumentParser(description=__doc__)\nparser.add_argument('mode', choices=('key', 'check'))\nargs = parser.parse_args()\n\
+        root = Path.cwd()\nproject = root / 'submodules/libs4/haskell'\ncache = project / '.cabal'\n\n\ndef output(name, value):\n\
+        \    with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:\n        stream.write(f'{name}={value}\\n')\n\n\nif args.mode\
+        \ == 'key':\n    inputs = {name: os.environ.get(name, '') for name in\n              ('RUNNER_OS', 'RUNNER_ARCH',\
+        \ 'ImageOS', 'ImageVersion', 'MACOSX_DEPLOYMENT_TARGET')}\n    # Never share across runs when the runner image cannot\
+        \ be identified.\n    inputs['image'] = inputs['ImageVersion'] or os.environ['GITHUB_RUN_ID']\n    inputs['workspace']\
+        \ = str(root)\n    inputs['ghc'] = subprocess.check_output(['ghc', '--info'], text=True)\n    inputs['cabal'] = subprocess.check_output(['cabal',\
+        \ '--numeric-version'], text=True).strip()\n    inputs['dependencies'] = {name: digest(project / name)\n         \
+        \                     for name in ('cabal.project', 'cabal.project.freeze', 'sapiens-domain.cabal')}\n    fingerprint\
+        \ = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()\n    output('key', f'cabal-deps-v1-{inputs[\"\
+        RUNNER_OS\"]}-{inputs[\"RUNNER_ARCH\"]}-{fingerprint}')\nelse:\n    databases = list((cache / 'store').glob('*/package.db'))\n\
+        \    # Build.hs copies these only after Cabal compilation, before build-ui.\n    # They are witnesses, never cache\
+        \ payloads: a partial dependency build must\n    # not occupy an immutable cache key with an incomplete useful package\
+        \ set.\n    binaries = ('sapiens4.exe', 'sapiens-windows.exe') if os.name == 'nt' else ('sapiens4', 'sapiens-macos')\n\
+        \    ready = (bool(databases) and (cache / 'packages/hackage.haskell.org/01-index.tar').is_file()\n             and\
+        \ all((root / '.build/bin' / name).is_file() for name in binaries))\n    log = []\n    for database in databases:\n\
+        \        # Cabal retains empty .lock files normally; unfinished incoming entries\n        # are not reusable, and\
+        \ we never delete them to make a cache look valid.\n        incoming = database.parent / 'incoming'\n        if incoming.exists()\
+        \ and any(p.is_dir() or p.suffix != '.lock' for p in incoming.iterdir()):\n            ready = False\n        checked\
+        \ = subprocess.run(['ghc-pkg', '--no-user-package-db', '--package-db', str(database), 'check'],\n                \
+        \                 capture_output=True, text=True)\n        log.append(checked.stdout + checked.stderr)\n        ready\
+        \ = ready and checked.returncode == 0\n    (root / '.build').mkdir(exist_ok=True)\n    (root / '.build/cabal-cache-check.log').write_text('\\\
+        n'.join(log))\n    output('ready', str(ready).lower())\n    print('Cabal dependency cache verified' if ready else\
+        \ 'Dependency cache not saved: incomplete or invalid store')\n"
+    - name: Restore trusted Cabal dependencies
+      id: cabal-restore
+      if: github.repository == 'PoulWalcker/sapiens4' && github.event_name != 'pull_request'
+      uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684
+      with:
+        key: ${{ steps.cabal-key.outputs.key }}
+        path: 'submodules/libs4/haskell/.cabal/store
+
+          submodules/libs4/haskell/.cabal/packages
+
+          '
+    - name: Compile host, native application, UI and existing fixture helpers once
+      id: compile
+      shell: bash
+      run: runghc build/Build.hs
+    - name: Check completed dependencies even if UI compilation failed
+      id: cabal-ready
+      if: ${{ !cancelled() && github.repository == 'PoulWalcker/sapiens4' && github.event_name != 'pull_request' && steps.compile.outcome
+        != 'skipped' && steps.cabal-restore.outputs.cache-hit != 'true' }}
+      shell: python
+      run: "import sys\nsys.argv = [\"cache\", \"check\"]\n#!/usr/bin/env python3\n\"\"\"Key the isolated dependency cache\
+        \ and admit only checked Cabal stores.\"\"\"\nimport argparse\nimport hashlib\nimport json\nimport os\nfrom pathlib\
+        \ import Path\nimport subprocess\ndef digest(path):\n    return hashlib.sha256(path.read_bytes()).hexdigest()\n\n\
+        parser = argparse.ArgumentParser(description=__doc__)\nparser.add_argument('mode', choices=('key', 'check'))\nargs\
+        \ = parser.parse_args()\nroot = Path.cwd()\nproject = root / 'submodules/libs4/haskell'\ncache = project / '.cabal'\n\
+        \n\ndef output(name, value):\n    with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:\n        stream.write(f'{name}={value}\\\
+        n')\n\n\nif args.mode == 'key':\n    inputs = {name: os.environ.get(name, '') for name in\n              ('RUNNER_OS',\
+        \ 'RUNNER_ARCH', 'ImageOS', 'ImageVersion', 'MACOSX_DEPLOYMENT_TARGET')}\n    # Never share across runs when the runner\
+        \ image cannot be identified.\n    inputs['image'] = inputs['ImageVersion'] or os.environ['GITHUB_RUN_ID']\n    inputs['workspace']\
+        \ = str(root)\n    inputs['ghc'] = subprocess.check_output(['ghc', '--info'], text=True)\n    inputs['cabal'] = subprocess.check_output(['cabal',\
+        \ '--numeric-version'], text=True).strip()\n    inputs['dependencies'] = {name: digest(project / name)\n         \
+        \                     for name in ('cabal.project', 'cabal.project.freeze', 'sapiens-domain.cabal')}\n    fingerprint\
+        \ = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()\n    output('key', f'cabal-deps-v1-{inputs[\"\
+        RUNNER_OS\"]}-{inputs[\"RUNNER_ARCH\"]}-{fingerprint}')\nelse:\n    databases = list((cache / 'store').glob('*/package.db'))\n\
+        \    # Build.hs copies these only after Cabal compilation, before build-ui.\n    # They are witnesses, never cache\
+        \ payloads: a partial dependency build must\n    # not occupy an immutable cache key with an incomplete useful package\
+        \ set.\n    binaries = ('sapiens4.exe', 'sapiens-windows.exe') if os.name == 'nt' else ('sapiens4', 'sapiens-macos')\n\
+        \    ready = (bool(databases) and (cache / 'packages/hackage.haskell.org/01-index.tar').is_file()\n             and\
+        \ all((root / '.build/bin' / name).is_file() for name in binaries))\n    log = []\n    for database in databases:\n\
+        \        # Cabal retains empty .lock files normally; unfinished incoming entries\n        # are not reusable, and\
+        \ we never delete them to make a cache look valid.\n        incoming = database.parent / 'incoming'\n        if incoming.exists()\
+        \ and any(p.is_dir() or p.suffix != '.lock' for p in incoming.iterdir()):\n            ready = False\n        checked\
+        \ = subprocess.run(['ghc-pkg', '--no-user-package-db', '--package-db', str(database), 'check'],\n                \
+        \                 capture_output=True, text=True)\n        log.append(checked.stdout + checked.stderr)\n        ready\
+        \ = ready and checked.returncode == 0\n    (root / '.build').mkdir(exist_ok=True)\n    (root / '.build/cabal-cache-check.log').write_text('\\\
+        n'.join(log))\n    output('ready', str(ready).lower())\n    print('Cabal dependency cache verified' if ready else\
+        \ 'Dependency cache not saved: incomplete or invalid store')\n"
+    - name: Save verified Cabal dependencies
+      if: ${{ !cancelled() && steps.cabal-ready.outputs.ready == 'true' }}
+      uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684
+      with:
+        key: ${{ steps.cabal-key.outputs.key }}
+        path: 'submodules/libs4/haskell/.cabal/store
+
+          submodules/libs4/haskell/.cabal/packages
+
+          '
+    - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199
+      with:
+        ruby-version: 3.4.11
+    - name: Verify standalone pinned provider acquisition
+      shell: bash
+      run: python build/acquire-codex.py --platform "$PROVIDER_PLATFORM" --destination .build/codex --ensure
+    - name: Run existing isolated onboarding scenarios
+      shell: bash
+      run: 'ruby submodules/libs4/ruby/bundle.rb install
+
+        ruby submodules/libs4/ruby/bundle.rb exec rspec spec/onboarding_spec.rb --format documentation --out .build/onboarding-rspec.txt'
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      if: always()
+      with:
+        name: d3-source-verification-${{ matrix.platform }}
+        path: '.build/onboarding-rspec.txt
+
+          .build/codex/sapiens-provider.json'
+        if-no-files-found: warn
