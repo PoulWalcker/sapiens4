@@ -8,7 +8,7 @@ else
   runghc build/Build.hs
 fi
 case "$(uname -s):$(uname -m)" in
-  Darwin:arm64) python3 build/package/acquire-provider.py --platform darwin-arm64 --destination .build/codex --ensure ;;
+  Darwin:arm64) runghc -ibuild/package build/Package.hs provider --platform darwin-arm64 --destination .build/codex --ensure ;;
   *) echo 'Bundled Codex requires macOS arm64; other source targets need SAPIENS_CODEX_BINARY.' >&2 ;;
 esac
 exec .build/bin/sapiens4 "$@"
