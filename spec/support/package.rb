@@ -29,6 +29,7 @@ module PackageExamples
           '--port', '0', '--data-dir', data, '--desktop', env: env, chdir: folder)
         begin
           address = Contract.wait(timeout: 40, description: 'installed runtime readiness') do
+            raise "Installed runtime exited before readiness: #{process.status.inspect}" if process.status
             process.stdout[/Sapiens4: (http:\/\/127\.0\.0\.1:\d+)/, 1]
           end
           %w[/api/health /workspace/ /workspace/app.js /workspace/guest.js /remote-vendor.js /workspace/styles.css].each do |route|
