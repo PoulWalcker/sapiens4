@@ -231,6 +231,21 @@ jobs:
       - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1 snapshot
         with:
           ruby-version: '3.4.11'
+      - name: Inspect backend loader and DLL dependencies
+        shell: pwsh
+        run: |
+          $binary = Join-Path $env:SAPIENS_TEST_PACKAGE_RUNTIME '.build/bin/sapiens4.exe'
+          $dumpbin = Get-ChildItem "${env:ProgramFiles}/Microsoft Visual Studio/*/Enterprise/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe" -ErrorAction SilentlyContinue | Select-Object -Last 1
+          if ($dumpbin) { & $dumpbin.FullName /DEPENDENTS $binary }
+          $originalPath = $env:PATH
+          foreach ($restricted in @($false, $true)) {
+            $env:PATH = if ($restricted) { Join-Path $env:SystemRoot 'System32' } else { $originalPath }
+            & $binary --help
+            $code = $LASTEXITCODE
+            Write-Output ("restricted={0} loader_exit={1} hex={2:X8}" -f $restricted, $code, ($code -band 0xFFFFFFFFL))
+          }
+          $env:PATH = $originalPath
+          exit 0
       - name: Observe packaged backend without compiling
         shell: bash
         run: |
@@ -248,7 +263,7 @@ jobs:
             begin
               address = Contract.wait(timeout: 40, description: 'existing packaged backend readiness') do
                 thread = process.instance_variable_get(:@thread)
-                raise "Backend exited: #{process.finish.inspect}" unless thread.alive?
+                raise "Backend exited: status=#{thread.value.inspect}, raw=#{thread.value.to_i}, output=#{process.finish.inspect}" unless thread.alive?
                 process.stdout[/Sapiens4: (http:\/\/127\.0\.0\.1:\d+)/, 1]
               end
               status, = Contract.http(address + '/api/health', 'GET')
