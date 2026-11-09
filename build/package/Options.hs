@@ -19,10 +19,17 @@ providerPlatform Windows = "windows-x64"
 architecture :: Platform -> String
 architecture MacOS = "arm64"
 architecture Windows = "x64"
+executableSuffix :: Platform -> String
+executableSuffix MacOS = ""
+executableSuffix Windows = ".exe"
 parsePlatform :: String -> Either String Platform
 parsePlatform "macos" = Right MacOS
 parsePlatform "windows" = Right Windows
 parsePlatform _ = Left "Supported primary targets: macOS arm64 and Windows x64"
+parseProviderPlatform :: String -> Either String Platform
+parseProviderPlatform "darwin-arm64" = Right MacOS
+parseProviderPlatform "windows-x64" = Right Windows
+parseProviderPlatform _ = Left "Unsupported provider platform"
 signingName :: Signing -> String
 signingName Unsigned = "none"
 signingName AdHoc = "ad-hoc"

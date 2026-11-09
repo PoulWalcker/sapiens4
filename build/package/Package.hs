@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE CPP #-}
 module Package (module Package, module Format) where
 
 import Control.Exception
@@ -14,9 +15,15 @@ import Data.Maybe
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import Data.Word (Word64)
 import System.Directory
 import System.FilePath
+import System.IO.Error (isAlreadyExistsError)
 import System.Process
+import System.Random (randomIO)
+#ifndef mingw32_HOST_OS
+import qualified System.Posix.Directory as Posix
+#endif
 import Options
 import Format
 
@@ -87,14 +94,8 @@ provenance root = do
 stageProvider :: FilePath -> FilePath -> Platform -> Maybe FilePath -> Bool -> IO (Maybe Provider)
 stageProvider root destination platform providerInput allowMissing = do
  provider <- canonicalizePath (fromMaybe (root</>".build/codex") providerInput)
- when (isNothing providerInput && not allowMissing) $ case platform of
-  Windows -> do
-   let script=root</>"build/package/acquire-provider.py"
-   available <- doesFileExist script
-   when available $ run "python" [script,"--platform","windows-x64","--destination",provider,"--ensure"]
-  MacOS -> do
-   locked <- doesFileExist (root</>"build/codex-provider-lock.json")
-   when locked $ acquireProvider root MacOS provider True Nothing
+ when (isNothing providerInput && not allowMissing) $
+  acquireProvider root platform provider True Nothing
  present <- doesDirectoryExist provider
  if not present then
   if allowMissing then pure Nothing else fail "Complete pinned Codex payload required; acquire the provider first"
@@ -115,7 +116,7 @@ stage rootInput destinationInput version platform providerInput allowMissing = d
  exists destination >>= flip when (fail "Runtime destination must be new; refusing to mix old and new payloads")
  when (inside destination root) $ fail "Runtime destination must not contain the source checkout"
  createDirectoryIfMissing True destination
- let windows=platform==Windows;suffix=if windows then ".exe" else ""
+ let windows=platform==Windows;suffix=executableSuffix platform
  appFiles <- concat <$> mapM (files . (root</>)) ["app/theme","app/shell","corpora/prompts"]
  notices <- concat <$> mapM (files . (root</>)) ["license","submodules/libs4/license","submodules/blindly4/license"]
  let relative = [".build/bin/sapiens4"++suffix,".build/web/app.js",".build/web/guest.js",".build/web/sw.js","submodules/libs4/web/remote-vendor.js","submodules/blindly4/.build/"++if windows then "windows/blindly4.exe" else "release/blindly4"] ++ map (makeRelative root) (filter ((/=".purs").takeExtension) appFiles ++ notices)
@@ -183,7 +184,20 @@ receipt artifact installer manifestPath output = do
 withTemporary :: FilePath -> String -> (FilePath -> IO a) -> IO a
 withTemporary parent prefix action = do
  createDirectoryIfMissing True parent
- bracket (capture "mktemp" ["-d",parent</>prefix++".XXXXXXXX"]) removePathForcibly action
+ bracket create removePathForcibly action
+ where
+ create = do
+  nonce <- randomIO :: IO Word64
+  let path=parent</>prefix++"."++show nonce
+  -- Allocate atomically; a pre-existing file/link is never used as a workspace.
+  (do
+#ifdef mingw32_HOST_OS
+   createDirectory path
+#else
+   Posix.createDirectory path 0o700
+#endif
+   pure path) `catch` \errorValue ->
+    if isAlreadyExistsError errorValue then create else throwIO (errorValue :: IOException)
 
 download :: Download -> FilePath -> IO ()
 download asset destination = do
@@ -195,7 +209,6 @@ download asset destination = do
 
 acquireProvider :: FilePath -> Platform -> FilePath -> Bool -> Maybe FilePath -> IO ()
 acquireProvider root platform destinationInput ensure cacheInput = do
- unless (platform==MacOS) $ fail "Windows provider acquisition remains in acquire-provider.py"
  lock <- readJSON (root</>"build/codex-provider-lock.json")
  let (entry,asset)=lockAsset platform lock
      identity=ProviderIdentity (lockVersion lock) platform entry (downloadHash asset) (Just $ lockCommit lock)
@@ -238,7 +251,7 @@ acquireProvider root platform destinationInput ensure cacheInput = do
     directory <- doesDirectoryExist (payload</>path)
     nonempty <- if directory then not . null <$> listDirectory (payload</>path) else pure False
     unless nonempty $ fail ("Missing provider resource directory: "++path)
-   forM_ [entry,"bin/codex-code-mode-host","codex-path/rg"] $ \path ->
+   forM_ [entry,"bin/codex-code-mode-host"++executableSuffix platform,"codex-path/rg"++executableSuffix platform] $ \path ->
     doesFileExist (payload</>path) >>= flip unless (fail $ "Incomplete provider package: "++path)
    forM_ (lockNotices lock) $ \(path,notice) -> download notice (payload</>path)
    records <- inventory payload ["sapiens-provider.json"]
@@ -259,8 +272,7 @@ command root args = case args of
  "receipt":rest -> do artifact<-required "artifact" rest;manifest<-required "manifest" rest;output<-required "output" rest;receipt artifact (option "installer" rest) manifest output
  "provenance":rest -> do output<-required "output" rest;provenance root >>= writeJSON output
  "provider":rest -> do
-  target<-required "platform" rest
-  platform<-case target of "darwin-arm64"->pure MacOS;"windows-x64"->pure Windows;_->fail "Unsupported provider platform"
+  platform<-required "platform" rest >>= either fail pure . parseProviderPlatform
   destination<-required "destination" rest
   acquireProvider root platform destination ("--ensure" `elem` rest) (option "cache" rest)
  _ -> fail "Usage: runghc -ibuild/package build/Package.hs {macos|stage|finalize|verify|receipt|provenance|provider} ..."

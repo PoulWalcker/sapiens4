@@ -13,7 +13,7 @@ try {
         }
         & ./environments/windows/build.ps1 -BuildOnly
         if ($LASTEXITCODE -ne 0) { throw 'Application compilation failed' }
-        & python build/package/acquire-provider.py --platform windows-x64 --destination .build/codex --ensure
+        & runghc -ibuild/package build/Package.hs provider --platform windows-x64 --destination .build/codex --ensure
         if ($LASTEXITCODE -ne 0) { throw 'Codex provider preparation failed' }
     }
     $arguments = @('--port', $Port, '--data-dir', $DataDir)

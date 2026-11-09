@@ -13,7 +13,7 @@ RSpec.describe 'Installed native package' do
       expect(compatibility.fetch('targetOSAcceptance')).to eq('not-run')
     end
     python = Gem.win_platform? ? 'python' : 'python3'
-    _, error, code = Contract.capture(python, 'build/package/package.py', 'verify', '--runtime', runtime, timeout: 120)
+    _, error, code = Contract.capture('runghc', '-ibuild/package', 'build/Package.hs', 'verify', '--runtime', runtime, timeout: 120)
     expect(code).to eq(0), error
     version, error, code = Contract.capture(File.join(runtime, manifest.fetch('provider').fetch('entrypoint')), '--version',
       env: {'PATH' => Gem.win_platform? ? File.join(ENV.fetch('SystemRoot'), 'System32') : '/usr/bin:/bin:/usr/sbin:/sbin'})

@@ -31,10 +31,10 @@ release after successful upload; only that job has contents-write permission.
 
 macOS compilation orchestration and packaging are Haskell (`build/Package.hs`
 and `build/package/`). The shared Haskell engine owns assembly, inventories,
-provenance and receipts for both platforms. Existing Windows commands retain
-the thin `package.py` compatibility CLI; Windows provider acquisition and
-CI/cache/test/release helpers remain Python. No Python is used by the macOS
-builder or packager.
+provenance, provider acquisition and receipts for both platforms. Windows invokes
+the Haskell launcher for staging, then reuses its compiled executable for finalization
+and receipts. Python remains in CI/cache/test/release helpers; native packaging does
+not invoke Python.
 
 The base-only launcher runs before `Build.hs` prepares the Cabal dependencies.
 It then compiles the packaging entrypoint inside the pinned Cabal environment.
@@ -50,7 +50,9 @@ To prepare one separately (repeat-safe):
 runghc -ibuild/package build/Package.hs provider --platform darwin-arm64 --destination .build/codex --ensure
 ```
 
-Windows acquisition remains `python build/package/acquire-provider.py --platform windows-x64 --destination .build/codex --ensure`.
+For Windows, use the same Haskell command with `--platform windows-x64`. Both
+platforms use `curl` and `tar` from the builder PATH and the same pinned lock,
+archive-member inspection and final inventory validation.
 Assembly rejects missing, changed or extra provider files and symlinks. It signs
 nested code before writing final provider/runtime inventories. The acquired
 inventory is retained as `sapiens-provider-upstream.json`.

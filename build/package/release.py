@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import re
-from package import digest
+from checksums import digest
 
 
 def verify(args):

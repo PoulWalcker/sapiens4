@@ -19,7 +19,7 @@ import qualified Data.ByteString.Lazy as L
 import qualified Crypto.Hash.SHA256 as SHA
 import Data.Char (isHexDigit, isLower, isDigit, ord)
 import Data.Foldable (toList)
-import Data.List (sortOn, nub, isPrefixOf)
+import Data.List (sortOn, isPrefixOf)
 import Data.Maybe (isJust, isNothing)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
@@ -55,10 +55,7 @@ relative path = check (safeRelativePath path) "Unsafe relative package path" >> 
 platformJSON :: Value -> Parser Platform
 platformJSON = withText "platform" (either fail pure . parsePlatform . T.unpack)
 providerPlatformJSON :: Value -> Parser Platform
-providerPlatformJSON = withText "provider platform" $ \value -> case value of
- "darwin-arm64" -> pure MacOS
- "windows-x64" -> pure Windows
- _ -> fail "Unsupported provider platform"
+providerPlatformJSON = withText "provider platform" (either fail pure . parseProviderPlatform . T.unpack)
 signingJSON :: Value -> Parser Signing
 signingJSON = withText "signing mode" (either fail pure . parseSigning . T.unpack)
 
@@ -75,9 +72,9 @@ instance ToJSON InventoryEntry where
 decodeEntries :: Value -> Parser [InventoryEntry]
 decodeEntries value = do
  entries<-parseJSON value
- let paths=map inventoryPath entries
- check (length paths==length (nub paths)) "Duplicate inventory paths"
- pure (sortOn inventoryPath entries)
+ let ordered=sortOn inventoryPath entries;paths=map inventoryPath ordered
+ check (and $ zipWith (/=) paths (drop 1 paths)) "Duplicate inventory paths"
+ pure ordered
 
 data Inventory = Inventory [InventoryEntry]
 instance FromJSON Inventory where
@@ -187,7 +184,8 @@ instance FromJSON Manifest where
  parseJSON value = withObject "package manifest" (\o -> do
   schema<-o .: "schemaVersion";check (schema==(1::Int)) "Unsupported package manifest schema"
   identity<-parseJSON value;provider<-o .: "provider";check (packageComplete identity==maybe False (const True) provider) "Provider status mismatch"
-  void (parseJSON value :: Parser Provenance);void (o .: "sourceTreeSha256" >>= checksum 64)
+  void (o .: "submodules" >>= traverse (checksum 40) :: Parser (M.Map T.Text T.Text))
+  void (o .: "sourceTreeSha256" >>= checksum 64)
   void (o .: "toolchain" :: Parser (M.Map T.Text String))
   epochs<-o .: "dataEpoch";mapM_ (\key -> void (epochs .: key :: Parser (Maybe Integer))) ["minReadable","maxReadable","target"]
   void (o .: "migrationSetId" :: Parser (Maybe String));void (o .: "legacyAdoption" :: Parser String);void (o .: "updateDiscovery" :: Parser Bool)
@@ -279,8 +277,9 @@ data CompatibilityRule = CompatibilityRule
 instance FromJSON CompatibilityRule where
  parseJSON = withObject "optional voice rule" $ \o -> do
   schema<-o .: "schemaVersion";check (schema==(1::Int)) "Unsupported compatibility rule schema"
-  identity<-o .: "providerIdentity";raw<-o .: "providerIdentity"
-  CompatibilityRule identity <$> (o .: "providerFilesSha256" >>= checksum 64) <*> (o .: "optionalRoot" >>= relative) <*> (o .: "maximumMinimumOS" >>= \v -> either fail (const $ pure v) (osVersion v)) <*> o .: "ruleId" <*> o .: "selectedPaths" <*> (raw .: "upstreamCommit" >>= checksum 40)
+  identity<-o .: "providerIdentity"
+  commit<-maybe (fail "Compatibility rule requires upstreamCommit") pure (identityCommit identity)
+  CompatibilityRule identity <$> (o .: "providerFilesSha256" >>= checksum 64) <*> (o .: "optionalRoot" >>= relative) <*> (o .: "maximumMinimumOS" >>= \v -> either fail (const $ pure v) (osVersion v)) <*> o .: "ruleId" <*> o .: "selectedPaths" <*> pure commit
 data BinaryAudit = BinaryAudit FilePath String [FilePath]
 instance ToJSON BinaryAudit where toJSON (BinaryAudit path minimum dependencies) = obj [("path",toJSON path),("minimumOS",toJSON minimum),("dependencies",toJSON dependencies)]
 data CompatibilityAudit = CompatibilityAudit String [BinaryAudit] (Maybe (CompatibilityRule,String,[BinaryAudit]))

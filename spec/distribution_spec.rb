@@ -12,7 +12,7 @@ RSpec.describe 'Source distribution contract' do
       FileUtils.mkdir_p(File.dirname(target))
       FileUtils.cp(File.join(Contract::ROOT, file), target)
     end
-    _, error, code = Contract.capture(Gem.win_platform? ? 'python' : 'python3', 'build/package/package.py', 'provenance',
+    _, error, code = Contract.capture('runghc', '-ibuild/package', 'build/Package.hs', 'provenance',
       '--output', File.join(@release, 'build/source-provenance.json'))
     expect(code).to eq(0), error
     if ENV['SAPIENS_TEST_CABAL_CACHE']

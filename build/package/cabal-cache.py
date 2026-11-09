@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
-from package import digest
+from checksums import digest
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('mode', choices=('key', 'check'))

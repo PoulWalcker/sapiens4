@@ -43,12 +43,13 @@ try {
     if ($BuildOnly) { return }
     $payload = Join-Path $destination 'runtime'
     $manifest = Join-Path $payload 'package-manifest.json'
-    $stage = @('build/package/package.py','stage','--root',$repo,'--destination',$payload,
+    $stage = @('-ibuild/package','build/Package.hs','stage','--root',$repo,'--destination',$payload,
         '--version',$Version,'--platform','windows')
     if ($ProviderDirectory) { $stage += @('--provider',$ProviderDirectory) }
     if ($AllowMissingProvider) { $stage += '--allow-missing-provider' }
-    & python @stage
+    & runghc @stage
     if ($LASTEXITCODE -ne 0) { throw 'Runtime assembly failed' }
+    $packager = Join-Path $repo '.build/package-tool/sapiens-package.exe'
     Copy-Item -LiteralPath (Join-Path $repo '.build/bin/sapiens-windows.exe') -Destination (Join-Path $destination 'Sapiens4.exe')
     Copy-Item -LiteralPath (Join-Path $repo '.build/bin/WebView2Loader.dll'),(Join-Path $repo '.build/bin/WebView2-LICENSE.txt') -Destination $destination
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination (Join-Path $destination 'README.md')
@@ -61,7 +62,7 @@ try {
         }
     }
     $signing = if ($CertificateThumbprint) { 'authenticode' } else { 'none' }
-    & python build/package/package.py finalize --runtime $payload --signing $signing
+    & $packager finalize --runtime $payload --signing $signing
     if ($LASTEXITCODE -ne 0) { throw 'Final signed runtime inventory failed' }
     [IO.File]::WriteAllText((Join-Path $destination 'sapiens-installation.id'), 'com.poulwalcker.sapiens4.development')
     $artifact = Join-Path $output "sapiens4-development-$Version-windows-x64.zip"
@@ -69,7 +70,7 @@ try {
     Compress-Archive -LiteralPath $destination -DestinationPath $artifact
     & (Join-Path $repo 'build/package/windows-installer.ps1') -PackageDirectory $destination -OutputDirectory $output -Version $Version -CertificateThumbprint $CertificateThumbprint -TimestampUrl $TimestampUrl
     if ($LASTEXITCODE -ne 0) { throw 'Installer assembly failed' }
-    & python build/package/package.py receipt --artifact $artifact --installer (Join-Path $output 'Sapiens-Setup.exe') --manifest $manifest --output ($artifact -replace '\.zip$','.release.json')
+    & $packager receipt --artifact $artifact --installer (Join-Path $output 'Sapiens-Setup.exe') --manifest $manifest --output ($artifact -replace '\.zip$','.release.json')
     if ($LASTEXITCODE -ne 0) { throw 'Release receipt failed' }
     Write-Host "Built $destination/Sapiens4.exe`nArtifact $artifact"
 } finally { Pop-Location }

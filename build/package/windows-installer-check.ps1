@@ -18,7 +18,7 @@ function Run-Setup([string]$Program,[string[]]$Arguments,[bool]$Success,[string]
     $script:result.checks += @{name=$Name;exitCode=$process.ExitCode}
 }
 function Check-Inventory {
-    & python build/package/package.py verify --runtime (Join-Path $app 'runtime')
+    & runghc -ibuild/package build/Package.hs verify --runtime (Join-Path $app 'runtime')
     if ($LASTEXITCODE -ne 0) { throw 'Installed runtime inventory failed' }
 }
 try {
