@@ -8,4 +8,3 @@ def digest(path):
         for chunk in iter(lambda: stream.read(1024 * 1024), b''):
             result.update(chunk)
         return result.hexdigest()
-
