@@ -13,8 +13,7 @@ import Text.Read (readMaybe)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import Data.IORef
-import Data.Char (toLower)
-import Data.List (nub,sortOn)
+import Data.List (nub)
 import qualified Data.Map.Strict as M
 import Data.Maybe
 import Data.Text (Text)
@@ -30,7 +29,6 @@ import System.Info
 import System.IO
 import System.Process hiding (runProcess)
 import System.Timeout
-import Text.Regex.TDFA ((=~))
 #ifndef mingw32_HOST_OS
 import System.Posix.Signals
 #endif
@@ -85,39 +83,15 @@ modelDefaults = (,) <$> (maybe "gpt-6-sol" T.pack <$> lookupEnv "SAPIENS_CODEX_M
 codexBinary :: IO (Maybe FilePath)
 codexBinary = do
  override <- lookupEnv "SAPIENS_CODEX_BINARY"
+ root <- fromMaybe "" <$> lookupEnv "SAPIENS_REPOSITORY"
+ packaged <- doesFileExist (root</>"package-manifest.json")
+ let payload=root</>if packaged then "codex" else ".build/codex"
+     candidate=payload</>"bin"</>if os=="mingw32" then "codex.exe" else "codex"
  case override of
-  Just p | not (null p) -> findExecutable p
+  Just path | not (null path) -> findExecutable path
   _ -> do
-   path <- findExecutable "codex"
-   home <- getHomeDirectory
-   local <- fromMaybe (home </> "AppData/Local") <$> lookupEnv "LOCALAPPDATA"
-   roaming <- fromMaybe (home </> "AppData/Roaming") <$> lookupEnv "APPDATA"
-   let children folder = do
-        present <- doesDirectoryExist folder
-        if present then map (folder </>) <$> listDirectory folder else pure []
-       vendors scope = do
-        packages <- filter (T.isPrefixOf "codex" . T.pack . takeFileName) <$> children scope
-        concat <$> forM packages (\package -> map (</> "codex/codex.exe") <$> children (package </> "vendor"))
-   installed <- if os /= "mingw32" then pure [] else do
-    app <- map (</> "codex.exe") <$> children (local </> "OpenAI/Codex/bin")
-    npm <- vendors (roaming </> "npm/node_modules/@openai")
-    bundled <- vendors (roaming </> "npm/node_modules/@openai/codex/node_modules/@openai")
-    pure (app ++ npm ++ bundled)
-   let candidates = maybeToList path ++ installed ++ ["/Applications/" ++ app ++ ".app/Contents/Resources/" ++ binary | os == "darwin", app <- ["Codex","ChatGPT"],binary <- ["codex","codex-cli/bin/codex"]]
-       native = filter (\p -> os /= "mingw32" || map toLower (takeExtension p) == ".exe") candidates
-   existing <- filterM doesFileExist (nub native)
-   runnable <- filterM (fmap executable . getPermissions) existing
-   versions <- forM runnable $ \p -> do
-    result <- try (timeout 10000000 (readProcessWithExitCode p ["--version"] "")) :: IO (Either SomeException (Maybe (ExitCode,String,String)))
-    case result of
-     Left errorValue | Just (_ :: SomeAsyncException) <- fromException errorValue -> throwIO errorValue
-     Left errorValue | Just (_ :: AsyncCancelled) <- fromException errorValue -> throwIO errorValue
-     _ -> pure ()
-    let version = case result of
-         Right (Just (ExitSuccess,out,_)) -> let (_,_,_,numbers) = out =~ ("codex-cli[[:space:]]+([0-9]+)\\.([0-9]+)\\.([0-9]+)" :: String) :: (String,String,String,[String]) in mapMaybe readMaybe numbers
-         _ -> [] :: [Int]
-    pure (version,p)
-   pure (snd <$> listToMaybe (reverse (sortOn id (filter (not . null . fst) versions))))
+   exists <- doesFileExist candidate
+   pure (if exists then Just candidate else Nothing)
 killTree :: ProcessHandle -> IO ()
 killTree ph = do
  result <- getProcessExitCode ph

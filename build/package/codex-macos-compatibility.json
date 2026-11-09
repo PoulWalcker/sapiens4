@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "ruleId": "codex-0.167.0-darwin-arm64-voice-v1",
+  "providerIdentity": {
+    "version": "0.167.0",
+    "upstreamCommit": "086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a",
+    "platform": "darwin-arm64",
+    "entrypoint": "bin/codex",
+    "archiveSha256": "af45ed45d940d7998809622c1c0296d3098ed7d7fad695284422c228bd454517"
+  },
+  "providerFilesSha256": "adb58e2634a6cb952d269987be34eb199e18405d47e0b003083955957c23a5e7",
+  "optionalRoot": "codex-resources/voice",
+  "maximumMinimumOS": "14.0",
+  "selectedPaths": [
+    "login status",
+    "login --device-auth",
+    "exec"
+  ],
+  "evidence": "D3_CODEX_COMPATIBILITY.md and D3_CODEX_COMPATIBILITY.json, 2026-11-08; pinned source plus released CLI synthetic sentinel experiments",
+  "source": "https://github.com/openai/codex/tree/086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a",
+  "targetOSAcceptance": "macOS 13 execution remains unverified"
+}
