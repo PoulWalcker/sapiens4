@@ -25,7 +25,7 @@ nameHelp :: String
 nameHelp = "Start with A–Z. Letters, numbers, and - _ . : # + | ( ) & $ ^ are allowed. No spaces."
 
 make :: M.DialogKind -> F.Context -> M.Model -> M.Dialog
-make kind record m = {kind,title,record,fields,providerPage:M.ProviderList,content:F.NoContent,status:M.Editing,identity:m.sequence+1}
+make kind record m = {kind,title,record,fields,content:F.NoContent,status:M.Editing,identity:m.sequence+1}
   where
   name = F.contextName record
   title = case kind of
@@ -78,7 +78,11 @@ dismissible d = d.kind /= M.Onboarding || case d.content of
 
 dialogTitle :: M.Dialog -> String
 dialogTitle d = if d.kind /= M.Onboarding then d.title else case d.content of
-  F.Setup value -> if D.s "step" value == "welcome" then "Choose your AI" else "Connect Codex"
+  F.Setup value -> case D.s "step" value of
+    "welcome" -> "Choose your AI"
+    "sign_in" -> "Connect Codex"
+    "permissions" -> "Finishing setup"
+    _ -> "Computer access"
   _ -> "Choose your AI"
 
 body :: M.Model -> M.Dialog -> V.Html
@@ -266,105 +270,117 @@ signInView value = V.div "account-sign-in" $
   signing = provider == "signing_in"
 
 accountView :: M.Dialog -> V.Html
-accountView d = V.node "section" [V.cls "ai-provider-detail-body",V.label "Codex account"] $ case d.content of
-  F.Setup value ->
-    let provider = D.s "provider" value
-        state = D.s "state" (D.get "login" value)
-        change = d.providerPage == M.ConfirmAccountChange
-        confirmation = change || d.providerPage == M.ConfirmDisconnect
-    in if provider == "signing_out" then [V.textNode "p" [V.attr "role" "status"] "Disconnecting…"]
-    else if confirmation then
-      [V.textNode "h4" [] (if change then "Change Codex account?" else "Disconnect Codex?")
-      ,V.p "" (if change then "Your current account will be signed out first. Cancelling the next sign-in leaves Codex disconnected." else "Codex will no longer be available to agents. Your local chats and settings remain.")
-      ,V.div "account-actions"
-        [setupButton d (if change then "change-account" else "sign-out") (if change then "Continue" else "Disconnect")
-        ,V.control [V.cls "button",V.disabled $ M.dialogBusy d] "Cancel" $ SetProviderPage M.CodexDetails]]
-    else if provider == "signed_in" then
-      [V.textNode "p" [V.cls "account-connected",V.attr "role" "status"] "Connected"
-      ,V.when (D.s "hold" value == "review") $ V.div ""
-        [V.p "form-hint" "AI work is paused. Review any pending tasks before resuming with this account."
-        ,setupButton d "resume" "Resume AI work"]
-      ,V.when (D.s "hold" value /= "" && D.s "hold" value /= "review") $ V.p "" "The last account change was interrupted. Disconnect and reconnect before resuming AI work."
-      ,V.div "ai-provider-actions"
-        [V.control [V.cls "ai-provider-action",V.disabled $ M.dialogBusy d] "Change account  ›" $ SetProviderPage M.ConfirmAccountChange
-        ,V.control [V.cls "ai-provider-action ai-provider-action-danger",V.disabled $ M.dialogBusy d] "Disconnect  ›" $ SetProviderPage M.ConfirmDisconnect]]
-    else
-      [V.when (provider /= "signing_in") $ V.p "" (connectionStatus value)
-      ,signInView value
-      ,V.when (provider == "unavailable" || state == "logout_failed") $ V.control [V.cls "ai-provider-action ai-provider-action-danger",V.disabled $ M.dialogBusy d] "Disconnect  ›" $ SetProviderPage M.ConfirmDisconnect]
-  _ -> [V.p "" "Checking connection…"]
+accountView d = V.node "section" [V.cls "ai-provider-detail-body",V.label "Codex account"] $
+  case d.content of
+    F.Setup value ->
+      let provider = D.s "provider" value
+          state = D.s "state" (D.get "login" value)
+          confirmation = d.fields.value == "change-account" || d.fields.value == "sign-out"
+      in if provider == "signing_out" then [V.textNode "p" [V.attr "role" "status"] "Signing out…"]
+      else if confirmation then
+        [V.textNode "h4" [] (if d.fields.value == "change-account" then "Change Codex account?" else "Disconnect Codex?")
+        ,V.p "" (if d.fields.value == "change-account" then "Your current account will be signed out first. Cancelling the next sign-in leaves Codex disconnected." else "Codex will no longer be available to agents. Your local chats and settings remain.")
+        ,V.div "account-actions" [setupButton d (d.fields.value) (if d.fields.value == "change-account" then "Continue" else "Disconnect"),V.control [V.cls "button",V.disabled $ M.dialogBusy d] "Cancel" $ Field F.Value "codex-details"]]
+      else if provider == "signed_in" then
+        [V.textNode "p" [V.cls "account-connected",V.attr "role" "status"] "Connected"
+        ,V.when (D.s "hold" value == "review") $ V.div ""
+          [V.p "form-hint" "AI work is paused. Review any pending tasks before resuming with this account."
+          ,setupButton d "resume" "Resume AI work"]
+        ,V.when (D.s "hold" value /= "" && D.s "hold" value /= "review") $ V.p "" "The last account change was interrupted. Sign out and reconnect before resuming AI work."
+        ,V.div "ai-provider-actions"
+          [V.control [V.cls "ai-provider-action",V.disabled $ M.dialogBusy d] "Change account  ›" $ Field F.Value "change-account"
+          ,V.control [V.cls "ai-provider-action ai-provider-action-danger",V.disabled $ M.dialogBusy d] "Disconnect  ›" $ Field F.Value "sign-out"]]
+      else [V.when (provider /= "signing_in") $ V.p "" (if provider == "unavailable" then "Unable to check connection" else "Not connected")
+           ,signInView value
+           ,V.when (provider == "unavailable" || state == "logout_failed") $ V.control [V.cls "button",V.disabled $ M.dialogBusy d] "Sign out" $ Field F.Value "sign-out"]
+    _ -> [V.p "" "Checking connection…"]
 
 providerIcon :: String -> V.Html
-providerIcon asset = V.node "img" [V.cls "ai-provider-icon",V.attr "src" ("/ai-" <> asset),V.attr "alt" "",V.attr "aria-hidden" "true"] []
+providerIcon slug = V.node "img" [V.cls "ai-provider-icon",V.attr "src" ("/ai-" <> slug <> ".svg"),V.attr "alt" "",V.attr "aria-hidden" "true"] []
 
 providerCopy :: String -> String -> V.Html
-providerCopy caption status = V.node "span" [V.cls "ai-provider-copy"]
-  [V.textNode "strong" [] caption,V.span [V.cls "ai-provider-status",V.attr "role" "status"] status]
+providerCopy caption status = V.div "ai-provider-copy"
+  [V.textNode "strong" [] caption,V.span [V.cls "ai-provider-status"] status]
 
 providerRow :: String -> String -> String -> V.Html -> V.Html
-providerRow asset caption status action = V.div "ai-provider-row" [providerIcon asset,providerCopy caption status,action]
+providerRow slug caption status action = V.div "ai-provider-row"
+  [providerIcon slug,providerCopy caption status,action]
 
-connectionStatus :: Json -> String
-connectionStatus value = case D.s "provider" value of
-  "signed_in" -> "Connected"
-  "signing_in" -> "Connecting…"
-  "signing_out" -> "Disconnecting…"
-  "missing" -> "Needs attention"
-  "unavailable" -> "Needs attention"
-  _ -> case D.s "state" (D.get "login" value) of
-    "failed" -> "Authentication failed"
-    "expired" -> "Authentication failed"
-    "browser_busy" -> "Needs attention"
-    _ -> "Not connected"
+providerLink :: String -> String -> String -> Action -> V.Html
+providerLink slug caption status action = V.controlWith [V.cls "ai-provider-row ai-provider-link",V.label $ "Manage " <> caption]
+  [providerIcon slug,providerCopy caption status,V.span [V.cls "ai-provider-arrow",V.attr "aria-hidden" "true"] "›"] action
 
-providerLink :: String -> String -> String -> Intent.Action -> V.Html
-providerLink asset caption status action = V.controlWith [V.cls "ai-provider-row ai-provider-link",V.label $ "Manage " <> caption]
-  [providerIcon asset,providerCopy caption status,V.span [V.cls "ai-provider-arrow",V.attr "aria-hidden" "true"] "›"] action
-
-aiProvidersView :: M.Dialog -> Json -> V.Html
-aiProvidersView d value = V.div "ai-providers" $ if d.providerPage == M.CodexAuth then
-  [backToProviders
-  ,heading "Connect Codex"
-  ,if provider == "signing_out" then V.p "form-hint" "Signing out of the previous account…" else signInView value
-  ,V.when (not active) $ V.button "button" "Back to providers" $ SetProviderPage M.ProviderList]
-  else if d.providerPage /= M.ProviderList then
-  [backToProviders,heading "Codex",accountView d]
-  else
-  [V.p "form-hint" "Manage AI connections available to your agents."
-  ,V.div "ai-provider-list" $ [codex] <> comingSoonProviders]
-  where
-  provider = D.s "provider" value
-  hold = D.s "hold" value
-  status = if provider == "signed_in" && hold == "review" then "Connected · AI work paused"
-    else if provider == "signed_in" && hold /= "" then "Connected · Needs attention"
-    else connectionStatus value
-  active = A.elem provider ["signing_in","signing_out"]
-  backToProviders = V.control [V.cls "ai-provider-back",V.disabled $ M.dialogBusy d] "‹  AI Providers" $ SetProviderPage M.ProviderList
-  heading caption = V.div "ai-provider-heading"
-    [providerIcon "codex.svg",V.textNode "h3" [] caption]
-  codex = if provider == "sign_in_required" then
-    providerRow "codex.svg" "Codex" status $ setupButton d "login" "Connect"
-    else providerLink "codex.svg" "Codex" status $ SetProviderPage (if active then M.CodexAuth else M.CodexDetails)
 
 comingSoonProviders :: Array V.Html
 comingSoonProviders =
-  [providerRow "claude.svg" "Claude Code" "Anthropic" soon
-  ,providerRow "gemini.svg" "Gemini CLI" "Google" soon
-  ,providerRow "kimi.svg" "Kimi Code" "Moonshot AI" soon]
-  where soon = V.span [V.cls "ai-provider-soon"] "Coming soon"
+  [providerRow "claude" "Claude Code" "Anthropic" (V.span [V.cls "ai-provider-soon"] "Coming soon")
+  ,providerRow "gemini" "Gemini CLI" "Google" (V.span [V.cls "ai-provider-soon"] "Coming soon")
+  ,providerRow "kimi" "Kimi Code" "Moonshot AI" (V.span [V.cls "ai-provider-soon"] "Coming soon")]
+
+aiProvidersView :: M.Dialog -> Json -> V.Html
+aiProvidersView d value =
+  let provider = D.s "provider" value
+      hold = D.s "hold" value
+      page = d.fields.value
+      details = A.elem page ["codex-details","change-account","sign-out"]
+      authenticating = page == "codex-auth"
+      status = case provider of
+        "signed_in" -> if hold == "review" then "Connected · AI work paused" else if hold /= "" then "Connected · Needs attention" else "Connected"
+        "signing_in" -> "Connecting…"
+        "signing_out" -> "Disconnecting…"
+        "missing" -> "Installation needs repair"
+        "unavailable" -> "Needs attention"
+        _ -> "Not connected"
+      navigate = Field F.Value "codex-details"
+      codex = case provider of
+        "sign_in_required" -> providerRow "codex" "Codex" status (setupButton d "login" "Connect")
+        "signed_in" -> providerLink "codex" "Codex" status navigate
+        "signing_in" -> providerLink "codex" "Codex" status (Field F.Value "codex-auth")
+        "signing_out" -> providerLink "codex" "Codex" status (Field F.Value "codex-auth")
+        _ -> providerLink "codex" "Codex" status navigate
+      back = V.control [V.cls "ai-provider-back"] "‹  AI Providers" $ Field F.Value ""
+  in V.div "ai-providers" $ if authenticating then
+    [back
+    ,V.div "ai-provider-heading" [providerIcon "codex",V.textNode "h3" [] "Connect Codex"]
+    ,if provider == "signing_out" then V.p "form-hint" "Signing out of the previous account…" else signInView value
+    ,V.when (provider /= "signing_in" && provider /= "signing_out") $ V.button "button" "Back to providers" $ Field F.Value ""]
+  else if details then
+    [back
+    ,V.div "ai-provider-heading" [providerIcon "codex",V.textNode "h3" [] "Codex"]
+    ,accountView d]
+  else
+    [V.p "form-hint" "Manage AI connections available to your agents."
+    ,V.div "ai-provider-list" $ [codex] <> comingSoonProviders]
+
 
 providersView :: M.Dialog -> Json -> V.Html
-providersView d value = V.div "ai-providers" $ if D.s "step" value == "welcome" then
-  [V.p "form-hint" "Connect an AI provider to get started."
-  ,V.div "ai-provider-list" $ [providerRow "codex.svg" "Codex" (if provider == "signed_in" then "Already connected" else "OpenAI")
-      (V.control [V.cls "button primary",V.disabled $ M.dialogBusy d] (if provider == "signed_in" then "Continue" else "Connect") $ DialogCommand $ Intent.Setup "connect")] <> comingSoonProviders]
-  else
-  [V.p "form-hint" "Finish signing in with ChatGPT in your browser."
-  ,signInView value
-  ,V.when (not active) $ setupButton d "choose" "Back to providers"]
-  where
-  provider = D.s "provider" value
-  active = A.elem provider ["signing_in","signing_out"]
+providersView d value =
+  let permission = D.s "computer_permission" value
+      setup = setupButton d
+      signing = D.s "provider" value == "signing_in"
+      alreadyConnected = D.s "provider" value == "signed_in"
+  in V.div "setup-screen" $ case D.s "step" value of
+    "welcome" ->
+      [V.p "form-hint" "Connect an AI provider to get started."
+      ,V.div "ai-provider-list" $ [providerRow "codex" "Codex" (if alreadyConnected then "Already connected" else "OpenAI")
+          (V.control [V.cls "button primary",V.disabled $ M.dialogBusy d] (if alreadyConnected then "Continue" else "Connect") $ DialogCommand $ Intent.Setup "begin")] <> comingSoonProviders]
+    "sign_in" ->
+      [V.p "form-hint" "Finish signing in with ChatGPT in your browser."
+      ,signInView value
+      ,V.when (not signing) $ setup "choose" "Back to providers"]
+    "permissions" -> [V.p "form-hint" "Codex connected. Finishing setup…"]
+    _ ->
+      [V.p "form-hint" "Optional · Configure computer access only when you need it."
+      ,V.p "" $ case permission of
+        "missing" -> "The computer helper is missing. Reinstall Sapiens to repair it."
+        "granted" -> "Computer control is enabled."
+        "denied" -> "Enable Accessibility in System Settings when you want agents to use the computer."
+        "unavailable" -> "Couldn't check Accessibility. Recheck or open System Settings."
+        "not_required" -> "Computer control works with accessible Windows apps."
+        _ -> "Computer control needs macOS Accessibility permission."
+      ,V.when (A.elem permission ["not_requested","denied","unavailable"]) $ setup "permission" "Enable Accessibility"
+      ,V.when (permission == "granted" || permission == "unavailable") $ setup "refresh" "Recheck"
+      ,V.button "button" "Done" CloseDialog]
 
 computerAccess :: M.Dialog -> Json -> V.Html
 computerAccess d value = V.div "setup-screen"

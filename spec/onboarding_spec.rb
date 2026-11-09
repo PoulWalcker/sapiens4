@@ -66,10 +66,11 @@ RSpec.describe 'Local Codex setup' do
     end
     expect(host.api('GET', '/api/host/onboarding')).to include('provider' => 'sign_in_required', 'step' => 'welcome', 'completed' => false)
     host.api('POST', '/api/host/onboarding', {action: 'finish'}, status: 409)
-    # One Connect starts browser auth; retrying never starts a second worker.
-    expect(host.api('POST', '/api/host/onboarding', action: 'connect').fetch('provider')).to eq('signing_in')
+    # Connect follows the supplied onboarding flow: begin, then immediate login.
+    expect(host.api('POST', '/api/host/onboarding', action: 'begin')).to include('step' => 'sign_in', 'completed' => false)
+    expect(host.api('POST', '/api/host/onboarding', action: 'login').fetch('provider')).to eq('signing_in')
     Contract.wait { host.api('GET', '/api/host/onboarding').dig('login', 'url').to_s.include?('response_type=code') }
-    host.api('POST', '/api/host/onboarding', {action: 'connect'}, status: 409)
+    host.api('POST', '/api/host/onboarding', {action: 'login'}, status: 409)
     expect(host.api('POST', '/api/host/onboarding', action: 'cancel').dig('login', 'state')).to eq('cancelled')
 
     host.api('POST', '/api/host/onboarding', {action: 'finish'}, status: 409)

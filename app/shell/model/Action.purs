@@ -6,7 +6,7 @@ import Sapiens.Form as F
 import Sapiens.Browser as Browser
 import Data.Argonaut.Core (Json)
 import Sapiens.Domain as X
-import Sapiens.Model (DialogKind, ProviderPage)
+import Sapiens.Model (DialogKind)
 import Sapiens.Navigation (Activity, Scope, Pane, Period)
 import Web.Event.Event (Event)
 
@@ -35,7 +35,6 @@ data Action
   | CloseMenu
   | OpenDialog DialogKind F.Context
   | CloseDialog
-  | SetProviderPage ProviderPage
   | Field F.Field String
   | CheckField String Boolean
   | SubmitDialog

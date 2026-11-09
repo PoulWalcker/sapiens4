@@ -53,7 +53,11 @@ handle runtime dispatch action = case action of
   OnboardingPoll id -> E.inDialog id \d -> when (A.elem d.kind [M.Onboarding,M.AIProviders,M.Computer] && not (M.dialogBusy d)) do
     receive id (\value -> do
       H.modify_ _ {account=value}
-      E.modifyDialog id \current -> current {content=F.Setup value,status=M.Editing,providerPage=if d.kind == M.AIProviders && current.providerPage == M.CodexAuth && D.s "provider" value == "signed_in" then M.ProviderList else current.providerPage}
+      E.modifyDialog id \current ->
+        let page = if d.kind == M.AIProviders && current.fields.value == "codex-auth" && D.s "provider" value == "signed_in" then "" else current.fields.value
+        in current {content=F.Setup value,status=M.Editing,fields=current.fields {value=page}}
+      when (d.kind == M.Onboarding && D.s "step" value == "permissions") $
+        dispatch $ DialogCommand $ Intent.Setup "finish"
       when (d.kind == M.Onboarding && D.b "completed" value && D.b "ready" value) $ dispatch CloseDialog
       when (A.elem (D.s "provider" value) ["signing_in","signing_out"]) $ E.later 1000.0 $ dispatch $ OnboardingPoll id) $ C.json "/api/host/onboarding" "GET" D.null
   CloseDialog -> do
@@ -64,10 +68,8 @@ handle runtime dispatch action = case action of
         void $ H.fork $ H.liftAff $ C.cancelPairing runtime
         H.modify_ Dialog.close
         E.sync
-  SetProviderPage page -> E.withDialog \d -> when (d.kind == M.AIProviders && not (M.dialogBusy d)) $
-    E.modifyDialog d.identity _ {providerPage=page,status=M.Editing}
   Field key value -> do
-    H.modify_ \m -> m {dialog=map (Dialog.updateField key value) m.dialog}
+    H.modify_ \m -> m {dialog=map (\d -> if d.kind == M.AIProviders && M.dialogBusy d then d else Dialog.updateField key value d) m.dialog}
     when (key == F.ShowLink) do
       liftEffect $ B.focus "#host-pair-link"
       m <- H.get
@@ -218,10 +220,16 @@ handle runtime dispatch action = case action of
       H.modify_ _ {dialog=Just requested,sequence=requested.identity}
       runDialog requested (\value -> do
         H.modify_ _ {account=value}
-        E.modifyDialog requested.identity \current -> current {content=F.Setup value,status=M.Editing,providerPage=if requested.kind /= M.AIProviders then current.providerPage
-          else if A.elem setupAction ["connect","login","device-login","change-account"] then (if D.s "provider" value == "signed_in" then M.ProviderList else M.CodexAuth)
-          else if A.elem setupAction ["cancel","sign-out"] then M.ProviderList
-          else current.providerPage,fields=current.fields {value=""}}
+        E.modifyDialog requested.identity \current ->
+          let page = if requested.kind /= M.AIProviders then ""
+                else if A.elem setupAction ["login","device-login","change-account"] then
+                  if D.s "provider" value == "signed_in" then "" else "codex-auth"
+                else if A.elem setupAction ["cancel","sign-out"] then ""
+                else current.fields.value
+          in current {content=F.Setup value,status=M.Editing,fields=current.fields {value=page}}
+        when (requested.kind == M.Onboarding && setupAction == "begin") do
+          when (D.s "provider" value == "sign_in_required") $ dispatch $ DialogCommand $ Intent.Setup "login"
+          when (D.b "ready" value && not (D.b "completed" value)) $ dispatch $ DialogCommand $ Intent.Setup "finish"
         when (requested.kind == M.Onboarding && D.b "completed" value && D.b "ready" value) $ dispatch CloseDialog
         when (A.elem (D.s "provider" value) ["signing_in","signing_out"]) $ E.later 1000.0 $ dispatch $ OnboardingPoll requested.identity) $ C.json "/api/host/onboarding" "POST" $ D.json {action: setupAction}
     Intent.SuggestNames -> do
