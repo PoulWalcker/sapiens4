@@ -21,7 +21,7 @@ filesUnder root = do
 buildUI :: FilePath -> IO ()
 buildUI root = do
  let libs=root</>"submodules/libs4"; work=libs</>"purescript"; output=root</>".build/web"; stamp=output</>"source.sha256"
- source <- filter ((==".purs").takeExtension) <$> filesUnder (root</>"app")
+ source <- filter ((`elem` [".purs",".js"]).takeExtension) <$> filesUnder (root</>"app")
  support <- filesUnder (work</>"src")
  let inputs = sort source ++ sort support ++ [work</>"spago.yaml",work</>"spago.lock",libs</>"package-lock.json",root</>"build/BuildUI.hs"]
  raw <- B.concat <$> mapM (\p -> (TE.encodeUtf8 (T.pack (makeRelative root p)) <>) <$> B.readFile p) inputs
