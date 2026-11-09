@@ -67,7 +67,8 @@ view m = case m.dialog of
   Nothing -> V.node "dialog" [V.id "modal"] []
   Just d -> V.node "dialog" [V.id $ if M.corporaDialog d.kind then "corpora-dialog" else "modal",V.cls $ if d.kind == M.AppMenu then "app-menu-sheet" else "",V.attr "aria-labelledby" "dialog-title",V.on "cancel" \e -> Link e CloseDialog]
     [V.div (if M.corporaDialog d.kind then "corpora-menu-heading" else "modal-top") [V.span [V.cls "tiny-label"] "SAPIENS4",V.when (dismissible d) $ V.icon (if M.corporaDialog d.kind then "Close" else "Close dialog") "×" CloseDialog]
-    ,V.node "div" [V.id $ if M.corporaDialog d.kind then "corpora-dialog-body" else "modal-content"] [V.textNode "h2" [V.id "dialog-title"] (dialogTitle d),body m d,V.textNode "p" [V.cls "corpora-feedback",V.attr "role" "status"] ((M.dialogError d))]]
+    ,V.node "div" [V.id $ if M.corporaDialog d.kind then "corpora-dialog-body" else "modal-content"] [V.textNode "h2" [V.id "dialog-title"] (dialogTitle d),body m d,V.textNode "p" [V.cls "corpora-feedback",V.attr "role" "status"] ((M.dialogError d))
+      ,V.when (A.elem d.kind [M.Onboarding,M.WorkspaceSettings] && M.dialogError d /= "") $ V.button "button" "Try again" $ OnboardingPoll d.identity]]
 
 dismissible :: M.Dialog -> Boolean
 dismissible d = d.kind /= M.Onboarding || case d.content of
@@ -105,9 +106,10 @@ body m d = case d.kind of
             "missing" -> "The optional computer helper is missing. You can use chat now and reinstall Sapiens to repair computer control later."
             "granted" -> "Accessibility access is enabled for computer control."
             "denied" -> "For optional computer control, enable Sapiens in System Settings > Privacy & Security > Accessibility, then recheck. You can do this later."
+            "unavailable" -> "Accessibility status is unavailable. Recheck setup or open System Settings > Privacy & Security > Accessibility."
             "not_required" -> "Optional computer control works with accessible Windows applications. Elevated apps and secure system dialogs cannot be controlled."
             _ -> "Optional computer control uses macOS Accessibility access. You can enable it now or later in Settings."
-          ,V.when (permission == "not_requested" || permission == "denied" || permission == "granted") $ setup "permission" (if permission == "granted" then "Recheck Accessibility" else "Allow Accessibility")
+          ,V.when (permission == "not_requested" || permission == "denied" || permission == "granted" || permission == "unavailable") $ setup (if permission == "granted" then "refresh" else "permission") (if permission == "granted" then "Recheck Accessibility" else "Allow Accessibility")
           ,V.p "" "You can revisit setup and permissions in Workspace & settings."
           ,setup "refresh" "Recheck setup"
           ,setup "finish" "Enter workspace"]
@@ -243,13 +245,13 @@ signInView :: Json -> V.Html
 signInView value = V.div "account-sign-in" $
   [V.textNode "p" [V.attr "role" "status"] $ if signing then "Once you’re signed in, you can return to Sapiens." else "Sign in to start using Sapiens."
   ,V.when (provider == "missing") $ V.p "" "Codex is missing from this installation. Reinstall Sapiens to repair it."
-  ,V.when (provider == "unavailable") $ V.p "" "We couldn’t check your sign-in. Your existing account has been preserved."
+  ,V.when (provider == "unavailable") $ V.p "" "We couldn’t check your sign-in. Recheck your connection. If this keeps happening, reinstall Sapiens to repair its runtime."
   ,V.when (state == "failed" || state == "expired" || state == "browser_busy" || state == "logout_failed" || state == "cancelled") $ V.p "" $ case state of
     "expired" -> "Sign-in timed out. Please try again."
     "browser_busy" -> "Another sign-in is using the browser callback. Finish it and try again, or use a one-time code."
     "logout_failed" -> "We couldn’t finish signing out. Recheck your connection, then try signing out again."
     "cancelled" -> "Sign-in cancelled. You can try again when you’re ready."
-    _ -> "Sign-in failed. Check your connection and try again."
+    _ -> "Sign-in failed. Check your connection and try again. If this keeps happening, reinstall Sapiens to repair its runtime."
   ,V.when (provider == "sign_in_required") $ V.button "button primary" (if state == "failed" || state == "expired" then "Try again" else "Continue with ChatGPT") $ DialogCommand $ Intent.Setup "login"
   ,V.when (provider == "sign_in_required") $ V.p "form-hint" "Your browser will open to complete sign-in."
   ,V.when (signing && D.s "url" login /= "") $ V.div "account-actions"

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 
 def digest(path):
@@ -100,9 +101,8 @@ def stage(args):
     if root == destination or root.is_relative_to(destination):
         raise ValueError('Runtime destination must not contain the source checkout')
     destination.mkdir(parents=True)
-    expected_arch = 'x64' if args.platform == 'windows' else 'arm64'
-    if args.architecture != expected_arch:
-        raise ValueError('Supported primary targets: macOS arm64 and Windows x64')
+    architecture = 'x64' if args.platform == 'windows' else 'arm64'
+    manifest_path = destination / 'package-manifest.json'
     suffix = '.exe' if args.platform == 'windows' else ''
     files = ['.build/bin/sapiens4' + suffix, '.build/web/app.js', '.build/web/guest.js', '.build/web/sw.js',
              'submodules/libs4/web/remote-vendor.js']
@@ -117,7 +117,11 @@ def stage(args):
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
-    provider = Path(args.provider).resolve() if args.provider else root / 'runtime/codex'
+    provider = Path(args.provider).resolve() if args.provider else root / '.build/codex'
+    acquire = root / 'build/package/acquire-provider.py'
+    if not args.provider and not args.allow_missing_provider and acquire.is_file():
+        subprocess.run([sys.executable, str(acquire), '--platform', 'windows-x64' if suffix else 'darwin-arm64',
+                        '--destination', str(provider), '--ensure'], check=True)
     provider_info = None
     if provider.exists():
         info = json.loads((provider / 'sapiens-provider.json').read_text())
@@ -136,11 +140,7 @@ def stage(args):
     elif not args.allow_missing_provider:
         raise ValueError('Complete pinned Codex payload required; run acquire-provider.py first')
     # No mutable shared caches or absolute source paths are part of the payload.
-    if args.platform == 'macos':
-        library_root = root / 'submodules/libs4/haskell/.runtime'
-        if library_root.exists():
-            shutil.copytree(library_root, destination / 'submodules/libs4/haskell/.runtime')
-    else:
+    if args.platform == 'windows':
         for icon in ('AppIcon.ico', 'AppIconDark.ico'):
             target = destination / 'environments/windows' / icon
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -162,9 +162,9 @@ def stage(args):
         if path.is_file():
             tree.update(relative.encode() + b'\0' + bytes.fromhex(digest(path)))
     inputs = {**provenance, 'sourceTreeSha256': tree.hexdigest(),
-              'platform': args.platform, 'architecture': args.architecture, 'version': args.version,
+              'platform': args.platform, 'architecture': architecture, 'version': args.version,
               'repository': 'PoulWalcker/sapiens4', 'channel': 'development', 'provider': provider_info,
-              'minimumOS': args.minimum_os, 'supportStatus': 'declared-target',
+              'minimumOS': '13.0' if args.platform == 'macos' else None, 'supportStatus': 'declared-target',
               'toolchain': {name: command(root, *cmd).splitlines()[0] for name, cmd in
                             {'ghc': ['ghc', '--numeric-version'], 'cabal': ['cabal', '--numeric-version'],
                              'rustc': ['rustc', '--version'], 'node': ['node', '--version']}.items()}}
@@ -173,8 +173,8 @@ def stage(args):
                 'packageStatus': 'provider-complete' if provider_info else 'validation-provider-incomplete',
                 'dataEpoch': {'minReadable': None, 'maxReadable': None, 'target': None},
                 'migrationSetId': None, 'legacyAdoption': 'not-implemented', 'updateDiscovery': False}
-    Path(args.manifest).write_text(json.dumps(manifest, indent=2) + '\n')
-    print(json.dumps({'runtime': str(destination), 'manifest': str(args.manifest), 'buildId': manifest['buildId'], 'status': manifest['packageStatus']}))
+    manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+    print(json.dumps({'runtime': str(destination), 'manifest': str(manifest_path), 'buildId': manifest['buildId'], 'status': manifest['packageStatus']}))
 
 
 def receipt(args):
@@ -209,11 +209,10 @@ if __name__ == '__main__':
     archive.add_argument('--output', required=True)
     archive.set_defaults(run=provenance)
     assemble = commands.add_parser('stage')
-    for name in ('root', 'destination', 'manifest', 'version', 'architecture'):
+    for name in ('root', 'destination', 'version'):
         assemble.add_argument('--' + name, required=True)
     assemble.add_argument('--platform', choices=('macos', 'windows'), required=True)
     assemble.add_argument('--provider')
-    assemble.add_argument('--minimum-os')
     assemble.add_argument('--allow-missing-provider', action='store_true', help='Native validation only; cannot create user-ready release')
     assemble.set_defaults(run=stage)
     record = commands.add_parser('receipt')

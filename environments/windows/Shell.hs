@@ -104,8 +104,16 @@ desktopSession memory probe = do
         dead <- readIORef closing
         unless dead $ atomicModifyIORef' pending (\xs -> (action:xs, ())) >> void (postMessage hwnd 0x802A 0 0)
       failStart message = do
-        windowTitle label $ "Sapiens4 could not start.\n\n" ++ message ++ "\n\nRequires Microsoft Edge WebView2 Runtime.\nData: " ++ dataDirectory host
+        cleanup <- try $
+          (atomicModifyIORef' browserRef (\value -> (Nothing, value)) >>= mapM_ closeBrowser) `finally`
+            ((atomicModifyIORef' shellRef (\value -> (Nothing, value)) >>= mapM_ closeView) `finally` closeHost host)
+        let detail = case cleanup of
+              Left (e :: SomeException) -> message ++ "\n\nStartup cleanup failed: " ++ displayException e
+              Right () -> message
+        writeIORef starting False
+        windowTitle label $ "Sapiens4 could not start.\n\n" ++ detail ++ "\n\nChoose Retry or Cancel.\nData: " ++ dataDirectory host
         void $ showWindow label 5
+        mapM_ (\button -> void (showWindow button 5)) (drop 1 setupButtons)
       loaded url result = do
         view <- either (ioError . userError) pure result
         dead <- readIORef closing
@@ -168,11 +176,13 @@ desktopSession memory probe = do
               Left (e :: SomeException) -> failStart (displayException e)
               Right url -> newView memory hwnd (dataDirectory host </> "WebView2/Shell") (\created -> loaded url created `catch` \(e :: SomeException) -> failStart (displayException e)) `catch` \(e :: SomeException) -> failStart (displayException e)
       begin = do
-        busy <- atomicModifyIORef' starting (\value -> (True,value))
-        unless busy $ do
-          mapM_ (\button -> void (showWindow button 0)) setupButtons
-          windowTitle label "Starting Sapiens4…"
-          async launch >>= writeIORef workerRef . Just
+        dead <- readIORef closing
+        unless dead $ do
+          busy <- atomicModifyIORef' starting (\value -> (True,value))
+          unless busy $ do
+            mapM_ (\button -> void (showWindow button 0)) setupButtons
+            windowTitle label "Starting Sapiens4…"
+            async launch >>= writeIORef workerRef . Just
   hSetBuffering stdout LineBuffering
   writeIORef retrySetup begin
   begin

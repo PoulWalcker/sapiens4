@@ -19,19 +19,22 @@ Keep GHC, shell and Make paths free of spaces. Use x64 GHC and Node on Windows A
 Initialize the pinned submodules, then run from the repository root:
 
 ```powershell
-git config submodule.blindly4.url https://github.com/aleski-green/blindly4.git
+git submodule sync --recursive
 git submodule update --init --recursive
-python build/package/acquire-provider.py --platform windows-x64 --destination runtime/codex
-.\environments\windows\build.ps1 -Runtime win-x64 -Version 0.1.0-dev -ProviderDirectory "$PWD/runtime/codex"
-.\.build\Sapiens4-Development-win-x64\Sapiens4.exe
+.\environments\windows\build.ps1 -Runtime win-x64 -Version 0.1.0-dev
+.\.build\windows\Sapiens-Setup.exe
 ```
 
 The build downloads/checks pinned Inno Setup 7.1.1 and installs its compiler below
 `.build/tools/` for the current build user. No compiler is needed by app users.
-Outputs in `.build/` are `Sapiens-Setup.exe`, `Sapiens4-Development-win-x64/`,
+Outputs in `.build/windows/` are `Sapiens-Setup.exe`, `Sapiens4-Development-win-x64/`,
 `sapiens4-development-0.1.0-dev-windows-x64.zip` and its `.release.json` receipt.
-Use `-OutputDirectory` for another build; existing package/ZIP outputs are rejected.
-`-SkipBuild` reuses binaries with caller-verified provenance. `-AllowMissingProvider`
+Use a new `-OutputDirectory` for another build; it contains the package directory,
+Setup, ZIP and receipt. The integrated build acquires
+or verifies `.build/codex`; `-ProviderDirectory` selects a prepared payload.
+`-BuildOnly` compiles the backend/UI/native shell and Blindly and prepares source
+icons/WebView2 without packaging or acquiring Codex. `-SkipBuild` packages existing
+outputs with caller-verified provenance. `runghc build/Build.hs` alone does not build Blindly. `-AllowMissingProvider`
 is for native validation only. `-BlindlyToolchain gnullvm` selects LLVM-MinGW
 instead of MSVC. The WebView2 loader is checksum-pinned. Publisher signing uses
 `-CertificateThumbprint`; see the [release runbook](../../docs/release-development.md).
@@ -45,9 +48,9 @@ and stops the host on close. Production update discovery is disabled.
 
 ```powershell
 ruby submodules/libs4/ruby/bundle.rb install
-$env:SAPIENS_TEST_PACKAGE_RUNTIME = (Resolve-Path .build/Sapiens4-Development-win-x64/runtime).Path
+$env:SAPIENS_TEST_PACKAGE_RUNTIME = (Resolve-Path .build/windows/Sapiens4-Development-win-x64/runtime).Path
 ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb
-$env:SAPIENS_TEST_WINDOWS_PACKAGE = (Resolve-Path .build/Sapiens4-Development-win-x64).Path
+$env:SAPIENS_TEST_WINDOWS_PACKAGE = (Resolve-Path .build/windows/Sapiens4-Development-win-x64).Path
 ruby submodules/libs4/ruby/bundle.rb exec rspec spec/windows_package_spec.rb
 ```
 
@@ -68,9 +71,10 @@ Uninstall removes recorded application files, shortcuts and registration. Unknow
 files and a small ownership marker remain so reinstall can recognize that directory.
 An existing nonempty unowned directory or the data root cannot be an install target.
 
-CI exercises silent install/reinstall, isolated native launch/health/close,
-active-process refusal, inventory verification and state-preserving uninstall.
-Native Windows/Windows 11 ARM, missing-WebView2 Install/Retry/Cancel, normal-user
-clean-machine and publisher-trust acceptance require actual recorded results.
+Native CI has passed silent install/reinstall, isolated launch/health/close,
+active-operation refusal, inventories and uninstall preserving selected synthetic
+sentinels. This does not cover complete user state or racing launches.
+Windows 11 ARM, missing-WebView2 Install/Retry/Cancel, normal-user clean-machine
+and publisher-trust acceptance remain open.
 WebView2 Evergreen is an external prerequisite; its download needs Internet.
 Unsigned manual builds may show Windows trust warnings. No updater is installed.

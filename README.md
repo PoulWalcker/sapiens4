@@ -27,11 +27,12 @@ On Windows, use `.\build\start.ps1 -Open`. The local UI opens at
 http://127.0.0.1:4174/workspace/. Existing checkouts initialize dependencies with
 `git submodule update --init --recursive`.
 
-The build downloads the pinned Codex payload to `.build/codex` and verifies it on
-subsequent builds. First launch opens Welcome → ChatGPT sign-in → optional
+Source startup and package assembly download the pinned Codex payload to
+`.build/codex` and verify it on subsequent runs. First launch opens Welcome → ChatGPT sign-in → optional
 computer permissions → workspace. Authentication belongs to Sapiens; no separate
 terminal login is needed. Completed setup is retained across restarts.
-`runghc build/Build.hs --no-provider` compiles without acquiring Codex, for CI only.
+`runghc build/Build.hs` compiles the backend, native shell and UI without acquiring
+Codex. Platform `--build-only`/`-BuildOnly` commands also build Blindly.
 
 The UI uses PureScript/Halogen. Source startup builds it when needed; completed
 packages need no Node installation. Third-party dependencies live in the pinned

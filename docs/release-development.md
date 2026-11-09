@@ -20,6 +20,8 @@ emulation. See the platform instructions for requirements, build commands and ch
 `native-build.yml` uses GHC 9.14.1, Cabal 3.18.2.0, Node 22.23.2, Rust 1.99.0
 and Ruby 3.4.11. PR jobs stop before provider acquisition and packaging. Tag and
 manual jobs reuse that job's compilation through `--skip-build`/`-SkipBuild`.
+Local builds and CI use the same platform entry points: `--build-only`/`-BuildOnly`
+compiles once; the default mode compiles and packages.
 `release-development.yml` validates SemVer and main ancestry, then requires both
 signed receipts to match the tag, clean source commit, supported targets and
 final asset hashes. Its publish job uploads to a draft and publishes the complete
@@ -27,7 +29,15 @@ release after successful upload; only that job has contents-write permission.
 
 ## Payload integrity
 
-Acquire the complete pinned provider with `build/package/acquire-provider.py`.
+The integrated platform build acquires/verifies `.build/codex` automatically.
+For an explicit prepared payload, use `--provider`/`-ProviderDirectory`.
+To prepare one separately (repeat-safe):
+
+```sh
+python3 build/package/acquire-provider.py --platform darwin-arm64 --destination .build/codex --ensure
+```
+
+On Windows use `python` and `--platform windows-x64`.
 Assembly rejects missing, changed or extra provider files and symlinks. It signs
 nested code before writing final provider/runtime inventories. The acquired
 inventory is retained as `sapiens-provider-upstream.json`.
@@ -38,8 +48,7 @@ python3 build/package/package.py verify --runtime /absolute/path/to/runtime
 
 Primary downloads are `Sapiens.dmg` and `Sapiens-Setup.exe`; portable ZIPs remain
 available. Each platform has one `.release.json` binding both final files, their
-sizes, SHA256 values and
-package-manifest hash. `buildId` records source, dependency, provider and toolchain
+sizes, SHA256 values and package-manifest hash. `buildId` records source, dependency, provider and toolchain
 inputs; it omits caller-supplied compiler flags and prebuilt binary hashes when
 using `--skip-build`. The final artifact digests identify the actual shipped bytes.
 Source exports need `build/source-provenance.json`, generated in the checkout:
@@ -83,4 +92,5 @@ the full real installer is then tested with synthetic state and no auth.
 
 Publisher signing/notarization, clean-machine/normal-user Windows, Windows 11 ARM,
 macOS 13 and downloaded signed-artifact acceptance require recorded results.
-Local ad-hoc DMG success is not evidence of these checks. Use synthetic data.
+Unsigned/ad-hoc CI evidence does not establish signing, target-OS or real-account
+acceptance. Use synthetic data.

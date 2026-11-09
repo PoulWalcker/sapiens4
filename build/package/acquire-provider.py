@@ -1,30 +1,13 @@
 #!/usr/bin/env python3
 """Stage the complete pinned upstream Codex package; never use a developer install."""
 import argparse
-import hashlib
 import json
 import pathlib
 import shutil
 import tarfile
 import tempfile
 import urllib.request
-
-
-def digest(path):
-    with path.open("rb") as stream:
-        checksum = hashlib.sha256()
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            checksum.update(chunk)
-        return checksum.hexdigest()
-
-
-def provider_files(root):
-    paths = sorted(root.rglob("*"))
-    if any(path.is_symlink() for path in paths):
-        raise ValueError("Provider payload may not contain symbolic links")
-    return [{"path": path.relative_to(root).as_posix(), "size": path.stat().st_size,
-             "sha256": digest(path)} for path in paths
-            if path.is_file() and path.relative_to(root).as_posix() != "sapiens-provider.json"]
+from package import digest, inventory, verify_inventory
 
 
 def download(record, destination):
@@ -54,8 +37,7 @@ def main():
                     "archiveSha256": asset["sha256"], "entrypoint": asset["entrypoint"]}
         if any(metadata.get(key) != value for key, value in expected.items()):
             raise ValueError("Existing provider does not match the pinned release; use a fresh destination")
-        if provider_files(destination) != metadata["files"]:
-            raise ValueError("Existing provider inventory does not match its files")
+        verify_inventory(destination, metadata["files"], {"sapiens-provider.json"})
         print(json.dumps({"version": lock["version"], "destination": str(destination), "verified": True}))
         return
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -102,7 +84,7 @@ def main():
                 raise ValueError("Incomplete provider package: " + path)
         for notice in lock["notices"]:
             download(notice, payload / notice["path"])
-        files = provider_files(payload)
+        files = inventory(payload, {"sapiens-provider.json"})
         metadata = {"schema": 1, "version": lock["version"], "upstreamCommit": lock["upstreamCommit"], "platform": args.platform, "entrypoint": asset["entrypoint"], "archiveSha256": asset["sha256"], "upstreamPackage": manifest, "files": files}
         (payload / "sapiens-provider.json").write_text(json.dumps(metadata, indent=2) + "\n")
         payload.rename(destination)

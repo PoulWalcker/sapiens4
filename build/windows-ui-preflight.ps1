@@ -13,22 +13,12 @@ $env:XDG_CACHE_HOME = $env:LOCALAPPDATA
 if ($LASTEXITCODE -ne 0) { throw 'Native PureScript compiler failed' }
 & node (Join-Path $libs 'node_modules/esbuild/bin/esbuild') --version
 if ($LASTEXITCODE -ne 0) { throw 'esbuild failed' }
-$trace = Join-Path $bin 'trace-spago.cjs'
-@'
-const cp = require('node:child_process');
-const spawn = cp.spawn;
-cp.spawn = (command, args, options) => {
-  console.error('[ui-preflight] ' + JSON.stringify({command, argument: args?.[0], shell: options?.shell}));
-  return spawn(command, args, options);
-};
-require('node:module').syncBuiltinESMExports();
-'@ | Set-Content -LiteralPath $trace -Encoding utf8
 Push-Location (Join-Path $libs 'purescript')
 try {
     $spago = Join-Path $libs 'node_modules/spago/bin/bundle.js'
-    & node --require $trace $spago install --verbose
+    & node $spago install --verbose
     if ($LASTEXITCODE -ne 0) { throw 'Spago install failed' }
-    $sources = & node --require $trace $spago sources --json --quiet
+    $sources = & node $spago sources --json --quiet
     if ($LASTEXITCODE -ne 0 -or @($sources | ConvertFrom-Json).Count -eq 0) { throw 'Spago sources failed' }
 } finally { Pop-Location }
 Write-Output 'Windows UI tools passed before application compilation'

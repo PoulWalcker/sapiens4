@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+from package import digest
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('mode', choices=('key', 'check'))
@@ -28,7 +29,7 @@ if args.mode == 'key':
     inputs['workspace'] = str(root)
     inputs['ghc'] = subprocess.check_output(['ghc', '--info'], text=True)
     inputs['cabal'] = subprocess.check_output(['cabal', '--numeric-version'], text=True).strip()
-    inputs['dependencies'] = {name: hashlib.sha256((project / name).read_bytes()).hexdigest()
+    inputs['dependencies'] = {name: digest(project / name)
                               for name in ('cabal.project', 'cabal.project.freeze', 'sapiens-domain.cabal')}
     fingerprint = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
     output('key', f'cabal-deps-v1-{inputs["RUNNER_OS"]}-{inputs["RUNNER_ARCH"]}-{fingerprint}')

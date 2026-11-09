@@ -10,19 +10,22 @@ Git and Xcode Command Line Tools. Checks use Ruby 3.4.11 and Bundler 4.0.21. Ini
 submodules, then run from the repository root:
 
 ```sh
-git config submodule.blindly4.url https://github.com/aleski-green/blindly4.git
+git submodule sync --recursive
 git submodule update --init --recursive
-python3 build/package/acquire-provider.py --platform darwin-arm64 --destination runtime/codex
-./environments/macos/build.sh --version 0.1.0-dev --provider "$PWD/runtime/codex"
+./environments/macos/build.sh --version 0.1.0-dev --output-directory .build/macos
 open .build/macos/Sapiens.dmg
 ```
 
 Open `Sapiens.dmg`, drag **Sapiens4 Development** to Applications, then launch it.
 Outputs in `.build/macos/` are the DMG, app, `sapiens4-development-0.1.0-dev-macos-arm64.zip`
 and its `.release.json` receipt. Use `--output-directory` for another build;
-existing app/ZIP outputs are rejected. Signing defaults to ad-hoc. Publisher
+existing app/DMG/ZIP outputs are rejected. The integrated build acquires or
+verifies the pinned provider in `.build/codex`; use `--provider` for an already
+verified payload elsewhere. Signing defaults to ad-hoc. Publisher
 signing and CI policy are in the [release runbook](../../docs/release-development.md).
-`--skip-build` reuses existing binaries with caller-verified provenance.
+`--build-only` compiles the backend/UI/native shell and Blindly without packaging
+or acquiring Codex. `--skip-build` packages existing outputs with caller-verified
+provenance. `runghc build/Build.hs` alone does not build Blindly.
 `--allow-missing-provider` supports native validation only.
 
 The macOS audit rejects required binaries above 13.0. Only the exact locked

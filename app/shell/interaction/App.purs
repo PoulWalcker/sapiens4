@@ -73,7 +73,7 @@ handle runtime input = session input
           Right value -> do
             H.modify_ _ {account=value}
             unless (D.b "completed" value) $ dispatch $ OpenDialog M.Onboarding F.NoRecord
-          Left _ -> pure unit
+          Left _ -> H.modify_ _ {setupChecked=false}
     Finalize -> liftEffect $ C.dispose runtime
     Poll -> E.runUpdate runtime dispatch U.Poll
     Copy text caption -> do
