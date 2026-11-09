@@ -28,7 +28,7 @@ import System.Posix.Signals
 #endif
 
 -- Owned by the outer local host only; remote corpus routes cannot reach login.
-data Onboarding = Onboarding FilePath (MVar (Bool,Maybe (Async ()))) (IORef Value) (IORef T.Text) (MVar (Bool,[Async T.Text])) (FilePath,MVar Value)
+data Onboarding = Onboarding FilePath (MVar (Bool,Maybe (Async ()))) (IORef Value) (MVar (Bool,[Async T.Text])) (FilePath,MVar Value)
 
 openOnboarding :: FilePath -> IO Onboarding
 openOnboarding root = do
@@ -40,13 +40,13 @@ openOnboarding root = do
  stored <- doesPathExist (home</>"auth.json")
  hold <- P.profileHold
  when (not stored && T.null hold) (P.holdProfile "disconnected")
- Onboarding root <$> newMVar (False,Nothing) <*> newIORef (loginState "idle" "") <*> newIORef "not_requested" <*> newMVar (False,[]) <*> pure (path,state)
+ Onboarding root <$> newMVar (False,Nothing) <*> newIORef (loginState "idle" "") <*> newMVar (False,[]) <*> pure (path,state)
 
 setupState :: Onboarding -> IO Value
-setupState (Onboarding _ _ _ _ _ (_,state)) = readMVar state
+setupState (Onboarding _ _ _ _ (_,state)) = readMVar state
 
 saveSetup :: Onboarding -> (Value -> Value) -> IO ()
-saveSetup (Onboarding _ _ _ _ _ (path,state)) update = modifyMVar_ state $ \current -> do
+saveSetup (Onboarding _ _ _ _ (path,state)) update = modifyMVar_ state $ \current -> do
  let next=update current
  writeJSON path next `catch` (\(_::IOException) -> failure 503 "Could not save setup. Check that Sapiens can write to its configuration folder, then retry.")
  pure next
@@ -58,14 +58,14 @@ loginView :: T.Text -> T.Text -> T.Text -> Value
 loginView state code url = obj [("state",str state),("code",str code),("url",str url)]
 
 closeOnboarding :: Onboarding -> IO ()
-closeOnboarding (Onboarding _ worker _ _ checks _) = do
+closeOnboarding (Onboarding _ worker _ checks _) = do
  modifyMVar_ checks $ \(_,active) -> mapM_ cancel active >> pure (True,[])
  modifyMVar_ worker $ \(_,active) -> mapM_ cancel active >> pure (True,Nothing)
 
 -- HTTP handlers may be abandoned when Warp stops; their subprocesses belong to
 -- onboarding, which cancels and joins them before the host can exit.
 checkedProviderStatus :: Onboarding -> IO T.Text
-checkedProviderStatus (Onboarding _ _ _ _ checks _) = bracket acquire release wait
+checkedProviderStatus (Onboarding _ _ _ checks _) = bracket acquire release wait
  where
  acquire = modifyMVar checks $ \(closed,active) -> do
   require (not closed) 503 "Sapiens is shutting down."
@@ -107,12 +107,22 @@ providerStatus = do
    pure (case result of Just ExitSuccess -> "signed_in"; Just _ | not stored -> "sign_in_required"; _ -> "unavailable")) `catch` (\(_::IOException) -> pure "unavailable")
 
 onboardingView :: Onboarding -> IO Value
-onboardingView onboarding@(Onboarding root _ progress permission _ _) = do
+onboardingView onboarding@(Onboarding root _ progress _ _) = do
  login <- readIORef progress
  provider <- if at login "state" `elem` ["signing_in","signing_out"] then pure (at login "state") else checkedProviderStatus onboarding
  binary <- C.blindlyBinary root
  built <- doesFileExist binary
- computer <- if not built then pure "missing" else if os/="darwin" then pure "not_required" else readIORef permission
+ computer <- if not built then pure "missing" else if os/="darwin" then pure "not_required" else do
+  -- Blindly checks AX trust before handling focused. This PID cannot be the
+  -- foreground application, so the command never reads window contents.
+  result <- (Just <$> C.invoke binary ["focused","--pid","2147483647"] 3) `catches`
+   [Handler (\(_::IOException) -> pure Nothing),Handler (\(_::APIError) -> pure Nothing)]
+  pure $ case result of
+   Just (ExitFailure 77,out,_) -> case at (parseJSONText (T.pack out)) "code" of
+    "focus_unavailable" -> "granted"
+    "accessibility_permission_denied" -> "denied"
+    _ -> "unavailable"
+   _ -> "unavailable"
  saved <- setupState onboarding
  hold <- P.profileHold
  let welcomed=boolean (get saved "welcomed")
@@ -122,7 +132,7 @@ onboardingView onboarding@(Onboarding root _ progress permission _ _) = do
  pure (obj [("schema",num (1::Int)),("step",str step),("completed",Bool complete),("provider",str provider),("login",login),("computer_permission",str computer),("computer_available",Bool built),("ready",Bool ready),("hold",str hold)])
 
 onboardingAction :: Onboarding -> Value -> IO Value
-onboardingAction onboarding@(Onboarding root worker progress permission _ _) value = do
+onboardingAction onboarding@(Onboarding root worker progress _ _) value = do
  case at value "action" of
   "begin" -> saveSetup onboarding (put "welcomed" (Bool True))
   "finish" -> do
@@ -159,9 +169,8 @@ onboardingAction onboarding@(Onboarding root worker progress permission _ _) val
    binary <- C.blindlyBinary root
    exists <- doesFileExist binary
    require exists 503 "Computer helper is missing. Reinstall Sapiens to repair it."
-   (code,out,_) <- C.invoke binary ["request-permission"] 10
+   (code,_,_) <- C.invoke binary ["request-permission"] 10
    require (code==ExitSuccess) 503 "Could not request Accessibility access. Open System Settings > Privacy & Security > Accessibility, then try again."
-   writeIORef permission (if boolean (get (parseJSONText (T.pack out)) "trusted") then "granted" else "denied")
   "refresh" -> pure ()
   _ -> failure 400 "Unknown setup action"
  onboardingView onboarding
@@ -169,7 +178,7 @@ onboardingAction onboarding@(Onboarding root worker progress permission _ _) val
 -- Serialize all mutations with the UI worker and take an OS-wide exclusive
 -- lease before touching credentials. A running task is never stopped by logout.
 startAuth :: Onboarding -> T.Text -> IO ()
-startAuth onboarding@(Onboarding _ worker progress _ _ _) action = modifyMVar_ worker $ \(closed,active) -> do
+startAuth onboarding@(Onboarding _ worker progress _ _) action = modifyMVar_ worker $ \(closed,active) -> do
  require (not closed) 503 "Sapiens is shutting down."
  running <- maybe (pure False) (fmap isNothing . poll) active
  require (not running) 409 "Account sign-in or sign-out is already running."

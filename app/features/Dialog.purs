@@ -67,7 +67,8 @@ view m = case m.dialog of
   Nothing -> V.node "dialog" [V.id "modal"] []
   Just d -> V.node "dialog" [V.id $ if M.corporaDialog d.kind then "corpora-dialog" else "modal",V.cls $ if d.kind == M.AppMenu then "app-menu-sheet" else "",V.attr "aria-labelledby" "dialog-title",V.on "cancel" \e -> Link e CloseDialog]
     [V.div (if M.corporaDialog d.kind then "corpora-menu-heading" else "modal-top") [V.span [V.cls "tiny-label"] "SAPIENS4",V.when (dismissible d) $ V.icon (if M.corporaDialog d.kind then "Close" else "Close dialog") "×" CloseDialog]
-    ,V.node "div" [V.id $ if M.corporaDialog d.kind then "corpora-dialog-body" else "modal-content"] [V.textNode "h2" [V.id "dialog-title"] (dialogTitle d),body m d,V.textNode "p" [V.cls "corpora-feedback",V.attr "role" "status"] ((M.dialogError d))]]
+    ,V.node "div" [V.id $ if M.corporaDialog d.kind then "corpora-dialog-body" else "modal-content"] [V.textNode "h2" [V.id "dialog-title"] (dialogTitle d),body m d,V.textNode "p" [V.cls "corpora-feedback",V.attr "role" "status"] ((M.dialogError d))
+      ,V.when (A.elem d.kind [M.Onboarding,M.WorkspaceSettings] && M.dialogError d /= "") $ V.button "button" "Try again" $ OnboardingPoll d.identity]]
 
 dismissible :: M.Dialog -> Boolean
 dismissible d = d.kind /= M.Onboarding || case d.content of
@@ -105,9 +106,10 @@ body m d = case d.kind of
             "missing" -> "The optional computer helper is missing. You can use chat now and reinstall Sapiens to repair computer control later."
             "granted" -> "Accessibility access is enabled for computer control."
             "denied" -> "For optional computer control, enable Sapiens in System Settings > Privacy & Security > Accessibility, then recheck. You can do this later."
+            "unavailable" -> "Accessibility status is unavailable. Recheck setup or open System Settings > Privacy & Security > Accessibility."
             "not_required" -> "Optional computer control works with accessible Windows applications. Elevated apps and secure system dialogs cannot be controlled."
             _ -> "Optional computer control uses macOS Accessibility access. You can enable it now or later in Settings."
-          ,V.when (permission == "not_requested" || permission == "denied" || permission == "granted") $ setup "permission" (if permission == "granted" then "Recheck Accessibility" else "Allow Accessibility")
+          ,V.when (permission == "not_requested" || permission == "denied" || permission == "granted" || permission == "unavailable") $ setup (if permission == "granted" then "refresh" else "permission") (if permission == "granted" then "Recheck Accessibility" else "Allow Accessibility")
           ,V.p "" "You can revisit setup and permissions in Workspace & settings."
           ,setup "refresh" "Recheck setup"
           ,setup "finish" "Enter workspace"]
