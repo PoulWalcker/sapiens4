@@ -17,10 +17,10 @@ main = do
   "macos":rest -> do
    options <- parseMac rest
    setEnv "MACOSX_DEPLOYMENT_TARGET" "13.0"
-   unless (skipBuild options) $ do
+   when (buildMode options /= PackageOnly) $ do
     callProcess "runghc" [root</>"build/Build.hs"]
     callProcess (root</>"submodules/blindly4/macos/build.sh") []
-   unless (buildOnly options) $ tool root args
+   when (buildMode options /= BuildOnly) $ tool root args
   _ -> tool root args
 
 tool :: FilePath -> [String] -> IO ()

@@ -1,11 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Main where
 
-import Control.Exception
+import Control.Exception (bracket_)
 import Control.Monad
 import Data.Aeson
-import qualified Data.Aeson.Key as K
-import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as B
 import Data.List (sortOn, isPrefixOf)
 import Data.Maybe
@@ -23,7 +21,7 @@ main = do
  root <- getCurrentDirectory
  args <- getArgs
  case args of
-  "macos":rest -> parseMac rest >>= \options -> unless (buildOnly options) (packageMac root options)
+  "macos":rest -> parseMac rest >>= \options -> when (buildMode options /= BuildOnly) (packageMac root options)
   _ -> P.command root args
 
 macho :: FilePath -> IO Bool
@@ -101,31 +99,31 @@ relocate input root = do
    loop app (Set.insert binary seen) (added++pending)
  strip prefix value = T.unpack <$> T.stripPrefix (T.pack prefix) (T.pack value)
 
-optionalVoice :: FilePath -> FilePath -> IO (Set.Set FilePath,Maybe Value)
+-- An optional component always carries the exact audited rule that permits it.
+data VoicePolicy = RequiredOnly | OptionalVoice P.CompatibilityRule (Set.Set FilePath)
+
+optionalVoice :: FilePath -> FilePath -> IO VoicePolicy
 optionalVoice root app = do
  let provider=app</>"Contents/Resources/runtime/codex";metadata=provider</>"sapiens-provider.json"
  present <- doesFileExist metadata
- if not present then pure (Set.empty,Nothing) else do
+ if not present then pure RequiredOnly else do
   rule <- P.readJSON (root</>"build/package/codex-macos-compatibility.json")
   info <- P.readJSON metadata
-  let identity=P.field "providerIdentity" rule
-  keys <- case identity of Object values -> pure (map K.toText $ KM.keys values);_->fail "Invalid optional voice rule"
-  if any (\key->P.field key info/=P.field key identity) keys then pure (Set.empty,Nothing) else do
+  if P.providerIdentity info /= P.ruleIdentity rule then pure RequiredOnly else do
    observed <- P.inventory provider ["sapiens-provider.json"]
-   unless (String (P.hash $ P.canonical observed)==P.field "providerFilesSha256" rule) $ fail "Provider bytes differ from the exact audited optional-voice release"
-   subtree <- P.get "optionalRoot" rule
-   paths <- binaries (provider</>subtree) >>= mapM canonicalizePath
-   pure (Set.fromList paths,Just rule)
-osVersion :: String -> [Int]
-osVersion value = take 3 (numbers value++repeat 0)
- where numbers input = case break (=='.') input of (a,[])->[read a];(a,_:rest)->read a:numbers rest
+   unless (P.hash (P.canonical $ toJSON observed)==P.ruleFingerprint rule) $ fail "Provider bytes differ from the exact audited optional-voice release"
+   paths <- binaries (provider</>P.ruleRoot rule) >>= mapM canonicalizePath
+   pure (OptionalVoice rule $ Set.fromList paths)
 
-maximumVersion :: [String] -> String
-maximumVersion [] = "13.0"
-maximumVersion (first:rest) = foldr (\a b->if osVersion a>osVersion b then a else b) first rest
+maximumVersion :: [String] -> Either String String
+maximumVersion [] = Right "13.0"
+maximumVersion (first:rest) = do
+ initial <- (,) <$> osVersion first <*> pure first
+ versions <- traverse (\value -> (,) <$> osVersion value <*> pure value) rest
+ pure $ snd $ foldr (\a b -> if fst a>fst b then a else b) initial versions
 
-audit :: FilePath -> Set.Set FilePath -> Maybe Value -> IO Value
-audit input optional rule = do
+audit :: FilePath -> VoicePolicy -> IO P.CompatibilityAudit
+audit input policy = do
  app <- canonicalizePath input
  paths <- binaries app >>= mapM canonicalizePath
  records <- forM paths $ \binary -> do
@@ -135,10 +133,12 @@ audit input optional rule = do
   unless (all (=="1") $ loadFields "LC_BUILD_VERSION" "platform" commands) $ fail ("Non-macOS Mach-O platform in "++binary)
   let minimums=loadFields "LC_BUILD_VERSION" "minos" commands++loadFields "LC_VERSION_MIN_MACOSX" "version" commands
   when (null minimums) $ fail ("No macOS minimum found for "++binary)
-  let minimum=maximumVersion minimums
-      voice=Set.member binary optional
-  allowed <- if voice then maybe (fail "Missing optional voice rule") (P.get "maximumMinimumOS") rule else pure "13.0"
-  when (osVersion minimum>osVersion allowed) $ fail (P.portable (makeRelative app binary)++" requires macOS "++minimum++"; allowed floor is "++allowed)
+  minimum <- either fail pure $ maximumVersion minimums
+  let voice=isVoice binary
+      allowed=case policy of OptionalVoice rule _ | voice -> P.ruleMaximum rule;_ -> "13.0"
+  minimumVersion <- either fail pure $ osVersion minimum
+  allowedVersion <- either fail pure $ osVersion allowed
+  when (minimumVersion>allowedVersion) $ fail (P.portable (makeRelative app binary)++" requires macOS "++minimum++"; allowed floor is "++allowed)
   edges <- dependencies binary
   let identities=loadFields "LC_ID_DYLIB" "name" commands;rpaths=loadFields "LC_RPATH" "path" commands
   resolved <- fmap catMaybes $ forM edges $ \dependency -> if dependency `elem` identities || systemDependency dependency then pure Nothing else do
@@ -148,35 +148,41 @@ audit input optional rule = do
    target <- firstFile candidates >>= maybe (fail $ "Unresolved or external packaged dependency "++dependency++" in "++binary) canonicalizePath
    unless (P.inside app target) $ fail ("Unresolved or external packaged dependency "++dependency++" in "++binary)
    macho target >>= flip unless (fail $ "Unrecognized packaged Mach-O dependency: "++target)
-   unless (voice==Set.member target optional) $ fail ("Dependency crosses audited optional voice boundary: "++binary++" -> "++target)
+   unless (voice==isVoice target) $ fail ("Dependency crosses audited optional voice boundary: "++binary++" -> "++target)
    pure (Just $ P.portable $ makeRelative app target)
-  pure (voice,minimum,P.obj [("path",toJSON $ P.portable $ makeRelative app binary),("minimumOS",toJSON minimum),("dependencies",toJSON $ sortOn id resolved)])
+  pure (voice,minimum,P.BinaryAudit (P.portable $ makeRelative app binary) minimum (sortOn id resolved))
  let required=[value | (False,_,value)<-records];voices=[value | (True,_,value)<-records]
- optionalRecords <- if null voices then pure [] else do
-  policy<-maybe (fail "Missing optional voice rule") pure rule
-  pure [P.obj [("name",String "codex-voice"),("ruleId",P.field "ruleId" policy),("minimumOS",toJSON $ maximumVersion [v | (True,v,_)<-records]),("notUsedBySelectedPaths",P.field "selectedPaths" policy),("binaries",toJSON voices),("evidenceCommit",P.field "upstreamCommit" $ P.field "providerIdentity" policy)]]
- pure $ P.obj [("declaredMinimumOS",String "13.0"),("requiredMinimumOS",toJSON $ maximumVersion ("13.0":[v | (False,v,_)<-records])),("requiredBinaries",toJSON required),("optionalComponents",toJSON optionalRecords),("targetOSAcceptance",String "not-run")]
+ optionalReport <- case policy of
+  OptionalVoice rule _ | not (null voices) -> do
+   minimum <- either fail pure $ maximumVersion [v | (True,v,_)<-records]
+   pure (Just (rule,minimum,voices))
+  _ -> pure Nothing
+ floor <- either fail pure $ maximumVersion ("13.0":[v | (False,v,_)<-records])
+ pure $ P.CompatibilityAudit floor required optionalReport
+ where
+ isVoice path = case policy of RequiredOnly->False;OptionalVoice _ paths->Set.member path paths
 
-sign :: FilePath -> String -> IO ()
-sign app identity = do
- let flags=["--force","--sign",identity]++[value | identity/="-",value<-["--options","runtime","--timestamp"]]
+sign :: FilePath -> MacSigning -> IO ()
+sign app plan = do
+ let identity=signIdentity plan
+     flags=["--force","--sign",identity]++[value | signingMode plan==DeveloperID,value<-["--options","runtime","--timestamp"]]
  binaries app >>= mapM_ (\binary->P.run "codesign" (flags++[binary])) . sortOn (negate . length . splitDirectories)
- P.finalize (app</>"Contents/Resources/runtime") (if identity=="-" then "ad-hoc" else "developer-id")
+ P.finalize (app</>"Contents/Resources/runtime") (signingMode plan)
  P.run "codesign" (flags++[app])
  P.run "codesign" ["--verify","--deep","--strict",app]
 
-diskImage :: FilePath -> FilePath -> FilePath -> MacOptions -> IO FilePath
-diskImage app output temporary options = do
+diskImage :: FilePath -> FilePath -> FilePath -> MacSigning -> IO FilePath
+diskImage app output temporary plan = do
  let image=output</>"Sapiens.dmg";source=temporary</>"disk-image"
  P.exists image >>= flip when (fail "Sapiens.dmg already exists; choose a new output directory")
  createDirectory source
  P.run "ditto" [app,source</>takeFileName app]
  createDirectoryLink "/Applications" (source</>"Applications")
  P.run "hdiutil" ["create","-volname","Sapiens4 Development","-srcfolder",source,"-format","UDZO",image]
- when (signIdentity options/="-") $ do
-  P.run "codesign" ["--force","--sign",signIdentity options,"--timestamp",image]
+ when (signingMode plan==DeveloperID) $ do
+  P.run "codesign" ["--force","--sign",signIdentity plan,"--timestamp",image]
   P.run "codesign" ["--verify","--strict",image]
- forM_ (notaryProfile options) $ \profile -> do
+ forM_ (notaryProfile plan) $ \profile -> do
   P.run "xcrun" ["notarytool","submit",image,"--keychain-profile",profile,"--wait"]
   P.run "xcrun" ["stapler","staple",image]
   P.run "xcrun" ["stapler","validate",image]
@@ -206,7 +212,7 @@ packageMac root options = do
   createDirectoryIfMissing True resources
   createDirectory macos
   copyFile (root</>".build/bin/sapiens-macos") (macos</>"Sapiens4")
-  void $ P.stage root runtime (version options) "macos" (providerDirectory options) (allowMissingProvider options)
+  manifest <- P.stage root runtime (version options) MacOS (providerDirectory options) (allowMissingProvider options)
   let iconset=temporary</>"AppIcon.iconset"
   createDirectory iconset
   P.run (root</>".build/bin/sapiens-macos") ["--icon",iconset,root</>"app/shell/favicon.svg"]
@@ -216,14 +222,13 @@ packageMac root options = do
   let infoJSON=temporary</>"Info.json"
   P.writeJSON infoJSON info
   P.run "plutil" ["-convert","xml1","-o",app</>"Contents/Info.plist",infoJSON]
-  (optional,rule)<-optionalVoice root app
+  voicePolicy<-optionalVoice root app
   relocate app root
-  compatibility<-audit app optional rule
+  compatibility<-audit app voicePolicy
   let manifestPath=runtime</>"package-manifest.json"
-  manifest<-P.readJSON manifestPath
-  P.writeJSON manifestPath (P.put "macOSCompatibility" compatibility manifest)
-  sign app (signIdentity options)
-  forM_ (notaryProfile options) $ \profile -> do
+  P.writeJSON manifestPath (P.compatibilityManifest compatibility manifest)
+  sign app (macSigning options)
+  forM_ (notaryProfile (macSigning options)) $ \profile -> do
    let submitted=temporary</>"notarization.zip"
    P.run "ditto" ["-c","-k","--keepParent",app,submitted]
    P.run "xcrun" ["notarytool","submit",submitted,"--keychain-profile",profile,"--wait"]
@@ -232,6 +237,6 @@ packageMac root options = do
    P.run "spctl" ["--assess","--type","execute","--verbose=2",app]
   renameDirectory app destination
   P.run "ditto" ["-c","-k","--keepParent",destination,artifact]
-  image<-diskImage destination output temporary options
+  image<-diskImage destination output temporary (macSigning options)
   P.receipt artifact (Just image) (destination</>"Contents/Resources/runtime/package-manifest.json") (replaceExtension artifact ".release.json")
   putStrLn ("Built "++destination++"\nInstaller "++image++"\nPortable "++artifact)
