@@ -39,7 +39,7 @@ printJSON = L.putStr . (<>"\n") . encode
 
 -- Optional means absent; a present null still goes through its field parser.
 optional :: FromJSON a => Object -> Key -> Parser (Maybe a)
-optional fields key = traverse parseJSON (KM.lookup key fields)
+optional fields key = if KM.member key fields then Just <$> fields .: key else pure Nothing
 check :: Bool -> String -> Parser ()
 check condition message = unless condition (fail message)
 checksum :: Int -> T.Text -> Parser T.Text
@@ -192,6 +192,7 @@ instance FromJSON Manifest where
   epochs<-o .: "dataEpoch";mapM_ (\key -> void (epochs .: key :: Parser (Maybe Integer))) ["minReadable","maxReadable","target"]
   void (o .: "migrationSetId" :: Parser (Maybe String));void (o .: "legacyAdoption" :: Parser String);void (o .: "updateDiscovery" :: Parser Bool)
   signing<-traverse signingJSON (KM.lookup "signing" o);digest<-optional o "providerInventorySha256" >>= traverse (checksum 64)
+  forM_ signing $ either fail pure . validateSigning (packagePlatform identity)
   check (isNothing signing || isNothing provider || isJust digest) "Signed provider inventory hash missing"
   pure (Manifest identity provider signing digest o)) value
 instance ToJSON Manifest where toJSON = Object . manifestWire
@@ -239,7 +240,11 @@ compatibilityManifest report m = m {manifestWire=KM.insert "macOSCompatibility" 
 -- that do not contain a complete staging manifest.
 data ReceiptInput = ReceiptInput PackageIdentity Signing
 instance FromJSON ReceiptInput where
- parseJSON value = withObject "receipt source" (\o -> ReceiptInput <$> parseJSON value <*> (o .: "signing" >>= signingJSON)) value
+ parseJSON value = withObject "receipt source" (\o -> do
+  identity <- parseJSON value
+  signing <- o .: "signing" >>= signingJSON
+  either fail pure $ validateSigning (packagePlatform identity) signing
+  pure (ReceiptInput identity signing)) value
 
 data ArtifactKind = Installer | PortableZip
 data Artifact = Artifact ArtifactKind FilePath Integer T.Text T.Text

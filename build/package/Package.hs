@@ -144,6 +144,7 @@ finalize :: FilePath -> Signing -> IO ()
 finalize runtime signing = do
  let manifestPath=runtime</>"package-manifest.json";provider=runtime</>"codex";metadataPath=provider</>"sapiens-provider.json";upstream=provider</>"sapiens-provider-upstream.json"
  manifest <- readJSON manifestPath
+ either fail pure $ validateSigning (packagePlatform $ manifestIdentity manifest) signing
  when (isJust $ manifestSigning manifest) $ fail "Already finalized; assemble a fresh package before signing again"
  providerHash <- forM (manifestProvider manifest) $ \_ -> do
   exists upstream >>= flip when (fail "Already finalized; assemble a fresh package before signing again")

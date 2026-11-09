@@ -36,6 +36,14 @@ parseSigning name = case name of
  "authenticode" -> Right Authenticode
  _ -> Left "Unsupported signing mode"
 
+validateSigning :: Platform -> Signing -> Either String ()
+validateSigning platform signing = case (platform,signing) of
+ (_,Unsigned) -> Right ()
+ (MacOS,AdHoc) -> Right ()
+ (MacOS,DeveloperID) -> Right ()
+ (Windows,Authenticode) -> Right ()
+ _ -> Left (signingName signing++" signing is not supported for "++platformName platform)
+
 -- Publishing credentials cannot be attached to an ad-hoc signing plan.
 data MacOptions = MacOptions
  { version :: String, outputDirectory :: Maybe FilePath, providerDirectory :: Maybe FilePath
