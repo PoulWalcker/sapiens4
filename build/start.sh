@@ -3,9 +3,8 @@ set -eu
 cd "$(dirname "$0")/.."
 git submodule update --init --recursive
 if [ "$(uname -s)" = Darwin ]; then
-  ./submodules/blindly4/macos/build.sh
+  ./environments/macos/build.sh --build-only
 else
-  echo "Blindly4 computer tasks require macOS. Chat is available on this platform."
+  runghc build/Build.hs
 fi
-runghc build/Build.hs
 exec .build/bin/sapiens4 "$@"

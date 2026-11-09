@@ -29,8 +29,10 @@ jobs:
         include:
           - runner: macos-15
             platform: darwin-arm64
+            compile: ./environments/macos/build.sh --build-only
           - runner: windows-2025
             platform: windows-x64
+            compile: pwsh -NoProfile -File ./environments/windows/build.ps1 -BuildOnly
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     env:
@@ -114,7 +116,7 @@ jobs:
       - name: Compile host, native application, UI and existing fixture helpers once
         id: compile
         shell: bash
-        run: runghc build/Build.hs
+        run: ${{ matrix.compile }}
       - name: Check completed dependencies even if UI compilation failed
         id: cabal-ready
         if: ${{ !cancelled() && github.repository == 'PoulWalcker/sapiens4' && github.event_name != 'pull_request' && steps.compile.outcome != 'skipped' && steps.cabal-restore.outputs.cache-hit != 'true' }}
@@ -128,18 +130,6 @@ jobs:
           path: |
             submodules/libs4/haskell/.cabal/store
             submodules/libs4/haskell/.cabal/packages
-      - name: Compile Blindly on macOS
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          test "$(uname -m)" = arm64
-          ./submodules/blindly4/macos/build.sh
-      - name: Compile Blindly on Windows
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          ./submodules/blindly4/windows/build.ps1 -Runtime win-x64 -Toolchain msvc
-          if ($LASTEXITCODE -ne 0) { throw 'Blindly compilation failed' }
       # Pull requests stop at compilation: no provider download, package or upload.
       - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1 snapshot, 2026-11-08
         if: github.event_name != 'pull_request'
@@ -149,10 +139,6 @@ jobs:
         if: github.event_name != 'pull_request'
         shell: bash
         run: ruby submodules/libs4/ruby/bundle.rb install
-      - name: Acquire complete pinned provider
-        if: github.event_name != 'pull_request'
-        shell: bash
-        run: python build/package/acquire-provider.py --platform "$PROVIDER_PLATFORM" --destination runtime/codex
       - name: Configure macOS release signing and notarization
         if: inputs.release && runner.os == 'macOS'
         shell: bash
@@ -216,7 +202,7 @@ jobs:
         shell: pwsh
         run: |
           $thumbprint = if ('${{ inputs.release }}' -eq 'true') { $env:SAPIENS_WINDOWS_CERT_THUMBPRINT } else { [string]::Empty }
-          ./environments/windows/build.ps1 -SkipBuild -Runtime win-x64 -Version $env:PACKAGE_VERSION -OutputDirectory .build/distribution/Sapiens4-Development-win-x64 -CertificateThumbprint $thumbprint
+          ./environments/windows/build.ps1 -SkipBuild -Runtime win-x64 -Version $env:PACKAGE_VERSION -OutputDirectory .build/distribution -CertificateThumbprint $thumbprint
           if ($LASTEXITCODE -ne 0) { throw 'Package build failed' }
           $env:SAPIENS_TEST_PACKAGE_RUNTIME = (Resolve-Path .build/distribution/Sapiens4-Development-win-x64/runtime).Path
           ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb

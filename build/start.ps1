@@ -11,10 +11,8 @@ try {
             git submodule update --init --recursive -- submodules/blindly4
             if ($LASTEXITCODE -ne 0) { throw 'Cannot initialize Blindly4' }
         }
-        & ./submodules/blindly4/windows/build.ps1
-        if ($LASTEXITCODE -ne 0) { throw 'Blindly4 build failed' }
-        & runghc build/Build.hs
-        if ($LASTEXITCODE -ne 0) { throw 'Haskell application build failed' }
+        & ./environments/windows/build.ps1 -BuildOnly
+        if ($LASTEXITCODE -ne 0) { throw 'Application compilation failed' }
     }
     $arguments = @('--port', $Port, '--data-dir', $DataDir)
     if ($Open) { $arguments += '--open' }

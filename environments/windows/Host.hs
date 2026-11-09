@@ -65,6 +65,7 @@ prepareHost args = do
 
 startHost :: Host -> IO String
 startHost host = mask $ \restore -> do
+  closeHost host
   createDirectoryIfMissing True (dataDirectory host)
   let binary = runtimeDirectory host </> ".build/bin/sapiens4.exe"
   available <- doesFileExist binary
@@ -114,9 +115,12 @@ awaitHost host output errors = do
     _ -> ioError $ userError "Server readiness check failed"
 
 closeHost :: Host -> IO ()
-closeHost host = do
+closeHost host = mask_ $ do
   writeIORef (origin host) Nothing
-  atomicModifyIORef' (serverProcess host) (\value -> (Nothing, value)) >>= mapM_ stopServer
+  current <- readIORef (serverProcess host)
+  forM_ current $ \server -> do
+    stopServer server
+    writeIORef (serverProcess host) Nothing
 
 stopServer :: ServerProcess -> IO ()
 stopServer server = stop `finally` (cancel (errorReader server) `finally` mapM_ closeStream streams)

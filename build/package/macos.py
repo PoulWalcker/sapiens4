@@ -207,7 +207,9 @@ def main():
     parser.add_argument('--version', default='0.1.0-dev')
     parser.add_argument('--output-directory')
     parser.add_argument('--provider')
-    parser.add_argument('--skip-build', action='store_true', help='Use existing outputs; their provenance remains the caller responsibility')
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument('--build-only', action='store_true', help='Compile Sapiens, UI and Blindly without packaging/provider acquisition')
+    modes.add_argument('--skip-build', action='store_true', help='Package existing outputs; provenance remains the caller responsibility')
     parser.add_argument('--allow-missing-provider', action='store_true')
     parser.add_argument('--sign-identity', default=os.environ.get('SAPIENS_MAC_SIGN_IDENTITY', '-'))
     parser.add_argument('--notary-profile', default=os.environ.get('SAPIENS_MAC_NOTARY_PROFILE'))
@@ -216,12 +218,14 @@ def main():
     os.chdir(root)
     if not re.fullmatch(r'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?', args.version):
         parser.error('--version must be SemVer')
-    if args.notary_profile and args.sign_identity == '-':
+    if not args.build_only and args.notary_profile and args.sign_identity == '-':
         parser.error('Notarization requires Developer ID signing')
     os.environ['MACOSX_DEPLOYMENT_TARGET'] = '13.0'
     if not args.skip_build:
         run('runghc', root / 'build/Build.hs')
         run(root / 'submodules/blindly4/macos/build.sh')
+    if args.build_only:
+        return
     output = Path(args.output_directory or root / '.build/macos').resolve()
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='sapiens-package-', dir=output) as temporary:
@@ -232,8 +236,7 @@ def main():
         macos.mkdir()
         shutil.copy2(root / '.build/bin/sapiens-macos', macos / 'Sapiens4')
         stage = [sys.executable, root / 'build/package/package.py', 'stage', '--root', root, '--destination', resources / 'runtime',
-                 '--manifest', resources / 'runtime/package-manifest.json', '--version', args.version, '--platform', 'macos', '--architecture', 'arm64',
-                 '--minimum-os', '13.0']
+                 '--version', args.version, '--platform', 'macos']
         if args.provider:
             stage += ['--provider', args.provider]
         if args.allow_missing_provider:

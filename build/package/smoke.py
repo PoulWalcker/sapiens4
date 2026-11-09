@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Collect installed-runtime observations for the RSpec package scenario."""
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,6 +10,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from package import digest
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--runtime', required=True)
@@ -55,7 +55,7 @@ with tempfile.TemporaryDirectory(prefix='sapiens-package-smoke-') as temporary:
             for route in ('/api/health', '/workspace/', '/workspace/app.js', '/workspace/guest.js', '/remote-vendor.js', '/workspace/styles.css'):
                 with urllib.request.urlopen(address + route, timeout=5) as response:
                     routes.append({'path': route, 'status': response.status, 'bytes': len(response.read())})
-            current = hashlib.sha256((data / 'corpora-identity.json').read_bytes()).hexdigest()
+            current = digest(data / 'corpora-identity.json')
         finally:
             if process.poll() is None:
                 process.stdin.write('stop\n')
