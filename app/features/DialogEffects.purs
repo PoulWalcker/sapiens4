@@ -57,6 +57,7 @@ handle runtime dispatch action = case action of
   CloseDialog -> do
     m <- H.get
     case m.dialog of
+      Just d | Dialog.finishOnClose d -> unless (M.dialogBusy d) $ dispatch $ DialogCommand $ Intent.Setup "finish"
       Just d | not (Dialog.dismissible d) -> E.modifyDialog d.identity $ M.setDialogError "Finish setup before entering your workspace. You can close the app and return to setup later."
       _ -> do
         void $ H.fork $ H.liftAff $ C.cancelPairing runtime
