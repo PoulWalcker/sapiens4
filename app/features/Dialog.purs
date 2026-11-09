@@ -69,7 +69,7 @@ view m = case m.dialog of
   Just d -> V.node "dialog" [V.id $ if M.corporaDialog d.kind then "corpora-dialog" else "modal",V.cls $ if d.kind == M.AppMenu then "app-menu-sheet" else "",V.attr "aria-labelledby" "dialog-title",V.on "cancel" \e -> Link e CloseDialog]
     [V.div (if M.corporaDialog d.kind then "corpora-menu-heading" else "modal-top") [V.span [V.cls "tiny-label"] "SAPIENS4",V.when (dismissible d) $ V.icon (if M.corporaDialog d.kind then "Close" else "Close dialog") "×" CloseDialog]
     ,V.node "div" [V.id $ if M.corporaDialog d.kind then "corpora-dialog-body" else "modal-content"] [V.textNode "h2" [V.id "dialog-title"] (dialogTitle d),body m d,V.textNode "p" [V.cls "corpora-feedback",V.attr "role" "status"] ((M.dialogError d))
-      ,V.when (A.elem d.kind [M.Onboarding,M.AIProviders,M.Computer] && M.dialogError d /= "") $ V.button "button" "Try again" $ OnboardingPoll d.identity]]
+      ,V.when (A.elem d.kind [M.Onboarding,M.AIProviders,M.Computer] && M.dialogError d /= "") $ V.button "button" "Recheck" $ OnboardingPoll d.identity]]
 
 dismissible :: M.Dialog -> Boolean
 dismissible d = d.kind /= M.Onboarding || case d.content of
@@ -83,7 +83,7 @@ dialogTitle d = if d.kind /= M.Onboarding then d.title else case d.content of
     "sign_in" -> "Connect Codex"
     "permissions" -> "Finishing setup"
     _ -> "Computer access"
-  _ -> "Choose your AI"
+  _ -> d.title
 
 body :: M.Model -> M.Dialog -> V.Html
 body m d = case d.kind of
