@@ -5,8 +5,10 @@ Codex provider and licenses. End users need macOS arm64 13.0+.
 
 ## Build
 
-Use GHC 9.14.1, Cabal 3.18.2.0, Node 22.23.2, Rust 1.99.0, Python 3.10+,
-Git and Xcode Command Line Tools. Checks use Ruby 3.4.11 and Bundler 4.0.21. Initialize the pinned
+Use GHC 9.14.1, Cabal 3.18.2.0, Node 22.23.2, Rust 1.99.0,
+Git and Xcode Command Line Tools. The builder and packager are Haskell; they use
+the existing Cabal dependencies and platform tools. Checks use Python 3.10+,
+Ruby 3.4.11 and Bundler 4.0.21. Initialize the pinned
 submodules, then run from the repository root:
 
 ```sh
