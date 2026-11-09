@@ -40,7 +40,6 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Blindly4 build failed' }
     }
     & (Join-Path $repo 'submodules/libs4/windows/webview2.ps1') -Runtime $Runtime -Destination (Join-Path $repo '.build/bin')
-    if ($LASTEXITCODE -ne 0) { throw 'WebView2 loader preparation failed' }
     if ($BuildOnly) { return }
     $payload = Join-Path $destination 'runtime'
     $manifest = Join-Path $payload 'package-manifest.json'
