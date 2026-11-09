@@ -32,6 +32,7 @@ jobs:
     timeout-minutes: 90
     env:
       PACKAGE_VERSION: ${{ inputs.version || '0.1.0-dev' }}
+      BUNDLE_FROZEN: 'true'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -91,6 +92,14 @@ jobs:
           path: |
             submodules/libs4/haskell/.cabal/store
             submodules/libs4/haskell/.cabal/packages
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1 snapshot, 2026-11-08
+        if: github.event_name != 'pull_request'
+        with:
+          ruby-version: '3.4.11'
+      - name: Install package-scenario dependencies
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: ruby submodules/libs4/ruby/bundle.rb install
       - name: Compile installer script before the expensive Windows application build
         if: github.event_name != 'pull_request'
         shell: pwsh
@@ -118,14 +127,6 @@ jobs:
             submodules/libs4/haskell/.cabal/store
             submodules/libs4/haskell/.cabal/packages
       # Pull requests stop at compilation: no provider download, package or upload.
-      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1 snapshot, 2026-11-08
-        if: github.event_name != 'pull_request'
-        with:
-          ruby-version: '3.4.11'
-      - name: Install package-scenario dependencies
-        if: github.event_name != 'pull_request'
-        shell: bash
-        run: ruby submodules/libs4/ruby/bundle.rb install
       - name: Configure Windows release signing
         if: (inputs.release || inputs.mode == 'prod')
         shell: pwsh

@@ -22,6 +22,9 @@ There are no macOS Actions jobs and no automatic release publication job.
 Windows still uses GHC9.14.1, Cabal3.18.2.0, Node22.23.2, Rust1.99.0 and
 Ruby3.4.11, existing caches, installer validation and `-SkipBuild` packaging.
 Production Windows runs require main ancestry and signing secrets before compilation.
+Ruby package-scenario dependencies are installed before application compilation with
+`BUNDLE_FROZEN=true`, also retained during the scenarios. Bundler must use the committed
+lockfile without rewriting it; an incompatible lockfile fails before the expensive build.
 
 ### One local macOS command
 
