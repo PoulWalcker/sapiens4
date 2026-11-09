@@ -34,7 +34,7 @@ decodePreview value = case toString (D.get "content" value) of
 
 type Request = { epoch :: Int, sequence :: Int, key :: String, revision :: String, path :: String }
 
-data DialogKind = AppMenu | WorkspaceSettings | Computer | Onboarding | AgentSettings | GroupSettings | Attach | Reference X.AttachmentKind | DecisionPrompts | GroupTask | CreateCorpora | EditCorpora | ConnectRemote | HostPairing | RelayList | RelayAdd | RelaySwitch | RelayTerms | Installation | Notice
+data DialogKind = AppMenu | WorkspaceSettings | AIProviders | Computer | Onboarding | AgentSettings | GroupSettings | Attach | Reference X.AttachmentKind | DecisionPrompts | GroupTask | CreateCorpora | EditCorpora | ConnectRemote | HostPairing | RelayList | RelayAdd | RelaySwitch | RelayTerms | Installation | Notice
 
 derive instance eqDialogKind :: Eq DialogKind
 
@@ -61,7 +61,10 @@ setDialogBusy running d = d {status=if running then Submitting (dialogError d) e
 setDialogError :: String -> Dialog -> Dialog
 setDialogError message d = d {status=if dialogBusy d then Submitting message else if message == "" then Editing else Rejected message}
 
-type Dialog = { kind :: DialogKind, title :: String, record :: F.Context, fields :: F.Fields, content :: F.Content, status :: DialogStatus, identity :: Int }
+data ProviderPage = ProviderList | CodexDetails | CodexAuth | ConfirmAccountChange | ConfirmDisconnect
+derive instance eqProviderPage :: Eq ProviderPage
+
+type Dialog = { providerPage :: ProviderPage, kind :: DialogKind, title :: String, record :: F.Context, fields :: F.Fields, content :: F.Content, status :: DialogStatus, identity :: Int }
 
 data ConnectionState = Offline | Online | ChangingLifecycle Boolean
 derive instance eqConnectionState :: Eq ConnectionState

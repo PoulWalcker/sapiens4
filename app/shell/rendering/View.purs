@@ -150,4 +150,4 @@ accountBanner :: M.Model -> V.Html
 accountBanner m = V.when (M.accountBlocked m && D.b "completed" m.account) $
   V.node "aside" [V.cls "account-banner",V.attr "role" "status"]
     [V.text $ if D.b "ready" m.account then "AI work is paused for this ChatGPT account." else "Connect ChatGPT to use AI features. Your chats and files are still available."
-    ,V.button "button" (if D.b "ready" m.account then "Manage account" else "Continue with ChatGPT") $ OpenDialog M.WorkspaceSettings F.NoRecord]
+    ,V.button "button" (if D.b "ready" m.account then "Manage account" else "AI Providers") $ OpenDialog M.AIProviders F.NoRecord]
