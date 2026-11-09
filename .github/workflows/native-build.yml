@@ -63,11 +63,10 @@ jobs:
           missing = [name for name in names if not os.environ.get(name)]
           if missing:
               raise SystemExit('Missing signing configuration: ' + ', '.join(missing))
-      - name: Resolve exact dependency pins from upstream URLs
+      - name: Resolve exact dependency pins from committed URLs
         shell: bash
         run: |
-          git config submodule.blindly4.url https://github.com/aleski-green/blindly4.git
-          git config submodule.libs4.url https://github.com/aleski-green/libs4.git
+          git submodule sync --recursive
           git submodule update --init --recursive
           git submodule status --recursive
       - uses: haskell-actions/setup@82e8b5066385702e477d9dc98f287070493e8abd # v2.8.2, peeled commit
