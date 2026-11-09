@@ -1,4 +1,4 @@
-# Sapiens4 Development for macOS
+# Sapiens4 for macOS
 
 The app bundles the native shell, owned backend, UI, Blindly, complete pinned
 Codex provider and licenses. End users need macOS arm64 13.0+.
@@ -18,7 +18,9 @@ compilation/download caches. Install missing tools first (GHC/Cabal via ghcup,
 Node22.23.2 and Rust1.99.0 via your tool manager; `xcode-select --install` for
 Xcode CLI tools). Nothing is installed globally by the command. See the
 [combined release runbook](../../docs/release-development.md) for exact commit/version
-matching, Prod signing and manual publication. macOS is not built on Actions.
+matching, Prod signing and manual publication. `--local prod` selects the Stable
+`Sapiens4.app` and requires Developer ID signing and notarization. Dev keeps
+`Sapiens4 Development.app`. macOS is not built on Actions.
 
 For direct low-level builds, initialize the pinned submodules and run:
 
@@ -48,7 +50,8 @@ Actual macOS 13 launch/login/exec acceptance remains open.
 
 ## Run and verify
 
-Data and configuration default to `~/Library/Application Support/Sapiens4 Development/data`
+Stable data defaults to `~/Library/Application Support/Sapiens4/data`, with
+configuration in the adjacent `config` directory. Dev data and configuration default to `~/Library/Application Support/Sapiens4 Development/data`
 and the adjacent `config` directory. Use `SAPIENS_DATA_DIR` and `SAPIENS_CONFIG_DIR`
 for synthetic validation. The app starts its own host on a dynamic loopback port;
 `desktop-server.log` is in the data directory. Closing the window leaves the app
@@ -60,6 +63,8 @@ codesign --verify --deep --strict '.build/macos/Sapiens4 Development.app'
 SAPIENS_TEST_PACKAGE_RUNTIME="$PWD/.build/macos/Sapiens4 Development.app/Contents/Resources/runtime" \
   ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb
 ```
+
+For Stable checks, set `PACKAGE_CHANNEL=stable` and use `Sapiens4.app` in those paths.
 
 DMG creation verifies the image, mounts it read-only, copies the app to a temporary
 installation path and verifies its signature/runtime inventory.

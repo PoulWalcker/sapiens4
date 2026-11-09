@@ -2,6 +2,7 @@ param(
     [Parameter(Mandatory)][string]$PackageDirectory,
     [Parameter(Mandatory)][string]$OutputDirectory,
     [Parameter(Mandatory)][string]$Version,
+    [ValidateSet('development','stable')][string]$Channel = 'development',
     [string]$CertificateThumbprint,
     [string]$TimestampUrl = 'http://timestamp.digicert.com'
 )
@@ -29,7 +30,11 @@ if (-not (Test-Path -LiteralPath $compiler)) {
     (Get-FileHash -LiteralPath $compiler -Algorithm SHA256).Hash | Set-Content -LiteralPath $compilerHash
 }
 if (-not (Test-Path -LiteralPath $compilerHash) -or (Get-FileHash -LiteralPath $compiler -Algorithm SHA256).Hash -ne (Get-Content -Raw -LiteralPath $compilerHash).Trim()) { throw 'Cached compiler changed; use a fresh tool cache' }
-$arguments = @('/Qp',("/DSourceDir=$package"),("/DOutputDir=$output"),("/DAppVersion=$Version"),("/DFileVersion="+($Version -split '[-+]')[0]))
+$appName = if ($Channel -eq 'stable') { 'Sapiens4' } else { 'Sapiens4 Development' }
+$appId = if ($Channel -eq 'stable') { 'com.poulwalcker.sapiens4' } else { 'com.poulwalcker.sapiens4.development' }
+$marker = (Get-Content -Raw -LiteralPath (Join-Path $package 'sapiens-installation.id')).Trim()
+if ($marker -ne $appId) { throw 'Installer channel and payload identity differ' }
+$arguments = @(("/DPackageName=$appName"),("/DPackageId=$appId"),'/Qp',("/DSourceDir=$package"),("/DOutputDir=$output"),("/DAppVersion=$Version"),("/DFileVersion="+($Version -split '[-+]')[0]))
 if ($CertificateThumbprint) {
     if ($CertificateThumbprint -notmatch '^[a-fA-F0-9]{40}$' -or $TimestampUrl -notmatch '^https?://[A-Za-z0-9./:_-]+$') { throw 'Invalid signing configuration' }
     $arguments += '/DPublisherSign'

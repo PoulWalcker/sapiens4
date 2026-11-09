@@ -172,16 +172,16 @@ instance ToJSON ProviderSummary where
  toJSON p = obj [("name",String "codex"),("version",toJSON $ summaryVersion p),("entrypoint",toJSON $ summaryEntry p),("archiveSha256",toJSON $ summaryArchive p)]
 
 data PackageIdentity = PackageIdentity
- { packageVersion :: Version, packagePlatform :: Platform, packageBuildId :: T.Text, packageCommit :: T.Text, packageDirty :: Bool, packageComplete :: Bool } deriving Eq
+ { packageChannel :: Channel, packageVersion :: Version, packagePlatform :: Platform, packageBuildId :: T.Text, packageCommit :: T.Text, packageDirty :: Bool, packageComplete :: Bool } deriving Eq
 instance FromJSON PackageIdentity where
  parseJSON = withObject "package identity" $ \o -> do
-  app<-o .: "appId";repository<-o .: "repository";channel<-o .: "channel";support<-o .: "supportStatus"
-  check (app==("com.poulwalcker.sapiens4.development"::String) && repository==("PoulWalcker/sapiens4"::String) && channel==("development"::String) && support==("declared-target"::String)) "Unexpected package identity/support status"
+  app<-o .: "appId";repository<-o .: "repository";channel<-o .: "channel" >>= either fail pure . parseChannel;support<-o .: "supportStatus"
+  check (app==appId channel && repository==("PoulWalcker/sapiens4"::String) && support==("declared-target"::String)) "Unexpected package identity/support status"
   platform<-o .: "platform" >>= platformJSON;arch<-o .: "architecture";floor<-o .: "minimumOS"
   check (arch==architecture platform && floor==(if platform==MacOS then Just "13.0" else Nothing :: Maybe String)) "Platform/architecture/minimumOS mismatch"
   status<-o .: "packageStatus";complete<-case status :: String of "provider-complete"->pure True;"validation-provider-incomplete"->pure False;_->fail "Invalid package status"
   version<-o .: "version"
-  PackageIdentity version platform <$> (o .: "buildId" >>= checksum 64) <*> (o .: "sourceCommit" >>= checksum 40) <*> o .: "sourceDirty" <*> pure complete
+  PackageIdentity channel version platform <$> (o .: "buildId" >>= checksum 64) <*> (o .: "sourceCommit" >>= checksum 40) <*> o .: "sourceDirty" <*> pure complete
 
 data Manifest = Manifest { manifestIdentity :: PackageIdentity, manifestProvider :: Maybe ProviderSummary, manifestSigning :: Maybe Signing, manifestProviderHash :: Maybe T.Text, manifestWire :: Object }
 instance FromJSON Manifest where
@@ -210,8 +210,8 @@ providerSummary :: Provider -> ProviderSummary
 providerSummary p = let i=providerIdentity p in ProviderSummary (identityVersion i) ("codex/"++identityEntry i) (identityArchive i)
 
 -- Build identity hashes the current deterministic input document.
-newManifest :: Provenance -> T.Text -> Platform -> Version -> Maybe Provider -> [(T.Text,String)] -> Manifest
-newManifest source tree platform version provider tools = Manifest identity summary Nothing Nothing document
+newManifest :: Channel -> Provenance -> T.Text -> Platform -> Version -> Maybe Provider -> [(T.Text,String)] -> Manifest
+newManifest channel source tree platform version provider tools = Manifest identity summary Nothing Nothing document
  where
  summary = providerSummary <$> provider
  inputs = KM.fromList
@@ -220,7 +220,7 @@ newManifest source tree platform version provider tools = Manifest identity summ
   ,("architecture",toJSON $ architecture platform)
   ,("version",toJSON version)
   ,("repository",String "PoulWalcker/sapiens4")
-  ,("channel",String "development")
+  ,("channel",toJSON $ channelName channel)
   ,("provider",toJSON summary)
   ,("minimumOS",if platform==MacOS then String "13.0" else Null)
   ,("supportStatus",String "declared-target")
@@ -229,10 +229,10 @@ newManifest source tree platform version provider tools = Manifest identity summ
   ,("sourceDirty",Bool $ sourceDirty source)
   ,("submodules",toJSON $ sourceSubmodules source)]
  buildId = hash $ canonical $ Object inputs
- identity = PackageIdentity version platform buildId (sourceCommit source) (sourceDirty source) (isJust provider)
+ identity = PackageIdentity channel version platform buildId (sourceCommit source) (sourceDirty source) (isJust provider)
  document = KM.union (KM.fromList
   [("schemaVersion",toJSON (1::Int))
-  ,("appId",String "com.poulwalcker.sapiens4.development")
+  ,("appId",toJSON $ appId channel)
   ,("buildId",String buildId)
   ,("packageStatus",String $ if isJust provider then "provider-complete" else "validation-provider-incomplete")
   ,("updateDiscovery",Bool False)]) inputs
@@ -251,15 +251,16 @@ data Receipt = Receipt PackageIdentity Signing ArtifactPair
 instance ToJSON Receipt where
  toJSON (Receipt i signing artifacts) = obj
   [("schemaVersion",toJSON (1::Int))
-  ,("appId",String "com.poulwalcker.sapiens4.development")
+  ,("appId",toJSON $ appId channel)
   ,("version",toJSON $ packageVersion i)
   ,("repository",String "PoulWalcker/sapiens4")
-  ,("channel",String "development")
+  ,("channel",toJSON $ channelName channel)
   ,("sourceCommit",toJSON $ packageCommit i)
   ,("sourceDirty",Bool $ packageDirty i)
   ,("packageStatus",String $ if packageComplete i then "provider-complete" else "validation-provider-incomplete")
   ,("artifacts",toJSON [item "installer" (installerArtifact artifacts), item "portable-zip" (portableArtifact artifacts)])]
   where
+  channel = packageChannel i
   item kind (Artifact path size digest manifestHash) = obj
    [("platform",toJSON $ platformName $ packagePlatform i)
    ,("architecture",toJSON $ architecture $ packagePlatform i)

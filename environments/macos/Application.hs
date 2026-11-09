@@ -32,6 +32,16 @@ import System.Posix.Process (getProcessID)
 import Data.List (stripPrefix)
 
 
+newtype PackageProfile = PackageProfile FilePath
+instance FromJSON PackageProfile where
+  parseJSON = withObject "package profile" $ \o -> do
+    channel <- o .: "channel"
+    identity <- o .: "appId"
+    case (channel :: String, identity :: String) of
+      ("development", "com.poulwalcker.sapiens4.development") -> pure (PackageProfile "Sapiens4 Development")
+      ("stable", "com.poulwalcker.sapiens4") -> pure (PackageProfile "Sapiens4")
+      _ -> fail "Invalid package channel/identity"
+
 data Application = Application { native :: Obj, browser :: Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: Maybe ServerProcess, address :: Text, manager :: Manager }
 
 data ServerProcess = ServerProcess ProcessHandle Handle (Async ())
@@ -47,19 +57,20 @@ check application = do
         Nothing -> pure False
         Just (ServerProcess process _ _) -> isNothing <$> getProcessExitCode process
     if alive then readIORef (shell (browser application)) >>= \view -> loadURL view (address application)
-      else alert "The application server stopped. Quit and reopen Sapiens4 Development."
+      else alert "The application server stopped. Quit and reopen Sapiens4."
 
 startServer :: IO (ServerProcess, Text)
 startServer = mask $ \restore -> do
     executable <- getExecutablePath
     let resources = takeDirectory executable </> "../Resources"
     runtime <- canonicalizePath (resources </> "runtime")
+    PackageProfile profile <- either fail pure =<< eitherDecodeFileStrict (runtime </> "package-manifest.json")
     home <- getHomeDirectory
-    configRoot <- lookupEnv "SAPIENS_CONFIG_DIR" >>= maybe (pure (home </> "Library/Application Support/Sapiens4 Development/config")) makeAbsolute
-    destination <- lookupEnv "SAPIENS_DATA_DIR" >>= maybe (pure (home </> "Library/Application Support/Sapiens4 Development/data")) makeAbsolute
+    configRoot <- lookupEnv "SAPIENS_CONFIG_DIR" >>= maybe (pure (home </> "Library/Application Support" </> profile </> "config")) makeAbsolute
+    destination <- lookupEnv "SAPIENS_DATA_DIR" >>= maybe (pure (home </> "Library/Application Support" </> profile </> "data")) makeAbsolute
     let binary = runtime </> ".build/bin/sapiens4"
     present <- doesFileExist binary
-    unless present $ ioError (userError "The application is incomplete. Extract the complete Sapiens4 Development package.")
+    unless present $ ioError (userError "The application is incomplete. Extract the complete Sapiens4 package.")
     mapM_ (createDirectoryIfMissing True) [destination, configRoot]
     environment <- getEnvironment
     pid <- getProcessID

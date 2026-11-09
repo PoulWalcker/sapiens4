@@ -1,8 +1,9 @@
-# Sapiens4 Development for Windows
+# Sapiens4 for Windows
 
 Run **Sapiens-Setup.exe** to install for the current user without administrator
-rights. Launch **Sapiens4 Development** from Start. Default files are under
-`%LOCALAPPDATA%\Programs\Sapiens4 Development`; uninstall through Windows Settings.
+rights. Stable installs as **Sapiens4**, Dev as **Sapiens4 Development**. Launch
+the corresponding Start shortcut. Files are under `%LOCALAPPDATA%\Programs\`
+in the matching app directory; uninstall through Windows Settings.
 The portable ZIP remains available: extract it whole and run **Sapiens4.exe**.
 Both contain the native shell, backend, UI, Blindly, pinned Codex provider and
 WebView2 loader. No Python, .NET, WSL or build tools are needed to run the app.
@@ -39,9 +40,13 @@ is for native validation only. `-BlindlyToolchain gnullvm` selects LLVM-MinGW
 instead of MSVC. The WebView2 loader is checksum-pinned. Publisher signing uses
 `-CertificateThumbprint`; see the [release runbook](../../docs/release-development.md).
 
+`-Channel stable` selects `Sapiens4-win-x64/` and `sapiens4-VERSION-windows-x64.zip`.
+Actions `mode=prod` selects Stable with publisher signing. Dev remains the default.
+
 ## State and verification
 
-Data defaults to `%LOCALAPPDATA%\Sapiens4 Development\data`, with configuration
+Stable data defaults to `%LOCALAPPDATA%\Sapiens4\data`; Dev uses
+`%LOCALAPPDATA%\Sapiens4 Development\data`, with configuration
 in the adjacent `config` directory. `SAPIENS_DATA_DIR` and `SAPIENS_CONFIG_DIR`
 allow synthetic validation. The app owns its host, uses a dynamic loopback port,
 and stops the host on close. Production update discovery is disabled.
@@ -54,13 +59,16 @@ $env:SAPIENS_TEST_WINDOWS_PACKAGE = (Resolve-Path .build/windows/Sapiens4-Develo
 ruby submodules/libs4/ruby/bundle.rb exec rspec spec/windows_package_spec.rb
 ```
 
+For Stable checks, set `$env:PACKAGE_CHANNEL = 'stable'` and use
+`Sapiens4-win-x64` in those paths.
+
 The package scenario checks inventories, provider version and backend restart
 with synthetic state. Desktop checks require an unlocked interactive session,
 accessible controls and matching privilege levels; run them serially.
 
 ## Installer safety and remaining acceptance
 
-The installer keeps the development identity and stores data/config/auth outside
+The installer keeps the selected channel identity and stores data/config/auth outside
 its program directory. It never runs auth, automatically stops apps, restarts
 processes, or deletes external state. Quit Sapiens before repair/uninstall.
 A busy owned executable or failed WMI process check refuses the operation.
@@ -71,7 +79,7 @@ Uninstall removes recorded application files, shortcuts and registration. Unknow
 files and a small ownership marker remain so reinstall can recognize that directory.
 An existing nonempty unowned directory or the data root cannot be an install target.
 
-Native CI has passed silent install/reinstall, isolated launch/health/close,
+Development native CI has passed silent install/reinstall, isolated launch/health/close,
 active-operation refusal, inventories and uninstall preserving selected synthetic
 sentinels. This does not cover complete user state or racing launches.
 Windows 11 ARM, missing-WebView2 Install/Retry/Cancel, normal-user clean-machine

@@ -3,8 +3,10 @@ require 'digest'
 module PackageExamples
   def verify_native_runtime(runtime)
     manifest = JSON.parse(File.read(File.join(runtime, 'package-manifest.json')))
-    expect(manifest).to include('appId' => 'com.poulwalcker.sapiens4.development',
-      'channel' => 'development', 'repository' => 'PoulWalcker/sapiens4',
+    channel = ENV.fetch('PACKAGE_CHANNEL', 'development')
+    identity = {'development' => 'com.poulwalcker.sapiens4.development', 'stable' => 'com.poulwalcker.sapiens4'}.fetch(channel)
+    expect(manifest).to include('appId' => identity,
+      'channel' => channel, 'repository' => 'PoulWalcker/sapiens4',
       'updateDiscovery' => false, 'packageStatus' => 'provider-complete')
     if manifest['platform'] == 'macos'
       expect(manifest.fetch('minimumOS')).to eq('13.0')

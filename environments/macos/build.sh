@@ -39,6 +39,8 @@ if [ "${1:-}" = --local ]; then
         printf 'repository hackage.haskell.org\n  url: https://hackage.haskell.org/\n  secure: True\n' > "$cache/config"
     fi
     # No clean/removal: Cabal, UI, Rust, provider and packaging caches stay in place.
-    set -- --version "$version" --output-directory "$output"
+    channel=development
+    [ "$mode" != prod ] || channel=stable
+    set -- --channel "$channel" --version "$version" --output-directory "$output"
 fi
 exec runghc -ibuild/package build/Package.hs macos "$@"

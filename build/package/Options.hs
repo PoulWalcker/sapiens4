@@ -1,5 +1,6 @@
 module Options
- ( Platform(..), BuildMode(..), Signing(..), MacSigning(..), MacOptions(..)
+ ( Channel(..), channelName, parseChannel, appId, displayName, artifactPrefix
+ , Platform(..), BuildMode(..), Signing(..), MacSigning(..), MacOptions(..)
  , platformName, providerPlatform, architecture, executableSuffix, parsePlatform, parseProviderPlatform
  , signingName, parseSigning, validateSigning, signIdentity, notaryProfile, signingMode
  , parseMac, osVersion, Version, parseVersion, versionText, macUsage, option, required ) where
@@ -8,6 +9,25 @@ import Control.Monad
 import Data.Char (isAscii, isAlphaNum)
 import System.Environment
 import Text.Read (readMaybe)
+
+-- Channel binds package identity and prevents mixing stable and development receipts.
+data Channel = Development | Stable deriving (Eq, Show)
+channelName :: Channel -> String
+channelName Development = "development"
+channelName Stable = "stable"
+parseChannel :: String -> Either String Channel
+parseChannel "development" = Right Development
+parseChannel "stable" = Right Stable
+parseChannel _ = Left "Expected development or stable channel"
+appId :: Channel -> String
+appId Development = "com.poulwalcker.sapiens4.development"
+appId Stable = "com.poulwalcker.sapiens4"
+displayName :: Channel -> String
+displayName Development = "Sapiens4 Development"
+displayName Stable = "Sapiens4"
+artifactPrefix :: Channel -> String
+artifactPrefix Development = "sapiens4-development-"
+artifactPrefix Stable = "sapiens4-"
 
 data Platform = MacOS | Windows deriving (Eq, Show)
 data BuildMode = BuildAndPackage | BuildOnly | PackageOnly deriving (Eq, Show)
@@ -57,7 +77,7 @@ validateSigning platform signing = case (platform,signing) of
 
 -- Publishing credentials cannot be attached to an ad-hoc signing plan.
 data MacOptions = MacOptions
- { version :: Version, outputDirectory :: Maybe FilePath, providerDirectory :: Maybe FilePath
+ { channel :: Channel, version :: Version, outputDirectory :: Maybe FilePath, providerDirectory :: Maybe FilePath
  , buildMode :: BuildMode, allowMissingProvider :: Bool, macSigning :: MacSigning } deriving Show
 
 signIdentity :: MacSigning -> String
@@ -74,7 +94,7 @@ parseMac :: [String] -> IO MacOptions
 parseMac args = do
  identity <- maybe "-" id <$> lookupEnv "SAPIENS_MAC_SIGN_IDENTITY"
  notary <- lookupEnv "SAPIENS_MAC_NOTARY_PROFILE"
- either fail pure $ parse (MacOptions (Version "0.1.0-dev") Nothing Nothing BuildAndPackage False MacAdHoc) identity (nonempty =<< notary) args
+ either fail pure $ parse (MacOptions Development (Version "0.1.0-dev") Nothing Nothing BuildAndPackage False MacAdHoc) identity (nonempty =<< notary) args
  where
  parse value identity notary [] = do
   plan <- if buildMode value==BuildOnly then Right MacAdHoc else case (identity,notary) of
@@ -87,6 +107,7 @@ parseMac args = do
  parse value identity notary ("--skip-build":rest) = mode PackageOnly value >>= \next -> parse next identity notary rest
  parse value identity notary ("--allow-missing-provider":rest) = parse value {allowMissingProvider=True} identity notary rest
  parse value identity notary (key:argument:rest) = case key of
+  "--channel" -> parseChannel argument >>= \c -> parse value {channel=c} identity notary rest
   "--version" -> parseVersion argument >>= \v -> parse value {version=v} identity notary rest
   "--output-directory" -> parse value {outputDirectory=Just argument} identity notary rest
   "--provider" -> parse value {providerDirectory=Just argument} identity notary rest
@@ -137,7 +158,7 @@ parseVersion input = if valid then Right (Version input) else Left "Version must
  split separator value = case break (==separator) value of (a,[]) -> [a]; (a,_:rest) -> a:split separator rest
 
 macUsage :: String
-macUsage = "Usage: environments/macos/build.sh [--version SEMVER] [--output-directory DIR] [--provider DIR] [--build-only | --skip-build] [--allow-missing-provider] [--sign-identity ID] [--notary-profile PROFILE]"
+macUsage = "Usage: environments/macos/build.sh [--channel development|stable] [--version SEMVER] [--output-directory DIR] [--provider DIR] [--build-only | --skip-build] [--allow-missing-provider] [--sign-identity ID] [--notary-profile PROFILE]"
 
 option :: String -> [String] -> Maybe String
 option name values = foldl select Nothing (zip values $ drop 1 values)

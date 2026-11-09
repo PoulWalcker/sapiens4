@@ -76,8 +76,11 @@ RSpec.describe 'Windows per-user installer', :windows do
     evidence = File.expand_path(ENV.fetch('SAPIENS_TEST_INSTALLER_EVIDENCE', File.join(work, 'evidence')))
     FileUtils.mkdir_p([state, evidence])
     installer = File.realpath(ENV.fetch('SAPIENS_TEST_INSTALLER'))
-    registration = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\com.poulwalcker.sapiens4.development_is1'
-    env = {'SAPIENS_INSTALL_APP' => app.tr('/', '\\'), 'SAPIENS_INSTALL_REGISTRATION' => registration}
+    stable = ENV.fetch('PACKAGE_CHANNEL', 'development') == 'stable'
+    identity = stable ? 'com.poulwalcker.sapiens4' : 'com.poulwalcker.sapiens4.development'
+    name = stable ? 'Sapiens4' : 'Sapiens4 Development'
+    registration = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\\' + identity + '_is1'
+    env = {'SAPIENS_INSTALL_APP' => app.tr('/', '\\'), 'SAPIENS_INSTALL_REGISTRATION' => registration, 'SAPIENS_INSTALL_NAME' => name}
     ps = lambda do |script, extra = {}|
       Contract.capture('powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
         "$ErrorActionPreference='Stop'; " + script, env: env.merge(extra), timeout: 190)
@@ -86,7 +89,7 @@ RSpec.describe 'Windows per-user installer', :windows do
       out, error, code = ps.call(<<~'PS')
         $r=Get-ItemProperty $env:SAPIENS_INSTALL_REGISTRATION -ErrorAction SilentlyContinue
         $processes=@(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($env:SAPIENS_INSTALL_APP+'\',[StringComparison]::OrdinalIgnoreCase) })
-        @{registered=($null -ne $r); location=$r.InstallLocation; shortcut=(Test-Path (Join-Path ([Environment]::GetFolderPath('Programs')) 'Sapiens4 Development.lnk')); processes=@($processes | Select-Object ProcessId,ParentProcessId,ExecutablePath,@{Name='Ports';Expression={@(Get-NetTCPConnection -OwningProcess $_.ProcessId -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort)}})} | ConvertTo-Json -Depth 5 -Compress
+        @{registered=($null -ne $r); location=$r.InstallLocation; shortcut=(Test-Path (Join-Path ([Environment]::GetFolderPath('Programs')) ($env:SAPIENS_INSTALL_NAME+'.lnk'))); processes=@($processes | Select-Object ProcessId,ParentProcessId,ExecutablePath,@{Name='Ports';Expression={@(Get-NetTCPConnection -OwningProcess $_.ProcessId -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort)}})} | ConvertTo-Json -Depth 5 -Compress
       PS
       expect(code).to eq(0), error
       JSON.parse(out)

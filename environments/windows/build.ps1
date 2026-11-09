@@ -2,6 +2,7 @@ param(
     [ValidateSet('win-x64')][string]$Runtime = 'win-x64',
     [string]$OutputDirectory,
     [string]$Version = '0.1.0-dev',
+    [ValidateSet('development','stable')][string]$Channel = 'development',
     [string]$ProviderDirectory,
     [ValidateSet('msvc','gnullvm')][string]$BlindlyToolchain = 'msvc',
     [switch]$BuildOnly,
@@ -17,7 +18,10 @@ $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 if ($LASTEXITCODE -ne 0) { throw 'Version must be SemVer' }
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repo ".build/windows" }
 $output = [IO.Path]::GetFullPath($OutputDirectory)
-$destination = Join-Path $output "Sapiens4-Development-$Runtime"
+$appName = if ($Channel -eq 'stable') { 'Sapiens4' } else { 'Sapiens4 Development' }
+$appId = if ($Channel -eq 'stable') { 'com.poulwalcker.sapiens4' } else { 'com.poulwalcker.sapiens4.development' }
+$prefix = if ($Channel -eq 'stable') { 'sapiens4-' } else { 'sapiens4-development-' }
+$destination = Join-Path $output (($appName -replace ' ', '-') + "-$Runtime")
 if (-not $BuildOnly -and (Test-Path -LiteralPath $destination)) { throw 'Output must be new; refusing to mix old and new payloads' }
 if ($destination -eq $repo -or $repo.StartsWith($destination + [IO.Path]::DirectorySeparatorChar)) { throw 'Output must not replace the source checkout' }
 Push-Location $repo
@@ -43,7 +47,7 @@ try {
     $payload = Join-Path $destination 'runtime'
     $manifest = Join-Path $payload 'package-manifest.json'
     $stage = @('-ibuild/package','build/Package.hs','stage','--root',$repo,'--destination',$payload,
-        '--version',$Version,'--platform','windows')
+        '--version',$Version,'--platform','windows','--channel',$Channel)
     if ($ProviderDirectory) { $stage += @('--provider',$ProviderDirectory) }
     if ($AllowMissingProvider) { $stage += '--allow-missing-provider' }
     & runghc @stage
@@ -63,11 +67,11 @@ try {
     $signing = if ($CertificateThumbprint) { 'authenticode' } else { 'none' }
     & $packager finalize --runtime $payload --signing $signing
     if ($LASTEXITCODE -ne 0) { throw 'Final signed runtime inventory failed' }
-    [IO.File]::WriteAllText((Join-Path $destination 'sapiens-installation.id'), 'com.poulwalcker.sapiens4.development')
-    $artifact = Join-Path $output "sapiens4-development-$Version-windows-x64.zip"
+    [IO.File]::WriteAllText((Join-Path $destination 'sapiens-installation.id'), $appId)
+    $artifact = Join-Path $output "$prefix$Version-windows-x64.zip"
     if (Test-Path -LiteralPath $artifact) { throw 'Versioned artifact already exists' }
     Compress-Archive -LiteralPath $destination -DestinationPath $artifact
-    & (Join-Path $repo 'build/package/windows-installer.ps1') -PackageDirectory $destination -OutputDirectory $output -Version $Version -CertificateThumbprint $CertificateThumbprint -TimestampUrl $TimestampUrl
+    & (Join-Path $repo 'build/package/windows-installer.ps1') -PackageDirectory $destination -OutputDirectory $output -Version $Version -Channel $Channel -CertificateThumbprint $CertificateThumbprint -TimestampUrl $TimestampUrl
     if ($LASTEXITCODE -ne 0) { throw 'Installer assembly failed' }
     & $packager receipt --artifact $artifact --installer (Join-Path $output 'Sapiens-Setup.exe') --manifest $manifest --output ($artifact -replace '\.zip$','.release.json')
     if ($LASTEXITCODE -ne 0) { throw 'Release receipt failed' }

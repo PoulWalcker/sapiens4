@@ -1,11 +1,11 @@
 ; Installer-only: no updater, migration, auth or process termination.
 [Setup]
-AppId=com.poulwalcker.sapiens4.development
-AppName=Sapiens4 Development
+AppId={#PackageId}
+AppName={#PackageName}
 AppVersion={#AppVersion}
 VersionInfoVersion={#FileVersion}
-DefaultDirName={localappdata}\Programs\Sapiens4 Development
-DefaultGroupName=Sapiens4 Development
+DefaultDirName={localappdata}\Programs\{#PackageName}
+DefaultGroupName={#PackageName}
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -33,14 +33,14 @@ Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "sapiens-installation.id";
 Source: "{#SourceDir}\sapiens-installation.id"; DestDir: "{app}"; Flags: ignoreversion uninsneveruninstall
 
 [Icons]
-Name: "{userprograms}\Sapiens4 Development"; Filename: "{app}\Sapiens4.exe"
+Name: "{userprograms}\{#PackageName}"; Filename: "{app}\Sapiens4.exe"
 
 [Run]
-Filename: "{app}\Sapiens4.exe"; Description: "Launch Sapiens4 Development"; Flags: nowait postinstall skipifsilent unchecked
+Filename: "{app}\Sapiens4.exe"; Description: "Launch {#PackageName}"; Flags: nowait postinstall skipifsilent unchecked
 
 [Code]
 const
-  Identity = 'com.poulwalcker.sapiens4.development';
+  Identity = '{#PackageId}';
 
 function OwnedDirectory: Boolean;
 var Marker: AnsiString;
@@ -53,9 +53,11 @@ function SafeDestination: Boolean;
 var Target, StateRoot: String; Item: TFindRec;
 begin
   Target := AddBackslash(ExpandConstant('{app}'));
+  Result := True;
+  StateRoot := AddBackslash(ExpandConstant('{localappdata}\Sapiens4'));
+  if CompareText(Copy(Target, 1, Length(StateRoot)), StateRoot) = 0 then begin Result := False; Exit; end;
   StateRoot := AddBackslash(ExpandConstant('{localappdata}\Sapiens4 Development'));
-  Result := CompareText(Copy(Target, 1, Length(StateRoot)), StateRoot) <> 0;
-  if not Result then Exit;
+  if CompareText(Copy(Target, 1, Length(StateRoot)), StateRoot) = 0 then begin Result := False; Exit; end;
   if OwnedDirectory then Exit;
   if FindFirst(Target + '*', Item) then begin
     try
@@ -114,7 +116,7 @@ begin
   if not SafeDestination then
     Result := 'Choose a new installation directory. Existing data or unowned files cannot be replaced.'
   else if not ProcessesStopped(False) then
-    Result := 'Quit Sapiens4 Development and its backend, then retry. No running process will be stopped by Setup.';
+    Result := 'Quit {#PackageName} and its backend, then retry. No running process will be stopped by Setup.';
 end;
 
 function InitializeUninstall: Boolean;
@@ -123,6 +125,6 @@ begin
   if not Result then begin
     Log('Uninstall refused: missing installation identity, running process, or process-check failure.');
     if not UninstallSilent then
-      MsgBox('Quit Sapiens4 Development and its backend, then retry uninstall. No running process will be stopped.', mbError, MB_OK);
+      MsgBox('Quit {#PackageName} and its backend, then retry uninstall. No running process will be stopped.', mbError, MB_OK);
   end;
 end;

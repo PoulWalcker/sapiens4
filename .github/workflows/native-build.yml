@@ -33,6 +33,7 @@ jobs:
     env:
       PACKAGE_VERSION: ${{ inputs.version || '0.1.0-dev' }}
       BUNDLE_FROZEN: 'true'
+      PACKAGE_CHANNEL: ${{ (inputs.release || inputs.mode == 'prod') && 'stable' || 'development' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -45,7 +46,7 @@ jobs:
           WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
-          if ($env:GITHUB_REPOSITORY -ne 'PoulWalcker/sapiens4') { throw 'Production signing is restricted to the development repository' }
+          if ($env:GITHUB_REPOSITORY -ne 'PoulWalcker/sapiens4') { throw 'Production signing is restricted to the release repository' }
           if ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF -ne "refs/tags/v$env:PACKAGE_VERSION") { throw 'Expected matching version tag' }
           git merge-base --is-ancestor HEAD origin/main
           if ($LASTEXITCODE -ne 0) { throw 'Production builds require main ancestry' }
@@ -98,8 +99,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path .build/installer-script-input -Force | Out-Null
           Set-Content -LiteralPath .build/installer-script-input/Sapiens4.exe -Value 'compiler fixture only'
-          Set-Content -LiteralPath .build/installer-script-input/sapiens-installation.id -Value 'com.poulwalcker.sapiens4.development'
-          ./build/package/windows-installer.ps1 -PackageDirectory .build/installer-script-input -OutputDirectory .build/installer-script-output -Version $env:PACKAGE_VERSION -CertificateThumbprint ([string]::Empty)
+          $identity = if ($env:PACKAGE_CHANNEL -eq 'stable') { 'com.poulwalcker.sapiens4' } else { 'com.poulwalcker.sapiens4.development' }
+          Set-Content -LiteralPath .build/installer-script-input/sapiens-installation.id -Value $identity
+          ./build/package/windows-installer.ps1 -PackageDirectory .build/installer-script-input -OutputDirectory .build/installer-script-output -Version $env:PACKAGE_VERSION -Channel $env:PACKAGE_CHANNEL -CertificateThumbprint ([string]::Empty)
           if ($LASTEXITCODE -ne 0) { throw 'Installer script/compiler preflight failed' }
       - name: Compile host, native application, UI and existing fixture helpers once
         id: compile
@@ -159,9 +161,10 @@ jobs:
         shell: pwsh
         run: |
           $thumbprint = if ('${{ inputs.release || inputs.mode == 'prod' }}' -eq 'true') { $env:SAPIENS_WINDOWS_CERT_THUMBPRINT } else { [string]::Empty }
-          ./environments/windows/build.ps1 -SkipBuild -Runtime win-x64 -Version $env:PACKAGE_VERSION -OutputDirectory .build/distribution -CertificateThumbprint $thumbprint
+          ./environments/windows/build.ps1 -SkipBuild -Runtime win-x64 -Version $env:PACKAGE_VERSION -Channel $env:PACKAGE_CHANNEL -OutputDirectory .build/distribution -CertificateThumbprint $thumbprint
           if ($LASTEXITCODE -ne 0) { throw 'Package build failed' }
-          $env:SAPIENS_TEST_PACKAGE_RUNTIME = (Resolve-Path .build/distribution/Sapiens4-Development-win-x64/runtime).Path
+          $packageName = if ($env:PACKAGE_CHANNEL -eq 'stable') { 'Sapiens4-win-x64' } else { 'Sapiens4-Development-win-x64' }
+          $env:SAPIENS_TEST_PACKAGE_RUNTIME = (Resolve-Path ".build/distribution/$packageName/runtime").Path
           ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb
           if ($LASTEXITCODE -ne 0) { throw 'Package scenario failed' }
       - name: Verify per-user Windows install, native launch and uninstall
@@ -175,7 +178,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always() && github.event_name != 'pull_request'
         with:
-          name: sapiens4-development-windows-x64
+          name: sapiens4-${{ env.PACKAGE_CHANNEL }}-windows-x64
           path: |
             .build/distribution/Sapiens-Setup.exe
             .build/distribution/*.zip

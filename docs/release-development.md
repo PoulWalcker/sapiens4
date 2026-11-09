@@ -1,7 +1,23 @@
 # Development packaging and releases
 
-Packages use `PoulWalcker/sapiens4`, channel `development`, and app ID
-`com.poulwalcker.sapiens4.development`. Production update discovery is disabled.
+Dev packages use channel `development`, name `Sapiens4 Development`, and app ID
+`com.poulwalcker.sapiens4.development`. Prod packages use channel `stable`, name
+`Sapiens4`, and app ID `com.poulwalcker.sapiens4`. Both use `PoulWalcker/sapiens4`.
+The Stable identity belongs to this packaging flow; it does not claim or migrate
+older installations with a different bundle ID. Update discovery stays disabled.
+
+Stable defaults to `~/Library/Application Support/Sapiens4/{data,config}` on Mac
+and `%LOCALAPPDATA%\Sapiens4\{data,config}` on Windows. Dev keeps its existing
+`Sapiens4 Development` directories. Explicit data/config overrides still work;
+no profiles are moved or deleted. Both channels can be installed alongside each other.
+
+`--local dev` selects Development and ad-hoc signing; `--local prod` selects
+Stable and requires Developer ID plus notarization. Actions `mode=prod` likewise
+selects Stable and Authenticode. Low-level packagers accept `--channel stable`
+(Mac) / `-Channel stable` (Windows) for local unsigned/ad-hoc acceptance builds;
+these cannot pass production release verification. Portable Stable ZIPs are named
+`sapiens4-VERSION-PLATFORM-ARCH.zip`; Dev names are unchanged.
+
 Targets are macOS arm64 (13.0+) and Windows x64, including Windows 11 ARM x64
 emulation. See the platform instructions for requirements, build commands and checks:
 
@@ -61,9 +77,14 @@ insufficient for this command. Keychain credentials are provisioned separately.
 
 ### Build Windows, combine and publish manually
 
-After pushing the approved commit, choose that exact ref in **Native verification
-and test packages**, enter the same version and `mode=dev` or `mode=prod`.
-No run publishes a release. Production builds must be in main history.
+For Dev, after pushing the approved commit, choose that exact ref in **Native
+verification and test packages**, enter the same version and `mode=dev`.
+For Prod, use a commit in main history and create/push its `vVERSION` tag first;
+that tag runs the signed Stable Windows build. Build Mac locally from the same
+commit/version. Use that existing tag when creating the draft, so publication
+will not cause a second Windows build. A manual `mode=prod` run is also available,
+but do not build manually and then push a new version tag for the same release.
+No run publishes a release.
 After a successful run, download its Windows artifact (replace RUN_ID):
 
 ```sh
@@ -73,10 +94,12 @@ gh run download RUN_ID --repo PoulWalcker/sapiens4 \
   --name sapiens4-development-windows-x64 --dir ".build/release/$VERSION/windows"
 ```
 
+For Prod, download artifact `sapiens4-stable-windows-x64` instead.
+
 Validate the complete set with the existing receipt checker. It requires exactly
 one receipt per supported platform, both installer and ZIP, matching clean source
-commit/version and final file hashes. Prod additionally requires publisher signing
-and the supported macOS13 floor; Dev permits Mac ad-hoc/unsigned and Windows unsigned.
+commit/version and final file hashes. Prod additionally requires the Stable channel and publisher signing
+and the supported macOS13 floor; Dev requires Development and permits Mac ad-hoc/unsigned and Windows unsigned.
 Keep the default mode `prod` when validating production packages.
 
 ```sh
@@ -90,13 +113,15 @@ Only after this command succeeds, create a draft with all six verified assets
 macOS Bash3.2 as well as newer Bash:
 
 ```sh
-# Use --mode prod above for a production release. Run only after verification succeeds.
+# Dev: TAG="dev-$VERSION" (does not start the production tag workflow).
+# Prod: TAG="v$VERSION" must already exist from the initial Windows build.
+# Use --mode prod above for Prod. Run only after verification succeeds.
 bash -eu -c '
   assets=()
   while IFS= read -r asset; do assets+=("$asset"); done < .build/verified-assets.txt
-  gh release create "v$1" "${assets[@]}" --repo PoulWalcker/sapiens4 \
+  gh release create "$3" "${assets[@]}" --repo PoulWalcker/sapiens4 \
     --target "$2" --draft --title "Sapiens4 $1"
-' _ "$VERSION" "$COMMIT"
+' _ "$VERSION" "$COMMIT" "$TAG"
 ```
 
 Review the complete draft in GitHub, then publish it manually. No credentials or
@@ -154,8 +179,8 @@ runghc -ibuild/package build/Package.hs provenance --output build/source-provena
 
 ## Publisher signing
 
-PR and manual builds need no signing credentials. Manual Mac builds use ad-hoc
-signing; manual Windows builds are unsigned. For a locally configured signing
+PR and Dev builds need no signing credentials. Dev Mac builds use ad-hoc
+signing; Dev Windows builds are unsigned. Prod requires publisher credentials. For a locally configured signing
 identity, add these arguments to the platform build command:
 
 - macOS: `--sign-identity 'Developer ID Application: ORGANIZATION (TEAMID)' --notary-profile PROFILE`

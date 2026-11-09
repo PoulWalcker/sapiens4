@@ -21,8 +21,19 @@ import System.Process
 import System.Timeout
 import qualified Data.Aeson.KeyMap as K
 
+newtype PackageProfile = PackageProfile FilePath
+instance FromJSON PackageProfile where
+  parseJSON = withObject "package profile" $ \o -> do
+    channel <- o .: "channel"
+    identity <- o .: "appId"
+    case (channel :: String, identity :: String) of
+      ("development", "com.poulwalcker.sapiens4.development") -> pure (PackageProfile "Sapiens4 Development")
+      ("stable", "com.poulwalcker.sapiens4") -> pure (PackageProfile "Sapiens4")
+      _ -> fail "Invalid package channel/identity"
+
 data Host = Host
   { dataDirectory :: FilePath
+  , configDirectory :: FilePath
   , runtimeDirectory :: FilePath
   , serverProcess :: IORef (Maybe ServerProcess)
   , origin :: IORef (Maybe URI)
@@ -35,14 +46,6 @@ data ServerProcess = ServerProcess
   , processErrors :: Handle
   , errorReader :: Async ()
   }
-
-data HostPaths = HostPaths { dataPath :: FilePath, runtimePath :: FilePath }
-
-hostPaths :: [String] -> FilePath -> FilePath -> Maybe FilePath -> Maybe FilePath -> HostPaths
-hostPaths args executable local dataEnv runtimeEnv = HostPaths
-  (fromMaybe (local </> "Sapiens4 Development/data") (option "--data-dir" `mplus` dataEnv))
-  (fromMaybe (takeDirectory executable </> "runtime") (option "--runtime-dir" `mplus` runtimeEnv))
-  where option name = listToMaybe [value | (key,value) <- zip args (drop 1 args), key == name]
 
 hostEnvironment :: [(String,String)] -> [(String,String)] -> [(String,String)]
 -- Windows names are case-insensitive; leave explicit path values unchanged.
@@ -58,10 +61,17 @@ prepareHost args = do
   local <- lookupEnv "LOCALAPPDATA" >>= maybe getHomeDirectory pure
   dataEnv <- lookupEnv "SAPIENS_DATA_DIR"
   runtimeEnv <- lookupEnv "SAPIENS_RUNTIME_DIR"
-  let paths = hostPaths args executable local dataEnv runtimeEnv
-  directory <- makeAbsolute (dataPath paths)
-  runtime <- makeAbsolute (runtimePath paths)
-  Host directory runtime <$> newIORef Nothing <*> newIORef Nothing
+  let option name = listToMaybe [value | (key,value) <- zip args (drop 1 args), key == name]
+  runtime <- makeAbsolute $ fromMaybe (takeDirectory executable </> "runtime") (option "--runtime-dir" `mplus` runtimeEnv)
+  let manifest = runtime </> "package-manifest.json"
+  packaged <- doesFileExist manifest
+  -- Source launchers/probes have no package manifest; retain their Dev profile.
+  PackageProfile profile <- if not packaged && takeBaseName executable `elem` ["sapiens-windows", "sapiens-windows-probe"]
+    then pure (PackageProfile "Sapiens4 Development")
+    else either fail pure =<< eitherDecodeFileStrict manifest
+  directory <- makeAbsolute $ fromMaybe (local </> profile </> "data") (option "--data-dir" `mplus` dataEnv)
+  config <- lookupEnv "SAPIENS_CONFIG_DIR" >>= maybe (pure (local </> profile </> "config")) makeAbsolute
+  Host directory config runtime <$> newIORef Nothing <*> newIORef Nothing
 
 startHost :: Host -> IO String
 startHost host = mask $ \restore -> do
@@ -71,8 +81,7 @@ startHost host = mask $ \restore -> do
   available <- doesFileExist binary
   unless available $ ioError $ userError $ "Haskell runtime is missing. Extract the complete Sapiens4 package: " ++ binary
   environment <- getEnvironment
-  local <- lookupEnv "LOCALAPPDATA" >>= maybe getHomeDirectory pure
-  configRoot <- lookupEnv "SAPIENS_CONFIG_DIR" >>= maybe (pure (local </> "Sapiens4 Development/config")) makeAbsolute
+  let configRoot = configDirectory host
   createDirectoryIfMissing True configRoot
   pid <- processId
   let overrides = [("SAPIENS_DESKTOP_PID", show pid),("SAPIENS_REPOSITORY",runtimeDirectory host),("SAPIENS_CONFIG_DIR",configRoot),("SAPIENS_DATA_DIR",dataDirectory host)]

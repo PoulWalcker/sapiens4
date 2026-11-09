@@ -103,8 +103,8 @@ stageProvider root destination platform providerInput allowMissing = do
   copyTree provider (destination</>"codex")
   pure (Just metadata)
 
-stage :: FilePath -> FilePath -> Version -> Platform -> Maybe FilePath -> Bool -> IO Manifest
-stage rootInput destinationInput version platform providerInput allowMissing = do
+stage :: Channel -> FilePath -> FilePath -> Version -> Platform -> Maybe FilePath -> Bool -> IO Manifest
+stage channel rootInput destinationInput version platform providerInput allowMissing = do
  root <- canonicalizePath rootInput
  destination <- canonicalizePath destinationInput
  exists destination >>= flip when (fail "Runtime destination must be new; refusing to mix old and new payloads")
@@ -128,7 +128,7 @@ stage rootInput destinationInput version platform providerInput allowMissing = d
   value<-atRoot root name args
   first<-case lines value of line:_->pure line;[]->fail ("Missing toolchain version: "++name)
   pure (T.pack name,first)
- let manifest=newManifest source (hash $ L.concat tree) platform version provider versions
+ let manifest=newManifest channel source (hash $ L.concat tree) platform version provider versions
  writeJSON (destination</>"package-manifest.json") manifest
  printJSON $ obj [("runtime",toJSON destination),("manifest",toJSON $ destination</>"package-manifest.json"),("buildId",toJSON $ packageBuildId $ manifestIdentity manifest),("status",toJSON (if isJust provider then "provider-complete" else "validation-provider-incomplete" :: String))]
  pure manifest
@@ -185,7 +185,7 @@ release :: String -> FilePath -> String -> String -> String -> FilePath -> IO ()
 release repository directory commit versionInput mode output = do
  -- Invalidate a previous list even when this attempt fails validation.
  exists output >>= flip when (removeFile output)
- unless (repository=="PoulWalcker/sapiens4") $ fail "Expected development repository"
+ unless (repository=="PoulWalcker/sapiens4") $ fail "Expected release repository"
  unless (mode `elem` ["dev","prod"] && length commit==40 && all (`elem` ['0'..'9']++['a'..'f']) commit) $ fail "Expected dev/prod, full source commit and SemVer"
  version <- either fail pure $ parseVersion versionInput
  root <- canonicalizePath directory
@@ -196,9 +196,9 @@ release repository directory commit versionInput mode output = do
   let platform=packagePlatform identity
       expectedSigning=if platform==MacOS then [DeveloperID] else [Authenticode]
       allowed=if mode=="prod" then expectedSigning else if platform==MacOS then [Unsigned,AdHoc] else [Unsigned]
-  unless (packageComplete identity && not (packageDirty identity) && packageCommit identity==T.pack commit && packageVersion identity==version && signing `elem` allowed) $ fail "Incomplete, dirty, wrong-source/version or incorrectly signed release"
+  unless (packageChannel identity==(if mode=="prod" then Stable else Development) && packageComplete identity && not (packageDirty identity) && packageCommit identity==T.pack commit && packageVersion identity==version && signing `elem` allowed) $ fail "Incomplete, dirty, wrong-channel/source/version or incorrectly signed release"
   let installerName=if platform==MacOS then "Sapiens.dmg" else "Sapiens-Setup.exe"
-      portableName="sapiens4-development-"++versionText version++"-"++platformName platform++"-"++architecture platform++".zip"
+      portableName=artifactPrefix (packageChannel identity)++versionText version++"-"++platformName platform++"-"++architecture platform++".zip"
   assets <- forM [(installerName,installerArtifact pair),(portableName,portableArtifact pair)] $ \(wanted,Artifact name size checksum _) -> do
    let artifact=takeDirectory path</>name
    unless (name==wanted) $ fail "Unexpected release artifact name"
@@ -333,7 +333,8 @@ command root args = case args of
  "stage":rest -> do
   source<-required "root" rest;destination<-required "destination" rest;version<-required "version" rest >>= either fail pure . parseVersion
   platform<-required "platform" rest >>= either fail pure . parsePlatform
-  void $ stage source destination version platform (option "provider" rest) ("--allow-missing-provider" `elem` rest)
+  channel<-either fail pure $ parseChannel $ fromMaybe "development" (option "channel" rest)
+  void $ stage channel source destination version platform (option "provider" rest) ("--allow-missing-provider" `elem` rest)
  "finalize":rest -> do
   runtime<-required "runtime" rest;signing<-required "signing" rest >>= either fail pure . parseSigning
   finalize runtime signing

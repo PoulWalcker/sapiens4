@@ -178,7 +178,7 @@ diskImage app output temporary plan = do
  createDirectory source
  P.run "ditto" [app,source</>takeFileName app]
  createDirectoryLink "/Applications" (source</>"Applications")
- P.run "hdiutil" ["create","-volname","Sapiens4 Development","-srcfolder",source,"-format","UDZO",image]
+ P.run "hdiutil" ["create","-volname",dropExtension (takeFileName app),"-srcfolder",source,"-format","UDZO",image]
  when (signingMode plan==DeveloperID) $ do
   P.run "codesign" ["--force","--sign",signIdentity plan,"--timestamp",image]
   P.run "codesign" ["--verify","--strict",image]
@@ -203,7 +203,7 @@ packageMac :: FilePath -> MacOptions -> IO ()
 packageMac root options = do
  output <- canonicalizePath $ fromMaybe (root</>".build/macos") (outputDirectory options)
  createDirectoryIfMissing True output
- let appName="Sapiens4 Development.app";destination=output</>appName;artifact=output</>"sapiens4-development-"++versionText (version options)++"-macos-arm64.zip"
+ let name=displayName (channel options);appName=name++".app";destination=output</>appName;artifact=output</>artifactPrefix (channel options)++versionText (version options)++"-macos-arm64.zip"
  P.exists destination >>= flip when (fail "Output app already exists; choose a new output directory")
  P.exists artifact >>= flip when (fail "Versioned artifact already exists")
  P.exists (output</>"Sapiens.dmg") >>= flip when (fail "Sapiens.dmg already exists; choose a new output directory")
@@ -212,13 +212,13 @@ packageMac root options = do
   createDirectoryIfMissing True resources
   createDirectory macos
   copyFile (root</>".build/bin/sapiens-macos") (macos</>"Sapiens4")
-  manifest <- P.stage root runtime (version options) MacOS (providerDirectory options) (allowMissingProvider options)
+  manifest <- P.stage (channel options) root runtime (version options) MacOS (providerDirectory options) (allowMissingProvider options)
   let iconset=temporary</>"AppIcon.iconset"
   createDirectory iconset
   P.run (root</>".build/bin/sapiens-macos") ["--icon",iconset,root</>"app/shell/favicon.svg"]
   P.run "iconutil" ["-c","icns",iconset,"-o",resources</>"AppIcon.icns"]
   let bundleVersion=takeWhile (`notElem` ['-','+']) (versionText $ version options)
-      info=P.obj [("CFBundleIdentifier",String "com.poulwalcker.sapiens4.development"),("CFBundleName",String "Sapiens4 Development"),("CFBundleDisplayName",String "Sapiens4 Development"),("CFBundleExecutable",String "Sapiens4"),("CFBundlePackageType",String "APPL"),("CFBundleVersion",toJSON bundleVersion),("CFBundleShortVersionString",toJSON bundleVersion),("CFBundleIconFile",String "AppIcon"),("NSHighResolutionCapable",Bool True),("LSMinimumSystemVersion",String "13.0"),("NSAppTransportSecurity",P.obj [("NSAllowsLocalNetworking",Bool True),("NSAllowsArbitraryLoadsInWebContent",Bool True)])]
+      info=P.obj [("CFBundleIdentifier",toJSON $ appId (channel options)),("CFBundleName",toJSON name),("CFBundleDisplayName",toJSON name),("CFBundleExecutable",String "Sapiens4"),("CFBundlePackageType",String "APPL"),("CFBundleVersion",toJSON bundleVersion),("CFBundleShortVersionString",toJSON bundleVersion),("CFBundleIconFile",String "AppIcon"),("NSHighResolutionCapable",Bool True),("LSMinimumSystemVersion",String "13.0"),("NSAppTransportSecurity",P.obj [("NSAllowsLocalNetworking",Bool True),("NSAllowsArbitraryLoadsInWebContent",Bool True)])]
   let infoJSON=temporary</>"Info.json"
   P.writeJSON infoJSON info
   P.run "plutil" ["-convert","xml1","-o",app</>"Contents/Info.plist",infoJSON]
