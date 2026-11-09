@@ -29,21 +29,28 @@ release after successful upload; only that job has contents-write permission.
 
 ## Payload integrity
 
+macOS compilation orchestration and packaging are Haskell (`build/Package.hs`
+and `build/package/`). The shared Haskell engine owns assembly, inventories,
+provenance and receipts for both platforms. Existing Windows commands retain
+the thin `package.py` compatibility CLI; Windows provider acquisition and
+CI/cache/test/release helpers remain Python. No Python is used by the macOS
+builder or packager.
+
 The integrated platform build acquires/verifies `.build/codex` automatically.
 For an explicit prepared payload, use `--provider`/`-ProviderDirectory`.
 To prepare one separately (repeat-safe):
 
 ```sh
-python3 build/package/acquire-provider.py --platform darwin-arm64 --destination .build/codex --ensure
+runghc -ibuild/package build/Package.hs provider --platform darwin-arm64 --destination .build/codex --ensure
 ```
 
-On Windows use `python` and `--platform windows-x64`.
+Windows acquisition remains `python build/package/acquire-provider.py --platform windows-x64 --destination .build/codex --ensure`.
 Assembly rejects missing, changed or extra provider files and symlinks. It signs
 nested code before writing final provider/runtime inventories. The acquired
 inventory is retained as `sapiens-provider-upstream.json`.
 
 ```sh
-python3 build/package/package.py verify --runtime /absolute/path/to/runtime
+runghc -ibuild/package build/Package.hs verify --runtime /absolute/path/to/runtime
 ```
 
 Primary downloads are `Sapiens.dmg` and `Sapiens-Setup.exe`; portable ZIPs remain
@@ -54,7 +61,7 @@ using `--skip-build`. The final artifact digests identify the actual shipped byt
 Source exports need `build/source-provenance.json`, generated in the checkout:
 
 ```sh
-python3 build/package/package.py provenance --output build/source-provenance.json
+runghc -ibuild/package build/Package.hs provenance --output build/source-provenance.json
 ```
 
 ## Publisher signing
