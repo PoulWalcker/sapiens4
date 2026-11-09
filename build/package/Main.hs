@@ -63,8 +63,8 @@ firstFile :: [FilePath] -> IO (Maybe FilePath)
 firstFile [] = pure Nothing
 firstFile (path:rest) = doesFileExist path >>= \present -> if present then pure (Just path) else firstFile rest
 
-relocate :: FilePath -> FilePath -> IO ()
-relocate input root = do
+relocate :: FilePath -> IO ()
+relocate input = do
  app <- canonicalizePath input
  binaries app >>= loop app Set.empty
  where
@@ -87,7 +87,7 @@ relocate input root = do
       unless internal $ fail ("Dependency escapes application: "++dependency)
       pure []
      else do
-      source <- maybe (pure $ root</>"submodules/libs4/haskell/.runtime"</>name) pure resolved
+      source <- maybe (fail $ "Unresolved non-system dependency "++dependency++" in "++binary) pure resolved
       doesFileExist source >>= flip unless (fail $ "Unresolved non-system dependency "++dependency++" in "++binary)
       createDirectoryIfMissing True frameworks
       let target=frameworks</>name
@@ -203,7 +203,7 @@ packageMac :: FilePath -> MacOptions -> IO ()
 packageMac root options = do
  output <- canonicalizePath $ fromMaybe (root</>".build/macos") (outputDirectory options)
  createDirectoryIfMissing True output
- let appName="Sapiens4 Development.app";destination=output</>appName;artifact=output</>"sapiens4-development-"++version options++"-macos-arm64.zip"
+ let appName="Sapiens4 Development.app";destination=output</>appName;artifact=output</>"sapiens4-development-"++versionText (version options)++"-macos-arm64.zip"
  P.exists destination >>= flip when (fail "Output app already exists; choose a new output directory")
  P.exists artifact >>= flip when (fail "Versioned artifact already exists")
  P.exists (output</>"Sapiens.dmg") >>= flip when (fail "Sapiens.dmg already exists; choose a new output directory")
@@ -217,13 +217,13 @@ packageMac root options = do
   createDirectory iconset
   P.run (root</>".build/bin/sapiens-macos") ["--icon",iconset,root</>"app/shell/favicon.svg"]
   P.run "iconutil" ["-c","icns",iconset,"-o",resources</>"AppIcon.icns"]
-  let bundleVersion=takeWhile (`notElem` ['-','+']) (version options)
+  let bundleVersion=takeWhile (`notElem` ['-','+']) (versionText $ version options)
       info=P.obj [("CFBundleIdentifier",String "com.poulwalcker.sapiens4.development"),("CFBundleName",String "Sapiens4 Development"),("CFBundleDisplayName",String "Sapiens4 Development"),("CFBundleExecutable",String "Sapiens4"),("CFBundlePackageType",String "APPL"),("CFBundleVersion",toJSON bundleVersion),("CFBundleShortVersionString",toJSON bundleVersion),("CFBundleIconFile",String "AppIcon"),("NSHighResolutionCapable",Bool True),("LSMinimumSystemVersion",String "13.0"),("NSAppTransportSecurity",P.obj [("NSAllowsLocalNetworking",Bool True),("NSAllowsArbitraryLoadsInWebContent",Bool True)])]
   let infoJSON=temporary</>"Info.json"
   P.writeJSON infoJSON info
   P.run "plutil" ["-convert","xml1","-o",app</>"Contents/Info.plist",infoJSON]
   voicePolicy<-optionalVoice root app
-  relocate app root
+  relocate app
   compatibility<-audit app voicePolicy
   let manifestPath=runtime</>"package-manifest.json"
   P.writeJSON manifestPath (P.compatibilityManifest compatibility manifest)
@@ -238,5 +238,5 @@ packageMac root options = do
   renameDirectory app destination
   P.run "ditto" ["-c","-k","--keepParent",destination,artifact]
   image<-diskImage destination output temporary (macSigning options)
-  P.receipt artifact (Just image) (destination</>"Contents/Resources/runtime/package-manifest.json") (replaceExtension artifact ".release.json")
+  P.receipt artifact image (destination</>"Contents/Resources/runtime/package-manifest.json") (replaceExtension artifact ".release.json")
   putStrLn ("Built "++destination++"\nInstaller "++image++"\nPortable "++artifact)

@@ -5,7 +5,7 @@ rights. Launch **Sapiens4 Development** from Start. Default files are under
 `%LOCALAPPDATA%\Programs\Sapiens4 Development`; uninstall through Windows Settings.
 The portable ZIP remains available: extract it whole and run **Sapiens4.exe**.
 Both contain the native shell, backend, UI, Blindly, pinned Codex provider and
-WebView2 loader. Python, .NET, WSL and build tools are builder-only.
+WebView2 loader. No Python, .NET, WSL or build tools are needed to run the app.
 
 Microsoft Edge WebView2 Evergreen Runtime is required. If it is missing, the
 window offers **Install WebView2**, **Retry** and **Cancel**. Install opens the
@@ -14,8 +14,7 @@ official Microsoft download; run that installer and choose Retry. Cancel exits.
 ## Build
 
 Use x64 GHC 9.14.1, Cabal 3.18.2.0, Node 22.23.2, Rust 1.99.0 with MSVC C++
-build tools, Git, a POSIX shell, GNU Make, curl and tar. CI/verification helpers use
-Python 3.10+; checks use Ruby 3.4.11 and Bundler 4.0.21.
+build tools, Git, a POSIX shell, GNU Make, curl and tar. Checks use Ruby 3.4.11 and Bundler 4.0.21.
 Keep GHC, shell and Make paths free of spaces. Use x64 GHC and Node on Windows ARM.
 Initialize the pinned submodules, then run from the repository root:
 
@@ -35,7 +34,7 @@ Setup, ZIP and receipt. The integrated build acquires
 or verifies `.build/codex`; `-ProviderDirectory` selects a prepared payload.
 `-BuildOnly` compiles the backend/UI/native shell and Blindly and prepares source
 icons/WebView2 without packaging or acquiring Codex. `-SkipBuild` packages existing
-outputs with caller-verified provenance. `runghc build/Build.hs` alone does not build Blindly. `-AllowMissingProvider`
+outputs with caller-verified provenance. Use `-BuildOnly` for desktop test preparation, including Blindly and the WebView2 loader. `-AllowMissingProvider`
 is for native validation only. `-BlindlyToolchain gnullvm` selects LLVM-MinGW
 instead of MSVC. The WebView2 loader is checksum-pinned. Publisher signing uses
 `-CertificateThumbprint`; see the [release runbook](../../docs/release-development.md).

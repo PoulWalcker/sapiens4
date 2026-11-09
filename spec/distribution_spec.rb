@@ -7,7 +7,7 @@ RSpec.describe 'Source distribution contract' do
       'license', 'README.md', 'submodules/blindly4', 'submodules/libs4')
     expect(code).to eq(0), error
     files.lines.map(&:strip).each do |file|
-      next if file.end_with?('.swift', '.cs') || (file.end_with?('.py') && !file.start_with?('build/package/'))
+      next if file.end_with?('.swift', '.cs', '.py')
       target = File.join(@release, file)
       FileUtils.mkdir_p(File.dirname(target))
       FileUtils.cp(File.join(Contract::ROOT, file), target)

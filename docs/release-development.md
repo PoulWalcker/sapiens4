@@ -77,7 +77,7 @@ and the supported macOS13 floor; Dev permits Mac ad-hoc/unsigned and Windows uns
 Keep the default mode `prod` when validating production packages.
 
 ```sh
-python3 build/package/release.py --mode dev --repository PoulWalcker/sapiens4 \
+runghc -ibuild/package build/Package.hs release --mode dev --repository PoulWalcker/sapiens4 \
   --directory ".build/release/$VERSION" --source-commit "$COMMIT" \
   --version "$VERSION" --output .build/verified-assets.txt
 ```
@@ -98,7 +98,7 @@ bash -eu -c '
 
 Review the complete draft in GitHub, then publish it manually. No credentials or
 workflow can automatically publish a Windows-only production release. A failed
-verification must stop the process; never reuse a previous verified-assets list.
+verification stops the process and invalidates the previous verified-assets list.
 The receipt signing labels supplement, rather than replace, native signing checks
 performed on the build hosts. Do not use arbitrary untrusted receipts.
 
@@ -108,8 +108,8 @@ macOS compilation orchestration and packaging are Haskell (`build/Package.hs`
 and `build/package/`). The shared Haskell engine owns assembly, inventories,
 provenance, provider acquisition and receipts for both platforms. Windows invokes
 the Haskell launcher for staging, then reuses its compiled executable for finalization
-and receipts. Python remains in CI/cache/test/release helpers; native packaging does
-not invoke Python.
+and receipts. Release-set validation uses the same Haskell executable; CI cache preparation uses
+PowerShell and all package/installer scenarios run through RSpec. D1 requires no Python.
 
 The base-only launcher runs before `Build.hs` prepares the Cabal dependencies.
 It then compiles the packaging entrypoint inside the pinned Cabal environment.
@@ -119,6 +119,8 @@ cost across stage, finalize, verify and receipt commands without rebuilding the 
 
 The integrated platform build acquires/verifies `.build/codex` automatically.
 For an explicit prepared payload, use `--provider`/`-ProviderDirectory`.
+Every supplied provider is compared with the complete payload reconstructed from
+the hash-pinned archive and notices, including its layout and full file inventory.
 To prepare one separately (repeat-safe):
 
 ```sh
@@ -170,7 +172,7 @@ stay in the local keychain and are no longer required as Actions secrets.
 ## Outstanding delivery checks
 
 The application owns the provider release policy in `build/codex-provider-lock.json`.
-Both acquisition entrypoints read this same lock; its download hashes, notices and
+Acquisition and validation read this same lock; its download hashes, notices and
 upstream commit are pinned independently of libs4. Distribution builds use libs4
 `731223b2f573166577be9d3f095a9d3d367092a2` and do not require an Onboarding module
 or a newer shared-library revision. Onboarding registration belongs to its separate PR.

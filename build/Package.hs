@@ -13,6 +13,7 @@ main = do
  args <- getArgs
  root <- getCurrentDirectory
  case args of
+  ["version",value] -> either fail (putStrLn . versionText) (parseVersion value)
   "macos":rest | "--help" `elem` rest || "-h" `elem` rest -> putStrLn macUsage
   "macos":rest -> do
    options <- parseMac rest

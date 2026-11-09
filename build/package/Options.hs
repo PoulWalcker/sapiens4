@@ -1,7 +1,11 @@
-module Options where
+module Options
+ ( Platform(..), BuildMode(..), Signing(..), MacSigning(..), MacOptions(..)
+ , platformName, providerPlatform, architecture, executableSuffix, parsePlatform, parseProviderPlatform
+ , signingName, parseSigning, validateSigning, signIdentity, notaryProfile, signingMode
+ , parseMac, osVersion, Version, parseVersion, versionText, macUsage, option, required ) where
 
 import Control.Monad
-import Data.Char (isDigit, isAscii, isAlphaNum)
+import Data.Char (isAscii, isAlphaNum)
 import System.Environment
 import Text.Read (readMaybe)
 
@@ -53,7 +57,7 @@ validateSigning platform signing = case (platform,signing) of
 
 -- Publishing credentials cannot be attached to an ad-hoc signing plan.
 data MacOptions = MacOptions
- { version :: String, outputDirectory :: Maybe FilePath, providerDirectory :: Maybe FilePath
+ { version :: Version, outputDirectory :: Maybe FilePath, providerDirectory :: Maybe FilePath
  , buildMode :: BuildMode, allowMissingProvider :: Bool, macSigning :: MacSigning } deriving Show
 
 signIdentity :: MacSigning -> String
@@ -70,10 +74,9 @@ parseMac :: [String] -> IO MacOptions
 parseMac args = do
  identity <- maybe "-" id <$> lookupEnv "SAPIENS_MAC_SIGN_IDENTITY"
  notary <- lookupEnv "SAPIENS_MAC_NOTARY_PROFILE"
- either fail pure $ parse (MacOptions "0.1.0-dev" Nothing Nothing BuildAndPackage False MacAdHoc) identity (nonempty =<< notary) args
+ either fail pure $ parse (MacOptions (Version "0.1.0-dev") Nothing Nothing BuildAndPackage False MacAdHoc) identity (nonempty =<< notary) args
  where
  parse value identity notary [] = do
-  unless (validVersion $ version value) $ Left "--version must be SemVer"
   plan <- if buildMode value==BuildOnly then Right MacAdHoc else case (identity,notary) of
    ("-",Nothing) -> Right MacAdHoc
    ("-",Just _) -> Left "Notarization requires Developer ID signing"
@@ -84,7 +87,7 @@ parseMac args = do
  parse value identity notary ("--skip-build":rest) = mode PackageOnly value >>= \next -> parse next identity notary rest
  parse value identity notary ("--allow-missing-provider":rest) = parse value {allowMissingProvider=True} identity notary rest
  parse value identity notary (key:argument:rest) = case key of
-  "--version" -> parse value {version=argument} identity notary rest
+  "--version" -> parseVersion argument >>= \v -> parse value {version=v} identity notary rest
   "--output-directory" -> parse value {outputDirectory=Just argument} identity notary rest
   "--provider" -> parse value {providerDirectory=Just argument} identity notary rest
   "--sign-identity" -> parse value argument notary rest
@@ -108,23 +111,30 @@ osVersion value = do
   _ -> Left ("Malformed macOS version: "++value)
  split input = case break (=='.') input of (a,[])->[a];(a,_:rest)->a:split rest
 
--- Same accepted version form as the existing packaging CLI.
-validVersion :: String -> Bool
-validVersion input = case split '+' input of
- [core] -> release core
- [core,metadata] -> release core && identifiers metadata
- _ -> False
+-- SemVer 2.0: ASCII identifiers; leading zeroes are forbidden only in numeric
+-- core/prerelease identifiers, not build metadata.
+newtype Version = Version String deriving (Eq, Show)
+
+versionText :: Version -> String
+versionText (Version value) = value
+
+parseVersion :: String -> Either String Version
+parseVersion input = if valid then Right (Version input) else Left "Version must be SemVer"
  where
+ valid = case split '+' input of
+  [core] -> release core
+  [core,metadata] -> release core && identifiers (const True) metadata
+  _ -> False
  release value = case break (=='-') value of
   (core,[]) -> numbers core
-  (core,_:pre) -> numbers core && identifiers pre
- numbers value = case split '.' value of
-  [a,b,c] -> all (\v -> not (null v) && all isDigit v) [a,b,c]
-  _ -> False
- identifiers value = not (null value) && all (\c -> isAscii c && (isAlphaNum c || c `elem` ".-")) value
- split separator value = case break (==separator) value of
-  (a,[]) -> [a]
-  (a,_:rest) -> a:split separator rest
+  (core,_:pre) -> numbers core && identifiers (\v -> not (all digit v) || number v) pre
+ numbers value = case split '.' value of [a,b,c] -> all number [a,b,c]; _ -> False
+ number "0" = True
+ number (c:cs) = c>='1' && c<='9' && all digit cs
+ number [] = False
+ digit c = c>='0' && c<='9'
+ identifiers extra = all (\v -> not (null v) && all (\c -> isAscii c && (isAlphaNum c || c=='-')) v && extra v) . split '.'
+ split separator value = case break (==separator) value of (a,[]) -> [a]; (a,_:rest) -> a:split separator rest
 
 macUsage :: String
 macUsage = "Usage: environments/macos/build.sh [--version SEMVER] [--output-directory DIR] [--provider DIR] [--build-only | --skip-build] [--allow-missing-provider] [--sign-identity ID] [--notary-profile PROFILE]"
