@@ -327,4 +327,3 @@ canonical input = L.fromStrict $ TE.encodeUtf8 $ render input
   | otherwise = T.singleton character
   where code=ord character
  unicode code = let value=showHex code "" in T.pack ("\\u"++replicate (4-length value) '0'++value)
-
