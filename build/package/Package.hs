@@ -95,16 +95,12 @@ stageProvider :: FilePath -> FilePath -> Platform -> Maybe FilePath -> Bool -> I
 stageProvider root destination platform providerInput allowMissing = do
  provider <- canonicalizePath (fromMaybe (root</>".build/codex") providerInput)
  present <- doesDirectoryExist provider
- when (not present && isNothing providerInput && not allowMissing) $
-  acquireProvider root platform provider False Nothing
- available <- doesDirectoryExist provider
- if not available then
+ if not present && (isJust providerInput || allowMissing) then
   if allowMissing then pure Nothing else fail "Complete pinned Codex payload required; acquire the provider first"
- else do
-  metadata <- withPinnedProvider root platform Nothing $ \_ expected -> validateProvider expected provider
-  let identity=providerIdentity metadata
+ else withPinnedProvider root platform Nothing $ \payload expected -> do
+  unless present $ installProvider payload provider
+  metadata <- validateProvider payload expected provider
   copyTree provider (destination</>"codex")
-  doesFileExist (destination</>"codex"</>identityEntry identity) >>= flip unless (fail "Provider entrypoint is missing")
   pure (Just metadata)
 
 stage :: FilePath -> FilePath -> Version -> Platform -> Maybe FilePath -> Bool -> IO Manifest
@@ -253,11 +249,21 @@ cachedDownload asset destination = do
 
 -- Compare against bytes reconstructed from the hash-pinned archive and notices,
 -- never against a caller-authored inventory alone.
-validateProvider :: Provider -> FilePath -> IO Provider
-validateProvider expected directory = do
+validateProvider :: FilePath -> Provider -> FilePath -> IO Provider
+validateProvider payload expected directory = do
  actual <- readJSON (directory</>"sapiens-provider.json")
  unless (toJSON actual==toJSON expected) $ fail "Provider metadata does not match the complete pinned release"
  verifyInventory directory (providerEntries expected) ["sapiens-provider.json"]
+ -- Byte hashes do not capture executable permissions. Use the pinned archive,
+ -- not caller-supplied metadata, to identify every required macOS executable.
+ when (identityPlatform (providerIdentity expected)==MacOS) $ do
+  layout <- readJSON (payload</>"codex-package.json")
+  forM_ (providerEntries expected) $ \entry -> do
+   let path=inventoryPath entry
+   requiredExec <- executable <$> getPermissions (payload</>path)
+   when (requiredExec || path `elem` providerExecutables MacOS layout) $ do
+    runnable <- executable <$> getPermissions (directory</>path)
+    unless runnable $ fail ("Provider executable permission missing: "++path)
  pure actual
 
 acquireProvider :: FilePath -> Platform -> FilePath -> Bool -> Maybe FilePath -> IO ()
@@ -266,14 +272,23 @@ acquireProvider root platform destinationInput ensure cacheInput = do
  present <- exists destination
  if present then do
   unless ensure $ fail "Provider destination already exists; use --ensure to verify it"
-  withPinnedProvider root platform cacheInput $ \_ expected -> void $ validateProvider expected destination
- else withPinnedProvider root platform cacheInput $ \payload _ -> do
-  -- Publish on the destination filesystem so explicit directories work across volumes.
-  withTemporary (takeDirectory destination) ".codex-copy" $ \temporary -> do
-   let staged=temporary</>"payload"
-   copyTree payload staged
-   renameDirectory staged destination
+  withPinnedProvider root platform cacheInput $ \payload expected -> void $ validateProvider payload expected destination
+ else withPinnedProvider root platform cacheInput $ \payload expected -> do
+  installProvider payload destination
+  void $ validateProvider payload expected destination
  printJSON $ obj [("destination",toJSON destination),("verified",Bool True)]
+
+installProvider :: FilePath -> FilePath -> IO ()
+installProvider payload destination =
+ -- Publish on the destination filesystem so explicit directories work across volumes.
+ withTemporary (takeDirectory destination) ".codex-copy" $ \temporary -> do
+  let staged=temporary</>"payload"
+  copyTree payload staged
+  renameDirectory staged destination
+
+providerExecutables :: Platform -> ProviderLayout -> [FilePath]
+providerExecutables platform layout = nub $ [layoutEntry layout] ++ maybeToList (layoutExec layout) ++
+ ["bin/codex-code-mode-host"++executableSuffix platform,"codex-path/rg"++executableSuffix platform]
 
 withPinnedProvider :: FilePath -> Platform -> Maybe FilePath -> (FilePath -> Provider -> IO a) -> IO a
 withPinnedProvider root platform cacheInput action = do
@@ -299,14 +314,12 @@ withPinnedProvider root platform cacheInput action = do
    layout <- readJSON manifestPath
    let payload=takeDirectory manifestPath
    unless (layoutRelease layout==lockVersion lock && layoutPlatform layout==platform && layoutEntry layout==entry) $ fail "Pinned provider package identity/layout mismatch"
-   forM_ ([layoutEntry layout]++maybeToList (layoutExec layout)) $ \path ->
+   forM_ (providerExecutables platform layout) $ \path ->
     doesFileExist (payload</>path) >>= flip unless (fail $ "Incomplete provider package: "++path)
    forM_ [layoutResources layout,layoutPath layout] $ \path -> do
     directory <- doesDirectoryExist (payload</>path)
     nonempty <- if directory then not . null <$> listDirectory (payload</>path) else pure False
     unless nonempty $ fail ("Missing provider resource directory: "++path)
-   forM_ [entry,"bin/codex-code-mode-host"++executableSuffix platform,"codex-path/rg"++executableSuffix platform] $ \path ->
-    doesFileExist (payload</>path) >>= flip unless (fail $ "Incomplete provider package: "++path)
    forM_ (lockNotices lock) $ \(path,notice) -> do
     let cachedNotice=cache</>T.unpack (downloadHash notice)
     cachedDownload notice cachedNotice
