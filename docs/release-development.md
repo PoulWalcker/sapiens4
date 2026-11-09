@@ -36,6 +36,12 @@ the thin `package.py` compatibility CLI; Windows provider acquisition and
 CI/cache/test/release helpers remain Python. No Python is used by the macOS
 builder or packager.
 
+The base-only launcher runs before `Build.hs` prepares the Cabal dependencies.
+It then compiles the packaging entrypoint inside the pinned Cabal environment.
+`cabal exec -- runghc` also works after dependency setup, but recompiles the
+packaging modules on every invocation. The cached GHC executable avoids that
+cost across stage, finalize, verify and receipt commands without rebuilding the app.
+
 The integrated platform build acquires/verifies `.build/codex` automatically.
 For an explicit prepared payload, use `--provider`/`-ProviderDirectory`.
 To prepare one separately (repeat-safe):
@@ -90,6 +96,17 @@ Missing credentials fail before compilation. Release runners remove temporary
 certificate/keychain material after the job. Keep signing material out of logs.
 
 ## Outstanding delivery checks
+
+Standalone D1 keeps `libs4` at `731223b2f573166577be9d3f095a9d3d367092a2`.
+Main must reconcile it with `e249d6f14c0181db2e02213be739833b643e4548` during
+D1 + D3 integration: that revision adds `tools/codex-provider-lock.json`, and
+its parent `d991f969b2d7fc13c86dba8f33e4c65f18bea629` registers `Onboarding`
+in the backend's Cabal `other-modules`. The combined checkout must contain the
+matching D3 `corpora/work/Onboarding.hs` implementation before selecting that pin;
+otherwise Cabal fails with `Cabal-6421: Could not find module: Onboarding`.
+D1 does not import D3 sources or change that dependency pin. Standalone packaging
+can use an explicitly prepared provider via `--provider`/`-ProviderDirectory`.
+Run combined-branch compilation and CI only after Main resolves this prerequisite.
 
 Windows Setup uses pinned Inno Setup for per-user installation only. Velopack,
 update feeds, migration and recovery are separate lifecycle work. WebView2
