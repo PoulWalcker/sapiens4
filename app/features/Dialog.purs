@@ -245,13 +245,13 @@ signInView :: Json -> V.Html
 signInView value = V.div "account-sign-in" $
   [V.textNode "p" [V.attr "role" "status"] $ if signing then "Once you’re signed in, you can return to Sapiens." else "Sign in to start using Sapiens."
   ,V.when (provider == "missing") $ V.p "" "Codex is missing from this installation. Reinstall Sapiens to repair it."
-  ,V.when (provider == "unavailable") $ V.p "" "We couldn’t check your sign-in. Your existing account has been preserved."
+  ,V.when (provider == "unavailable") $ V.p "" "We couldn’t check your sign-in. Recheck your connection. If this keeps happening, reinstall Sapiens to repair its runtime."
   ,V.when (state == "failed" || state == "expired" || state == "browser_busy" || state == "logout_failed" || state == "cancelled") $ V.p "" $ case state of
     "expired" -> "Sign-in timed out. Please try again."
     "browser_busy" -> "Another sign-in is using the browser callback. Finish it and try again, or use a one-time code."
     "logout_failed" -> "We couldn’t finish signing out. Recheck your connection, then try signing out again."
     "cancelled" -> "Sign-in cancelled. You can try again when you’re ready."
-    _ -> "Sign-in failed. Check your connection and try again."
+    _ -> "Sign-in failed. Check your connection and try again. If this keeps happening, reinstall Sapiens to repair its runtime."
   ,V.when (provider == "sign_in_required") $ V.button "button primary" (if state == "failed" || state == "expired" then "Try again" else "Continue with ChatGPT") $ DialogCommand $ Intent.Setup "login"
   ,V.when (provider == "sign_in_required") $ V.p "form-hint" "Your browser will open to complete sign-in."
   ,V.when (signing && D.s "url" login /= "") $ V.div "account-actions"
