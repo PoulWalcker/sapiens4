@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module Host (Host(..), prepareHost, startHost, closeHost) where
+module Host (Host(..), prepareHost, startHost, checkStorage, closeHost) where
 
 import Control.Concurrent.Async
 import Control.Exception
@@ -10,12 +10,13 @@ import Data.Char (toUpper)
 import Data.IORef
 import Data.List (stripPrefix, isPrefixOf)
 import Data.Maybe
+import DataRoot (configDirectory, StorageChoice(..))
 import Network.HTTP.Client
 import Network.URI
 import Native (processId)
-import qualified RuntimePaths as Paths
 import System.Directory
 import System.Environment
+import System.Exit (ExitCode(..))
 import System.FilePath
 import System.IO
 import System.Process
@@ -24,7 +25,6 @@ import qualified Data.Aeson.KeyMap as K
 
 data Host = Host
   { dataDirectory :: FilePath
-  , configDirectory :: FilePath
   , runtimeDirectory :: FilePath
   , serverProcess :: IORef (Maybe ServerProcess)
   , origin :: IORef String
@@ -37,6 +37,14 @@ data ServerProcess = ServerProcess
   , processErrors :: Handle
   , errorReader :: Async ()
   }
+
+data HostPaths = HostPaths { dataPath :: FilePath, runtimePath :: FilePath }
+
+hostPaths :: [String] -> FilePath -> FilePath -> Maybe FilePath -> Maybe FilePath -> HostPaths
+hostPaths args executable local dataEnv runtimeEnv = HostPaths
+  (fromMaybe (local </> "Sapiens4 Development/data") (option "--data-dir" `mplus` dataEnv))
+  (fromMaybe (takeDirectory executable </> "runtime") (option "--runtime-dir" `mplus` runtimeEnv))
+  where option name = listToMaybe [value | (key,value) <- zip args (drop 1 args), key == name]
 
 hostEnvironment :: [(String,String)] -> [(String,String)] -> [(String,String)]
 -- Windows names are case-insensitive; leave explicit path values unchanged.
@@ -52,25 +60,22 @@ prepareHost args = do
   local <- lookupEnv "LOCALAPPDATA" >>= maybe getHomeDirectory pure
   dataEnv <- lookupEnv "SAPIENS_DATA_DIR"
   runtimeEnv <- lookupEnv "SAPIENS_RUNTIME_DIR"
-  let option name = listToMaybe [value | (key,value) <- zip args (drop 1 args), key == name]
-  runtime <- makeAbsolute $ fromMaybe (takeDirectory executable </> "runtime") (option "--runtime-dir" `mplus` runtimeEnv)
-  defaultData <- Paths.defaultDataDirectory
-  directory <- makeAbsolute $ maybe defaultData id (option "--data-dir" `mplus` dataEnv)
-  config <- Paths.configDirectory
-  Host directory config runtime <$> newIORef Nothing <*> newIORef ""
+  let paths = hostPaths args executable local dataEnv runtimeEnv
+  directory <- makeAbsolute (dataPath paths)
+  runtime <- makeAbsolute (runtimePath paths)
+  Host directory runtime <$> newIORef Nothing <*> newIORef ""
 
-startHost :: Host -> IO String
-startHost host = mask $ \restore -> do
+startHost :: StorageChoice -> Host -> IO String
+startHost choice host = mask $ \restore -> do
   closeHost host
-  createDirectoryIfMissing True (dataDirectory host)
   let binary = runtimeDirectory host </> ".build/bin/sapiens4.exe"
   available <- doesFileExist binary
   unless available $ ioError $ userError $ "Haskell runtime is missing. Extract the complete Sapiens4 package: " ++ binary
   environment <- getEnvironment
-  let configRoot = configDirectory host
+  configRoot <- configDirectory
   createDirectoryIfMissing True configRoot
   pid <- processId
-  let overrides = [("SAPIENS_DESKTOP_PID", show pid),("SAPIENS_REPOSITORY",runtimeDirectory host),("SAPIENS_CONFIG_DIR",configRoot),("SAPIENS_DATA_DIR",dataDirectory host)]
+  let overrides = [("SAPIENS_STORAGE_MODE",if choice==StartNew then "new" else "existing"),("SAPIENS_DESKTOP_PID", show pid),("SAPIENS_REPOSITORY",runtimeDirectory host),("SAPIENS_CONFIG_DIR",configRoot),("SAPIENS_DATA_DIR",dataDirectory host)]
   (Just input, Just output, Just errors, child) <- createProcess (proc binary ["--port", "0", "--data-dir", dataDirectory host, "--desktop"])
     { cwd = Just (runtimeDirectory host), std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe
     , env = Just (hostEnvironment overrides environment)
@@ -82,6 +87,16 @@ startHost host = mask $ \restore -> do
     `catch` \(_ :: IOException) -> pure ()
   writeIORef (serverProcess host) (Just (ServerProcess child input output errors collect))
   restore (awaitHost host output errorText) `onException` closeHost host
+
+checkStorage :: Host -> StorageChoice -> IO ()
+checkStorage host choice = do
+  environment <- getEnvironment
+  let binary = runtimeDirectory host </> ".build/bin/sapiens4.exe"
+      mode = if choice == StartNew then "new" else "existing"
+  (code,_,errors) <- readCreateProcessWithExitCode
+    (proc binary ["check-data",dataDirectory host,mode])
+      { cwd=Just (runtimeDirectory host), env=Just (hostEnvironment [] environment), detach_console=True } ""
+  unless (code==ExitSuccess) $ ioError $ userError $ if null errors then "This data directory could not be opened." else errors
 
 readyAddress :: String -> Maybe URI
 readyAddress line = do

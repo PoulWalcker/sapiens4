@@ -12,6 +12,8 @@ import Data.String.CodeUnits as CU
 import Data.Tuple (Tuple(..))
 import Effect.Aff (try, throwError)
 import Effect.Class (liftEffect)
+import Effect (Effect)
+import Control.Promise (Promise)
 import Effect.Exception (error, message)
 import Effect.Ref as Ref
 import Foreign.Object as O
@@ -26,6 +28,11 @@ import Sapiens.Model as M
 import Sapiens.Navigation as N
 import Sapiens.Remote as R
 
+foreign import afterRender :: Effect (Promise Unit)
+
+setupPath :: M.Dialog -> String
+setupPath _ = "/api/host/onboarding"
+
 handle :: C.Runtime -> E.Dispatch -> Action -> E.UI Unit
 handle runtime dispatch action = case action of
   OpenDialog kind record -> do
@@ -39,14 +46,38 @@ handle runtime dispatch action = case action of
       case kind of
         M.DecisionPrompts -> receive d.identity (\value -> E.modifyDialog d.identity _ {content=value,fields=D.first $ D.rows "prompts" value,error=""}) $ E.api runtime m "/api/decision-prompts" "GET" D.null
         M.RelayList -> receive d.identity (\value -> E.modifyDialog d.identity _ {content=value,error=""}) $ C.json "/api/host/relays" "GET" D.null
+        M.Onboarding -> dispatch $ OnboardingPoll d.identity
+        M.AIProviders -> when m.localAvailable $ dispatch $ OnboardingPoll d.identity
+        M.Computer -> when m.localAvailable $ dispatch $ OnboardingPoll d.identity
         M.HostPairing -> dispatch $ HostPairPoll d.identity
         M.EditCorpora -> liftEffect $ B.focus "#corpora-dialog textarea"
         M.ConnectRemote -> liftEffect $ B.focus "#paste-invitation textarea"
         _ -> pure unit
+  OnboardingPoll id -> E.inDialog id \d -> when (A.elem d.kind [M.Onboarding,M.AIProviders,M.Computer] && not (M.dialogBusy d)) do
+    receive id (\value -> do
+      let signedIn = D.s "provider" value == "signed_in" && D.s "provider" d.content == "signing_in"
+      when signedIn $ liftEffect $ B.nativeMessage $ D.json {activate: true}
+      H.modify_ _ {account=value}
+      E.modifyDialog id \current ->
+        let page = if A.elem d.kind [M.AIProviders,M.Onboarding] && (current.providerPage == M.CodexAuth || D.s "hold" value == "review" && current.providerPage == M.Providers) && D.s "provider" value == "signed_in" then M.CodexDetails else current.providerPage
+        in current {content=value,busy=false,providerPage=page}
+      when (A.elem d.kind [M.AIProviders,M.Onboarding] && d.providerPage == M.CodexAuth && D.s "provider" value == "signed_in") $ focusSetup id "#resume-ai-work"
+      when (D.s "provider" value == "signing_in" && D.s "provider" d.content /= "signing_in") $ focusSetup id "#cancel-codex-login"
+      if d.kind == M.Onboarding && D.b "completed" value then dispatch CloseDialog else E.sync
+      when (A.elem (D.s "provider" value) ["signing_in","signing_out"]) $ E.later 1000.0 $ dispatch $ OnboardingPoll id) $ C.json (setupPath d) "GET" D.null
   CloseDialog -> do
-    void $ H.fork $ H.liftAff $ C.cancelPairing runtime
-    H.modify_ _ {dialog=Nothing,dialogStack=[]}
-    E.sync
+    m <- H.get
+    case m.dialog of
+      Just d | not (Dialog.dismissible d) -> E.modifyDialog d.identity _ {error= "Finish or cancel sign-in before leaving. Signing out cannot be cancelled. You can quit the app and recover later."}
+      _ -> do
+        void $ H.fork $ H.liftAff $ C.cancelPairing runtime
+        H.modify_ _ {dialog=Nothing,dialogStack=[]}
+        E.sync
+  ProviderNavigate page -> do
+    m <- H.get
+    traverse_ (\d -> when (A.elem d.kind [M.AIProviders,M.Onboarding] && not (M.dialogBusy d) && (not (Dialog.authenticating d) || page == M.CodexAuth)) do
+      E.modifyDialog d.identity _ {providerPage=page}
+      when (page == M.CodexAuth) $ focusSetup d.identity "#cancel-codex-login") m.dialog
   Field key value -> do
     H.modify_ \m -> m {dialog=map (updateField key value) m.dialog}
     when (key == "showLink") do
@@ -69,6 +100,10 @@ handle runtime dispatch action = case action of
   DialogCommand command value -> commandAction command value
   _ -> pure unit
   where
+  -- Let rendering finish, then recheck the dialog generation before focusing.
+  focusSetup id target = void $ H.fork do
+    H.liftAff $ toAffE afterRender
+    E.inDialog id \_ -> liftEffect $ B.focus target
   attach m operation = E.attempt operation \result -> E.inEpoch m.epoch \current -> do
     H.modify_ \s -> s {uploading=max 0 $ current.uploading-1,dialog=map (_ {busy=false}) s.dialog}
     case result of
@@ -189,6 +224,30 @@ handle runtime dispatch action = case action of
       "install-prompt" -> void $ H.fork $ void $ H.liftAff $ try $ toAffE B.installPrompt
       _ -> traverse_ (\d -> unless d.busy $ dialogCommand m d command value) m.dialog
   dialogCommand m d command value = case command of
+    "setup" ->
+      let setupAction = D.str value
+      in
+      if d.kind == M.Onboarding && (A.elem setupAction ["corpora-done","finish"] || setupAction == "permissions-done" && A.length (Dialog.onboardingCorpora m) <= 1) && not (Dialog.onboardingConnected m)
+      then E.modifyDialog d.identity _ {error="Wait for your Corpora to open before continuing."}
+      else do
+        -- A mutation owns a new dialog generation: old polling responses and
+        -- timers cannot overwrite its result or unlock its busy controls.
+        let choices = Dialog.onboardingCorpora m
+            requested = d {identity=m.sequence+1}
+        H.modify_ _ {dialog=Just requested,sequence=requested.identity}
+        runDialog requested (\value -> do
+          H.modify_ _ {account=value}
+          E.modifyDialog requested.identity \current ->
+            let page = if not (A.elem requested.kind [M.AIProviders,M.Onboarding]) || requested.kind == M.Onboarding && D.s "step" value /= "provider" then M.Providers
+                  else if A.elem setupAction ["login","device-login","change-account"] then
+                    if D.s "provider" value == "signed_in" then M.CodexDetails else M.CodexAuth
+                  else if setupAction == "cancel" then M.CodexDetails
+                  else if setupAction == "sign-out" then M.Providers
+                  else current.providerPage
+            in current {content=value,busy=false,providerPage=page}
+          focusSetup requested.identity (if D.s "provider" value == "signing_in" then "#cancel-codex-login" else "#dialog-title")
+          if requested.kind == M.Onboarding && D.b "completed" value then dispatch CloseDialog else E.sync
+          when (A.elem (D.s "provider" value) ["signing_in","signing_out"]) $ E.later 1000.0 $ dispatch $ OnboardingPoll requested.identity) $ C.json "/api/host/onboarding" "POST" $ D.json {action: setupAction, choose_corpora: A.length choices > 1, selected_corpora: (D.s "id" $ M.activeRecord m)}
     "names" -> do
       E.modifyDialog d.identity (\s -> s {identity=s.identity+1})
       H.modify_ (\s -> s {sequence=s.sequence+1})

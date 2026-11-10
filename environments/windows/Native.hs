@@ -267,3 +267,22 @@ pickFile window directory = allocaBytes 152 $ \dialog -> allocaArray 32768 $ \fi
     pokeByteOff dialog 96 (0x00001000 .|. 0x00000800 .|. 0x00080000 :: Word32)
     selected <- getOpenFileName dialog
     if selected /= 0 then Just <$> readWide filename else pure Nothing
+
+foreign import ccall safe "CoCreateInstance" coCreateInstance :: Ptr Word8 -> Object -> Word32 -> Ptr Word8 -> Ptr Object -> IO HRESULT
+
+foreign import ccall "dynamic" invokeIntPtr :: FunPtr (Object -> Word32 -> Ptr a -> IO HRESULT) -> Object -> Word32 -> Ptr a -> IO HRESULT
+
+-- The native folder picker returns the selected Data Root without copying it.
+pickDirectory :: Window -> IO (Maybe FilePath)
+pickDirectory owner = withGuid "{DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7}" $ \classId ->
+  withGuid "{D57C7288-D4AD-4768-BE02-9D969532D960}" $ \interfaceId ->
+    bracket (alloca $ \out -> coCreateInstance classId nullPtr 1 interfaceId out >>= check >> peek out) release $ \dialog -> do
+      options <- getValue dialog 10 :: IO Word32
+      callInt dialog 9 (fromIntegral $ options .|. 0x20 .|. 0x40 .|. 0x800 .|. 0x10000000)
+      putString dialog 17 "Open Sapiens data"
+      result <- method dialog 3 >>= \showDialog -> invokePtr showDialog dialog owner
+      if result == -2147023673 then pure Nothing else do
+        check result
+        bracket (getValue dialog 20) release $ \item -> do
+          getName <- method item 5
+          Just <$> bracket (alloca $ \out -> invokeIntPtr getName item 0x80058000 out >>= check >> peek out) coFree readWide

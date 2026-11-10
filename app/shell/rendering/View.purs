@@ -19,8 +19,11 @@ import Sapiens.Workspace as Workspace
 
 render :: M.Model -> V.Html
 render m = V.node "div" []
-  [V.div "app" [header m,emptyCorpora m,installGate m,V.textNode "p" [V.id "corpora-startup-feedback",V.attr "role" "status"] (m.feedback)
+  [V.node "div" [V.cls "app",V.hidden $ M.setupRequired m] [header m,accountBanner m,emptyCorpora m,installGate m,V.textNode "p" [V.id "corpora-startup-feedback",V.attr "role" "status"] (m.feedback)
     ,V.node "div" [V.cls "main-grid",V.hidden $ A.null m.agents || m.installRequired,V.attr "data-visible-panes" $ show $ A.length panes,V.style $ "grid-template-columns:" <> S.joinWith " " columns] [sidebar m,conversation m,Workspace.view m]]
+  ,V.when (M.setupRequired m && m.dialog == Nothing) $ V.div "setup-loading"
+    [V.p "" (if m.feedback == "" then "Opening your setup…" else m.feedback)
+    ,V.when (m.feedback /= "") $ V.button "button" "Check again" CheckSetup]
   ,Dialog.view m,V.textNode "div" [V.id "toast",V.cls $ "toast " <> if m.toast /= "" then "visible" else "",V.attr "role" "status",V.attr "aria-live" "polite"] (m.toast)]
   where
   panes = M.visiblePanes m
@@ -141,3 +144,10 @@ viewbar m = V.node "div" [V.id "activity-viewbar",V.hidden hidden] $ [V.span [V.
     N.Chat view -> N.chatLabel view
     N.Work view _ -> N.workLabel view
     N.Updates -> "Events"
+
+
+accountBanner :: M.Model -> V.Html
+accountBanner m = V.when (M.accountBlocked m && D.b "completed" m.account) $
+  V.node "aside" [V.cls "account-banner",V.attr "role" "status"]
+    [V.text $ if D.b "ready" m.account then "AI work is paused. Review any pending tasks before continuing with this account." else "Codex needs attention. Reconnect in AI Connections. Your chats and files are still available."
+    ,V.button "button" "AI Connections" $ OpenDialog M.AIProviders D.empty]

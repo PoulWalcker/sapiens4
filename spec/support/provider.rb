@@ -10,6 +10,8 @@ if ARGV.include?('--version')
   exit
 end
 
+exit 0 if ARGV.include?('login') && ARGV.include?('status')
+
 text = STDIN.read
 context = text.include?("\nContext:\n") ? JSON.parse(text.split("\nContext:\n", 2).last) : {}
 node = text[/decision at node (\w+)/, 1] || (text.start_with?('You are acting as yourself inside') ? 'group' :

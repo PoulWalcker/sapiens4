@@ -18,14 +18,17 @@ data RemoteData a = NotAsked | Loading Request (Maybe a) | Ready Request a | Fai
 
 type Request = { epoch :: Int, sequence :: Int, key :: String, revision :: String, path :: String }
 
-data DialogKind = AppMenu | WorkspaceSettings | Computer | AgentSettings | GroupSettings | Attach | Reference String | DecisionPrompts | GroupTask | CreateCorpora | EditCorpora | ConnectRemote | HostPairing | RelayList | RelayAdd | RelaySwitch | RelayTerms | Installation | Notice
+data DialogKind = AppMenu | WorkspaceSettings | AIProviders | Computer | Onboarding | AgentSettings | GroupSettings | Attach | Reference String | DecisionPrompts | GroupTask | CreateCorpora | EditCorpora | ConnectRemote | HostPairing | RelayList | RelayAdd | RelaySwitch | RelayTerms | Installation | Notice
 
 derive instance eqDialogKind :: Eq DialogKind
 
 corporaDialog :: DialogKind -> Boolean
 corporaDialog kind = A.elem kind [CreateCorpora,EditCorpora,ConnectRemote,HostPairing,RelayList,RelayAdd,RelaySwitch,RelayTerms,Notice]
 
-type Dialog = { kind :: DialogKind, title :: String, record :: Json, fields :: Json, content :: Json, error :: String, busy :: Boolean, identity :: Int }
+data ProviderPage = Providers | CodexDetails | CodexAuth | ConfirmChange | ConfirmDisconnect
+derive instance eqProviderPage :: Eq ProviderPage
+
+type Dialog = { providerPage :: ProviderPage, kind :: DialogKind, title :: String, record :: Json, fields :: Json, content :: Json, error :: String, busy :: Boolean, identity :: Int }
 
 type Model =
   { snapshot :: Json, agents :: Array Json, messages :: O.Object (Array Json)
@@ -37,7 +40,7 @@ type Model =
   , epoch :: Int, sequence :: Int, now :: Number, env :: Json
   , panes :: Array N.Pane, search :: String, searchOpen :: Boolean, menu :: Maybe String, dialog :: Maybe Dialog
   , records :: Array Json, active :: String, online :: Boolean, busy :: Boolean, localAvailable :: Boolean, showArchived :: Boolean
-  , toast :: String, feedback :: String, theme :: String, installRequired :: Boolean
+  , toast :: String, feedback :: String, theme :: String, installRequired :: Boolean, setupChecked :: Boolean, account :: Json, accountCheckedAt :: Number, accountChecking :: Boolean
   , dialogStack :: Array Dialog
   , imageUrls :: Json
   , preview :: RemoteData Json, previewPath :: String, address :: String, addressOpen :: Boolean
@@ -52,7 +55,7 @@ initial env =
   , polling:false,pollGeneration:0,saving:false,lastPreview:0.0,nativeReporting:false,nativeReports:[]
   , epoch:0, sequence:0, now:0.0, env, panes:[N.ChatPane,N.Sidebar,N.Workspace], search:"", searchOpen:false, menu:Nothing, dialog:Nothing
   , records:[], active:"", online:false, busy:false, localAvailable:false, showArchived:false
-  , toast:"", feedback:"", theme:if D.b "dark" env then "dark" else "light", installRequired:false
+  , toast:"", feedback:"", theme:if D.b "dark" env then "dark" else "light", installRequired:false, setupChecked:false, account:D.empty, accountCheckedAt:0.0, accountChecking:false
   , dialogStack:[], imageUrls:D.empty, preview:NotAsked, previewPath:"", address:"", addressOpen:false, scrollPosition:D.null, restoringScroll:false, preferencesSaved:""
   }
 
@@ -204,3 +207,15 @@ decodeDocument r value
   | S.take 5 r.key == "tasks" = if isJust (toArray $ D.get "tasks" value) && A.all (\t -> A.all (\key -> isJust (toString $ D.get key t)) ["id","title","body","state","owner","sender"]) (D.rows "tasks" value) then Right (D.get "tasks" value) else Left "Invalid tasks response"
   | isJust (toString $ D.get "content" value) && isJust (toString $ D.get "path" value) = Right value
   | otherwise = Left "Invalid Memo response"
+
+accountBlocked :: Model -> Boolean
+accountBlocked m = setupRequired m || not (remote m) && D.s "location" (activeRecord m) == "Local" && D.n "schema" m.account > 0.0 && (not (D.b "ready" m.account) || D.s "hold" m.account /= "")
+
+dialogBusy :: Dialog -> Boolean
+dialogBusy d = d.busy
+
+dialogError :: Dialog -> String
+dialogError d = d.error
+
+setupRequired :: Model -> Boolean
+setupRequired m = not (remote m) && (not m.setupChecked || not (D.b "completed" m.account))

@@ -39,7 +39,7 @@ data Browser = Browser { shell :: IORef Obj, delegate :: IORef Obj, tabs :: IORe
 
 newBrowser address guestScript = do
     sh <- newIORef nullPtr; de <- newIORef nullPtr; ts <- newIORef Map.empty
-    ac <- newIORef ""; da <- newIORef False; base <- url address
+    ac <- newIORef ""; da <- newIORef False; base <- url address >>= (`obj0` "retain")
     pure (Browser sh de ts ac da base guestScript)
 
 key tab = tabOwner tab <> ":" <> tabID tab
@@ -176,7 +176,7 @@ history browser tab predicate action = do
         let done = pending { tabAwaiting = False }
         save browser done; report browser done
 
-receive browser message = do
+receive browser message onSetup = do
     sh <- readIORef (shell browser)
     sourceView <- obj0 message "webView"
     frame <- obj0 message "frameInfo"
@@ -189,7 +189,17 @@ receive browser message = do
         dictionary <- cls "NSDictionary"
         valid <- booleanArgument raw "isKindOfClass:" dictionary
         body <- if valid then jsonObject raw else pure Nothing
-        forM_ body $ \input -> if bool (field "pickFile" input) then do
+        forM_ body $ \input -> do
+          case field "onboarding" input of
+            Bool setup -> onSetup setup (text (field "onboardingStep" input))
+            _ -> pure ()
+          if bool (field "activate" input) then do
+            win <- obj0 sh "window"
+            void (obj1 win "deminiaturize:" nullPtr)
+            void (obj1 win "makeKeyAndOrderFront:" nullPtr)
+            app <- cls "NSApplication" >>= (`obj0` "sharedApplication")
+            void (obj1 app "activateIgnoringOtherApps:" (int 1))
+          else if bool (field "pickFile" input) then do
             panel <- new "NSOpenPanel"
             void (obj1 panel "setCanChooseDirectories:" (int 0)); void (obj1 panel "setAllowsMultipleSelection:" (int 1)); void (obj1 panel "setShowsHiddenFiles:" (int 1))
             let directory = text (field "directory" input)

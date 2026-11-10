@@ -74,4 +74,4 @@ sync m = when (D.b "native" m.env) do
   background <- B.cssProperty ".workspace" "--sapi-white"
   foreground <- B.cssProperty ".workspace" "--sapi-ink"
   caption <- B.cssProperty ".workspace" "--sapi-bg"
-  B.nativeMessage $ D.json {workspaces: if native m then m.workspaces else D.empty, owner: if native m then m.selected else "", active: D.get "id" $ M.activeTab m, visible: native m && A.elem N.Workspace (M.visiblePanes m) && m.dialog == Nothing && m.menu == Nothing, dark: m.theme == "dark", background, foreground, captionBackground: caption, rect:{x:D.n "x" box,y:D.n "y" box,width:D.n "width" box,height:D.n "height" box}}
+  B.nativeMessage $ D.json {onboarding: M.setupRequired m, onboardingStep: D.s "step" m.account, workspaces: if native m then m.workspaces else D.empty, owner: if native m then m.selected else "", active: D.get "id" $ M.activeTab m, visible: not (M.setupRequired m) && native m && A.elem N.Workspace (M.visiblePanes m) && m.dialog == Nothing && m.menu == Nothing, dark: m.theme == "dark", background, foreground, captionBackground: caption, rect:{x:D.n "x" box,y:D.n "y" box,width:D.n "width" box,height:D.n "height" box}}

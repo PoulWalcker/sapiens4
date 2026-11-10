@@ -1,11 +1,14 @@
 module HostServer where
 
 import Types
+import DataRoot
+import System.Environment (lookupEnv)
 import qualified Service as Service
 import Assets
 import HTTP
 import Bridge
 import Registry
+import qualified Onboarding as O
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Exception
@@ -32,25 +35,32 @@ listenLoopback port = Socket.withSocketsDo $ do
   pure (sock,fromIntegral assigned)
 startHost :: FilePath -> Int -> Bool -> IO Host
 startHost root requested managed = do
- unless managed (recoverRelays root)
- service <- Service.openService root
+ mode <- lookupEnv "SAPIENS_STORAGE_MODE"
+ startHostWith (if mode==Just "existing" || managed then AttachExisting else StartNew) root requested managed
+
+startHostWith :: StorageChoice -> FilePath -> Int -> Bool -> IO Host
+startHostWith choice root requested managed = do
+ service <- Service.openService choice root
  flip onException (Service.closeService service) $ do
+  unless managed (recoverRelays root)
   (socket,port) <- listenLoopback requested
   flip onException (Socket.close socket) $ do
    Service.attachEndpoint service ("http://127.0.0.1:"<>T.pack (show port))
    bridge <- newBridge service
-   let child path = do
-        host <- startHost path 0 True
+   let child selection path = do
+        host <- startHostWith selection path 0 True
         pure (hostService host,hostBridge host,hostStop host)
    registry <- if managed then pure Nothing else Just <$> newRegistry service bridge child
+   onboarding <- if managed then pure Nothing else Just <$> O.openOnboarding (repositoryRoot service)
    shutdown <- newEmptyMVar
    ready <- newEmptyMVar
    let settings = setServerName "Sapiens4" $ setPort port $ setHost "127.0.0.1" $ setGracefulCloseTimeout1 1000 $ setGracefulShutdownTimeout (Just 5) $ setInstallShutdownHandler (putMVar shutdown) $ setBeforeMainLoop (putMVar ready ()) defaultSettings
-   worker <- async (runSettingsSocket settings socket (application service bridge registry port))
+   worker <- async (runSettingsSocket settings socket (application service bridge registry onboarding port))
    void (race (wait worker) (takeMVar ready))
    Service.startService service
    stopped <- newMVar False
    let stop = modifyMVar_ stopped $ \done -> if done then pure True else do
+        mapM_ O.closeOnboarding onboarding
         mapM_ closeRegistry registry
         closeBridge bridge
         readMVar shutdown >>= id
@@ -60,8 +70,8 @@ startHost root requested managed = do
         Socket.close socket
         pure True
    pure (Host port service bridge stop)
-application :: Service -> Bridge -> Maybe Registry -> Int -> Application
-application service bridge registry port req respond = respond =<< respondError (do
+application :: Service -> Bridge -> Maybe Registry -> Maybe O.Onboarding -> Int -> Application
+application service bridge registry onboarding port req respond = respond =<< respondError (do
  let method = TE.decodeUtf8 (requestMethod req)
      path = TE.decodeUtf8 (rawPathInfo req)
      target = requestTarget req
@@ -79,7 +89,19 @@ application service bridge registry port req respond = respond =<< respondError 
   stopping <- readIORef (serviceStopping service)
   when write (require (not stopping) 503 "Host is shutting down")
   case (method,T.splitOn "/" path) of
-   ("GET",["","api","host"]) -> jsonResponse 200 <$> registryRecords r
+   ("GET",["","api","host","onboarding"]) -> maybe (failure 404 "Local setup unavailable") (fmap (jsonResponse 200) . O.onboardingView) onboarding
+   ("POST",["","api","host","onboarding"]) -> do
+    setup <- maybe (failure 404 "Local setup unavailable") pure onboarding
+    when (at data_ "action"=="finish") $ do
+     saved <- O.setupState setup
+     when (at saved "step"=="ready") (resumeRegistry r)
+    value <- O.onboardingAction setup data_
+    pure (jsonResponse 200 value)
+   ("GET",["","api","host"]) -> do
+    forM_ onboarding $ \setup -> do
+     saved <- O.setupState setup
+     when (boolean (get saved "completed")) (resumeRegistry r)
+    jsonResponse 200 <$> registryRecords r
    ("GET",["","api","host","relays"]) -> jsonResponse 200 <$> relayView r Nothing
    ("GET",["","api","host","relays",ident]) -> jsonResponse 200 <$> relayView r (Just ident)
    ("POST",["","api","host","relays"]) -> jsonResponse 200 <$> relayChange r data_

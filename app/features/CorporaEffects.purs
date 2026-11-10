@@ -61,6 +61,7 @@ handle runtime dispatch action = case action of
           H.modify_ _ {env=D.put "search" (D.text "") current.env}
           traverse_ (dispatch <<< OpenDialog M.HostPairing) $ A.find (( _ == "Local") <<< D.s "location") registry.records
         E.sync
+        unless (D.valid record) $ dispatch CheckSetup
   EnterCorpora key -> yes do
     m <- H.get
     unless (m.busy || key == m.active) $ traverse_ enter $ A.find (\r -> D.s "key" r == key && D.s "status" r /= "archived") m.records
@@ -195,7 +196,10 @@ handle runtime dispatch action = case action of
     E.persistLocal
     cached <- liftEffect $ C.read $ "s4.snapshot." <> D.s "key" record
     snapshot <- liftEffect $ C.decorate (D.s "key" record) cached
-    let current = m {active=D.s "key" record,online=false,busy=false,polling=true,saving=false,nativeReporting=false,nativeReports=[],epoch=m.epoch+1,menu=m.menu,dialog=Nothing,scrollPosition=D.null}
+    let current = m {active=D.s "key" record,online=false,busy=false,polling=true,saving=false,nativeReporting=false,nativeReports=[],epoch=m.epoch+1,menu=m.menu,dialog=case m.dialog of
+            Just d | d.kind == M.Onboarding -> Just d
+            _ -> Nothing
+          ,scrollPosition=D.null}
     H.put $ if D.valid cached then M.reset snapshot current else current {snapshot=D.empty,agents=[],documents=O.empty}
     void $ liftEffect $ C.write "s4.active" $ D.get "key" record
     next <- H.get
