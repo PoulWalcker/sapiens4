@@ -17,8 +17,9 @@ class Desktop
   def self.binary
     return @binary if @binary
     @binary = File.join(Contract::ROOT, '.build/bin', Gem.win_platform? ? 'sapiens-windows-probe.exe' : 'sapiens-macos')
-    unless File.executable?(@binary)
-      out, error, code = Contract.capture('runghc', 'build/Build.hs', timeout: 600)
+    unless File.executable?(@binary) && (!Gem.win_platform? || File.file?(File.join(Contract::ROOT, '.build/bin/WebView2Loader.dll')))
+      command = Gem.win_platform? ? ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'environments/windows/build.ps1', '-BuildOnly'] : ['runghc', 'build/Build.hs']
+      out, error, code = Contract.capture(*command, timeout: 600)
       raise out + error unless code == 0
     end
     @binary

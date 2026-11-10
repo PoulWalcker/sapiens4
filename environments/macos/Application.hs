@@ -3,6 +3,7 @@
 module Application where
 
 import Control.Concurrent
+import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
 import Data.Aeson
@@ -18,6 +19,7 @@ import qualified Data.Text.Encoding as TE
 import Foreign hiding (void, new)
 import Network.HTTP.Client hiding (method)
 import Network.HTTP.Types.Status
+import Network.URI (parseURI, uriScheme, uriAuthority, uriRegName, uriUserInfo, uriPath, uriQuery, uriFragment)
 import ObjC
 import Browser
 import System.Directory
@@ -25,45 +27,85 @@ import System.Environment
 import System.FilePath
 import System.IO
 import System.Process hiding (shell)
+import System.Timeout
+import System.Posix.Process (getProcessID)
+import Data.List (stripPrefix)
 
 
-data Application = Application { native :: Obj, browser :: Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, config :: Obj, attempts :: IORef Int, child :: IORef (Maybe ProcessHandle), checking :: IORef Bool, manager :: Manager }
+newtype PackageProfile = PackageProfile FilePath
+instance FromJSON PackageProfile where
+  parseJSON = withObject "package profile" $ \o -> do
+    channel <- o .: "channel"
+    identity <- o .: "appId"
+    case (channel :: String, identity :: String) of
+      ("development", "com.poulwalcker.sapiens4.development") -> pure (PackageProfile "Sapiens4 Development")
+      ("stable", "com.poulwalcker.sapiens4") -> pure (PackageProfile "Sapiens4")
+      _ -> fail "Invalid package channel/identity"
 
+data Application = Application { native :: Obj, browser :: Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: Maybe ServerProcess, address :: Text, manager :: Manager }
+
+data ServerProcess = ServerProcess ProcessHandle Handle (Async ())
+
+post :: Application -> IO () -> IO ()
 post application action = atomicModifyIORef' (pending application) (\actions -> (actions ++ [action],()))
-check application = do
-    busy <- atomicModifyIORef' (checking application) (\old -> (True,old))
-    unless busy $ void $ forkIO $ do
-        let finish action = post application (writeIORef (checking application) False >> action)
-        response <- try $ parseRequest "http://127.0.0.1:4174/api/health" >>= \r -> httpLbs r { responseTimeout = responseTimeoutMicro 2000000 } (manager application)
-        case response of
-            Right result -> if statusCode (responseStatus result) == 200 && maybe False (BC.isPrefixOf "Sapiens4") (lookup "Server" (responseHeaders result)) && maybe False ((== String "ok") . field "status") (decode (responseBody result))
-                then finish $ writeIORef (attempts application) 0 >> readIORef (shell (browser application)) >>= \view -> loadURL view "http://127.0.0.1:4174/workspace/"
-                else finish $ alert "Port 4174 is occupied by another service. Stop that service and choose View → Reload."
-            Left (_ :: HttpException) -> do
-                launched <- readIORef (child application)
-                started <- try $ when (isNothing launched) $ startServer application
-                case started of
-                    Left (e :: SomeException) -> finish $ alert (T.pack (displayException e))
-                    Right () -> do
-                        count <- atomicModifyIORef' (attempts application) (\n -> (n+1,n+1))
-                        if count >= 60 then finish $ writeIORef (child application) Nothing >> alert "The server did not become ready. Choose View → Reload to try again."
-                        else threadDelay 1000000 >> finish (check application)
 
-configurationValue application name = str name >>= obj1 (config application) "objectForKey:" >>= string
-startServer application = do
-    root <- T.unpack <$> configurationValue application "Repository"
-    executable <- T.unpack <$> configurationValue application "Executable"
-    dataDirectory <- T.unpack <$> configurationValue application "DataDirectory"
-    configuredPath <- T.unpack <$> configurationValue application "Path"
-    present <- doesFileExist executable
-    unless present $ ioError (userError "Repository or Haskell executable was moved. Rebuild the app with environments/macos/build.sh.")
-    let destination = if null dataDirectory then root </> ".sapiens4" else dataDirectory
-    createDirectoryIfMissing True destination
-    logFile <- openFile (destination </> "desktop-server.log") AppendMode
+-- Only the child started by this application is trusted. Never attach to a
+-- fixed port, which might belong to another installation or data directory.
+check :: Application -> IO ()
+check application = do
+    alive <- case child application of
+        Nothing -> pure False
+        Just (ServerProcess process _ _) -> isNothing <$> getProcessExitCode process
+    if alive then readIORef (shell (browser application)) >>= \view -> loadURL view (address application)
+      else alert "The application server stopped. Quit and reopen Sapiens4."
+
+startServer :: IO (ServerProcess, Text)
+startServer = mask $ \restore -> do
+    executable <- getExecutablePath
+    let resources = takeDirectory executable </> "../Resources"
+    runtime <- canonicalizePath (resources </> "runtime")
+    PackageProfile profile <- either fail pure =<< eitherDecodeFileStrict (runtime </> "package-manifest.json")
+    home <- getHomeDirectory
+    configRoot <- lookupEnv "SAPIENS_CONFIG_DIR" >>= maybe (pure (home </> "Library/Application Support" </> profile </> "config")) makeAbsolute
+    destination <- lookupEnv "SAPIENS_DATA_DIR" >>= maybe (pure (home </> "Library/Application Support" </> profile </> "data")) makeAbsolute
+    let binary = runtime </> ".build/bin/sapiens4"
+    present <- doesFileExist binary
+    unless present $ ioError (userError "The application is incomplete. Extract the complete Sapiens4 package.")
+    mapM_ (createDirectoryIfMissing True) [destination, configRoot]
     environment <- getEnvironment
-    (_,_,_,process) <- createProcess (proc executable ["--port","4174","--data-dir",destination]) { cwd = Just root, env = Just (("PATH", if null configuredPath then "/usr/bin:/bin:/usr/sbin:/sbin" else configuredPath) : filter ((/= "PATH") . fst) environment), std_in = NoStream, std_out = UseHandle logFile, std_err = UseHandle logFile }
-    hClose logFile
-    writeIORef (child application) (Just process)
+    pid <- getProcessID
+    let overrides = [("PATH","/usr/bin:/bin:/usr/sbin:/sbin"),("SAPIENS_REPOSITORY",runtime),("SAPIENS_CONFIG_DIR",configRoot),("SAPIENS_DATA_DIR",destination),("SAPIENS_DESKTOP_PID",show pid)]
+    (Just input, Just output, Just errors, process) <- createProcess (proc binary ["--port","0","--data-dir",destination,"--desktop"])
+        { cwd = Just runtime, env = Just (overrides ++ filter ((`notElem` map fst overrides) . fst) environment)
+        , std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe, create_group = True }
+    let close h = hClose h `catch` (\(_ :: IOException) -> pure ())
+        cleanup = terminateProcess process `finally` mapM_ close [input, output, errors]
+    mapM_ (\h -> hSetEncoding h utf8 >> hSetNewlineMode h universalNewlineMode) [input,output,errors] `onException` cleanup
+    reader <- async $ withFile (destination </> "desktop-server.log") AppendMode $ \logFile ->
+        (forever (hGetLine errors >>= hPutStrLn logFile >> hFlush logFile)) `catch` (\(_ :: IOException) -> pure ())
+    let server = ServerProcess process input reader
+        await = do
+            line <- hGetLine output
+            case stripPrefix "Sapiens4: " line >>= parseURI of
+                Just uri | uriScheme uri == "http:", Just auth <- uriAuthority uri,
+                           uriRegName auth == "127.0.0.1", null (uriUserInfo auth) -> pure (T.pack (show uri))
+                _ -> await
+    ready <- restore (timeout 35000000 await >>= maybe (ioError (userError "The application server did not start within 35 seconds. See desktop-server.log in the application data folder.")) pure)
+        `onException` stopServer server
+    -- The address is read from our private stdout pipe, never discovered by port.
+    void $ async $ (forever (void (hGetLine output))) `catch` (\(_ :: IOException) -> close output)
+    pure (server, ready)
+
+stopServer :: ServerProcess -> IO ()
+stopServer (ServerProcess process input reader) = stop `finally` (cancel reader >> (hClose input `catch` (\(_ :: IOException) -> pure ())))
+    where
+        stop = do
+            (hPutStrLn input "stop" >> hFlush input >> hClose input) `catch` (\(_ :: IOException) -> pure ())
+            ended <- timeout 10000000 (waitForProcess process)
+            when (isNothing ended) $ do
+                terminateProcess process
+                confirmed <- timeout 5000000 (waitForProcess process)
+                when (isNothing confirmed) (ioError (userError "The application server could not be stopped."))
 
 alert message = do
     panel <- new "NSAlert"
@@ -71,7 +113,9 @@ alert message = do
     setText panel "setInformativeText:" message
     void (long panel "runModal")
 
-reload application = if fixture application then readIORef (shell (browser application)) >>= void . (`obj0` "reload") else writeIORef (attempts application) 0 >> check application
+reload :: Application -> IO ()
+reload application = if fixture application then readIORef (shell (browser application)) >>= void . (`obj0` "reload") else check application
+showWindow :: Application -> IO ()
 showWindow application = do win <- readIORef (windowRef application); void (obj1 win "makeKeyAndOrderFront:" nullPtr); void (obj1 (native application) "activateIgnoringOtherApps:" (int 1))
 
 installMethods application = do
@@ -85,6 +129,7 @@ installMethods application = do
     on1 "tick:" $ \_ -> atomicModifyIORef' (pending application) (\items -> ([],items)) >>= sequence_
     on0 "reloadWorkspace" (reload application)
     on0 "quit" (void (obj1 (native application) "terminate:" nullPtr))
+    on1 "applicationWillTerminate:" (\_ -> mapM_ stopServer (child application))
     on0 "reloadTab" (activeAction b "reload" 0)
     on0 "zoomIn" (activeAction b "zoom" 0.1)
     on0 "restoreWorkspace" $ do
@@ -195,18 +240,19 @@ initialize application target address = do
 
 runApplication isFixture address = do
     loadFrameworks
-    pool <- new "NSAutoreleasePool"
+    bracket (new "NSAutoreleasePool") (\pool -> void (obj0 pool "drain")) $ \_ -> (runSession isFixture address `catch` (\(e :: SomeException) -> alert (T.pack (displayException e))))
+
+runSession :: Bool -> Text -> IO ()
+runSession isFixture initialAddress = bracket acquire (mapM_ (stopServer . fst)) $ \started -> do
+    let address = maybe initialAddress snd started
+        base = maybe address (T.pack . show . (\u -> u { uriPath = "", uriQuery = "", uriFragment = "" })) (parseURI (T.unpack address))
     application <- cls "NSApplication" >>= \c -> obj0 c "sharedApplication"
     http <- newManager defaultManagerSettings
-    guestScript <- (do r <- parseRequest (T.unpack (T.dropWhileEnd (== '/') address <> "/workspace/guest.js")); response <- httpLbs r { responseTimeout = responseTimeoutMicro 2000000 } http; pure (TE.decodeUtf8With (\_ _ -> Just '\xfffd') (L.toStrict (responseBody response)))) `catch` (\(_ :: HttpException) -> pure "")
+    guestScript <- (do r <- parseRequest (T.unpack (T.dropWhileEnd (== '/') base <> "/workspace/guest.js")); response <- httpLbs r { responseTimeout = responseTimeoutMicro 2000000 } http; pure (TE.decodeUtf8With (\_ _ -> Just '\xfffd') (L.toStrict (responseBody response)))) `catch` (\(_ :: HttpException) -> pure "")
     b <- newBrowser address guestScript
-    win <- newIORef nullPtr; tasks <- newIORef []; tries <- newIORef 0; process <- newIORef Nothing; busy <- newIORef False
-    bundle <- cls "NSBundle" >>= \c -> obj0 c "mainBundle"
-    resource <- str "Launcher"; extension <- str "plist"
-    path <- obj2 bundle "pathForResource:ofType:" resource extension
-    configuration <- cls "NSDictionary" >>= \c -> obj1 c "dictionaryWithContentsOfFile:" path
-    let state = Application application b win tasks isFixture configuration tries process busy http
+    win <- newIORef nullPtr; tasks <- newIORef []
+    let state = Application application b win tasks isFixture (fst <$> started) address http
     target <- installMethods state
     initialize state target address
     void (obj0 application "run")
-    void (obj0 pool "drain")
+    where acquire = if isFixture then pure Nothing else Just <$> startServer
