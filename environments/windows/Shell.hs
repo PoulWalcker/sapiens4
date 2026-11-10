@@ -15,7 +15,7 @@ import Data.Maybe (isNothing)
 import Data.Word
 import DataRoot
 import Network.URI (URI(..), URIAuth(..), parseURI, escapeURIString, isUnreserved, unEscapeString)
-import System.Directory (canonicalizePath)
+import System.Directory (canonicalizePath, doesFileExist)
 import Foreign hiding (void)
 import Numeric
 import Browser
@@ -52,7 +52,7 @@ desktopSession memory probe = do
           && equalFilePath (unEscapeString $ uriPath uri) filePath && null (uriQuery uri) && null (uriFragment uri)
         Nothing -> False
   initialStorage <- newIORef True
-  recoveryError <- newIORef Nothing
+  recoveryError <- newIORef (Nothing :: Maybe String)
   top <- newIORef 0
   pending <- newIORef []
   shellRef <- newIORef Nothing
@@ -349,13 +349,12 @@ desktopSession memory probe = do
                         Right (Just directory) -> startSelected AttachExisting directory Nothing
             else do
               base <- readIORef (origin host)
-              let message = "Cannot load Sapiens4: " ++ show code
               case base of
-                Nothing -> failStart message
+                Nothing -> failStart "We couldn't open the setup screen. Choose Retry. If the problem continues, extract or reinstall the complete Sapiens4 application. Your saved data is unchanged."
                 Just _ -> do
                   (atomicModifyIORef' browserRef (\value -> (Nothing,value)) >>= mapM_ closeBrowser) `finally` closeHost host
                   writeIORef initialStorage False
-                  writeIORef recoveryError (Just message)
+                  writeIORef recoveryError (Just "We couldn't open your workspace. Your saved data is unchanged. Choose your storage folder to reconnect.")
                   writeIORef starting True
                   writeIORef onboarding True
                   resizeContent hwnd 560 600
@@ -368,15 +367,18 @@ desktopSession memory probe = do
           callInt (controller view) 12 0
           when probe $ void $ forkIO $ probeInput post hwnd top resize
       launch = do
-        available <- try webViewRuntimeAvailable
-        case available of
-          Left (e :: SomeException) -> post (failStart (storageMessage e))
-          Right False -> post $ do
-            windowTitle label "Microsoft Edge WebView2 is required.\n\nChoose Install WebView2 to open Microsoft's official installer.\nRun the downloaded installer, then choose Retry.\nCancel closes Sapiens4 without starting its server."
-            mapM_ (\button -> void (showWindow button 5)) setupButtons
-            writeIORef starting False
-          Right True -> post $
-            newView memory hwnd (configRoot </> "WebView2/Shell") (\created -> loaded created `catch` \(e :: SomeException) -> failStart (storageMessage e)) `catch` \(e :: SomeException) -> failStart (storageMessage e)
+        complete <- and <$> mapM doesFileExist [bootstrapPath, runtimeDirectory host </> ".build/bin/sapiens4.exe"]
+        if not complete then post $ failStart "Some Sapiens4 application files are missing. Extract the complete downloaded application, then choose Retry. Your saved data is unchanged."
+        else do
+          available <- try webViewRuntimeAvailable
+          case available of
+            Left (e :: SomeException) -> post (failStart (storageMessage e))
+            Right False -> post $ do
+              windowTitle label "Microsoft Edge WebView2 is required.\n\nChoose Install WebView2 to open Microsoft's official installer.\nRun the downloaded installer, then choose Retry.\nCancel closes Sapiens4 without starting its server."
+              mapM_ (\button -> void (showWindow button 5)) setupButtons
+              writeIORef starting False
+            Right True -> post $
+              newView memory hwnd (configRoot </> "WebView2/Shell") (\created -> loaded created `catch` \(e :: SomeException) -> failStart (storageMessage e)) `catch` \(e :: SomeException) -> failStart (storageMessage e)
       begin = do
         dead <- readIORef closing
         unless dead $ do
