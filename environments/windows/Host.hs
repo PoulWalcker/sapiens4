@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module Host (Host(..), prepareHost, startHost, checkStorage, closeHost, activeDataDirectory, activeStorageChoice, hostRunning) where
+module Host (Host(..), prepareHost, startHost, restartHost, checkStorage, closeHost, activeDataDirectory, activeStorageChoice, hostRunning, serverRunning) where
 
 import Control.Concurrent.Async
 import Control.Exception
@@ -38,6 +38,7 @@ data ServerProcess = ServerProcess
   , processOutput :: Handle
   , processErrors :: Handle
   , errorReader :: Async ()
+  , processConfiguration :: CreateProcess
   }
 
 data HostPaths = HostPaths { dataPath :: FilePath, runtimePath :: FilePath }
@@ -68,8 +69,7 @@ prepareHost args = do
   Host directory runtime <$> newIORef Nothing <*> newIORef Nothing
 
 startHost :: StorageChoice -> Host -> IO String
-startHost choice host = mask $ \restore -> do
-  closeHost host
+startHost choice host = do
   let binary = runtimeDirectory host </> ".build/bin/sapiens4.exe"
   available <- doesFileExist binary
   unless available $ ioError $ userError $ "Haskell runtime is missing. Extract the complete Sapiens4 package: " ++ binary
@@ -78,16 +78,32 @@ startHost choice host = mask $ \restore -> do
   createDirectoryIfMissing True configRoot
   pid <- processId
   let overrides = [("SAPIENS_STORAGE_MODE",if choice==StartNew then "new" else "existing"),("SAPIENS_DESKTOP_PID", show pid),("SAPIENS_REPOSITORY",runtimeDirectory host),("SAPIENS_CONFIG_DIR",configRoot),("SAPIENS_DATA_DIR",dataDirectory host)]
-  (Just input, Just output, Just errors, child) <- createProcess (proc binary ["--port", "0", "--data-dir", dataDirectory host, "--desktop"])
-    { cwd = Just (runtimeDirectory host), std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe
-    , env = Just (hostEnvironment overrides environment)
-    , create_group = True, use_process_jobs = True, detach_console = True }
+  let command = (proc binary ["--port", "0", "--data-dir", dataDirectory host, "--desktop"])
+        { cwd = Just (runtimeDirectory host), std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe
+        , env = Just (hostEnvironment overrides environment)
+        , create_group = True, use_process_jobs = True, detach_console = True }
+  launchHost choice host command
+
+restartHost :: ServerProcess -> Host -> IO (Host,String)
+restartHost previous host = do
+  let restored = host {dataDirectory=processDirectory previous}
+      existing (key,value) = (key,if map toUpper key=="SAPIENS_STORAGE_MODE" then "existing" else value)
+      command = (processConfiguration previous) {env=fmap (map existing) (env $ processConfiguration previous)}
+  -- Reopen initialized data, retaining the original startup configuration and
+  -- StartNew provenance used by the idempotent first-run selection contract.
+  address <- launchHost (processChoice previous) restored command
+  pure (restored,address)
+
+launchHost :: StorageChoice -> Host -> CreateProcess -> IO String
+launchHost choice host command = mask $ \restore -> do
+  closeHost host
+  (Just input, Just output, Just errors, child) <- createProcess command
   let cleanup = terminateProcess child `finally` mapM_ closeStream [input, output, errors]
   mapM_ (\stream -> hSetEncoding stream utf8 >> hSetNewlineMode stream universalNewlineMode) [input, output, errors] `onException` cleanup
   errorText <- newIORef ""
-  collect <- async $ (forever $ hGetLine errors >>= \line -> modifyIORef' errorText (\old -> let next = old ++ line ++ "\n" in drop (max 0 $ length next - 12000) next))
-    `catch` \(_ :: IOException) -> pure ()
-  writeIORef (serverProcess host) (Just (ServerProcess choice (dataDirectory host) child input output errors collect))
+  collect <- (async $ (forever $ hGetLine errors >>= \line -> modifyIORef' errorText (\old -> let next = old ++ line ++ "\n" in drop (max 0 $ length next - 12000) next))
+    `catch` \(_ :: IOException) -> pure ()) `onException` cleanup
+  writeIORef (serverProcess host) (Just (ServerProcess choice (dataDirectory host) child input output errors collect command))
   restore (awaitHost host output errorText) `onException` closeHost host
 
 checkStorage :: Host -> StorageChoice -> IO ()
@@ -133,15 +149,22 @@ activeStorageChoice :: Host -> IO (Maybe StorageChoice)
 activeStorageChoice host = fmap processChoice <$> readIORef (serverProcess host)
 
 hostRunning :: Host -> IO Bool
-hostRunning host = readIORef (serverProcess host) >>= maybe (pure False) (fmap isNothing . getProcessExitCode . processHandle)
+hostRunning host = readIORef (serverProcess host) >>= serverRunning
+
+serverRunning :: Maybe ServerProcess -> IO Bool
+serverRunning = maybe (pure False) (fmap isNothing . getProcessExitCode . processHandle)
 
 closeHost :: Host -> IO ()
 closeHost host = mask_ $ do
-  writeIORef (origin host) Nothing
   current <- readIORef (serverProcess host)
-  forM_ current $ \server -> do
-    stopServer server
-    writeIORef (serverProcess host) Nothing
+  let clear = writeIORef (serverProcess host) Nothing >> writeIORef (origin host) Nothing
+  case current of
+    Nothing -> clear
+    Just server -> stopServer server `finally` (do
+      alive <- serverRunning current
+      -- Retain ownership if termination failed and the process is still alive.
+      -- A stopped process must never remain the active server after an error.
+      unless alive clear)
 
 stopServer :: ServerProcess -> IO ()
 stopServer server = stop `finally` (cancel (errorReader server) `finally` mapM_ closeStream streams)
