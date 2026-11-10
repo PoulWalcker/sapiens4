@@ -103,7 +103,7 @@ runDesktop probe = runInBoundThread $ bracket newArena freeArena $ \memory ->
     when (hwnd == nullPtr) $ ioError $ userError "Cannot create desktop window"
     flip finally (void $ destroyWindow hwnd) $ do
       label <- withWide "STATIC" $ \className -> withWide "Starting Sapiens4…" $ \title ->
-        createWindow 0 className title 0x50000201 0 0 1440 960 hwnd nullPtr instanceHandle nullPtr
+        createWindow 0 className title 0x50000001 0 0 1440 960 hwnd nullPtr instanceHandle nullPtr
       setupButtons <- forM [(101,"Install WebView2"),(102,"Retry"),(103,"Cancel")] $ \(ident,title) ->
         withWide "BUTTON" $ \className -> withWide title $ \caption ->
           createWindow 0 className caption 0x40010000 (360 + (ident-101)*170) 230 160 38 hwnd (intPtrToPtr (fromIntegral ident)) instanceHandle nullPtr
