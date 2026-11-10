@@ -70,10 +70,8 @@ change account and explicit Resume. Check restart persistence and that queued
 work stays paused during account replacement. Check narrow/normal windows and
 light/dark themes. Verify native focus returns after sign-in on each OS.
 
-Existing synthetic API scenarios live in `spec/onboarding_spec.rb`; they do not
-prove real OAuth, actual model output, clean-machine installation or macOS 13
-compatibility. No installer, release workflow or publishing behavior is included
-in this feature branch.
+No installer, release workflow or publishing behavior is included in this
+feature branch.
 
 ## Revisiting storage during setup
 
