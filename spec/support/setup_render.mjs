@@ -6,6 +6,7 @@ import * as Form from '../../.build/web/modules/Sapiens.Form/index.js';
 import * as Maybe from '../../.build/web/modules/Data.Maybe/index.js';
 import * as Workspace from '../../.build/web/modules/Sapiens.Workspace/index.js';
 import * as IdleTabs from '../../.build/web/modules/Sapiens.IdleTabs/index.js';
+import * as Domain from '../../.build/web/modules/Sapiens.Domain/index.js';
 
 const environment = {native:false,dark:false,origin:'http://127.0.0.1',href:'http://127.0.0.1/workspace/',path:'/workspace/',hash:'',search:'',userAgent:'',platform:'MacIntel',body:{},width:600,height:971,touchPoints:0,installed:false,touch:false,hidden:false,secure:true,online:true};
 const initial = Model.initial(environment);
@@ -45,3 +46,12 @@ assert(click(new UIEvent(2)) instanceof Maybe.Nothing, 'The second click must no
 assert(click(new UIEvent(1)) instanceof Maybe.Just, 'A single click still advances');
 assert(click(new UIEvent(0)) instanceof Maybe.Just, 'Keyboard activation still advances');
 console.log('setup navigation: double click ignored, single click and keyboard retained');
+
+// A native restart changes the localhost origin, so client storage may be empty.
+const first=Domain.corpora({id:'first',key:'first',location:'Local',status:'active'});
+const second=Domain.corpora({id:'second',key:'second',location:'Local',status:'active'});
+const cold={...initial,records:[first,second],active:first.key,restoredCorpora:false};
+const finished={completed:true,selected_corpora:second.id};
+assert.equal(Dialog.setupSelection(cold)(finished).value0?.id,second.id,'A cold native restart restores the completed setup selection');
+assert(Dialog.setupSelection({...cold,restoredCorpora:true})(finished) instanceof Maybe.Nothing,'A valid client selection takes precedence after completion');
+assert(Dialog.setupSelection({...cold,setupChecked:true})(finished) instanceof Maybe.Nothing,'Later account polls never switch Corpora');

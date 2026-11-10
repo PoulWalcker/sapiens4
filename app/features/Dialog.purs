@@ -389,6 +389,15 @@ onboardingCorpora m = A.filter (\r -> r.location == X.Local && r.status /= X.Arc
 startingCorpora :: M.Model -> Json -> Maybe X.Corpora
 startingCorpora m value = A.find ((_ == D.s "selected_corpora" value) <<< _.id) (onboardingCorpora m)
 
+setupSelection :: M.Model -> Json -> Maybe X.Corpora
+setupSelection m value
+  | D.b "completed" value && (m.setupChecked || m.restoredCorpora) = Nothing
+  | otherwise = case startingCorpora m value of
+      Just record -> Just record
+      Nothing -> case A.uncons (onboardingCorpora m) of
+        Just {head,tail} | A.null tail -> Just head
+        _ -> Nothing
+
 onboardingConnected :: M.Model -> Boolean
 onboardingConnected m = M.online m && m.snapshot.corpora.id == (M.activeRecord m).id && A.any ((_ == m.active) <<< _.key) (onboardingCorpora m)
 

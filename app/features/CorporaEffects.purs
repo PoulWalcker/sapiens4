@@ -35,7 +35,7 @@ handle runtime dispatch action = case action of
       let record = fromMaybe (X.corpora D.empty) $ A.find (( _ == active) <<< _.key) records
       when (record.id /= "") do
         cached <- liftEffect $ C.read $ "s4.snapshot." <> active
-        H.modify_ _ {records=records,active=active}
+        H.modify_ _ {records=records,active=active,restoredCorpora=true}
         when (D.valid cached) do
           decorated <- liftEffect $ C.decorate active cached
           H.modify_ $ M.reset decorated
@@ -47,6 +47,7 @@ handle runtime dispatch action = case action of
         E.later 3000.0 $ dispatch LoadRegistry
       Right registry -> do
         saved <- D.str <$> liftEffect (C.read "s4.active")
+        when (requested.active == "") $ H.modify_ _ {restoredCorpora=A.any ((_ == saved) <<< _.key) registry.records}
         E.runUpdate runtime dispatch $ U.RegistryReceived requested.epoch saved registry
   EnterCorpora key -> yes do
     m <- H.get

@@ -18,6 +18,9 @@ Forward actions require an available local Corpora; permission grants and sign-i
 are never required merely to explore the application.
 The completed setup and selected Corpora survive restart; AI connections remain
 available from **AI Connections**.
+On a cold launch without a saved client selection, restore the starting Corpora
+from setup. A valid client selection takes precedence after setup is complete;
+later account checks never switch Corpora.
 Claude Code, Gemini CLI and Kimi Code remain Coming soon. Browser sign-in uses
 the complete authorization URL produced by Codex. One-time-code sign-in is
 available after cancelling an active browser sign-in.
