@@ -62,7 +62,12 @@ view :: M.Model -> V.Html
 view m = case m.dialog of
   Nothing -> V.node "dialog" [V.id "modal"] []
   Just d -> V.node "dialog" [V.id $ if M.corporaDialog d.kind then "corpora-dialog" else "modal",V.cls $ if d.kind == M.AppMenu then "app-menu-sheet" else if d.kind == M.Onboarding then "onboarding" else "",V.attr "aria-labelledby" "dialog-title",V.on "cancel" \e -> Link e CloseDialog]
-    [V.div (if M.corporaDialog d.kind then "corpora-menu-heading" else "modal-top") [V.span [V.cls "tiny-label"] "SAPIENS4",V.when (dismissible d) $ V.icon (if M.corporaDialog d.kind then "Close" else "Close dialog") "×" CloseDialog]
+    [V.div (if M.corporaDialog d.kind then "corpora-menu-heading" else "modal-top")
+      [V.when (d.kind == M.Onboarding) $ V.div "setup-wordmark" [V.span [V.cls "setup-mark",V.attr "aria-hidden" "true"] "✳",V.span [] "sapiens"]
+      ,V.when (d.kind /= M.Onboarding) $ V.span [V.cls "tiny-label"] "SAPIENS4"
+      ,V.when (d.kind == M.Onboarding) $ V.span [V.cls "setup-kicker"] "SETUP"
+      ,V.when (dismissible d) $ V.icon (if M.corporaDialog d.kind then "Close" else "Close dialog") "×" CloseDialog]
+    ,V.when (d.kind == M.Onboarding) $ V.node "div" [V.cls "setup-progress",V.attr "aria-hidden" "true"] [V.div ("setup-progress-fill setup-progress-" <> D.s "step" d.content) []]
     ,V.node "div" [V.id $ if M.corporaDialog d.kind then "corpora-dialog-body" else "modal-content"] [V.when (A.elem d.kind [M.AIProviders,M.Onboarding] && d.providerPage /= M.Providers && not (authenticating d)) $ V.control [V.cls "ai-provider-back"] "‹  AI Connections" $ ProviderNavigate M.Providers,V.node "h2" [V.id "dialog-title",V.attr "tabindex" "-1",V.cls (if A.elem d.kind [M.AIProviders,M.Onboarding] then "provider-title" else "")] ((if A.elem d.kind [M.AIProviders,M.Onboarding] && d.providerPage /= M.Providers then [providerIcon "codex"] else []) <> [V.text $ dialogTitle d]),body m d,V.textNode "p" [V.cls "corpora-feedback",V.attr "role" "status"] ((M.dialogError d))
       ,V.when (A.elem d.kind [M.Onboarding,M.AIProviders,M.Computer] && M.dialogError d /= "") $ V.button "button" "Check again" $ OnboardingPoll d.identity]]
 
@@ -84,10 +89,10 @@ dialogTitle d
       _ -> "Codex"
   | d.kind == M.Onboarding = case D.s "step" d.content of
       "permissions" -> "Computer access"
-      "corpora" -> "Your Corpora"
+      "corpora" -> "Choose your Corpora"
       "ready" -> "You're ready"
       _ -> case d.providerPage of
-        M.Providers -> "Your AI lineup"
+        M.Providers -> "Connect your AI"
         M.CodexAuth -> connectionTitle d.content
         _ -> "Codex"
   | otherwise = d.title
@@ -327,26 +332,29 @@ onboardingView :: M.Model -> M.Dialog -> Json -> V.Html
 onboardingView m d value = V.div "setup-screen" $
   [V.when (not (onboardingConnected m) && A.elem step ["permissions","corpora","ready"]) $ V.textNode "p" [V.attr "role" "status"] (D.fallback "Opening your Corpora…" m.feedback)] <> case step of
   "permissions" ->
-    [V.p "form-hint" "Computer control is optional. Chat works without it."
+    [V.p "setup-intro" "Computer control is optional. Chat works without it."
     ,computerAccess m d value]
   "corpora" ->
-    [V.p "form-hint" "Choose the Corpora you'd like to open first."
-    ,V.div "form-stack" $ map (\r -> V.control [V.cls "button",V.disabled $ m.busy,V.attr "aria-pressed" $ show $ (D.s "key" r) == m.active] (D.s "name" r) (EnterCorpora (D.s "key" r))) (onboardingCorpora m)
-    ,V.control [V.cls "button primary",V.disabled $ M.dialogBusy d || m.busy || not (onboardingConnected m)] "Continue" $ DialogCommand "setup" (D.text "corpora-done")]
+    [V.p "setup-intro" "Choose the Corpora you'd like to open first."
+    ,V.div "setup-corpora-list" $ map (\r -> V.control [V.cls "setup-corpora-choice",V.disabled $ m.busy,V.attr "aria-pressed" $ show $ (D.s "key" r) == m.active] (D.s "name" r) (EnterCorpora (D.s "key" r))) (onboardingCorpora m)
+    ,V.div "setup-footer" [V.control [V.cls "button primary",V.disabled $ M.dialogBusy d || m.busy || not (onboardingConnected m)] "Continue" $ DialogCommand "setup" (D.text "corpora-done")]]
   "ready" ->
-    [V.p "" ("AI connection · " <> if D.s "provider" value == "signed_in" then "Codex connected" else "Not connected")
-    ,V.p "" ("Computer access · " <> case permission of
-      "granted" -> "Enabled"
-      "not_required" -> "Available for accessible apps"
-      "missing" -> "Helper unavailable"
-      _ -> "Not enabled")
-    ,V.p "" ("Corpora · " <> (D.s "name" $ M.activeRecord m))
-    ,V.p "form-hint" "Remote Control — Coming soon"
-    ,V.p "form-hint" "Analytics — Coming soon"
-    ,V.control [V.cls "button primary",V.disabled $ M.dialogBusy d || m.busy || not (onboardingConnected m)] (if M.dialogBusy d then "Opening Sapiens…" else "Open Sapiens") $ DialogCommand "setup" (D.text "finish")]
+    [V.p "setup-intro" "Your Sapiens workspace is ready to use."
+    ,V.div "setup-summary"
+      [V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "AI connection",V.span [] (if D.s "provider" value == "signed_in" then "Codex connected" else "Not connected")]
+      ,V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "Computer access",V.span [] (case permission of
+        "granted" -> "Enabled"
+        "not_required" -> "Available for accessible apps"
+        "missing" -> "Helper unavailable"
+        _ -> "Not enabled")]
+      ,V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "Corpora",V.span [] (D.s "name" $ M.activeRecord m)]
+      ,V.div "setup-summary-divider" []
+      ,V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "Remote Control",V.span [V.cls "setup-muted"] "Coming soon"]
+      ,V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "Analytics",V.span [V.cls "setup-muted"] "Coming soon"]]
+    ,V.div "setup-footer" [V.control [V.cls "button primary",V.disabled $ M.dialogBusy d || m.busy || not (onboardingConnected m)] (if M.dialogBusy d then "Opening Sapiens…" else "Open Sapiens") $ DialogCommand "setup" (D.text "finish")]]
   _ ->
     [aiProvidersView d value
-    ,V.when (A.elem d.providerPage [M.Providers,M.CodexDetails] && D.b "ready" value) $ setupButton d "provider-next" "Continue"]
+    ,V.when (A.elem d.providerPage [M.Providers,M.CodexDetails] && D.b "ready" value) $ V.div "setup-footer" [V.control [V.cls "button primary",V.disabled $ M.dialogBusy d] "Continue" $ DialogCommand "setup" (D.text "provider-next")]]
   where
   permission = D.s "computer_permission" value
   step = D.s "step" value
