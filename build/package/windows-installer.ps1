@@ -34,17 +34,25 @@ $appName = if ($Channel -eq 'stable') { 'Sapiens4' } else { 'Sapiens4 Developmen
 $appId = if ($Channel -eq 'stable') { 'com.poulwalcker.sapiens4' } else { 'com.poulwalcker.sapiens4.development' }
 $marker = (Get-Content -Raw -LiteralPath (Join-Path $package 'sapiens-installation.id')).Trim()
 if ($marker -ne $appId) { throw 'Installer channel and payload identity differ' }
-$arguments = @(("/DPackageName=$appName"),("/DPackageId=$appId"),'/Qp',("/DSourceDir=$package"),("/DOutputDir=$output"),("/DAppVersion=$Version"),("/DFileVersion="+($Version -split '[-+]')[0]))
-if ($CertificateThumbprint) {
-    if ($CertificateThumbprint -notmatch '^[a-fA-F0-9]{40}$' -or $TimestampUrl -notmatch '^https?://[A-Za-z0-9./:_-]+$') { throw 'Invalid signing configuration' }
-    $arguments += '/DPublisherSign'
-    $arguments += ('/Ssapiens=signtool.exe sign /sha1 '+$CertificateThumbprint+' /fd SHA256 /tr '+$TimestampUrl+' /td SHA256 $f')
-}
-& $compiler @arguments (Join-Path $PSScriptRoot 'windows-installer.iss')
-if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compilation failed' }
-$installer = Join-Path $output 'Sapiens-Setup.exe'
-if ($CertificateThumbprint) {
-    & signtool verify /pa /all /v $installer
-    if ($LASTEXITCODE -ne 0) { throw 'Final installer signature verification failed' }
-}
-Write-Host "Installer $installer (Inno Setup $($pin.version))"
+New-Item -ItemType Directory -Path $output -Force | Out-Null
+$temporary = Join-Path $output ('.sapiens-installer.' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $temporary | Out-Null
+try {
+    $arguments = @(("/DPackageName=$appName"),("/DPackageId=$appId"),'/Qp',("/DSourceDir=$package"),("/DOutputDir=$temporary"),("/DAppVersion=$Version"),("/DFileVersion="+($Version -split '[-+]')[0]))
+    if ($CertificateThumbprint) {
+        if ($CertificateThumbprint -notmatch '^[a-fA-F0-9]{40}$' -or $TimestampUrl -notmatch '^https?://[A-Za-z0-9./:_-]+$') { throw 'Invalid signing configuration' }
+        $arguments += '/DPublisherSign'
+        $arguments += ('/Ssapiens=signtool.exe sign /sha1 '+$CertificateThumbprint+' /fd SHA256 /tr '+$TimestampUrl+' /td SHA256 $f')
+    }
+    & $compiler @arguments (Join-Path $PSScriptRoot 'windows-installer.iss')
+    if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compilation failed' }
+    $installer = Join-Path $temporary 'Sapiens-Setup.exe'
+    if ($CertificateThumbprint) {
+        & signtool verify /pa /all /v $installer
+        if ($LASTEXITCODE -ne 0) { throw 'Final installer signature verification failed' }
+    }
+    $destination = Join-Path $output 'Sapiens-Setup.exe'
+    [IO.File]::Move($installer, $destination)
+    Write-Host "Installer $destination (Inno Setup $($pin.version))"
+
+} finally { Remove-Item -LiteralPath $temporary -Recurse -Force }

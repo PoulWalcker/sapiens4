@@ -7,6 +7,7 @@ import Data.Aeson
 import qualified Data.ByteString as B
 import Data.List (sortOn, isPrefixOf)
 import Data.Maybe
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import System.Directory
@@ -66,37 +67,35 @@ firstFile (path:rest) = doesFileExist path >>= \present -> if present then pure 
 relocate :: FilePath -> IO ()
 relocate input = do
  app <- canonicalizePath input
- binaries app >>= loop app Set.empty
+ paths <- binaries app
+ loop app Set.empty Map.empty [(path,path) | path<-paths]
  where
- loop _ _ [] = pure ()
- loop app seen (binary:pending)
-  | Set.member binary seen = loop app seen pending
+ loop _ _ _ [] = pure ()
+ loop app seen origins ((binary,source):pending)
+  | Set.member binary seen = loop app seen origins pending
   | otherwise = do
    let frameworks=app</>"Contents/Frameworks"
-   edges <- dependencies binary
-   added <- fmap concat $ forM edges $ \dependency -> if systemDependency dependency || takeFileName dependency==takeFileName binary then pure [] else do
-    let name=takeFileName dependency
-    commands <- P.capture "otool" ["-l",binary]
-    let candidates=case strip "@rpath/" dependency of
-         Just suffix -> [expand app binary path</>suffix | path<-loadFields "LC_RPATH" "path" commands]
-         Nothing -> [expand app binary dependency]
-    resolved <- firstFile candidates
-    internal <- maybe (pure False) (fmap (P.inside app) . canonicalizePath) resolved
-    if "@rpath/" `isPrefixOf` dependency && internal then pure [] else
-     if "@loader_path/" `isPrefixOf` dependency && isJust resolved then do
-      unless internal $ fail ("Dependency escapes application: "++dependency)
-      pure []
-     else do
-      source <- maybe (fail $ "Unresolved non-system dependency "++dependency++" in "++binary) pure resolved
-      doesFileExist source >>= flip unless (fail $ "Unresolved non-system dependency "++dependency++" in "++binary)
-      createDirectoryIfMissing True frameworks
-      let target=frameworks</>name
-      present <- doesFileExist target
-      unless present $ copyFile source target
+   commands <- P.capture "otool" ["-l",source]
+   edges <- dependencies source
+   (nextOrigins,added) <- foldM (\(known,queued) dependency ->
+    if systemDependency dependency || dependency `elem` loadFields "LC_ID_DYLIB" "name" commands then pure (known,queued) else do
+     let candidates=case strip "@rpath/" dependency of
+          Just suffix -> [expand app source path</>suffix | path<-loadFields "LC_RPATH" "path" commands]
+          Nothing -> [expand app source dependency]
+     resolved <- firstFile candidates >>= maybe (fail $ "Unresolved non-system dependency "++dependency++" in "++source) canonicalizePath
+     if source==binary && P.inside app resolved && any (`isPrefixOf` dependency) ["@rpath/","@loader_path/","@executable_path/"] then pure (known,queued) else do
+      let target=if P.inside app resolved then resolved else frameworks</>takeFileName resolved
+      present <- P.exists target
+      -- A copied library's identity is its original canonical path, even after
+      -- install_name_tool changes its bytes. Equal basenames are insufficient.
+      when present $ do
+       identity <- maybe (canonicalizePath target) pure (Map.lookup target known)
+       unless (identity==resolved) $ fail ("Library filename collision at "++target++": "++identity++" and "++resolved)
+      unless present $ createDirectoryIfMissing True frameworks >> copyFile resolved target
       P.run "install_name_tool" ["-change",dependency,"@loader_path/"++relativeBetween (takeDirectory binary) target,binary]
-      pure [target | not present]
+      pure (Map.insert target resolved known,[(target,resolved) | not present]++queued)) (origins,[]) edges
    when (takeDirectory binary==frameworks) $ P.run "install_name_tool" ["-id","@rpath/"++takeFileName binary,binary]
-   loop app (Set.insert binary seen) (added++pending)
+   loop app (Set.insert binary seen) nextOrigins (added++pending)
  strip prefix value = T.unpack <$> T.stripPrefix (T.pack prefix) (T.pack value)
 
 -- An optional component always carries the exact audited rule that permits it.

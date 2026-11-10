@@ -26,10 +26,9 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 
 runDesktop :: Bool -> IO ()
-runDesktop probe = runInBoundThread $ do
-  check =<< coInitialize nullPtr 2
+runDesktop probe = runInBoundThread $ bracket newArena freeArena $ \memory ->
+ bracket_ (check =<< coInitialize nullPtr 2) coUninitialize $ do
   void $ setDpiAwareness (-4)
-  memory <- newArena
   args <- getArgs
   host <- prepareHost args
   top <- newIORef 0
@@ -51,8 +50,10 @@ runDesktop probe = runInBoundThread $ do
         when (label /= nullPtr) $ void $ setWindowPos label nullPtr 0 0 (fromIntegral width) (fromIntegral height) 4
       stop = do
         writeIORef closing True
-        (readIORef browserRef >>= mapM_ closeBrowser) `finally`
-          ((readIORef shellRef >>= mapM_ closeView) `finally` closeHost host)
+        (readIORef workerRef >>= mapM_ cancel) `finally` closeViews
+      closeViews =
+        (atomicModifyIORef' browserRef (\value -> (Nothing, value)) >>= mapM_ closeBrowser) `finally`
+          ((atomicModifyIORef' shellRef (\value -> (Nothing, value)) >>= mapM_ closeView) `finally` closeHost host)
       runPending = do
         actions <- atomicModifyIORef' pending (\actions -> ([], reverse actions))
         sequence_ actions
@@ -80,148 +81,132 @@ runDesktop probe = runInBoundThread $ do
           _ -> defaultProc hwnd message wparam lparam
         0x802A -> runPending >> pure 0
         _ -> defaultProc hwnd message wparam lparam
-  proc <- wrapWindowProc $ \hwnd message wparam lparam -> procedure hwnd message wparam lparam `catch` \(e :: SomeException) -> reportException e >> defaultProc hwnd message wparam lparam
-  retain memory (freeHaskellFunPtr proc)
-  instanceHandle <- moduleHandle nullPtr
-  hwnd <- withWide "Sapiens4HaskellWindow" $ \className -> withWide "Sapiens4" $ \title -> allocaBytes 80 $ \klass -> do
-    fillBytes klass 0 80
-    pokeByteOff klass 0 (80 :: Word32)
-    pokeByteOff klass 4 (3 :: Word32)
-    pokeByteOff klass 8 proc
-    pokeByteOff klass 24 instanceHandle
-    pokeByteOff klass 48 (intPtrToPtr 6 :: Object)
-    pokeByteOff klass 64 className
-    registered <- registerClass klass
-    when (registered == 0) $ ioError $ userError "Cannot register desktop window"
-    screenWidth <- systemMetric 0
-    screenHeight <- systemMetric 1
-    createWindow 0 className title 0x00CF0000 ((screenWidth - 1440) `div` 2) ((screenHeight - 960) `div` 2) 1440 960 nullPtr nullPtr instanceHandle nullPtr
-  when (hwnd == nullPtr) $ ioError $ userError "Cannot create desktop window"
-  label <- withWide "STATIC" $ \className -> withWide "Starting Sapiens4…" $ \title ->
-    createWindow 0 className title 0x50000201 0 0 1440 960 hwnd nullPtr instanceHandle nullPtr
-  setupButtons <- forM [(101,"Install WebView2"),(102,"Retry"),(103,"Cancel")] $ \(ident,title) ->
-    withWide "BUTTON" $ \className -> withWide title $ \caption ->
-      createWindow 0 className caption 0x40010000 (360 + (ident-101)*170) 230 160 38 hwnd (intPtrToPtr (fromIntegral ident)) instanceHandle nullPtr
-  writeIORef statusRef label
-  resize hwnd
-  light <- loadIconFile $ runtimeDirectory host </> "environments/windows/AppIcon.ico"
-  dark <- loadIconFile $ runtimeDirectory host </> "environments/windows/AppIconDark.ico"
-  mapM_ (\icon -> when (icon /= nullPtr) $ retain memory (void $ destroyIcon icon)) [light, dark]
-  setIcon hwnd light
-  lastTheme <- newIORef Nothing
-  let post action = do
-        dead <- readIORef closing
-        unless dead $ atomicModifyIORef' pending (\xs -> (action:xs, ())) >> void (postMessage hwnd 0x802A 0 0)
-      failStart message = do
-        cleanup <- try $
-          (atomicModifyIORef' browserRef (\value -> (Nothing, value)) >>= mapM_ closeBrowser) `finally`
-            ((atomicModifyIORef' shellRef (\value -> (Nothing, value)) >>= mapM_ closeView) `finally` closeHost host)
-        let detail = case cleanup of
-              Left (e :: SomeException) -> message ++ "\n\nStartup cleanup failed: " ++ displayException e
-              Right () -> message
-        writeIORef starting False
-        windowTitle label $ "Sapiens4 could not start.\n\n" ++ detail ++ "\n\nChoose Retry or Cancel.\nData: " ++ dataDirectory host
-        void $ showWindow label 5
-        mapM_ (\button -> void (showWindow button 5)) (drop 1 setupButtons)
-      loaded url result = do
-        view <- either (ioError . userError) pure result
-        dead <- readIORef closing
-        if dead then closeView view else do
-          writeIORef shellRef (Just view)
-          resize hwnd
-          settings <- getValue (core view) 3
-          mapM_ (\index -> callInt settings index 0) [10, 12, 14, 16]
-          release settings
-          browser <- newBrowser memory hwnd view host top
-          writeIORef browserRef (Just browser)
-          let on index iid = onEvent memory (core view) index iid
-          on 7 "{9ADBE429-F36D-432B-9DDC-F8881FBD76E3}" $ \event -> do
-            destination <- getString event 3
-            base <- readIORef (origin host)
-            unless (Navigation.trusted base destination) $ callInt event 8 1
-            when probe $ (getValue event 9 :: IO Word64) >>= \identity -> putStrLn $ "NAVIGATION START " ++ show identity
-          on 44 "{D4C185FE-C81C-4989-97AF-2D3FA7AB5651}" $ \event -> do
-            callInt event 6 1
-            destination <- getString event 3
-            base <- readIORef (origin host)
-            when (Navigation.guest base destination) $ openBrowser browser destination
-          on 34 "{57213F19-00E6-49FA-8E07-898EA01ECBD2}" $ \event -> do
-            source <- getString event 3
-            current <- getString (core view) 4
-            base <- readIORef (origin host)
-            when (Navigation.trusted base source && Navigation.trusted base current) $ do
-              raw <- getString event 4
-              case decodeStrict (TE.encodeUtf8 $ T.pack raw) of
-                Nothing -> pure ()
-                Just message -> do
-                  applyWindowTheme hwnd light dark lastTheme message
-                  syncBrowser browser message
-          on 15 "{D33A35BF-1C49-4F98-93AB-006E0533FE1C}" $ \event -> do
-            success <- getValue event 3 :: IO Int32
-            code <- getValue event 4 :: IO Int32
-            if success /= 0 then void $ showWindow label 0 else do
-              windowTitle label ("Cannot load Sapiens4: " ++ show code)
-              void $ showWindow label 5
-            when probe $ do
-              identity <- getValue event 5 :: IO Word64
-              putStrLn $ "NAVIGATION END " ++ show identity ++ " " ++ (if success /= 0 then "True" else "False") ++ " " ++ show code
-          navigate view url
-          callInt (controller view) 12 0
-          when probe $ do
-            putStrLn "TITLE: Sapiens4"
-            readIORef (origin host) >>= putStrLn . ("Sapiens4: " ++)
-            void $ forkIO $ probeInput post hwnd top resize
-      launch = do
-        available <- try webViewRuntimeAvailable
-        case available of
-          Left (e :: SomeException) -> post (failStart (displayException e))
-          Right False -> post $ do
-            windowTitle label "Microsoft Edge WebView2 is required.\n\nChoose Install WebView2 to open Microsoft's official installer.\nRun the downloaded installer, then choose Retry.\nCancel closes Sapiens4 without starting its server."
-            mapM_ (\button -> void (showWindow button 5)) setupButtons
+  flip finally stop $ do
+    proc <- wrapWindowProc $ \hwnd message wparam lparam -> procedure hwnd message wparam lparam `catch` \(e :: SomeException) -> reportException e >> defaultProc hwnd message wparam lparam
+    retain memory (freeHaskellFunPtr proc)
+    instanceHandle <- moduleHandle nullPtr
+    hwnd <- withWide "Sapiens4HaskellWindow" $ \className -> withWide "Sapiens4" $ \title -> allocaBytes 80 $ \klass -> do
+      fillBytes klass 0 80
+      pokeByteOff klass 0 (80 :: Word32)
+      pokeByteOff klass 4 (3 :: Word32)
+      pokeByteOff klass 8 proc
+      pokeByteOff klass 24 instanceHandle
+      pokeByteOff klass 48 (intPtrToPtr 6 :: Object)
+      pokeByteOff klass 64 className
+      registered <- registerClass klass
+      when (registered == 0) $ ioError $ userError "Cannot register desktop window"
+      retain memory (withWide "Sapiens4HaskellWindow" $ \name -> void $ unregisterClass name instanceHandle)
+      screenWidth <- systemMetric 0
+      screenHeight <- systemMetric 1
+      createWindow 0 className title 0x00CF0000 ((screenWidth - 1440) `div` 2) ((screenHeight - 960) `div` 2) 1440 960 nullPtr nullPtr instanceHandle nullPtr
+    when (hwnd == nullPtr) $ ioError $ userError "Cannot create desktop window"
+    flip finally (void $ destroyWindow hwnd) $ do
+      label <- withWide "STATIC" $ \className -> withWide "Starting Sapiens4…" $ \title ->
+        createWindow 0 className title 0x50000201 0 0 1440 960 hwnd nullPtr instanceHandle nullPtr
+      setupButtons <- forM [(101,"Install WebView2"),(102,"Retry"),(103,"Cancel")] $ \(ident,title) ->
+        withWide "BUTTON" $ \className -> withWide title $ \caption ->
+          createWindow 0 className caption 0x40010000 (360 + (ident-101)*170) 230 160 38 hwnd (intPtrToPtr (fromIntegral ident)) instanceHandle nullPtr
+      writeIORef statusRef label
+      resize hwnd
+      light <- loadIconFile $ runtimeDirectory host </> "environments/windows/AppIcon.ico"
+      dark <- loadIconFile $ runtimeDirectory host </> "environments/windows/AppIconDark.ico"
+      mapM_ (\icon -> when (icon /= nullPtr) $ retain memory (void $ destroyIcon icon)) [light, dark]
+      setIcon hwnd light
+      lastTheme <- newIORef Nothing
+      let post action = do
+            dead <- readIORef closing
+            unless dead $ atomicModifyIORef' pending (\xs -> (action:xs, ())) >> void (postMessage hwnd 0x802A 0 0)
+          failStart message = do
+            cleanup <- try closeViews
+            let detail = case cleanup of
+                  Left (e :: SomeException) -> message ++ "\n\nStartup cleanup failed: " ++ displayException e
+                  Right () -> message
             writeIORef starting False
-          Right True -> do
-            result <- try $ startHost host
-            post $ case result of
-              Left (e :: SomeException) -> failStart (displayException e)
-              Right url -> newView memory hwnd (dataDirectory host </> "WebView2/Shell") (\created -> loaded url created `catch` \(e :: SomeException) -> failStart (displayException e)) `catch` \(e :: SomeException) -> failStart (displayException e)
-      begin = do
-        dead <- readIORef closing
-        unless dead $ do
-          busy <- atomicModifyIORef' starting (\value -> (True,value))
-          unless busy $ do
-            mapM_ (\button -> void (showWindow button 0)) setupButtons
-            windowTitle label "Starting Sapiens4…"
-            async launch >>= writeIORef workerRef . Just
-  hSetBuffering stdout LineBuffering
-  writeIORef retrySetup begin
-  begin
-  void $ showWindow hwnd 5
-  void $ updateWindow hwnd
-  void $ foregroundWindow hwnd
-  pumpMessages memory `finally` ((readIORef workerRef >>= mapM_ cancel) `finally` closeHost host)
-
-createMainWindow :: Object -> FunPtr WindowProc -> IO Window
-createMainWindow instanceHandle procedure = do
-  hwnd <- withWide "Sapiens4HaskellWindow" $ \className -> withWide "Sapiens4" $ \title -> allocaBytes 80 $ \klass -> do
-    fillBytes klass 0 80
-    pokeByteOff klass 0 (80 :: Word32)
-    pokeByteOff klass 4 (3 :: Word32)
-    pokeByteOff klass 8 procedure
-    pokeByteOff klass 24 instanceHandle
-    pokeByteOff klass 48 (intPtrToPtr 6 :: Object)
-    pokeByteOff klass 64 className
-    registered <- registerClass klass
-    when (registered == 0) $ ioError $ userError "Cannot register desktop window"
-    screenWidth <- systemMetric 0
-    screenHeight <- systemMetric 1
-    createWindow 0 className title 0x00CF0000 ((screenWidth - 1440) `div` 2) ((screenHeight - 960) `div` 2) 1440 960 nullPtr nullPtr instanceHandle nullPtr
-  when (hwnd == nullPtr) $ ioError $ userError "Cannot create desktop window"
-  pure hwnd
+            windowTitle label $ "Sapiens4 could not start.\n\n" ++ detail ++ "\n\nChoose Retry or Cancel.\nData: " ++ dataDirectory host
+            void $ showWindow label 5
+            mapM_ (\button -> void (showWindow button 5)) (drop 1 setupButtons)
+          loaded url result = do
+            view <- either (ioError . userError) pure result
+            dead <- readIORef closing
+            if dead then closeView view else do
+              writeIORef shellRef (Just view)
+              resize hwnd
+              settings <- getValue (core view) 3
+              mapM_ (\index -> callInt settings index 0) [10, 12, 14, 16]
+              release settings
+              browser <- newBrowser memory hwnd view host top
+              writeIORef browserRef (Just browser)
+              let on index iid = onEvent memory (core view) index iid
+              on 7 "{9ADBE429-F36D-432B-9DDC-F8881FBD76E3}" $ \event -> do
+                destination <- getString event 3
+                base <- readIORef (origin host)
+                unless (Navigation.trusted base destination) $ callInt event 8 1
+                when probe $ (getValue event 9 :: IO Word64) >>= \identity -> putStrLn $ "NAVIGATION START " ++ show identity
+              on 44 "{D4C185FE-C81C-4989-97AF-2D3FA7AB5651}" $ \event -> do
+                callInt event 6 1
+                destination <- getString event 3
+                base <- readIORef (origin host)
+                when (Navigation.guest base destination) $ openBrowser browser destination
+              on 34 "{57213F19-00E6-49FA-8E07-898EA01ECBD2}" $ \event -> do
+                source <- getString event 3
+                current <- getString (core view) 4
+                base <- readIORef (origin host)
+                when (Navigation.trusted base source && Navigation.trusted base current) $ do
+                  raw <- getString event 4
+                  case decodeStrict (TE.encodeUtf8 $ T.pack raw) of
+                    Nothing -> pure ()
+                    Just message -> do
+                      applyWindowTheme hwnd light dark lastTheme message
+                      syncBrowser browser message
+              on 15 "{D33A35BF-1C49-4F98-93AB-006E0533FE1C}" $ \event -> do
+                success <- getValue event 3 :: IO Int32
+                code <- getValue event 4 :: IO Int32
+                if success /= 0 then void $ showWindow label 0 else do
+                  windowTitle label ("Cannot load Sapiens4: " ++ show code)
+                  void $ showWindow label 5
+                when probe $ do
+                  identity <- getValue event 5 :: IO Word64
+                  putStrLn $ "NAVIGATION END " ++ show identity ++ " " ++ (if success /= 0 then "True" else "False") ++ " " ++ show code
+              navigate view url
+              callInt (controller view) 12 0
+              when probe $ do
+                putStrLn "TITLE: Sapiens4"
+                readIORef (origin host) >>= putStrLn . ("Sapiens4: " ++)
+                void $ forkIO $ probeInput post hwnd top resize
+          launch = do
+            available <- try webViewRuntimeAvailable
+            case available of
+              Left (e :: SomeException) -> post (failStart (displayException e))
+              Right False -> post $ do
+                windowTitle label "Microsoft Edge WebView2 is required.\n\nChoose Install WebView2 to open Microsoft's official installer.\nRun the downloaded installer, then choose Retry.\nCancel closes Sapiens4 without starting its server."
+                mapM_ (\button -> void (showWindow button 5)) setupButtons
+                writeIORef starting False
+              Right True -> do
+                result <- try $ startHost host
+                post $ case result of
+                  Left (e :: SomeException) -> failStart (displayException e)
+                  Right url -> newView memory hwnd (dataDirectory host </> "WebView2/Shell") (\created -> loaded url created `catch` \(e :: SomeException) -> failStart (displayException e)) `catch` \(e :: SomeException) -> failStart (displayException e)
+          begin = mask_ $ do
+            dead <- readIORef closing
+            unless dead $ do
+              busy <- atomicModifyIORef' starting (\value -> (True,value))
+              unless busy $ do
+                mapM_ (\button -> void (showWindow button 0)) setupButtons
+                windowTitle label "Starting Sapiens4…"
+                asyncWithUnmask (\unmask -> unmask launch) >>= writeIORef workerRef . Just
+      hSetBuffering stdout LineBuffering
+      writeIORef retrySetup begin
+      begin
+      void $ showWindow hwnd 5
+      void $ updateWindow hwnd
+      void $ foregroundWindow hwnd
+      pumpMessages memory
 
 pumpMessages :: Arena -> IO ()
 pumpMessages memory = allocaBytes 48 $ \message -> do
   let step = do
         result <- getMessage message nullPtr 0 0
+        when (result < 0) $ ioError $ userError "Cannot read desktop window messages"
         when (result > 0) $ do
           void $ translateMessage message
           void $ dispatchMessage message

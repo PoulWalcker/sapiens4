@@ -8,7 +8,7 @@ import Control.Monad
 import Data.Aeson
 import Data.Char (toUpper)
 import Data.IORef
-import Data.List (stripPrefix, isPrefixOf)
+import Data.List (stripPrefix)
 import Data.Maybe
 import Network.HTTP.Client
 import Network.URI
@@ -43,8 +43,7 @@ hostEnvironment :: [(String,String)] -> [(String,String)] -> [(String,String)]
 hostEnvironment overrides inherited = overrides ++ filter keep inherited
   where
     owned = map (map toUpper . fst) overrides
-    keep (key,_) = let name = map toUpper key in
-      name `notElem` owned && not (any (`isPrefixOf` name) ["CODEX_","OPENAI_"])
+    keep (key,_) = map toUpper key `notElem` owned
 
 prepareHost :: [String] -> IO Host
 prepareHost args = do

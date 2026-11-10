@@ -30,7 +30,7 @@ import System.IO
 import System.Process hiding (shell)
 import System.Timeout
 import System.Posix.Process (getProcessID)
-import Data.List (stripPrefix)
+import Data.List (stripPrefix, nub, intercalate)
 
 
 data Application = Application { native :: Obj, browser :: Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: Maybe ServerProcess, address :: Text, manager :: Manager }
@@ -63,7 +63,12 @@ startServer = mask $ \restore -> do
     mapM_ (createDirectoryIfMissing True) [destination, configRoot]
     environment <- getEnvironment
     pid <- getProcessID
-    let overrides = [("PATH","/usr/bin:/bin:/usr/sbin:/sbin"),("SAPIENS_REPOSITORY",runtime),("SAPIENS_CONFIG_DIR",configRoot),("SAPIENS_DATA_DIR",destination),("SAPIENS_DESKTOP_PID",show pid)]
+    -- System tools take precedence; expose standard Homebrew installs and the
+    -- caller's tool managers without running shell startup scripts.
+    let toolPath = intercalate [searchPathSeparator] $ nub $
+            ["/usr/bin","/bin","/usr/sbin","/sbin","/opt/homebrew/bin","/usr/local/bin"] ++
+            filter isAbsolute (maybe [] splitSearchPath $ lookup "PATH" environment)
+        overrides = [("PATH",toolPath),("SAPIENS_REPOSITORY",runtime),("SAPIENS_CONFIG_DIR",configRoot),("SAPIENS_DATA_DIR",destination),("SAPIENS_DESKTOP_PID",show pid)]
     (Just input, Just output, Just errors, process) <- createProcess (proc binary ["--port","0","--data-dir",destination,"--desktop"])
         { cwd = Just runtime, env = Just (overrides ++ filter ((`notElem` map fst overrides) . fst) environment)
         , std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe, create_group = True }

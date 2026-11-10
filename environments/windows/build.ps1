@@ -24,6 +24,9 @@ $prefix = if ($Channel -eq 'stable') { 'sapiens4-' } else { 'sapiens4-developmen
 $destination = Join-Path $output (($appName -replace ' ', '-') + "-$Runtime")
 if (-not $BuildOnly -and (Test-Path -LiteralPath $destination)) { throw 'Output must be new; refusing to mix old and new payloads' }
 if ($destination -eq $repo -or $repo.StartsWith($destination + [IO.Path]::DirectorySeparatorChar)) { throw 'Output must not replace the source checkout' }
+$staging = $null
+$published = @()
+$complete = $false
 Push-Location $repo
 try {
     if (-not $SkipBuild) {
@@ -44,7 +47,17 @@ try {
     }
     & (Join-Path $repo 'submodules/libs4/windows/webview2.ps1') -Runtime $Runtime -Destination (Join-Path $repo '.build/bin')
     if ($BuildOnly) { return }
-    $payload = Join-Path $destination 'runtime'
+    $artifactName = "$prefix$Version-windows-x64.zip"
+    $receiptName = $artifactName -replace '\.zip$','.release.json'
+    foreach ($name in @($artifactName, $receiptName, 'Sapiens-Setup.exe')) {
+        if (Test-Path -LiteralPath (Join-Path $output $name)) { throw "Output already exists: $name" }
+    }
+    New-Item -ItemType Directory -Path $output -Force | Out-Null
+    $candidate = Join-Path $output ('.sapiens-package.' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $candidate | Out-Null
+    $staging = $candidate
+    $package = Join-Path $staging (Split-Path -Leaf $destination)
+    $payload = Join-Path $package 'runtime'
     $manifest = Join-Path $payload 'package-manifest.json'
     $stage = @('-ibuild/package','build/Package.hs','stage','--root',$repo,'--destination',$payload,
         '--version',$Version,'--platform','windows','--channel',$Channel)
@@ -53,11 +66,11 @@ try {
     & runghc @stage
     if ($LASTEXITCODE -ne 0) { throw 'Runtime assembly failed' }
     $packager = Join-Path $repo '.build/package-tool/sapiens-package.exe'
-    Copy-Item -LiteralPath (Join-Path $repo '.build/bin/sapiens-windows.exe') -Destination (Join-Path $destination 'Sapiens4.exe')
-    Copy-Item -LiteralPath (Join-Path $repo '.build/bin/WebView2Loader.dll'),(Join-Path $repo '.build/bin/WebView2-LICENSE.txt') -Destination $destination
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination (Join-Path $destination 'README.md')
+    Copy-Item -LiteralPath (Join-Path $repo '.build/bin/sapiens-windows.exe') -Destination (Join-Path $package 'Sapiens4.exe')
+    Copy-Item -LiteralPath (Join-Path $repo '.build/bin/WebView2Loader.dll'),(Join-Path $repo '.build/bin/WebView2-LICENSE.txt') -Destination $package
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination (Join-Path $package 'README.md')
     if ($CertificateThumbprint) {
-        Get-ChildItem -LiteralPath $destination -Recurse -File | Where-Object { $_.Extension -in @('.exe','.dll') } | ForEach-Object {
+        Get-ChildItem -LiteralPath $package -Recurse -File | Where-Object { $_.Extension -in @('.exe','.dll') } | ForEach-Object {
             & signtool sign /sha1 $CertificateThumbprint /fd SHA256 /tr $TimestampUrl /td SHA256 $_.FullName
             if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed: $($_.FullName)" }
             & signtool verify /pa /all /v $_.FullName
@@ -67,13 +80,31 @@ try {
     $signing = if ($CertificateThumbprint) { 'authenticode' } else { 'none' }
     & $packager finalize --runtime $payload --signing $signing
     if ($LASTEXITCODE -ne 0) { throw 'Final signed runtime inventory failed' }
-    [IO.File]::WriteAllText((Join-Path $destination 'sapiens-installation.id'), $appId)
-    $artifact = Join-Path $output "$prefix$Version-windows-x64.zip"
-    if (Test-Path -LiteralPath $artifact) { throw 'Versioned artifact already exists' }
-    Compress-Archive -LiteralPath $destination -DestinationPath $artifact
-    & (Join-Path $repo 'build/package/windows-installer.ps1') -PackageDirectory $destination -OutputDirectory $output -Version $Version -Channel $Channel -CertificateThumbprint $CertificateThumbprint -TimestampUrl $TimestampUrl
+    [IO.File]::WriteAllText((Join-Path $package 'sapiens-installation.id'), $appId)
+    $artifact = Join-Path $staging $artifactName
+    Compress-Archive -LiteralPath $package -DestinationPath $artifact
+    & (Join-Path $repo 'build/package/windows-installer.ps1') -PackageDirectory $package -OutputDirectory $staging -Version $Version -Channel $Channel -CertificateThumbprint $CertificateThumbprint -TimestampUrl $TimestampUrl
     if ($LASTEXITCODE -ne 0) { throw 'Installer assembly failed' }
-    & $packager receipt --artifact $artifact --installer (Join-Path $output 'Sapiens-Setup.exe') --manifest $manifest --output ($artifact -replace '\.zip$','.release.json')
+    & $packager receipt --artifact $artifact --installer (Join-Path $staging 'Sapiens-Setup.exe') --manifest $manifest --output ($artifact -replace '\.zip$','.release.json')
     if ($LASTEXITCODE -ne 0) { throw 'Release receipt failed' }
-    Write-Host "Built $destination/Sapiens4.exe`nArtifact $artifact"
-} finally { Pop-Location }
+    # Publish only fully assembled, signed and verified outputs on this volume.
+    [IO.Directory]::Move($package, $destination)
+    $published += $destination
+    foreach ($name in @($artifactName, 'Sapiens-Setup.exe', $receiptName)) {
+        $target = Join-Path $output $name
+        [IO.File]::Move((Join-Path $staging $name), $target)
+        $published += $target
+    }
+    $complete = $true
+    Write-Host "Built $destination/Sapiens4.exe`nArtifact $(Join-Path $output $artifactName)"
+} finally {
+    try {
+        if (-not $complete) {
+            foreach ($path in $published) { Remove-Item -LiteralPath $path -Recurse -Force }
+        }
+    } finally {
+        try {
+            if ($staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+        } finally { Pop-Location }
+    }
+}

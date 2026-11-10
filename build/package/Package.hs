@@ -106,32 +106,36 @@ stageProvider root destination platform providerInput allowMissing = do
 stage :: Channel -> FilePath -> FilePath -> Version -> Platform -> Maybe FilePath -> Bool -> IO Manifest
 stage channel rootInput destinationInput version platform providerInput allowMissing = do
  root <- canonicalizePath rootInput
- destination <- canonicalizePath destinationInput
- exists destination >>= flip when (fail "Runtime destination must be new; refusing to mix old and new payloads")
- when (inside destination root) $ fail "Runtime destination must not contain the source checkout"
- createDirectoryIfMissing True destination
- let windows=platform==Windows;suffix=executableSuffix platform
- appFiles <- concat <$> mapM (files . (root</>)) ["app/theme","app/shell","corpora/prompts"]
- notices <- concat <$> mapM (files . (root</>)) ["license","submodules/libs4/license","submodules/blindly4/license"]
- let relative = [".build/bin/sapiens4"++suffix,".build/web/app.js",".build/web/guest.js",".build/web/sw.js","submodules/libs4/web/remote-vendor.js","submodules/blindly4/.build/"++if windows then "windows/blindly4.exe" else "release/blindly4"] ++ map (makeRelative root) (filter ((/=".purs").takeExtension) appFiles ++ notices)
- forM_ (sort $ nub relative) $ \path -> copy (root</>path) (destination</>path)
- provider <- stageProvider root destination platform providerInput allowMissing
- when windows $ forM_ ["AppIcon.ico","AppIconDark.ico"] $ \icon -> copy (root</>"environments/windows"</>icon) (destination</>"environments/windows"</>icon)
- git <- doesPathExist (root</>".git")
- source <- if git then provenance root else readJSON (root</>"build/source-provenance.json")
- tracked <- if git then splitNul <$> atRoot root "git" ["ls-files","--cached","--others","--exclude-standard","-z"] else map (portable . makeRelative root) . concat <$> mapM (files . (root</>)) ["app","build","corpora","remote","environments","license","docs"]
- let relevant path = any (`isPrefixOf` portable path) ["app/","build/","corpora/","remote/","environments/","license/","docs/",".github/"] || path `elem` ["README.md",".gitmodules",".gitignore"]
- tree <- forM (sort $ filter (\p -> not (null p) && relevant p && takeExtension p `notElem` [".pyc",".pyo"]) tracked) $ \path -> do
-  present <- doesFileExist (root</>path)
-  if present then do checksum<-SHA.hashlazy <$> L.readFile (root</>path);pure (L.fromStrict $ TE.encodeUtf8 (T.pack path)<>B.singleton 0<>checksum) else pure L.empty
- versions <- forM [("ghc",["--numeric-version"]),("cabal",["--numeric-version"]),("rustc",["--version"]),("node",["--version"])] $ \(name,args) -> do
-  value<-atRoot root name args
-  first<-case lines value of line:_->pure line;[]->fail ("Missing toolchain version: "++name)
-  pure (T.pack name,first)
- let manifest=newManifest channel source (hash $ L.concat tree) platform version provider versions
- writeJSON (destination</>"package-manifest.json") manifest
- printJSON $ obj [("runtime",toJSON destination),("manifest",toJSON $ destination</>"package-manifest.json"),("buildId",toJSON $ packageBuildId $ manifestIdentity manifest),("status",toJSON (if isJust provider then "provider-complete" else "validation-provider-incomplete" :: String))]
- pure manifest
+ output <- canonicalizePath destinationInput
+ exists output >>= flip when (fail "Runtime destination must be new; refusing to mix old and new payloads")
+ when (inside output root) $ fail "Runtime destination must not contain the source checkout"
+ withTemporary (takeDirectory output) ".runtime-stage" $ \temporary -> do
+  let destination=temporary</>"runtime"
+  createDirectory destination
+  let windows=platform==Windows;suffix=executableSuffix platform
+  appFiles <- concat <$> mapM (files . (root</>)) ["app/theme","app/shell","corpora/prompts"]
+  notices <- concat <$> mapM (files . (root</>)) ["license","submodules/libs4/license","submodules/blindly4/license"]
+  let relative = [".build/bin/sapiens4"++suffix,".build/web/app.js",".build/web/guest.js",".build/web/sw.js","submodules/libs4/web/remote-vendor.js","submodules/blindly4/.build/"++if windows then "windows/blindly4.exe" else "release/blindly4"] ++ map (makeRelative root) (filter ((/=".purs").takeExtension) appFiles ++ notices)
+  forM_ (sort $ nub relative) $ \path -> copy (root</>path) (destination</>path)
+  provider <- stageProvider root destination platform providerInput allowMissing
+  when windows $ forM_ ["AppIcon.ico","AppIconDark.ico"] $ \icon -> copy (root</>"environments/windows"</>icon) (destination</>"environments/windows"</>icon)
+  git <- doesPathExist (root</>".git")
+  source <- if git then provenance root else readJSON (root</>"build/source-provenance.json")
+  tracked <- if git then splitNul <$> atRoot root "git" ["ls-files","--cached","--others","--exclude-standard","-z"] else map (portable . makeRelative root) . concat <$> mapM (files . (root</>)) ["app","build","corpora","remote","environments","license","docs"]
+  let relevant path = any (`isPrefixOf` portable path) ["app/","build/","corpora/","remote/","environments/","license/","docs/",".github/"] || path `elem` ["README.md",".gitmodules",".gitignore"]
+  tree <- forM (sort $ filter (\p -> not (null p) && relevant p && takeExtension p `notElem` [".pyc",".pyo"]) tracked) $ \path -> do
+   present <- doesFileExist (root</>path)
+   if present then do checksum<-SHA.hashlazy <$> L.readFile (root</>path);pure (L.fromStrict $ TE.encodeUtf8 (T.pack path)<>B.singleton 0<>checksum) else pure L.empty
+  versions <- forM [("ghc",["--numeric-version"]),("cabal",["--numeric-version"]),("rustc",["--version"]),("node",["--version"])] $ \(name,args) -> do
+   value<-atRoot root name args
+   first<-case lines value of line:_->pure line;[]->fail ("Missing toolchain version: "++name)
+   pure (T.pack name,first)
+  let manifest=newManifest channel source (hash $ L.concat tree) platform version provider versions
+  writeJSON (destination</>"package-manifest.json") manifest
+  exists output >>= flip when (fail "Runtime destination already exists")
+  renameDirectory destination output
+  printJSON $ obj [("runtime",toJSON output),("manifest",toJSON $ output</>"package-manifest.json"),("buildId",toJSON $ packageBuildId $ manifestIdentity manifest),("status",toJSON (if isJust provider then "provider-complete" else "validation-provider-incomplete" :: String))]
+  pure manifest
  where
  splitNul value = case break (=='\0') value of (a,[]) -> [a];(a,_:rest)->a:splitNul rest
 
@@ -183,8 +187,7 @@ receipt artifact installer manifestPath output = do
 -- not publisher signatures (which the native build hosts verify).
 release :: String -> FilePath -> String -> String -> String -> FilePath -> IO ()
 release repository directory commit versionInput mode output = do
- -- Invalidate a previous list even when this attempt fails validation.
- exists output >>= flip when (removeFile output)
+ exists output >>= flip when (fail "Release list output already exists; choose a new output file")
  unless (repository=="PoulWalcker/sapiens4") $ fail "Expected release repository"
  unless (mode `elem` ["dev","prod"] && length commit==40 && all (`elem` ['0'..'9']++['a'..'f']) commit) $ fail "Expected dev/prod, full source commit and SemVer"
  version <- either fail pure $ parseVersion versionInput
@@ -207,7 +210,11 @@ release repository directory commit versionInput mode output = do
    pure artifact
   pure (platform,assets++[path])
  unless (sort (map (platformName . fst) verified)==["macos","windows"]) $ fail "Both supported platforms required"
- writeFile output (unlines $ concatMap snd verified)
+ withTemporary (takeDirectory output) ".release-list" $ \temporary -> do
+  let staged=temporary</>"assets"
+  writeFile staged (unlines $ concatMap snd verified)
+  exists output >>= flip when (fail "Release list output already exists; choose a new output file")
+  renameFile staged output
 
 
 withTemporary :: FilePath -> String -> (FilePath -> IO a) -> IO a

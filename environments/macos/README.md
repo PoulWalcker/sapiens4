@@ -56,6 +56,11 @@ for synthetic validation. The app starts its own host on a dynamic loopback port
 `desktop-server.log` is in the data directory. Closing the window leaves the app
 running; Quit stops its host. No login item is installed.
 
+Backend tools use system directories first, then `/opt/homebrew/bin` and
+`/usr/local/bin`, then absolute entries from the inherited `PATH`. Login shell
+startup scripts are not run; Finder may not inherit pyenv/conda/nvm paths.
+Bundled Codex remains the default; `SAPIENS_CODEX_BINARY` explicitly overrides it.
+
 ```sh
 ruby submodules/libs4/ruby/bundle.rb install
 codesign --verify --deep --strict '.build/macos/Sapiens4 Development.app'

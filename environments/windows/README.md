@@ -49,6 +49,10 @@ in the adjacent `config` directory. `SAPIENS_DATA_DIR` and `SAPIENS_CONFIG_DIR`
 allow synthetic validation. The app owns its host, uses a dynamic loopback port,
 and stops the host on close. Production update discovery is disabled.
 
+The host inherits `CODEX_*` and `OPENAI_*`, including `CODEX_HOME`, so explicit
+authentication and CLI configuration remain available. D1 does not manage accounts.
+Bundled Codex remains the default; `SAPIENS_CODEX_BINARY` explicitly overrides it.
+
 ```powershell
 ruby submodules/libs4/ruby/bundle.rb install
 $env:SAPIENS_TEST_PACKAGE_RUNTIME = (Resolve-Path .build/windows/Sapiens4-Development-win-x64/runtime).Path

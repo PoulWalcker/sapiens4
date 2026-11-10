@@ -25,16 +25,18 @@ type Arena = IORef [(IO Bool, IO ())]
 type WindowProc = Window -> Word32 -> WordPtr -> IntPtr -> IO IntPtr
 
 foreign import ccall safe "CoInitializeEx" coInitialize :: Ptr () -> Word32 -> IO HRESULT
-foreign import ccall unsafe "CoUninitialize" coUninitialize :: IO ()
+foreign import ccall safe "CoUninitialize" coUninitialize :: IO ()
 foreign import ccall unsafe "CoTaskMemFree" coFree :: Ptr a -> IO ()
 foreign import ccall unsafe "CLSIDFromString" clsid :: Wide -> Ptr Word8 -> IO HRESULT
 foreign import ccall unsafe "LoadLibraryW" loadLibrary :: Wide -> IO Object
+foreign import ccall unsafe "FreeLibrary" freeLibrary :: Object -> IO Int32
 foreign import ccall unsafe "GetProcAddress" getProcAddress :: Object -> CString -> IO (FunPtr a)
 foreign import ccall unsafe "GetModuleHandleW" moduleHandle :: Wide -> IO Object
 foreign import ccall unsafe "GetCurrentProcessId" processId :: IO Word32
 foreign import ccall unsafe "SetProcessDpiAwarenessContext" setDpiAwareness :: IntPtr -> IO Int32
 foreign import ccall unsafe "GetDpiForWindow" windowDpi :: Window -> IO Word32
 foreign import ccall unsafe "RegisterClassExW" registerClass :: Ptr a -> IO Word16
+foreign import ccall unsafe "UnregisterClassW" unregisterClass :: Wide -> Object -> IO Int32
 foreign import ccall safe "CreateWindowExW" createWindow :: Word32 -> Wide -> Wide -> Word32 -> Int32 -> Int32 -> Int32 -> Int32 -> Window -> Object -> Object -> Ptr () -> IO Window
 foreign import ccall safe "DefWindowProcW" defaultProc :: WindowProc
 foreign import ccall "wrapper" wrapWindowProc :: WindowProc -> IO (FunPtr WindowProc)
@@ -129,7 +131,11 @@ retain :: Arena -> IO () -> IO ()
 retain arena dispose = modifyIORef' arena ((pure False, dispose) :)
 
 freeArena :: Arena -> IO ()
-freeArena arena = readIORef arena >>= mapM_ snd
+freeArena arena = do
+  entries <- atomicModifyIORef' arena (\entries -> ([], entries))
+  let dispose [] = pure ()
+      dispose ((_,action):rest) = action `finally` dispose rest
+  dispose entries
 
 sweepArena :: Arena -> IO ()
 sweepArena arena = do
@@ -145,7 +151,7 @@ callback arena guid invoke = do
   iid <- withGuid guid (peekArray 16)
   unknown <- withGuid "{00000000-0000-0000-C000-000000000046}" (peekArray 16)
   add <- wrapRef $ \_ -> atomicModifyIORef' count (\n -> (n + 1, n + 1))
-  dropRef <- wrapRef $ \_ -> atomicModifyIORef' count (\n -> (max 1 n - 1, max 1 n - 1))
+  dropRef <- wrapRef $ \_ -> atomicModifyIORef' count (\n -> let next = if n == 0 then 0 else n - 1 in (next, next))
   identify <- wrapQuery $ \self requested out -> do
     bytes <- peekArray 16 requested
     if bytes `elem` [iid, unknown]
@@ -168,8 +174,7 @@ reportException e = hPutStrLn stderr (displayException e) `catch` \(_ :: IOExcep
 onEvent :: Arena -> Object -> Int -> String -> (Object -> IO ()) -> IO ()
 onEvent arena object index iid action = do
   handler <- wrapEvent (\_ _ args -> guardCallback $ action args) >>= callback arena iid
-  allocaBytes 8 $ call2 object index handler
-  release handler
+  (allocaBytes 8 $ call2 object index handler) `finally` release handler
 
 completion :: Arena -> String -> (HRESULT -> Object -> IO ()) -> IO Object
 completion arena iid action = wrapCompletion (\_ result object -> guardCallback $ action result object) >>= callback arena iid
@@ -184,8 +189,7 @@ webViewLoader = do
   pure loader
 
 webViewRuntimeAvailable :: IO Bool
-webViewRuntimeAvailable = do
-  loader <- webViewLoader
+webViewRuntimeAvailable = bracket webViewLoader (void . freeLibrary) $ \loader -> do
   entry <- withCString "GetAvailableCoreWebView2BrowserVersionString" (getProcAddress loader)
   when (entry == nullFunPtr) $ ioError $ userError "WebView2 runtime detection is unavailable"
   alloca $ \version -> do
@@ -198,6 +202,7 @@ webViewRuntimeAvailable = do
 newView :: Arena -> Window -> String -> (Either String View -> IO ()) -> IO ()
 newView arena parent profile done = do
   loader <- webViewLoader
+  retain arena (void $ freeLibrary loader)
   entry <- withCString "CreateCoreWebView2EnvironmentWithOptions" (getProcAddress loader)
   when (entry == nullFunPtr) $ ioError $ userError "WebView2 loader entry point is unavailable"
   environment <- completion arena "{4E8A3389-C9D8-4BD2-B6B5-124FEE6CC14D}" $ \result env ->
@@ -209,12 +214,10 @@ newView arena parent profile done = do
       ready <- completion arena "{6C4819F3-C9B7-4260-8127-C9F5BDE7F68C}" $ \code ctrl ->
         if code < 0 || ctrl == nullPtr then void (destroyWindow child) >> done (Left $ "Cannot create browser view: " ++ show code) else do
           addRef ctrl
-          web <- getValue ctrl 25
+          web <- getValue ctrl 25 `onException` (release ctrl >> void (destroyWindow child))
           done (Right $ View ctrl web child)
-      call2 env 3 child ready `onException` void (destroyWindow child)
-      release ready
-  withWide profile $ \path -> createEnvironment entry nullPtr path nullPtr environment >>= check
-  release environment
+      (call2 env 3 child ready `onException` void (destroyWindow child)) `finally` release ready
+  (withWide profile $ \path -> createEnvironment entry nullPtr path nullPtr environment >>= check) `finally` release environment
 
 closeView :: View -> IO ()
 closeView view = call0 (controller view) 24 `finally` (release (core view) >> release (controller view) >> void (destroyWindow $ container view))
@@ -237,8 +240,7 @@ execute :: Arena -> View -> String -> (String -> IO ()) -> IO ()
 execute arena view script done = do
   handler <- completion arena "{49511172-CC67-4BCA-9923-137112F4C4CC}" $ \result output ->
     when (result >= 0) $ readWide (castPtr output) >>= done
-  withWide script $ \source -> call2 (core view) 29 source handler
-  release handler
+  (withWide script $ \source -> call2 (core view) 29 source handler) `finally` release handler
 
 navigate :: View -> String -> IO ()
 navigate view = putString (core view) 5

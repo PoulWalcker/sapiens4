@@ -87,6 +87,8 @@ one receipt per supported platform, both installer and ZIP, matching clean sourc
 commit/version and final file hashes. Prod additionally requires the Stable channel and publisher signing
 and the supported macOS13 floor; Dev requires Development and permits Mac ad-hoc/unsigned and Windows unsigned.
 Keep the default mode `prod` when validating production packages.
+The `--output` path must be new. Validation never removes an existing file;
+the verified list is published atomically only after all checks succeed.
 
 ```sh
 runghc -ibuild/package build/Package.hs release --mode dev --repository PoulWalcker/sapiens4 \
