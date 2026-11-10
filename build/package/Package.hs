@@ -37,6 +37,7 @@ import qualified System.Posix.Directory as Posix
 #endif
 import Options
 import Format
+import Source
 
 digest :: FilePath -> IO T.Text
 digest path = hash <$> L.readFile path
@@ -92,6 +93,17 @@ renameNew source destination = do
   fail "Exclusive package publication is unsupported on this platform"
 #endif
 #endif
+
+-- Each exclusive rename is atomic; the set is not. Roll back only entries this
+-- attempt published, leaving a conflicting destination untouched.
+publish :: FilePath -> [FilePath] -> IO ()
+publish output = mask_ . go
+ where
+ go [] = pure ()
+ go (source:rest) = do
+  let destination = output </> takeFileName source
+  renameNew source destination
+  go rest `onException` removePathForcibly destination
 
 files :: FilePath -> IO [FilePath]
 files root = do
@@ -239,6 +251,7 @@ release repository directory commit versionInput mode output = do
  unless (repository=="PoulWalcker/sapiens4") $ fail "Expected release repository"
  unless (mode `elem` ["dev","prod"] && length commit==40 && all (`elem` ['0'..'9']++['a'..'f']) commit) $ fail "Expected dev/prod, full source commit and SemVer"
  version <- either fail pure $ parseVersion versionInput
+ when (mode=="prod") $ getCurrentDirectory >>= \source -> requireMainAncestor source commit
  root <- canonicalizePath directory
  receipts <- filter (".release.json" `isSuffixOf`) <$> files root
  unless (length receipts==2) $ fail "Exactly two platform receipts required"

@@ -48,13 +48,11 @@ hostEnvironment overrides inherited = overrides ++ filter keep inherited
 prepareHost :: [String] -> IO Host
 prepareHost args = do
   executable <- getExecutablePath
-  local <- lookupEnv "LOCALAPPDATA" >>= maybe getHomeDirectory pure
-  dataEnv <- lookupEnv "SAPIENS_DATA_DIR"
   runtimeEnv <- lookupEnv "SAPIENS_RUNTIME_DIR"
   let option name = listToMaybe [value | (key,value) <- zip args (drop 1 args), key == name]
   runtime <- makeAbsolute $ fromMaybe (takeDirectory executable </> "runtime") (option "--runtime-dir" `mplus` runtimeEnv)
   defaultData <- Paths.defaultDataDirectory
-  directory <- makeAbsolute $ maybe defaultData id (option "--data-dir" `mplus` dataEnv)
+  directory <- makeAbsolute $ fromMaybe defaultData (option "--data-dir")
   config <- Paths.configDirectory
   Host directory config runtime <$> newIORef Nothing <*> newIORef ""
 

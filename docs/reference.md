@@ -44,11 +44,17 @@ Default model: `gpt-6-sol`, reasoning `high`; Deep work uses `xhigh`. A call's
 | Variable | Purpose |
 | --- | --- |
 | `SAPIENS_DATA_DIR` | Data directory |
-| `SAPIENS_PYTHON` | Python executable |
+| `SAPIENS_CONFIG_DIR` | Configuration directory, independent of data |
 | `SAPIENS_CODEX_BINARY` | Codex executable |
 | `SAPIENS_CODEX_MODEL` | Model |
 | `SAPIENS_CODEX_REASONING_EFFORT` | Reasoning effort |
 | `SAPIENS_BLINDLY_BINARY` | Blindly4 executable |
+
+Codex resolution uses an explicit `SAPIENS_CODEX_BINARY`, otherwise the pinned
+bundled provider (`.build/codex/bin/codex` in source checkouts, `codex/bin/codex`
+inside a packaged runtime; Windows uses `codex.exe`). There is no automatic PATH,
+application or npm installation discovery. An invalid explicit override fails
+instead of falling back to another installation.
 
 Decision templates live in `corpora/prompts/`. **Edit decision prompts** saves local
 `decision-prompts/*.md` overrides for subsequent invocations; past decision
@@ -57,9 +63,13 @@ are inactive. Global Codex configuration is unchanged.
 
 ## Data and updates
 
-macOS/source data defaults to `.sapiens4` in the checkout; Windows packages use
-`%LOCALAPPDATA%\Sapiens4`. Back up the complete data directory while the host is
-stopped, including:
+CLI and GUI, Development and Stable share one default root:
+`~/Library/Application Support/Sapiens4` on macOS, `%LOCALAPPDATA%\Sapiens4` on
+Windows, and `$XDG_DATA_HOME/Sapiens4` (normally `~/.local/share/Sapiens4`) on
+other source platforms. Data is in `data`, configuration in `config`.
+`--data-dir` takes precedence over `SAPIENS_DATA_DIR`; `SAPIENS_CONFIG_DIR` is
+independent. Existing directories are not migrated automatically.
+Back up the complete data directory while the host is stopped, including:
 
 - `corpora.sqlite3`: agents, workloads, Groups, preferences and attachments.
 - `agentpy/`: persisted chat state and archives; the legacy path remains in use.

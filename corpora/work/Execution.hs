@@ -54,8 +54,7 @@ submitTurn s a d = do
  attachments <- resolveAttachments s a (get d "attachments" `fallback` arr []) True
  require (not (T.null input) || not (null attachments)) 400 "Write a message or attach a file"
  flow <- decodeValue 400 flowValue
- binary <- codexBinary
- require (isJust binary) 503 "Codex CLI is missing. Install it and run codex login."
+ void codexBinary
  when (flow==Computer) $ blindly s >>= doesFileExist >>= \built -> require built 503 "Blindly4 is not built. Run ./build/start.sh to build it."
  stopped <- readIORef (serviceStopping s)
  require (not stopped) 503 "Server is shutting down"

@@ -67,5 +67,5 @@ buildUI root = do
      pure ("node",(root</>"submodules/libs4/node_modules"</>entry):args)
   | os=="mingw32" && name=="npm" = do
      script <- findExecutable (name<>".cmd") >>= maybe (ioError $ userError $ "Missing build tool: "<>name) pure
-     pure ("cmd",["/d","/c",script]++args)
+     pure ("cmd.exe",["/d","/c",script]++args)
   | otherwise = pure (name,args)

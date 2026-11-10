@@ -33,10 +33,13 @@ open .build/macos/Sapiens.dmg
 Open `Sapiens.dmg`, drag **Sapiens4 Development** to Applications, then launch it.
 Outputs in `.build/macos/` are the DMG, app, `sapiens4-development-0.1.0-dev-macos-arm64.zip`
 and its `.release.json` receipt. Use `--output-directory` for another build;
-existing app/DMG/ZIP outputs are rejected. The integrated build acquires or
+existing app/DMG/ZIP/receipt outputs are rejected. The complete set is assembled
+and verified in a temporary directory on the destination filesystem. Publication
+uses exclusive per-entry renames and rolls back only this attempt's published
+entries on ordinary failure; the four-entry set is not atomic. The integrated build acquires or
 verifies the pinned provider in `.build/codex`; use `--provider` for an already
 verified payload elsewhere. Signing defaults to ad-hoc. Publisher
-signing and CI policy are in the [release runbook](../../docs/release-development.md).
+signing and manual release policy are in the [release runbook](../../docs/release-development.md).
 `--build-only` compiles the backend/UI/native shell and Blindly without packaging
 or acquiring Codex. `--skip-build` packages existing outputs with caller-verified
 provenance. `runghc build/Build.hs` alone does not build Blindly.
@@ -55,10 +58,11 @@ Actual macOS 13 launch/login/exec acceptance remains open.
 
 ## Run and verify
 
-Stable uses `~/Library/Application Support/Sapiens4/{data,config}`.
-Dev data and configuration default to `~/Library/Application Support/Sapiens4 Development/data`
-and the adjacent `config` directory. Use `SAPIENS_DATA_DIR` and `SAPIENS_CONFIG_DIR`
-for synthetic validation. The app starts its own host on a dynamic loopback port;
+CLI and GUI, Development and Stable all use
+`~/Library/Application Support/Sapiens4/{data,config}` by default.
+`SAPIENS_DATA_DIR` and `SAPIENS_CONFIG_DIR` override these independently; a config
+override does not move default data. Use isolated overrides for manual checks.
+The app starts its own host on a dynamic loopback port;
 `desktop-server.log` is in the data directory. Closing the window leaves the app
 running; Quit stops its host. No login item is installed.
 

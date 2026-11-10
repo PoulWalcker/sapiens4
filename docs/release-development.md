@@ -2,8 +2,9 @@
 
 `PoulWalcker/sapiens4`: Dev uses `development` / `Sapiens4 Development` /
 `com.poulwalcker.sapiens4.development`; Prod uses `stable` / `Sapiens4` /
-`com.poulwalcker.sapiens4`. Stable data/config paths replace `Sapiens4 Development`
-with `Sapiens4`; profiles stay separate, with no migration or update discovery.
+`com.poulwalcker.sapiens4`. Both channels, source CLI and native GUI share the
+`Sapiens4` data/config root. Explicit data/config overrides are independent;
+there is no migration or update discovery.
 macOS `--local prod` selects Stable with publisher signing. On Windows, select
 `-Channel stable` and supply `-CertificateThumbprint` for publisher signing.
 Low-level `--channel stable` / `-Channel stable` allows unsigned acceptance builds,
@@ -21,6 +22,17 @@ Build on macOS and Windows from the same clean commit and version. GitHub Action
 workflows are removed; pushes, pull requests and tags do not build or publish packages.
 Keep the existing local caches and use a new output directory for each package set.
 Production releases must come from main history and pass the receipt checker in Prod mode.
+Before a production build, refresh the dedicated release-main reference:
+
+```sh
+git fetch https://github.com/PoulWalcker/sapiens4.git refs/heads/main:refs/remotes/release/main
+```
+
+The signed Stable build commands and Prod receipt verification compare this ref
+with the release repository's current main and require the source commit to be
+its ancestor. A missing/stale ref or an unavailable remote fails explicitly;
+refresh the ref and retry. The checkout need not be named `main`. Development
+builds and unsigned Stable acceptance builds do not require this ancestry.
 
 Windows uses GHC9.14.1, Cabal3.18.2.0, Node22.23.2, Rust1.99.0 and Ruby3.4.11.
 Keep Ruby's MSYS2/pkg-config paths out of the native compilation environment so
@@ -91,31 +103,34 @@ commit/version and final file hashes. Prod additionally requires the Stable chan
 and the supported macOS13 floor; Dev requires Development and permits Mac ad-hoc/unsigned and Windows unsigned.
 Keep the default mode `prod` when validating production packages.
 The `--output` path must be new. Validation never removes an existing file;
-the verified list is published atomically only after all checks succeed.
+the verified list is published atomically only after all checks succeed. Each
+attempt below gets a fresh directory named with the exact version and full
+source commit. Validation and draft creation stay in one fail-fast shell: a
+failed validation cannot fall through to an earlier list. Do not run the draft
+step separately with an old list.
+
+This block creates a draft with all six verified assets (two installers, two
+portable ZIPs and two receipts). It runs on macOS Bash3.2 as well as newer Bash:
 
 ```sh
-runghc -ibuild/package build/Package.hs release --mode dev --repository PoulWalcker/sapiens4 \
-  --directory ".build/release/$VERSION" --source-commit "$COMMIT" \
-  --version "$VERSION" --output .build/verified-assets.txt
-```
-
-Only after this command succeeds, create a draft with all six verified assets
-(two installers, two portable ZIPs and two receipts). This shell block runs on
-macOS Bash3.2 as well as newer Bash:
-
-```sh
-# Dev: TAG="dev-$VERSION". Prod: TAG="v$VERSION".
-# Use --mode prod above for Prod. Run only after verification succeeds.
+# Prod: MODE=prod; TAG="v$VERSION". Dev:
+MODE=dev
+TAG="dev-$VERSION"
 bash -eu -c '
+  mkdir -p .build/verification
+  attempt=$(mktemp -d ".build/verification/$1-$2.XXXXXXXX")
+  verified="$attempt/verified-assets.txt"
+  runghc -ibuild/package build/Package.hs release --mode "$3" --repository PoulWalcker/sapiens4 \
+    --directory ".build/release/$1" --source-commit "$2" --version "$1" --output "$verified"
   assets=()
-  while IFS= read -r asset; do assets+=("$asset"); done < .build/verified-assets.txt
-  gh release create "$3" "${assets[@]}" --repo PoulWalcker/sapiens4 \
+  while IFS= read -r asset; do assets+=("$asset"); done < "$verified"
+  gh release create "$4" "${assets[@]}" --repo PoulWalcker/sapiens4 \
     --target "$2" --draft --title "Sapiens4 $1"
-' _ "$VERSION" "$COMMIT" "$TAG"
+' _ "$VERSION" "$COMMIT" "$MODE" "$TAG"
 ```
 
-Review the complete draft in GitHub, then publish it manually. A failed
-verification stops the process and invalidates the previous verified-assets list.
+Review the complete draft in GitHub, then publish it manually. Previous lists
+remain untouched for reference and are never used by a new attempt.
 The receipt signing labels supplement, rather than replace, native signing checks
 performed on the build hosts. Do not use arbitrary untrusted receipts.
 

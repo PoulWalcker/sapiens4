@@ -2,6 +2,7 @@ module Main where
 
 import Control.Monad
 import Options
+import Source
 import System.Directory
 import System.Environment
 import System.FilePath
@@ -14,9 +15,12 @@ main = do
  root <- getCurrentDirectory
  case args of
   ["version",value] -> either fail (putStrLn . versionText) (parseVersion value)
+  ["production-source",commit] -> requireMainAncestor root commit
   "macos":rest | "--help" `elem` rest || "-h" `elem` rest -> putStrLn macUsage
   "macos":rest -> do
    options <- parseMac rest
+   when (channel options == Stable && signingMode (macSigning options) == DeveloperID) $
+    readProcess "git" ["rev-parse", "HEAD"] "" >>= requireMainAncestor root . filter (`notElem` "\r\n")
    setEnv "MACOSX_DEPLOYMENT_TARGET" "13.0"
    when (buildMode options /= PackageOnly) $ do
     callProcess "runghc" [root</>"build/Build.hs"]

@@ -29,6 +29,12 @@ $published = @()
 $complete = $false
 Push-Location $repo
 try {
+    if ($Channel -eq 'stable' -and $CertificateThumbprint) {
+        $commit = & git rev-parse HEAD
+        if ($LASTEXITCODE) { throw 'Production build requires a Git checkout' }
+        & runghc ("-i"+(Join-Path $repo 'build/package')) (Join-Path $repo 'build/Package.hs') production-source $commit
+        if ($LASTEXITCODE) { throw 'Production source must belong to current release main history' }
+    }
     if (-not $SkipBuild) {
         $target = & ghc --print-target-platform
         if ($LASTEXITCODE -ne 0 -or $target -notmatch '^x86_64-.*mingw') { throw "Windows x64 GHC required; got $target" }

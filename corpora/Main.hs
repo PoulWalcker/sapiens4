@@ -2,6 +2,7 @@
 module Main where
 
 import Types
+import qualified RuntimePaths as Paths
 import HostServer
 import Assets
 import BuildUI
@@ -77,7 +78,8 @@ hostMain root args = do
  validateOptions ["--port","--data-dir"] ["--open","--desktop"] args
  port <- integerOption "--port" 4174 args
  require (port>=0 && port<=65535) 400 "Port must be between 0 and 65535"
- let directory=option "--data-dir" (root</>".sapiens4") args
+ defaultData <- Paths.defaultDataDirectory
+ let directory=option "--data-dir" defaultData args
  void (asset root "/")
  void (asset root "/workspace/app.js")
  bracket (startHost directory port False) hostStop $ \host -> do

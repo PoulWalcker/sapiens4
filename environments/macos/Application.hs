@@ -7,18 +7,15 @@ import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
 import Data.Aeson
-import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy as L
 import Data.IORef
-import qualified Data.Map.Strict as Map
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Foreign hiding (void, new)
 import Network.HTTP.Client hiding (method)
-import Network.HTTP.Types.Status
 import Network.URI (parseURI, uriScheme, uriAuthority, uriRegName, uriUserInfo, uriPath, uriQuery, uriFragment)
 import ObjC
 import Browser

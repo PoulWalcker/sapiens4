@@ -171,10 +171,9 @@ sign app plan = do
  P.run "codesign" (flags++[app])
  P.run "codesign" ["--verify","--deep","--strict",app]
 
-diskImage :: FilePath -> FilePath -> FilePath -> MacSigning -> IO FilePath
-diskImage app output temporary plan = do
- let image=output</>"Sapiens.dmg";source=temporary</>"disk-image"
- P.exists image >>= flip when (fail "Sapiens.dmg already exists; choose a new output directory")
+diskImage :: FilePath -> FilePath -> MacSigning -> IO FilePath
+diskImage app temporary plan = do
+ let image=temporary</>"Sapiens.dmg";source=temporary</>"disk-image"
  createDirectory source
  P.run "ditto" [app,source</>takeFileName app]
  createDirectoryLink "/Applications" (source</>"Applications")
@@ -203,10 +202,10 @@ packageMac :: FilePath -> MacOptions -> IO ()
 packageMac root options = do
  output <- canonicalizePath $ fromMaybe (root</>".build/macos") (outputDirectory options)
  createDirectoryIfMissing True output
- let name=displayName (channel options);appName=name++".app";destination=output</>appName;artifact=output</>artifactPrefix (channel options)++versionText (version options)++"-macos-arm64.zip"
- P.exists destination >>= flip when (fail "Output app already exists; choose a new output directory")
- P.exists artifact >>= flip when (fail "Versioned artifact already exists")
- P.exists (output</>"Sapiens.dmg") >>= flip when (fail "Sapiens.dmg already exists; choose a new output directory")
+ let name=displayName (channel options);appName=name++".app";destination=output</>appName
+     artifactName=artifactPrefix (channel options)++versionText (version options)++"-macos-arm64.zip"
+ forM_ [appName,artifactName,"Sapiens.dmg",replaceExtension artifactName ".release.json"] $ \entry ->
+  P.exists (output</>entry) >>= flip when (fail $ "Output already exists: "++output</>entry)
  P.withTemporary output "sapiens-package" $ \temporary -> do
   let app=temporary</>appName;resources=app</>"Contents/Resources";macos=app</>"Contents/MacOS";runtime=resources</>"runtime"
   createDirectoryIfMissing True resources
@@ -235,8 +234,9 @@ packageMac root options = do
    P.run "xcrun" ["stapler","staple",app]
    P.run "xcrun" ["stapler","validate",app]
    P.run "spctl" ["--assess","--type","execute","--verbose=2",app]
-  renameDirectory app destination
-  P.run "ditto" ["-c","-k","--keepParent",destination,artifact]
-  image<-diskImage destination output temporary (macSigning options)
-  P.receipt artifact image (destination</>"Contents/Resources/runtime/package-manifest.json") (replaceExtension artifact ".release.json")
-  putStrLn ("Built "++destination++"\nInstaller "++image++"\nPortable "++artifact)
+  let artifact=temporary</>artifactName;receipt=replaceExtension artifact ".release.json"
+  P.run "ditto" ["-c","-k","--keepParent",app,artifact]
+  image<-diskImage app temporary (macSigning options)
+  P.receipt artifact image manifestPath receipt
+  P.publish output [app,artifact,image,receipt]
+  putStrLn ("Built "++destination++"\nInstaller "++(output</>takeFileName image)++"\nPortable "++(output</>artifactName))
