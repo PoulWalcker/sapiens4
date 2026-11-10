@@ -4,7 +4,8 @@
 `com.poulwalcker.sapiens4.development`; Prod uses `stable` / `Sapiens4` /
 `com.poulwalcker.sapiens4`. Stable data/config paths replace `Sapiens4 Development`
 with `Sapiens4`; profiles stay separate, with no migration or update discovery.
-`--local prod` and Actions `mode=prod` select Stable with publisher signing.
+macOS `--local prod` selects Stable with publisher signing. On Windows, select
+`-Channel stable` and supply `-CertificateThumbprint` for publisher signing.
 Low-level `--channel stable` / `-Channel stable` allows unsigned acceptance builds,
 which cannot pass Prod verification. Stable ZIPs: `sapiens4-VERSION-PLATFORM-ARCH.zip`.
 
@@ -14,27 +15,22 @@ emulation. See the platform instructions for requirements, build commands and ch
 - [macOS](../environments/macos/README.md)
 - [Windows](../environments/windows/README.md)
 
-## Local macOS + Windows Actions policy
+## Manual builds on both platforms
 
-| Event | Work | Publication |
-|---|---|---|
-| Feature push | No native workflow | None |
-| PR to main | Windows compilation only | None |
-| Manual native workflow, selected ref | Windows compile once, package/verify Dev or Prod | Workflow artifacts only |
-| Version tag in main history | Signed Windows packages | Workflow artifacts only |
-| macOS | Build locally using the same commit/version | Manual complete release only |
+Build on macOS and Windows from the same clean commit and version. GitHub Actions
+workflows are removed; pushes, pull requests and tags do not build or publish packages.
+Keep the existing local caches and use a new output directory for each package set.
+Production releases must come from main history and pass the receipt checker in Prod mode.
 
-There are no macOS Actions jobs and no automatic release publication job.
-Windows still uses GHC9.14.1, Cabal3.18.2.0, Node22.23.2, Rust1.99.0 and
-Ruby3.4.11, existing caches, installer validation and `-SkipBuild` packaging.
-Production Windows runs require main ancestry and signing secrets before compilation.
-Ruby is installed after native compilation: its MSYS2/pkg-config paths must not
-make Cabal select an external zlib DLL absent from the package. `BUNDLE_FROZEN=true`
-keeps the committed lockfile unchanged during dependency installation and scenarios.
+Windows uses GHC9.14.1, Cabal3.18.2.0, Node22.23.2, Rust1.99.0 and Ruby3.4.11.
+Keep Ruby's MSYS2/pkg-config paths out of the native compilation environment so
+Cabal does not select an external zlib DLL absent from the package. Use a separate
+shell for checks. `BUNDLE_FROZEN=true` keeps the committed lockfile unchanged during
+dependency installation and scenarios.
 
 ### One local macOS command
 
-From a clean checkout of the exact Windows workflow commit:
+From a clean checkout of the commit selected for both platforms:
 
 ```sh
 COMMIT=$(git rev-parse HEAD)
@@ -49,8 +45,8 @@ tools fail with a prerequisite message; it does not install global software.
 Cabal, UI, Rust, provider/download and packaging caches are preserved. It invokes
 the existing compilation and DMG packaging exactly once, without `--skip-build`.
 Output directories must be fresh. The full commit SHA must equal HEAD and the
-checkout must be clean; receipts record that identity. Use the same VERSION in
-Windows Actions and confirm the run's `headSha` before combining artifacts.
+checkout must be clean; receipts record that identity. Use the same VERSION and
+full commit SHA for Windows before combining artifacts.
 
 Dev forces ad-hoc Mac signing (required for ARM64 execution, no publisher identity)
 and unsigned Windows packages. For Prod, configure the existing local keychain:
@@ -67,20 +63,27 @@ insufficient for this command. Keychain credentials are provisioned separately.
 
 ### Build Windows, combine and publish manually
 
-Dev: dispatch **Native verification and test packages** on the approved ref/version,
-`mode=dev`. Prod: push `vVERSION` on main history to build signed Stable Windows
-packages; reuse that tag for the draft to avoid rebuilding. Manual `mode=prod`
-is also available. Mac must match the commit/version. Neither workflow publishes.
-After a successful run, download its Windows artifact (replace RUN_ID):
+Prepare the Windows toolchain described in the [Windows guide](../environments/windows/README.md).
+In PowerShell, use the full commit SHA selected above:
 
-```sh
-gh run view RUN_ID --repo PoulWalcker/sapiens4 --json headSha,conclusion
-# Require conclusion=success and headSha=$COMMIT before downloading.
-gh run download RUN_ID --repo PoulWalcker/sapiens4 \
-  --name sapiens4-development-windows-x64 --dir ".build/release/$VERSION/windows"
+```powershell
+$Commit = 'FULL_COMMIT_SHA'
+$Version = '0.1.0-dev.local1'
+if ((git rev-parse HEAD) -ne $Commit) { throw 'Checkout commit differs' }
+git submodule sync --recursive
+if ($LASTEXITCODE) { throw 'Submodule sync failed' }
+git submodule update --init --recursive
+if ($LASTEXITCODE) { throw 'Submodule initialization failed' }
+if (git status --porcelain --untracked-files=normal) { throw 'Clean checkout required' }
+.\environments\windows\build.ps1 -Version $Version -OutputDirectory ".build/release/$Version/windows"
 ```
 
-For Prod, download artifact `sapiens4-stable-windows-x64` instead.
+For Prod, add `-Channel stable -CertificateThumbprint CERTIFICATE_THUMBPRINT`.
+Run the existing package checks from the Windows guide and manually launch the GUI
+with temporary data/config paths. Confirm backend health, close the GUI, check that
+its backend and port are gone, then reopen the same data and verify identity.
+Copy the resulting Setup, ZIP and receipt to `.build/release/$VERSION/windows`
+on the Mac alongside its `mac` directory. Do not substitute artifacts from another build.
 
 Validate the complete set with the existing receipt checker. It requires exactly
 one receipt per supported platform, both installer and ZIP, matching clean source
@@ -101,8 +104,7 @@ Only after this command succeeds, create a draft with all six verified assets
 macOS Bash3.2 as well as newer Bash:
 
 ```sh
-# Dev: TAG="dev-$VERSION" (does not start the production tag workflow).
-# Prod: TAG="v$VERSION" must already exist from the initial Windows build.
+# Dev: TAG="dev-$VERSION". Prod: TAG="v$VERSION".
 # Use --mode prod above for Prod. Run only after verification succeeds.
 bash -eu -c '
   assets=()
@@ -112,8 +114,7 @@ bash -eu -c '
 ' _ "$VERSION" "$COMMIT" "$TAG"
 ```
 
-Review the complete draft in GitHub, then publish it manually. No credentials or
-workflow can automatically publish a Windows-only production release. A failed
+Review the complete draft in GitHub, then publish it manually. A failed
 verification stops the process and invalidates the previous verified-assets list.
 The receipt signing labels supplement, rather than replace, native signing checks
 performed on the build hosts. Do not use arbitrary untrusted receipts.
@@ -124,8 +125,8 @@ macOS compilation orchestration and packaging are Haskell (`build/Package.hs`
 and `build/package/`). The shared Haskell engine owns assembly, inventories,
 provenance, provider acquisition and receipts for both platforms. Windows invokes
 the Haskell launcher for staging, then reuses its compiled executable for finalization
-and receipts. Release-set validation uses the same Haskell executable; CI cache preparation uses
-PowerShell and all package/installer scenarios run through RSpec. D1 requires no Python.
+and receipts. Release-set validation uses the same Haskell executable;
+package/installer scenarios run through RSpec. D1 requires no Python.
 
 The base-only launcher runs before `Build.hs` prepares the Cabal dependencies.
 It then compiles the packaging entrypoint inside the pinned Cabal environment.
@@ -167,7 +168,7 @@ runghc -ibuild/package build/Package.hs provenance --output build/source-provena
 
 ## Publisher signing
 
-PR and Dev builds need no signing credentials. Dev Mac builds use ad-hoc
+Dev builds need no signing credentials. Dev Mac builds use ad-hoc
 signing; Dev Windows builds are unsigned. For a locally configured signing
 identity, add these arguments to the platform build command:
 
@@ -180,10 +181,9 @@ all application EXE/DLL files before final inventories. Inno signs its generated
 Setup, uninstaller and temporary copies through the configured SignTool; final
 installer hashes are calculated after composition/signing.
 
-Windows production workflows require repository secrets `WINDOWS_CERTIFICATE_PFX`
-(base64) and `WINDOWS_CERTIFICATE_PASSWORD`. Missing credentials fail before
-compilation; temporary certificates are removed after the job. Mac credentials
-stay in the local keychain and are no longer required as Actions secrets.
+Windows publisher certificates are provisioned in the build user's local certificate
+store; select the signing certificate by thumbprint and put Windows SDK SignTool on PATH.
+Mac credentials stay in the local keychain. Builds do not read GitHub Actions secrets.
 
 ## Outstanding delivery checks
 
@@ -196,10 +196,9 @@ or a newer shared-library revision. Onboarding registration belongs to its separ
 Windows Setup uses pinned Inno Setup for per-user installation only. Velopack,
 update feeds, migration and recovery are separate lifecycle work. WebView2
 Evergreen remains a prerequisite with native Install/Retry/Cancel guidance.
-CI compiler preflight uses a tiny fixture before the expensive Windows build;
-the full real installer is then tested with synthetic state and no auth.
+Use the real installer with synthetic state and no auth for acceptance checks.
 
 Publisher signing/notarization, clean-machine/normal-user Windows, Windows 11 ARM,
 macOS 13 and downloaded signed-artifact acceptance require recorded results.
-Unsigned/ad-hoc CI evidence does not establish signing, target-OS or real-account
+Unsigned/ad-hoc build evidence does not establish signing, target-OS or real-account
 acceptance. Use synthetic data.

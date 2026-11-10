@@ -15,14 +15,35 @@ official Microsoft download; run that installer and choose Retry. Cancel exits.
 
 Use x64 GHC 9.14.1, Cabal 3.18.2.0, Node 22.23.2, Rust 1.99.0 with MSVC C++
 build tools, Git, a POSIX shell, GNU Make, curl and tar. Checks use Ruby 3.4.11 and Bundler 4.0.21.
-Keep GHC, shell and Make paths free of spaces. Use x64 GHC and Node on Windows ARM.
-Initialize the pinned submodules, then run from the repository root:
+Keep GHC, shell and Make paths free of spaces and use shell/Make from the same
+POSIX distribution. Use x64 GHC and Node on Windows ARM. Run in an MSVC developer
+shell with the pinned tools on PATH. Initialize the pinned submodules, configure
+the isolated Cabal index if absent, then build from the repository root:
 
 ```powershell
 git submodule sync --recursive
 git submodule update --init --recursive
+$cabalConfig = 'submodules/libs4/haskell/.cabal/config'
+if (-not (Test-Path $cabalConfig)) {
+    New-Item -ItemType Directory -Force (Split-Path $cabalConfig) | Out-Null
+    "repository hackage.haskell.org`n  url: https://hackage.haskell.org/`n  secure: True`n" | Set-Content $cabalConfig
+}
 .\environments\windows\build.ps1 -Runtime win-x64 -Version 0.1.0-dev
 .\.build\windows\Sapiens-Setup.exe
+```
+
+For an early check of the UI toolchain, run
+`powershell.exe -NoProfile -File .\build\windows-ui-preflight.ps1` before the full
+build. The separate process keeps its cache environment changes out of the build shell.
+
+To capture a build log in Windows PowerShell 5, redirect through `cmd.exe`.
+PowerShell's `*>` redirection can turn native-tool stderr warnings into terminating
+errors under the build's `Stop` policy. Use a fresh output directory:
+
+```powershell
+New-Item -ItemType Directory -Force .build | Out-Null
+cmd.exe /d /c "powershell.exe -NoProfile -File environments\windows\build.ps1 -OutputDirectory .build/windows-logged > .build/windows-build.log 2>&1"
+if ($LASTEXITCODE) { throw 'Windows build failed; see .build/windows-build.log' }
 ```
 
 The build downloads/checks pinned Inno Setup 7.1.1 and installs its compiler below
@@ -80,7 +101,7 @@ Uninstall removes recorded application files, shortcuts and registration. Unknow
 files and a small ownership marker remain so reinstall can recognize that directory.
 An existing nonempty unowned directory or the data root cannot be an install target.
 
-Development native CI has passed silent install/reinstall, isolated launch/health/close,
+Recorded development checks have passed silent install/reinstall, isolated launch/health/close,
 active-operation refusal, inventories and uninstall preserving selected synthetic
 sentinels. This does not cover complete user state or racing launches.
 Windows 11 ARM, missing-WebView2 Install/Retry/Cancel, normal-user clean-machine

@@ -20,7 +20,7 @@ if [ "${1:-}" = --local ]; then
         [ "$(node --version)" = v22.23.2 ] && case "$(rustc --version)" in 'rustc 1.99.0 '*) true ;; *) false ;; esac ||
         { echo 'Use GHC9.14.1, Cabal3.18.2.0, Node22.23.2 and Rust1.99.0' >&2; exit 1; }
     xcrun --find clang >/dev/null
-    [ "$(git rev-parse HEAD)" = "$commit" ] || { echo 'Checkout HEAD must equal the full Windows workflow commit SHA' >&2; exit 1; }
+    [ "$(git rev-parse HEAD)" = "$commit" ] || { echo 'Checkout HEAD must equal the full shared build commit SHA' >&2; exit 1; }
     [ -z "$(git status --porcelain --untracked-files=normal --ignore-submodules=untracked)" ] ||
         { echo 'Local release preparation requires a clean checkout' >&2; exit 1; }
     case "$mode" in
