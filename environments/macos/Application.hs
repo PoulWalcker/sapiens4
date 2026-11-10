@@ -8,6 +8,9 @@ import Control.Exception
 import Control.Monad
 import Data.Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Aeson.Key as Key
+import qualified Crypto.Hash.SHA256 as SHA256
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy as L
 import DataRoot
@@ -31,9 +34,10 @@ import System.Timeout
 import System.Exit (ExitCode(..))
 import System.Posix.Process (getProcessID)
 import Data.List (stripPrefix)
+import Numeric (showHex)
 
 
-data Application = Application { native :: Obj, browser :: IORef Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: IORef (Maybe ServerProcess), address :: IORef Text, startup :: IORef (Maybe (Async ())), starting :: IORef Bool, localLoaded :: IORef Bool, runtime :: FilePath, windowSetup :: IORef (Maybe Text), recoveryError :: IORef (Maybe Text) }
+data Application = Application { native :: Obj, browser :: IORef Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: IORef (Maybe ServerProcess), address :: IORef Text, startup :: IORef (Maybe (Async ())), starting :: IORef Bool, localLoaded :: IORef Bool, runtime :: FilePath, windowSetup :: IORef (Maybe Text), recoveryError :: IORef (Maybe Text), clientPreferences :: Obj }
 
 data ServerProcess = ServerProcess ProcessHandle Handle (Async ()) FilePath StorageChoice CreateProcess
 
@@ -300,10 +304,18 @@ runSession isFixture initialAddress = do
     process <- newIORef Nothing; address <- newIORef (if isFixture then initialAddress else "")
     worker <- newIORef Nothing; busy <- newIORef False; loaded <- newIORef False; setup <- newIORef (Just "welcome")
     problem <- newIORef Nothing
-    let state = Application application b win tasks isFixture process address worker busy loaded runtime setup problem
+    preferences <- if isFixture then pure nullPtr else do
+        config <- configDirectory >>= canonicalizePath
+        let hex byte = let value=showHex byte "" in replicate (2-length value) '0' ++ value
+            suite="com.sapiens4.client." <> T.pack (concatMap hex (BS.unpack (SHA256.hash (TE.encodeUtf8 (T.pack config)))))
+        allocated "NSUserDefaults" >>= \o -> str suite >>= obj1 o "initWithSuiteName:"
+    let state = Application application b win tasks isFixture process address worker busy loaded runtime setup problem preferences
     target <- installMethods state
     initialize state target initialAddress
-    void (obj0 application "run") `finally` (closeApplication state >> readIORef b >>= \current -> void (obj0 (origin current) "release"))
+    void (obj0 application "run") `finally` do
+        closeApplication state
+        readIORef b >>= \current -> void (obj0 (origin current) "release")
+        unless isFixture $ void (obj0 preferences "release")
 
 createShell :: Application -> Obj -> IO Obj
 createShell application target = do
@@ -331,6 +343,7 @@ showStorageError application message = do
 
 closeApplication :: Application -> IO ()
 closeApplication application = do
+    unless (fixture application) $ void (long (clientPreferences application) "synchronize")
     atomicModifyIORef' (startup application) (\old -> (Nothing,old)) >>= mapM_ cancel
     atomicModifyIORef' (child application) (\old -> (Nothing,old)) >>= mapM_ stopServer
 
@@ -338,7 +351,7 @@ receiveMessage :: Application -> Obj -> IO ()
 receiveMessage application message = do
     b <- readIORef (browser application)
     connected <- not . T.null <$> readIORef (address application)
-    if connected || fixture application then receive b message (setSetupWindow application) (storageMessageReceived application) else do
+    if connected || fixture application then receive b message (setSetupWindow application) (storageMessageReceived application) (saveClientPreferences application) else do
         sh <- readIORef (shell b)
         sourceView <- obj0 message "webView"
         frame <- obj0 message "frameInfo"
@@ -378,6 +391,55 @@ chooseDataDirectory = do
 
 serverDirectory :: ServerProcess -> FilePath
 serverDirectory (ServerProcess _ _ _ directory _ _) = directory
+
+-- Keep device-local UI state outside the changing loopback origin and outside
+-- Corpora snapshots. NSUserDefaults batches writes; shutdown flushes the suite.
+readClientPreferences :: Application -> FilePath -> IO Value
+readClientPreferences application directory = do
+    value <- str (T.pack directory) >>= obj1 (clientPreferences application) "stringForKey:" >>= string
+    pure $ case decodeStrict (TE.encodeUtf8 value) of
+        Just result@(Object _) -> result
+        _ -> object []
+
+saveClientPreferences :: Application -> Value -> IO ()
+saveClientPreferences application input = unless (fixture application) $ do
+    active <- readIORef (child application)
+    forM_ active $ \server -> do
+        let name=text (field "key" input); value=text (field "value" input)
+        when ((name=="s4.active" || T.isPrefixOf "s4.workspace." name) && T.length name<=128 && T.length value<=1000000) $ do
+            previous <- readClientPreferences application (serverDirectory server)
+            let stored=case previous of
+                    Object fields -> Object (KeyMap.insert (Key.fromText name) (String value) fields)
+                    _ -> previous
+            content <- str (jsonText stored)
+            nameObject <- str (T.pack (serverDirectory server))
+            void (obj2 (clientPreferences application) "setObject:forKey:" content nameObject)
+
+installClientPreferences :: Application -> Obj -> Text -> FilePath -> IO ()
+installClientPreferences application view readyAddress directory = unless (fixture application) $ do
+    saved <- readClientPreferences application directory
+    let source=T.unlines
+            [ "(() => {"
+            , "if (location.origin !== new URL(" <> jsonText (String readyAddress) <> ").origin) return;"
+            , "try {"
+            , "const root=" <> jsonText (String (T.pack directory)) <> ", saved=" <> jsonText saved <> ";"
+            , "const allowed=k => k==='s4.active'||k.startsWith('s4.workspace.');"
+            , "const previous=localStorage.getItem('s4.native.storage');"
+            , "if(previous && previous!==root) for(const k of Object.keys(localStorage)) if(allowed(k)||k.startsWith('s4.snapshot.')) localStorage.removeItem(k);"
+            , "for(const [k,v] of Object.entries(saved)) if(allowed(k)&&localStorage.getItem(k)===null) localStorage.setItem(k,v);"
+            , "localStorage.setItem('s4.native.storage',root);"
+            , "const store=Storage.prototype.setItem;"
+            , "const notify=(key,value)=>window.webkit.messageHandlers.browser.postMessage({clientPreferences:{key,value}});"
+            , "Storage.prototype.setItem=function(key,value){store.call(this,key,value);if(this===localStorage&&allowed(String(key)))notify(String(key),String(value));};"
+            , "for(const k of Object.keys(localStorage)) if(allowed(k)) notify(k,localStorage.getItem(k));"
+            , "} catch (_) {}"
+            , "})();"
+            ]
+    user <- obj0 view "configuration" >>= (`obj0` "userContentController")
+    void (obj0 user "removeAllUserScripts")
+    content <- str source
+    injection <- allocated "WKUserScript" >>= \o -> obj3 o "initWithSource:injectionTime:forMainFrameOnly:" content (int 0) (int 1)
+    void (obj1 user "addUserScript:" injection)
 
 serverRunning :: Maybe ServerProcess -> IO Bool
 serverRunning Nothing = pure False
@@ -426,6 +488,8 @@ installServer application readyAddress guestScript selection = mask_ $ do
         writeIORef (shell next) view
         sync previous (object [])
         writeIORef (browser application) next
+        active <- readIORef (child application)
+        forM_ active $ \server -> installClientPreferences application view readyAddress (serverDirectory server)
         loadURL view readyAddress
         mapM_ saveDataDirectory selection) `onException`
             (writeIORef (browser application) previous >> void (obj0 (origin next) "release"))

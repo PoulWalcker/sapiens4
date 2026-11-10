@@ -15,6 +15,12 @@ and attachments; newer input survives. Failed resources require explicit retry.
 Native browser reports are serialized, and corpora switching restores that
 corpora's cached preferences.
 
+The macOS shell mirrors workspace preferences and the active Corpora into a
+profile-specific NSUserDefaults suite, keyed by the canonical Data Root. It
+restores them before the UI starts on a new loopback origin, so a changed port
+does not lose drafts. Only the trusted shell can update this device-local state;
+guest pages and Corpora snapshots do not carry it.
+
 Browser/native APIs and third-party bindings live in
 `submodules/libs4/purescript/src/Libs4/Browser.purs` and its foreign implementation.
 Application behavior stays here. Host payloads are JSON; navigation, actions,
