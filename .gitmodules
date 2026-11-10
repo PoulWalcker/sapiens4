@@ -5,4 +5,4 @@
 [submodule "libs4"]
 	path = submodules/libs4
 	url = https://github.com/PoulWalcker/libs4.git
-	branch = codex/d3-main-integration
+	branch = codex/d3-clean-main
