@@ -87,7 +87,7 @@ dismissible d
 
 dialogTitle :: M.Dialog -> String
 dialogTitle d
-  | d.kind == M.Computer = if A.elem (D.s "computer_permission" (F.setupValue d.content)) ["not_requested","denied"] then "Computer access needed" else "Computer access"
+  | d.kind == M.Computer = if D.s "computer_permission" (F.setupValue d.content) == "denied" then "Computer access needed" else "Computer access"
   | d.kind == M.AIProviders = case d.providerPage of
       M.Providers -> "Your AI lineup"
       M.CodexAuth -> connectionTitle (F.setupValue d.content)
@@ -308,28 +308,27 @@ signInView value = V.div "account-sign-in" $
 
 accountView :: M.Dialog -> V.Html
 accountView d = V.node "section" [V.cls "ai-provider-detail-body",V.label "Codex account"] $
-  let value = (F.setupValue d.content)
-  in
-      let provider = D.s "provider" value
-          state = D.s "state" (D.get "login" value)
-          confirmation = A.elem d.providerPage [M.ConfirmChange,M.ConfirmDisconnect]
-      in if provider == "signing_out" then [V.textNode "p" [V.attr "role" "status"] "Signing out…"]
-      else if confirmation then
-        [V.textNode "h4" [] (if d.providerPage == M.ConfirmChange then "Change Codex account?" else "Disconnect Codex?")
-        ,V.p "" (if d.providerPage == M.ConfirmChange then "We'll sign out of your current account first. If you cancel the new sign-in, Codex will stay disconnected." else "Your Sapis won't be able to use Codex until you reconnect. Your chats and settings will stay on this device.")
-        ,V.div "account-actions" [setupButton d (if d.providerPage == M.ConfirmChange then "change-account" else "sign-out") (if d.providerPage == M.ConfirmChange then "Continue" else "Disconnect"),V.control [V.cls "button",V.disabled $ M.dialogBusy d] "Cancel" $ ProviderNavigate M.CodexDetails]]
-      else if provider == "signed_in" then
-        [V.textNode "p" [V.cls "account-connected",V.attr "role" "status"] "Connected"
-        ,V.when (D.s "hold" value == "review") $ V.div ""
-          [V.p "form-hint" "AI work is paused. Review any pending tasks before continuing with this account."
-          ,V.control [V.cls "button",V.id "resume-ai-work",V.disabled $ M.dialogBusy d] "Resume AI work" $ DialogCommand $ Intent.Setup "resume"]
-        ,V.when (D.s "hold" value /= "" && D.s "hold" value /= "review") $ V.p "" "The last account change was interrupted. Sign out and reconnect before resuming AI work."
-        ,V.div "ai-provider-actions"
-          [V.control [V.cls "ai-provider-action",V.disabled $ M.dialogBusy d] "Change account  ›" $ ProviderNavigate M.ConfirmChange
-          ,V.control [V.cls "ai-provider-action ai-provider-action-danger",V.disabled $ M.dialogBusy d] "Disconnect  ›" $ ProviderNavigate M.ConfirmDisconnect]]
-      else [V.when (provider /= "signing_in") $ V.p "" (if provider == "unavailable" then "Couldn't check Codex" else if provider == "missing" then "Codex isn't available" else "Not connected")
-           ,signInView value
-           ,V.when (provider == "unavailable" || state == "logout_failed") $ V.control [V.cls "button",V.disabled $ M.dialogBusy d] "Sign out" $ ProviderNavigate M.ConfirmDisconnect]
+  let value = F.setupValue d.content
+      provider = D.s "provider" value
+      state = D.s "state" (D.get "login" value)
+      confirmation = A.elem d.providerPage [M.ConfirmChange,M.ConfirmDisconnect]
+  in if provider == "signing_out" then [V.textNode "p" [V.attr "role" "status"] "Signing out…"]
+  else if confirmation then
+    [V.textNode "h4" [] (if d.providerPage == M.ConfirmChange then "Change Codex account?" else "Disconnect Codex?")
+    ,V.p "" (if d.providerPage == M.ConfirmChange then "We'll sign out of your current account first. If you cancel the new sign-in, Codex will stay disconnected." else "Your Sapis won't be able to use Codex until you reconnect. Your chats and settings will stay on this device.")
+    ,V.div "account-actions" [setupButton d (if d.providerPage == M.ConfirmChange then "change-account" else "sign-out") (if d.providerPage == M.ConfirmChange then "Continue" else "Disconnect"),V.control [V.cls "button",V.disabled $ M.dialogBusy d] "Cancel" $ ProviderNavigate M.CodexDetails]]
+  else if provider == "signed_in" then
+    [V.textNode "p" [V.cls "account-connected",V.attr "role" "status"] "Connected"
+    ,V.when (D.s "hold" value == "review") $ V.div ""
+      [V.p "form-hint" "AI work is paused. Review any pending tasks before continuing with this account."
+      ,V.control [V.cls "button",V.id "resume-ai-work",V.disabled $ M.dialogBusy d] "Resume AI work" $ DialogCommand $ Intent.Setup "resume"]
+    ,V.when (D.s "hold" value /= "" && D.s "hold" value /= "review") $ V.p "" "The last account change was interrupted. Sign out and reconnect before resuming AI work."
+    ,V.div "ai-provider-actions"
+      [V.control [V.cls "ai-provider-action",V.disabled $ M.dialogBusy d] "Change account  ›" $ ProviderNavigate M.ConfirmChange
+      ,V.control [V.cls "ai-provider-action ai-provider-action-danger",V.disabled $ M.dialogBusy d] "Disconnect  ›" $ ProviderNavigate M.ConfirmDisconnect]]
+  else [V.when (provider /= "signing_in") $ V.p "" (if provider == "unavailable" then "Couldn't check Codex" else if provider == "missing" then "Codex isn't available" else "Not connected")
+       ,signInView value
+       ,V.when (provider == "unavailable" || state == "logout_failed") $ V.control [V.cls "button",V.disabled $ M.dialogBusy d] "Sign out" $ ProviderNavigate M.ConfirmDisconnect]
 
 
 providerIcon :: String -> V.Html
@@ -363,7 +362,7 @@ aiProvidersView d value =
       inAuth = page == M.CodexAuth
       needsAttention = A.elem (D.s "state" (D.get "login" value)) ["failed","expired","browser_busy","logout_failed"]
       status = case provider of
-        "signed_in" -> if hold == "review" then "Connected" else if hold /= "" then "Needs attention" else "Connected"
+        "signed_in" -> if hold /= "" && hold /= "review" then "Needs attention" else "Connected"
         "signing_in" -> "Connecting…"
         "signing_out" -> "Disconnecting…"
         "missing" -> "Needs attention"
@@ -372,9 +371,7 @@ aiProvidersView d value =
       navigate = ProviderNavigate M.CodexDetails
       codex = case provider of
         "sign_in_required" -> if needsAttention then providerLink "codex" "Codex" status navigate else providerRow "codex" "Codex" status (setupButton d "login" "Connect")
-        "signed_in" -> providerLink "codex" "Codex" status navigate
-        "signing_in" -> providerLink "codex" "Codex" status (ProviderNavigate M.CodexAuth)
-        "signing_out" -> providerLink "codex" "Codex" status (ProviderNavigate M.CodexAuth)
+        active | A.elem active ["signing_in","signing_out"] -> providerLink "codex" "Codex" status (ProviderNavigate M.CodexAuth)
         _ -> providerLink "codex" "Codex" status navigate
   in V.div "ai-providers" $ if inAuth then
     [if provider == "signing_out" then V.p "form-hint" "Signing out of the previous account…" else signInView value
@@ -484,7 +481,7 @@ computerAccess d value = V.div "computer-access"
     "not_required" -> "Computer control works with supported apps."
     _ -> "Couldn't check Accessibility. Check again or open System Settings."
   ,V.node "div" [V.cls "actions",V.style "margin-top:24px"]
-    [V.when (A.elem permission ["not_requested","denied","unavailable"]) $ setupButton d "permission" "Enable access"
+    [V.when (A.elem permission ["denied","unavailable"]) $ setupButton d "permission" "Enable access"
     ,V.when (permission /= "missing" && permission /= "not_required") $ setupButton d "refresh" "Recheck access"
     ,V.when (d.kind /= M.Onboarding) $ V.control [V.cls "button",V.style "margin-left:auto"] "Done" CloseDialog]]
   where permission = D.s "computer_permission" value

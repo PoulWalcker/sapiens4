@@ -30,7 +30,6 @@ import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as L
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import qualified Data.Aeson.KeyMap as KeyMap
 
 runDesktop :: Bool -> IO ()
 runDesktop probe = runInBoundThread $
@@ -151,13 +150,12 @@ desktopSession memory probe = do
         writeIORef starting False
         storageScript ("window.storageError(" ++ T.unpack (TE.decodeUtf8 $ L.toStrict $ encode message) ++ ")")
       storageReply request fields = readIORef shellRef >>= mapM_ (\view -> do
-        let payload = case fields of JSON.Object values -> JSON.Object (KeyMap.insert "request" (field "request" request) values); _ -> fields
-        execute memory view ("window.sapiensBrowserEvent?.(" ++ T.unpack (TE.decodeUtf8 $ L.toStrict $ encode $ object ["action" .= ("storage" :: String),"fields" .= payload]) ++ ")") (const $ pure ()))
+        execute memory view ("window.sapiensBrowserEvent?.(" ++ T.unpack (TE.decodeUtf8 $ L.toStrict $ encode $ object ["action" .= ("storage" :: String),"fields" .= object (("request" .= field "request" request):fields)]) ++ ")") (const $ pure ()))
       storageFailure request e = case request of
         Nothing -> storageError (storageMessage e)
         Just input -> do
           available <- hostRunning host
-          storageReply input (object ["kind" .= ("error" :: String),"error" .= storageMessage e,"available" .= available])
+          storageReply input ["kind" .= ("error" :: String),"error" .= storageMessage e,"available" .= available]
       installStorage selected url selection = do
         view <- readIORef shellRef >>= maybe (ioError $ userError "The application window closed.") pure
         atomicModifyIORef' browserRef (\value -> (Nothing,value)) >>= mapM_ closeBrowser
@@ -217,53 +215,45 @@ desktopSession memory probe = do
                             writeIORef starting False
                             withWide "We couldn't switch storage. Your previous storage has been reopened. Your saved storage selection and data are unchanged." $ \message ->
                               withWide "Sapiens4 storage" $ \title -> void $ messageBox hwnd message title 0x30
-          task <- async $ unmask $ do
-            result <- try $ do
-              selectedDirectory <- canonicalizePath directory
-              current <- activeDataDirectory host
-              available <- hostRunning host
-              startedAs <- activeStorageChoice host
-              if available && not (isNothing previousOrigin) && current==Just selectedDirectory && (choice==AttachExisting || choice==StartNew && startedAs==Just StartNew) then
-                post $ do
-                  writeIORef starting False
-                  mapM_ (\input -> storageReply input (object ["kind" .= ("unchanged" :: String)])) request
-              else do
-                let selected = host {dataDirectory=selectedDirectory}
-                checkStorage selected choice
-                -- Read the UI asset before stopping the current backend too.
-                void (B.readFile $ runtimeDirectory host </> ".build/web/guest.js")
-                switched <- try $ do
-                  url <- startHost choice selected
-                  post $ do
-                    installed <- try (installStorage selected url (Just selectedDirectory))
-                    case installed of
-                      Left (e :: SomeException) -> work (recover e)
-                      Right () -> writeIORef starting False
-                case switched of
-                  Left (e :: SomeException) -> case fromException e :: Maybe SomeAsyncException of
-                    Just _ -> throwIO e
-                    Nothing -> recover e
-                  Right () -> pure ()
-            case result of
-              Left (e :: SomeException) -> case fromException e :: Maybe SomeAsyncException of
+          work $ handle (\(e :: SomeException) -> unmask $ case fromException e :: Maybe SomeAsyncException of
+            Just _ -> throwIO e
+            Nothing -> report e) $ do
+            selectedDirectory <- canonicalizePath directory
+            current <- activeDataDirectory host
+            available <- hostRunning host
+            startedAs <- activeStorageChoice host
+            if available && not (isNothing previousOrigin) && current==Just selectedDirectory && (choice==AttachExisting || choice==StartNew && startedAs==Just StartNew) then
+              post $ do
+                writeIORef starting False
+                mapM_ (\input -> storageReply input ["kind" .= ("unchanged" :: String)]) request
+            else do
+              let selected = host {dataDirectory=selectedDirectory}
+              checkStorage selected choice
+              -- Read the UI asset before stopping the current backend too.
+              void (B.readFile $ runtimeDirectory host </> ".build/web/guest.js")
+              handle (\(e :: SomeException) -> unmask $ case fromException e :: Maybe SomeAsyncException of
                 Just _ -> throwIO e
-                Nothing -> report e
-              Right () -> pure ()
-          writeIORef workerRef (Just task)
+                Nothing -> recover e) $ do
+                url <- startHost choice selected
+                post $ do
+                  installed <- try (installStorage selected url (Just selectedDirectory))
+                  case installed of
+                    Left (e :: SomeException) -> work (recover e)
+                    Right () -> writeIORef starting False
       storageMessageReceived request = do
         step <- readIORef onboardingStep
         when (step=="provider") $ case string (field "operation" request) of
           "info" -> do
             directory <- activeDataDirectory host
             available <- hostRunning host
-            storageReply request (object ["kind" .= ("info" :: String),"current" .= maybe "" id directory,"default" .= dataDirectory host,"available" .= available])
+            storageReply request ["kind" .= ("info" :: String),"current" .= maybe "" id directory,"default" .= dataDirectory host,"available" .= available]
           "pick" -> do
             busy <- atomicModifyIORef' starting (\value -> (True,value))
             unless busy $ flip finally (writeIORef starting False) $ do
               selected <- pickDirectory hwnd
               storageReply request $ case selected of
-                Nothing -> object ["kind" .= ("cancelled" :: String)]
-                Just directory -> object ["kind" .= ("picked" :: String),"directory" .= directory]
+                Nothing -> ["kind" .= ("cancelled" :: String)]
+                Just directory -> ["kind" .= ("picked" :: String),"directory" .= directory]
           "apply" -> do
             let choice=if string (field "mode" request)=="new" then StartNew else AttachExisting
                 directory=if choice==StartNew then dataDirectory host else string (field "directory" request)

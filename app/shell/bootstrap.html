@@ -72,10 +72,6 @@ if(matchMedia('(prefers-color-scheme:dark)').matches) document.documentElement.d
     <p class="setup-note">Existing data stays in its original location.</p>
     <p id="error" role="alert"></p>
   </section>
-  <section id="loading" role="status" hidden>
-    <h1>Opening Sapiens…</h1>
-    <p>Preparing your workspace.</p>
-  </section>
 </div>
 <footer class="setup-footer">
   <button class="button" id="storage-back" type="button" onclick="welcomeScreen()" hidden>← Back</button>
@@ -121,23 +117,22 @@ function continueSetup(event) {
  if(event?.detail>1) return;
  if(storageBusy) return;
  if(!document.getElementById('welcome').hidden) storageScreen();
- else chooseStorage(storageChoice);
+ else if(storageChoice!=='existing' || storageDirectory) {
+  storageLoading();
+  postStorage({storage:storageChoice,directory:storageDirectory});
+ }
 }
 function welcomeScreen() {
  document.getElementById('welcome').hidden=false;
  document.getElementById('storage').hidden=true;
- document.getElementById('loading').hidden=true;
  document.getElementById('storage-back').hidden=true;
- document.getElementById('get-started').hidden=false;
  document.getElementById('setup-progress-fill').style.width='8%';
  document.getElementById('get-started').focus();
 }
 function storageScreen(error='') {
  document.getElementById('welcome').hidden=true;
  document.getElementById('storage').hidden=false;
- document.getElementById('loading').hidden=true;
  document.getElementById('storage-back').hidden=false;
- document.getElementById('get-started').hidden=false;
  document.getElementById('setup-progress-fill').style.width='20%';
  document.getElementById('error').textContent=error;
  storageBusy=false;
@@ -150,11 +145,6 @@ function storageLoading() {
  storageBusy=true;
  updateStorage();
  document.getElementById('setup-progress-fill').style.width='32%';
-}
-function chooseStorage(storage) {
- if(storageBusy || (storage==='existing' && !storageDirectory)) return;
- storageLoading();
- postStorage({storage,directory:storageDirectory});
 }
 </script>
 </body>

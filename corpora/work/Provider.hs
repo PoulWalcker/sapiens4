@@ -68,13 +68,12 @@ instance FromJSON ProviderEvent where
 
 -- Login and execution deliberately share an app-owned credential/config root.
 -- Never inherit a shell's Codex home, API key or workload identity credentials.
-codexEnvironment :: IO [(String,String)]
-codexEnvironment = do
+codexEnvironment :: FilePath -> IO [(String,String)]
+codexEnvironment binary = do
  home <- codexHome
  environment <- getEnvironment
- binary <- codexBinary
  let name=if os=="mingw32" then map toUpper else id
-     tools=maybe "" (\p -> takeDirectory (takeDirectory p)</>"codex-path") binary
+     tools=takeDirectory (takeDirectory binary)</>"codex-path"
      path=fromMaybe "" (listToMaybe [value | (key,value)<-environment,name key=="PATH"])
  pure (("CODEX_HOME",home):("PATH",tools<>[searchPathSeparator]<>path):filter (\(key,_) -> name key/="PATH" && not ("CODEX_" `T.isPrefixOf` T.pack (name key) || "OPENAI_" `T.isPrefixOf` T.pack (name key))) environment)
 codexHome :: IO FilePath
@@ -278,7 +277,7 @@ invokeModel s run input = do
  let config = resolveCodexConfig settings defaults
      workdir = workspaceRoot s (agentIdText (runOwner run))
      args = codexArguments workdir config
- environment <- codexEnvironment
+ environment <- codexEnvironment binary
  started <- realToFrac . (*1000) <$> getPOSIXTime :: IO Double
  writeIORef (runActivity run) (obj [("started",toJSON started),("updated",toJSON started),("phase",str "Waiting for model"),("last_action",str "")])
  notifyChange s

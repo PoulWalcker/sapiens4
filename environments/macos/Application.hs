@@ -394,12 +394,10 @@ serverDirectory (ServerProcess _ _ _ directory _ _) = directory
 
 -- Keep device-local UI state outside the changing loopback origin and outside
 -- Corpora snapshots. NSUserDefaults batches writes; shutdown flushes the suite.
-readClientPreferences :: Application -> FilePath -> IO Value
+readClientPreferences :: Application -> FilePath -> IO (KeyMap.KeyMap Value)
 readClientPreferences application directory = do
     value <- str (T.pack directory) >>= obj1 (clientPreferences application) "stringForKey:" >>= string
-    pure $ case decodeStrict (TE.encodeUtf8 value) of
-        Just result@(Object _) -> result
-        _ -> object []
+    pure (fromMaybe KeyMap.empty (decodeStrict (TE.encodeUtf8 value)))
 
 saveClientPreferences :: Application -> Value -> IO ()
 saveClientPreferences application input = unless (fixture application) $ do
@@ -408,9 +406,7 @@ saveClientPreferences application input = unless (fixture application) $ do
         let name=text (field "key" input); value=text (field "value" input)
         when ((name=="s4.active" || T.isPrefixOf "s4.workspace." name) && T.length name<=128 && T.length value<=1000000) $ do
             previous <- readClientPreferences application (serverDirectory server)
-            let stored=case previous of
-                    Object fields -> Object (KeyMap.insert (Key.fromText name) (String value) fields)
-                    _ -> previous
+            let stored=Object (KeyMap.insert (Key.fromText name) (String value) previous)
             content <- str (jsonText stored)
             nameObject <- str (T.pack (serverDirectory server))
             void (obj2 (clientPreferences application) "setObject:forKey:" content nameObject)
@@ -422,7 +418,7 @@ installClientPreferences application view readyAddress directory = unless (fixtu
             [ "(() => {"
             , "if (location.origin !== new URL(" <> jsonText (String readyAddress) <> ").origin) return;"
             , "try {"
-            , "const root=" <> jsonText (String (T.pack directory)) <> ", saved=" <> jsonText saved <> ";"
+            , "const root=" <> jsonText (String (T.pack directory)) <> ", saved=" <> jsonText (Object saved) <> ";"
             , "const allowed=k => k==='s4.active'||k.startsWith('s4.workspace.');"
             , "const previous=localStorage.getItem('s4.native.storage');"
             , "if(previous && previous!==root) for(const k of Object.keys(localStorage)) if(allowed(k)||k.startsWith('s4.snapshot.')) localStorage.removeItem(k);"
@@ -445,13 +441,10 @@ serverRunning :: Maybe ServerProcess -> IO Bool
 serverRunning Nothing = pure False
 serverRunning (Just (ServerProcess process _ _ _ _ _)) = isNothing <$> getProcessExitCode process
 
-storageReply :: Application -> Value -> Value -> IO ()
+storageReply :: Application -> Value -> [(Key.Key,Value)] -> IO ()
 storageReply application request fields = do
     b <- readIORef (browser application)
-    let payload = case fields of
-            Object values -> Object (KeyMap.insert "request" (field "request" request) values)
-            _ -> fields
-    emit b (object ["action" .= ("storage" :: Text),"fields" .= payload])
+    emit b (object ["action" .= ("storage" :: Text),"fields" .= object (("request" .= field "request" request):fields)])
 
 storageMessageReceived :: Application -> Value -> IO ()
 storageMessageReceived application request = unless (fixture application) $ do
@@ -462,14 +455,14 @@ storageMessageReceived application request = unless (fixture application) $ do
             "info" -> do
                 directory <- defaultDataDirectory
                 available <- serverRunning active
-                storageReply application request (object ["kind" .= ("info" :: Text),"current" .= maybe "" serverDirectory active,"default" .= directory,"available" .= available])
+                storageReply application request ["kind" .= ("info" :: Text),"current" .= maybe "" serverDirectory active,"default" .= directory,"available" .= available]
             "pick" -> do
                 busy <- atomicModifyIORef' (starting application) (\old -> (True,old))
                 unless busy $ flip finally (writeIORef (starting application) False) $ do
                     selected <- chooseDataDirectory
                     storageReply application request $ case selected of
-                        Nothing -> object ["kind" .= ("cancelled" :: Text)]
-                        Just directory -> object ["kind" .= ("picked" :: Text),"directory" .= directory]
+                        Nothing -> ["kind" .= ("cancelled" :: Text)]
+                        Just directory -> ["kind" .= ("picked" :: Text),"directory" .= directory]
             "apply" -> do
                 let choice=if text (field "mode" request)=="new" then StartNew else AttachExisting
                 directory <- if choice==StartNew then defaultDataDirectory else pure (T.unpack (text (field "directory" request)))
@@ -570,47 +563,39 @@ startSelected application choice directory request = mask $ \unmask -> do
                                             releaseOld old
                                             writeIORef (starting application) False
                                             alert "We couldn't switch storage. Your previous storage has been reopened. Your saved storage selection and data are unchanged."
-        task <- async $ unmask $ do
-            result <- try $ do
-                selected <- canonicalizePath directory
-                alive <- serverRunning previousServer
-                let sameSelection=case previousServer of
-                        Just (ServerProcess _ _ _ current startedAs _) -> current==selected && (choice==AttachExisting || choice==StartNew && startedAs==StartNew)
-                        Nothing -> False
-                if alive && not (T.null previousAddress) && sameSelection then
+        work $ handle (\(e :: SomeException) -> unmask $ if cancelled e then throwIO e else report e) $ do
+            selected <- canonicalizePath directory
+            alive <- serverRunning previousServer
+            let sameSelection=case previousServer of
+                    Just (ServerProcess _ _ _ current startedAs _) -> current==selected && (choice==AttachExisting || choice==StartNew && startedAs==StartNew)
+                    Nothing -> False
+            if alive && not (T.null previousAddress) && sameSelection then
+                post application $ do
+                    writeIORef (starting application) False
+                    forM_ request $ \input -> storageReply application input ["kind" .= ("unchanged" :: Text)]
+              else do
+                let binary=runtime application </> ".build/bin/sapiens4"
+                -- Validate a different target while the current server still
+                -- owns its lock. Startup repeats validation under the new lock.
+                (code,_,errors) <- readProcessWithExitCode binary ["check-data",selected,if choice==StartNew then "new" else "existing"] ""
+                unless (code==ExitSuccess) $ ioError (userError errors)
+                guestScript <- TIO.readFile (runtime application </> ".build/web/guest.js")
+                handle (\(e :: SomeException) -> unmask $ if cancelled e then throwIO e else recover guestScript e) $ mask $ \restore -> do
+                    restore (mapM_ stopServer previousServer)
+                    clear
+                    running@(_,readyAddress) <- restore (startServer choice (runtime application) selected)
+                    publish running
                     post application $ do
-                        writeIORef (starting application) False
-                        forM_ request $ \input -> storageReply application input (object ["kind" .= ("unchanged" :: Text)])
-                  else do
-                    let binary=runtime application </> ".build/bin/sapiens4"
-                    -- Validate a different target while the current server still
-                    -- owns its lock. Startup repeats validation under the new lock.
-                    (code,_,errors) <- readProcessWithExitCode binary ["check-data",selected,if choice==StartNew then "new" else "existing"] ""
-                    unless (code==ExitSuccess) $ ioError (userError errors)
-                    guestScript <- TIO.readFile (runtime application </> ".build/web/guest.js")
-                    switched <- try $ mask $ \restore -> do
-                        restore (mapM_ stopServer previousServer)
-                        clear
-                        running@(_,readyAddress) <- restore (startServer choice (runtime application) selected)
-                        publish running
-                        post application $ do
-                            installed <- try (installServer application readyAddress guestScript (Just selected))
-                            case installed of
-                                Left (e :: SomeException) -> work (recover guestScript e)
-                                Right old -> releaseOld old >> writeIORef (starting application) False
-                    case switched of
-                        Left (e :: SomeException) -> if cancelled e then throwIO e else recover guestScript e
-                        Right () -> pure ()
-            case result of
-                Left (e :: SomeException) -> if cancelled e then throwIO e else report e
-                Right () -> pure ()
-        writeIORef (startup application) (Just task)
+                        installed <- try (installServer application readyAddress guestScript (Just selected))
+                        case installed of
+                            Left (e :: SomeException) -> work (recover guestScript e)
+                            Right old -> releaseOld old >> writeIORef (starting application) False
 
 storageFailure :: Application -> Maybe Value -> SomeException -> IO ()
 storageFailure application Nothing e = showStorageError application (T.pack (storageMessage e))
 storageFailure application (Just request) e = do
     available <- readIORef (child application) >>= serverRunning
-    storageReply application request (object ["kind" .= ("error" :: Text),"error" .= storageMessage e,"available" .= available])
+    storageReply application request ["kind" .= ("error" :: Text),"error" .= storageMessage e,"available" .= available]
 
 -- Setup size is transient. Save/restore the normal workspace frame only after
 -- completion; all stages continue to use the same NSWindow.

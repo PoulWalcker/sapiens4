@@ -108,7 +108,7 @@ handle runtime dispatch action = case action of
       in current {storage=next,status=if kind == "error" then M.Rejected (D.s "error" value) else M.Editing}
   ProviderNavigate page -> do
     m <- H.get
-    traverse_ (\d -> when (A.elem d.kind [M.AIProviders,M.Onboarding] && not (M.dialogBusy d) && (not (Dialog.authenticating d) || page == M.CodexAuth)) do
+    traverse_ (\d -> when (A.elem d.kind [M.AIProviders,M.Onboarding] && (if page == M.CodexAuth then not (M.dialogBusy d) else not (Dialog.authenticating d))) do
       E.modifyDialog d.identity _ {providerPage=page}
       when (page == M.CodexAuth) $ focusSetup d.identity "#cancel-codex-login") m.dialog
   Field key value -> do
