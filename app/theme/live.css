@@ -563,3 +563,6 @@
 
 :root body.sapi-workspace dialog.onboarding #dialog-title { flex:none; }
 :root body.sapi-workspace dialog.onboarding .corpora-feedback { flex:none;max-height:80px;overflow:auto; }
+
+:root body.sapi-workspace .setup-benefits { display:grid;gap:9px;margin:20px 0 0;padding:0;list-style:none;color:var(--sapi-ink);font-size:12px; }
+:root body.sapi-workspace .setup-benefits li::before { content:'✓';color:var(--sapi-muted);margin-right:9px; }

@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module Host (Host(..), prepareHost, startHost, checkStorage, closeHost, activeDataDirectory, hostRunning) where
+module Host (Host(..), prepareHost, startHost, checkStorage, closeHost, activeDataDirectory, activeStorageChoice, hostRunning) where
 
 import Control.Concurrent.Async
 import Control.Exception
@@ -31,7 +31,8 @@ data Host = Host
   }
 
 data ServerProcess = ServerProcess
-  { processDirectory :: FilePath
+  { processChoice :: StorageChoice
+  , processDirectory :: FilePath
   , processHandle :: ProcessHandle
   , processInput :: Handle
   , processOutput :: Handle
@@ -86,7 +87,7 @@ startHost choice host = mask $ \restore -> do
   errorText <- newIORef ""
   collect <- async $ (forever $ hGetLine errors >>= \line -> modifyIORef' errorText (\old -> let next = old ++ line ++ "\n" in drop (max 0 $ length next - 12000) next))
     `catch` \(_ :: IOException) -> pure ()
-  writeIORef (serverProcess host) (Just (ServerProcess (dataDirectory host) child input output errors collect))
+  writeIORef (serverProcess host) (Just (ServerProcess choice (dataDirectory host) child input output errors collect))
   restore (awaitHost host output errorText) `onException` closeHost host
 
 checkStorage :: Host -> StorageChoice -> IO ()
@@ -127,6 +128,9 @@ awaitHost host output errors = do
 
 activeDataDirectory :: Host -> IO (Maybe FilePath)
 activeDataDirectory host = fmap processDirectory <$> readIORef (serverProcess host)
+
+activeStorageChoice :: Host -> IO (Maybe StorageChoice)
+activeStorageChoice host = fmap processChoice <$> readIORef (serverProcess host)
 
 hostRunning :: Host -> IO Bool
 hostRunning host = readIORef (serverProcess host) >>= maybe (pure False) (fmap isNothing . getProcessExitCode . processHandle)

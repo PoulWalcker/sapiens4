@@ -35,7 +35,7 @@ import Data.List (stripPrefix)
 
 data Application = Application { native :: Obj, browser :: IORef Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: IORef (Maybe ServerProcess), address :: IORef Text, startup :: IORef (Maybe (Async ())), starting :: IORef Bool, localLoaded :: IORef Bool, runtime :: FilePath, windowSetup :: IORef (Maybe Text) }
 
-data ServerProcess = ServerProcess ProcessHandle Handle (Async ()) FilePath
+data ServerProcess = ServerProcess ProcessHandle Handle (Async ()) FilePath StorageChoice
 
 post :: Application -> IO () -> IO ()
 post application action = atomicModifyIORef' (pending application) (\actions -> (actions ++ [action],()))
@@ -47,7 +47,7 @@ check application = do
     current <- readIORef (child application)
     case current of
         Nothing -> pure ()
-        Just (ServerProcess process _ _ _) -> do
+        Just (ServerProcess process _ _ _ _) -> do
             alive <- isNothing <$> getProcessExitCode process
             if alive then do
                 b <- readIORef (browser application)
@@ -73,7 +73,7 @@ startServer choice runtime destination = mask $ \restore -> do
     mapM_ (\h -> hSetEncoding h utf8 >> hSetNewlineMode h universalNewlineMode) [input,output,errors] `onException` cleanup
     reader <- async $ withFile (destination </> "desktop-server.log") AppendMode $ \logFile ->
         (forever (hGetLine errors >>= hPutStrLn logFile >> hFlush logFile)) `catch` (\(_ :: IOException) -> pure ())
-    let server = ServerProcess process input reader destination
+    let server = ServerProcess process input reader destination choice
         await = do
             ended <- hIsEOF output
             when ended $ do
@@ -92,7 +92,7 @@ startServer choice runtime destination = mask $ \restore -> do
     pure (server, ready)
 
 stopServer :: ServerProcess -> IO ()
-stopServer (ServerProcess process input reader _) = stop `finally` (cancel reader >> (hClose input `catch` (\(_ :: IOException) -> pure ())))
+stopServer (ServerProcess process input reader _ _) = stop `finally` (cancel reader >> (hClose input `catch` (\(_ :: IOException) -> pure ())))
     where
         stop = do
             (hPutStrLn input "stop" >> hFlush input >> hClose input) `catch` (\(_ :: IOException) -> pure ())
@@ -333,11 +333,15 @@ receiveMessage application message = do
                 size win "setContentSize:" 560 600
               case text (field "storage" input) of
                 "new" -> defaultDataDirectory >>= \directory -> startSelected application StartNew directory Nothing
-                "existing" -> do
+                "pick" -> do
                     busy <- atomicModifyIORef' (starting application) (\old -> (True,old))
                     unless busy $ do
                         selected <- chooseDataDirectory `finally` writeIORef (starting application) False
-                        forM_ selected $ \directory -> startSelected application AttachExisting directory Nothing
+                        script sh ("window.storagePicked?.(" <> jsonText (maybe Null (String . T.pack) selected) <> ")")
+                "existing" -> do
+                    let directory=T.unpack (text (field "directory" input))
+                    if isAbsolute directory then startSelected application AttachExisting directory Nothing
+                      else showStorageError application "Choose a folder before continuing."
                 _ -> pure ()
 
 chooseDataDirectory :: IO (Maybe FilePath)
@@ -352,11 +356,11 @@ chooseDataDirectory = do
     if result/=1 then pure Nothing else Just . T.unpack <$> (obj0 panel "URL" >>= (\u -> textProp u "path"))
 
 serverDirectory :: ServerProcess -> FilePath
-serverDirectory (ServerProcess _ _ _ directory) = directory
+serverDirectory (ServerProcess _ _ _ directory _) = directory
 
 serverRunning :: Maybe ServerProcess -> IO Bool
 serverRunning Nothing = pure False
-serverRunning (Just (ServerProcess process _ _ _)) = isNothing <$> getProcessExitCode process
+serverRunning (Just (ServerProcess process _ _ _ _)) = isNothing <$> getProcessExitCode process
 
 storageReply :: Application -> Value -> Value -> IO ()
 storageReply application request fields = do
@@ -401,7 +405,10 @@ startSelected application choice directory request = do
             result <- try $ do
                 selected <- canonicalizePath directory
                 alive <- serverRunning previousServer
-                if choice==AttachExisting && alive && maybe False ((==selected) . serverDirectory) previousServer then
+                let sameSelection=case previousServer of
+                        Just (ServerProcess _ _ _ current startedAs) -> current==selected && (choice==AttachExisting || choice==StartNew && startedAs==StartNew)
+                        Nothing -> False
+                if alive && sameSelection then
                     post application $ do
                         writeIORef (starting application) False
                         forM_ request $ \input -> storageReply application input (object ["kind" .= ("unchanged" :: Text)])

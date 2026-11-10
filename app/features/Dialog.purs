@@ -93,7 +93,7 @@ dialogTitle d
       M.CodexAuth -> connectionTitle (F.setupValue d.content)
       _ -> "Codex"
   | d.kind == M.Onboarding && d.storage.page == M.ChooseStorage = "Where should we start?"
-  | d.kind == M.Onboarding && d.storage.page == M.SetupWelcome = "Your AI team starts here."
+  | d.kind == M.Onboarding && d.storage.page == M.SetupWelcome = "Meet your Sapis."
   | d.kind == M.Onboarding = case D.s "step" (F.setupValue d.content) of
       "permissions" -> "Computer access"
       "corpora" -> "Choose your Corpora"
@@ -271,7 +271,7 @@ saveTask m d deleted =
   in {path:M.ownerPath m <> "/tasks" <> if existing then "/" <> B.encodeURI (F.contextId d.record) else "",method:if existing then "PUT" else "POST",body:payload,caption:if deleted then "Task deleted." else "Task saved."}
 
 setupButton :: M.Dialog -> String -> String -> V.Html
-setupButton d name caption = V.control [V.cls "button",V.disabled $ M.dialogBusy d] caption $ DialogCommand $ Intent.Setup name
+setupButton d name caption = (if name == "back" then V.navigationControl else V.control) [V.cls "button",V.disabled $ M.dialogBusy d] caption $ DialogCommand $ Intent.Setup name
 
 signInView :: Json -> V.Html
 signInView value = V.div "account-sign-in" $
@@ -398,8 +398,8 @@ onboardingView m d value = V.div "setup-screen"
   [V.div "setup-step-content" content
   ,V.when navigation $ V.div "setup-footer"
     [V.div "setup-navigation"
-      [V.div "setup-back" [if needsCorpora then setupButton d "back" "← Back" else V.when m.env.native $ V.control [V.cls "button",V.disabled $ authenticating d] "← Back" $ StorageNavigate M.ChooseStorage]
-      ,V.control [V.cls "button primary",V.disabled $ M.dialogBusy d || needsCorpora && (M.busy m || not (onboardingConnected m))] caption $ DialogCommand $ Intent.Setup forward]]]
+      [V.div "setup-back" [if needsCorpora then setupButton d "back" "← Back" else V.when m.env.native $ V.navigationControl [V.cls "button",V.disabled $ authenticating d] "← Back" $ StorageNavigate M.ChooseStorage]
+      ,V.navigationControl [V.cls "button primary",V.disabled $ M.dialogBusy d || needsCorpora && (M.busy m || not (onboardingConnected m))] caption $ DialogCommand $ Intent.Setup forward]]]
   where
   permission = D.s "computer_permission" value
   step = D.s "step" value
@@ -439,7 +439,10 @@ onboardingView m d value = V.div "setup-screen"
 storageView :: M.Dialog -> V.Html
 storageView d = V.div "setup-screen"
   [V.div "setup-step-content" $ if storage.page == M.SetupWelcome then
-    [V.p "setup-intro" "Meet Sapiens4 — a place for AI agents to collaborate, manage tasks, and work on your computer."]
+    [V.p "setup-intro" "Your own team of AI coworkers. Think together, make things, and get work done on your computer."
+    ,V.node "ul" [V.cls "setup-benefits"]
+      [V.textNode "li" [] "Your team, conversations, and tasks in one place"
+      ,V.textNode "li" [] "Connect your AI tools whenever you're ready"]]
     else
     [V.p "setup-intro" "Keep your current space or choose another storage location. Changes apply when you continue."
     ,V.div "setup-choice-list"
@@ -450,8 +453,8 @@ storageView d = V.div "setup-screen"
         ,V.when (storage.choice == M.ExistingStorage && storage.directory /= "") $ V.control [V.cls "setup-storage-change",V.label "Choose another folder",V.disabled busy] "Change" StoragePick]]
     ,V.p "setup-note" "Existing data stays in its original location."]
   ,V.div "setup-footer" [V.div "setup-navigation"
-    [V.div "setup-back" [V.when (storage.page /= M.SetupWelcome) $ V.control [V.cls "button",V.disabled busy] "← Back" $ StorageNavigate M.SetupWelcome]
-    ,V.control [V.cls "button primary",V.disabled $ busy || storage.page == M.ChooseStorage && (storage.current == "" || storage.choice == M.ExistingStorage && storage.directory == "")] "Continue" (if storage.page == M.SetupWelcome then StorageNavigate M.ChooseStorage else StorageApply)]]]
+    [V.div "setup-back" [V.when (storage.page /= M.SetupWelcome) $ V.navigationControl [V.cls "button",V.disabled busy] "← Back" $ StorageNavigate M.SetupWelcome]
+    ,V.navigationControl [V.cls "button primary",V.disabled $ busy || storage.page == M.ChooseStorage && (storage.current == "" || storage.choice == M.ExistingStorage && storage.directory == "")] "Continue" (if storage.page == M.SetupWelcome then StorageNavigate M.ChooseStorage else StorageApply)]]]
   where
   storage = d.storage
   busy = M.dialogBusy d

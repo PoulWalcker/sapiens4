@@ -16,8 +16,6 @@ main{box-sizing:border-box;width:min(100%,540px);height:100dvh;min-height:0;padd
 h1{font:600 27px/1.2 var(--sapi-font);letter-spacing:-.8px;margin:0 0 10px}
 p{color:var(--sapi-muted);font-size:13px;line-height:1.6;margin:0 0 18px}
 .setup-intro{max-width:410px}
-.setup-benefits{display:grid;gap:9px;margin:20px 0 0;padding:0;list-style:none;color:var(--sapi-ink);font-size:12px}
-.setup-benefits li::before{content:'✓';color:var(--sapi-muted);margin-right:9px}
 .setup-bootstrap .setup-footer{margin-top:0;min-height:52px}
 .setup-bootstrap .setup-choice{width:100%;min-height:64px;cursor:pointer;text-align:left}
 .setup-bootstrap .setup-choice[aria-pressed=true]{border-color:var(--setup-accent)}
@@ -46,11 +44,11 @@ if(matchMedia('(prefers-color-scheme:dark)').matches) document.documentElement.d
 <div class="setup-progress" aria-hidden="true"><div class="setup-progress-fill" id="setup-progress-fill"></div></div>
 <div class="setup-stage">
   <section id="welcome">
-    <h1>Your AI team starts here.</h1>
-    <p class="setup-intro">Meet Sapiens — a place for AI agents to collaborate, manage tasks, and work on your computer.</p>
+    <h1>Meet your Sapis.</h1>
+    <p class="setup-intro">Your own team of AI coworkers. Think together, make things, and get work done on your computer.</p>
     <ul class="setup-benefits">
-      <li>Your agents and conversations in one place</li>
-      <li>Connected to your own AI account</li>
+      <li>Your team, conversations, and tasks in one place</li>
+      <li>Connect your AI tools whenever you're ready</li>
     </ul>
   </section>
   <section id="storage" hidden>
@@ -62,11 +60,14 @@ if(matchMedia('(prefers-color-scheme:dark)').matches) document.documentElement.d
         <span class="setup-choice-copy"><strong>Start fresh</strong><small>Use the default location for your Sapiens data.</small></span>
         <span class="setup-choice-arrow" aria-hidden="true">›</span>
       </button>
-      <button type="button" class="setup-choice" aria-pressed="false" onclick="selectStorage('existing')">
-        <span class="setup-choice-symbol" aria-hidden="true">↗</span>
-        <span class="setup-choice-copy"><strong>Use another folder</strong><small>Use your existing agents and conversations.</small></span>
-        <span class="setup-choice-arrow" aria-hidden="true">›</span>
-      </button>
+      <div class="setup-storage-option" id="storage-existing" data-change="false">
+        <button type="button" class="setup-choice" aria-pressed="false" onclick="selectStorage('existing')">
+          <span class="setup-choice-symbol" aria-hidden="true">↗</span>
+          <span class="setup-choice-copy"><strong>Use another folder</strong><small id="storage-directory">Use your existing agents and conversations.</small></span>
+          <span class="setup-choice-arrow" aria-hidden="true">›</span>
+        </button>
+        <button type="button" class="setup-storage-change" id="storage-change" aria-label="Choose another folder" onclick="pickStorage()" hidden>Change</button>
+      </div>
     </div>
     <p class="setup-note">Existing data stays in its original location.</p>
     <p id="error" role="alert"></p>
@@ -78,16 +79,47 @@ if(matchMedia('(prefers-color-scheme:dark)').matches) document.documentElement.d
 </div>
 <footer class="setup-footer">
   <button class="button" id="storage-back" type="button" onclick="welcomeScreen()" hidden>← Back</button>
-  <button class="button primary" id="get-started" type="button" onclick="continueSetup()">Continue</button>
+  <button class="button primary" id="get-started" type="button" onclick="continueSetup(event)">Continue</button>
 </footer>
 </main>
 <script>
-let storageChoice='new';
-function selectStorage(choice) {
- storageChoice=choice;
- document.querySelectorAll('#storage .setup-choice').forEach((button,index)=>button.setAttribute('aria-pressed',String((index===0)===(choice==='new'))));
+let storageChoice='new', storageDirectory='', storageBusy=false;
+function postStorage(message) {
+ if(window.webkit?.messageHandlers?.browser) window.webkit.messageHandlers.browser.postMessage(message);
+ else window.chrome?.webview?.postMessage(message);
 }
-function continueSetup() {
+function updateStorage() {
+ document.querySelectorAll('#storage .setup-choice').forEach((button,index)=>button.setAttribute('aria-pressed',String((index===0)===(storageChoice==='new'))));
+ document.querySelectorAll('button').forEach(button=>button.disabled=storageBusy);
+ document.getElementById('get-started').disabled=storageBusy || (storageChoice==='existing' && !storageDirectory);
+ const selected=storageChoice==='existing' && !!storageDirectory;
+ document.getElementById('storage-existing').dataset.change=String(selected);
+ document.getElementById('storage-change').hidden=!selected;
+ const path=document.getElementById('storage-directory');
+ const parts=storageDirectory.replaceAll('\\','/').split('/').filter(Boolean);
+ path.textContent=storageDirectory ? (parts.length>2?'…/':'')+parts.slice(-2).join('/') : 'Use your existing agents and conversations.';
+ path.title=storageDirectory;
+}
+function selectStorage(choice) {
+ if(storageBusy) return;
+ if(choice==='existing' && !storageDirectory) { pickStorage(); return; }
+ storageChoice=choice;
+ updateStorage();
+}
+function pickStorage() {
+ if(storageBusy) return;
+ storageBusy=true;
+ updateStorage();
+ postStorage({storage:'pick'});
+}
+function storagePicked(directory) {
+ storageBusy=false;
+ if(directory) { storageDirectory=directory; storageChoice='existing'; }
+ updateStorage();
+}
+function continueSetup(event) {
+ if(event?.detail>1) return;
+ if(storageBusy) return;
  if(!document.getElementById('welcome').hidden) storageScreen();
  else chooseStorage(storageChoice);
 }
@@ -108,21 +140,21 @@ function storageScreen(error='') {
  document.getElementById('get-started').hidden=false;
  document.getElementById('setup-progress-fill').style.width='20%';
  document.getElementById('error').textContent=error;
- document.querySelectorAll('button').forEach(b=>b.disabled=false);
+ storageBusy=false;
+ updateStorage();
  document.querySelector('#storage button').focus();
- const message={storageStage:'storage'};
- if(window.webkit?.messageHandlers?.browser) window.webkit.messageHandlers.browser.postMessage(message);
- else window.chrome?.webview?.postMessage(message);
+ postStorage({storageStage:'storage'});
 }
 function storageError(message) { storageScreen(message); }
 function storageLoading() {
- document.querySelectorAll('button').forEach(b=>b.disabled=true);
+ storageBusy=true;
+ updateStorage();
  document.getElementById('setup-progress-fill').style.width='32%';
 }
 function chooseStorage(storage) {
- const message={storage};
- if(window.webkit?.messageHandlers?.browser) window.webkit.messageHandlers.browser.postMessage(message);
- else window.chrome?.webview?.postMessage(message);
+ if(storageBusy || (storage==='existing' && !storageDirectory)) return;
+ storageLoading();
+ postStorage({storage,directory:storageDirectory});
 }
 </script>
 </body>

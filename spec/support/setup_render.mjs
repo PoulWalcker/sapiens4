@@ -33,3 +33,15 @@ Workspace.sync(timers)({...nativeInitial,setupChecked:true,account:setup.account
 assert.equal(messages.at(-1).onboarding,true);
 IdleTabs.stop(timers)();
 console.log('native bridge: resize is emitted only for known setup status');
+
+// A double click must not apply storage and then skip the next setup step.
+class UIEvent { constructor(detail) { this.detail=detail; } }
+const storageDialog={...dialog,content:new Form.SetupContent(setup.account),storage:{...Model.emptyStorage,page:Model.ChooseStorage.value,current:'/Sapiens4/data',defaultDirectory:'/Sapiens4/data',choice:Model.FreshStorage.value}};
+const storageTree=Dialog.view({...setup,env:{...environment,native:true},dialog:new Maybe.Just(storageDialog)});
+const descendants=node=>[node,...(node.value3||[]).flatMap(descendants)];
+const next=descendants(storageTree).find(node=>node.value1==='button' && (node.value3||[]).some(child=>child.value0==='Continue'));
+const click=next.value2.find(prop=>prop.constructor.name==='Handler').value1;
+assert(click(new UIEvent(2)) instanceof Maybe.Nothing, 'The second click must not advance into the next setup screen');
+assert(click(new UIEvent(1)) instanceof Maybe.Just, 'A single click still advances');
+assert(click(new UIEvent(0)) instanceof Maybe.Just, 'Keyboard activation still advances');
+console.log('setup navigation: double click ignored, single click and keyboard retained');

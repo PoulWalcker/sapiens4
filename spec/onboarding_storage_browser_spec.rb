@@ -35,7 +35,7 @@ RSpec.describe 'Revisiting onboarding storage', :desktop do
     desktop.click('← Back')
     desktop.press(/Start fresh/)
     desktop.click('← Back')
-    desktop.see('Your AI team starts here.')
+    desktop.see('Meet your Sapis.')
     desktop.press('Continue')
     # WebKit exposes the pressed state as AXValue; verify the draft survived.
     expect(desktop.find(/Start fresh/)['value'].to_f).to eq(1.0)
@@ -51,4 +51,43 @@ RSpec.describe 'Revisiting onboarding storage', :desktop do
   ensure
     launcher&.close
   end
+
+  it 'reuses the current Data Root when Start fresh is selected again during the same setup' do
+    skip 'macOS native storage lifecycle' unless RUBY_PLATFORM.include?('darwin')
+    @host = Host.new(start: false)
+    config = host.environment.fetch('SAPIENS_CONFIG_DIR')
+    File.delete(File.join(config, 'onboarding.json'))
+    fresh = File.join(host.root, 'New', 'data')
+    launcher = Contract::Child.new(File.join(Contract::ROOT, '.build/macos/Sapiens4.app/Contents/MacOS/Sapiens4'),
+      env: host.environment.merge('SAPIENS_DATA_DIR' => fresh), chdir: Contract::ROOT)
+    @desktop = Contract.wait(description: 'native application registration') do
+      begin
+        Desktop.new(process: launcher, ready: false)
+      rescue RuntimeError => error
+        raise unless error.message.include?('is not a running application')
+        false
+      end
+    end
+    desktop.see('Meet your Sapis.')
+    desktop.click('Continue')
+    desktop.see('Where should we start?')
+    desktop.click('Continue')
+    desktop.see('Connect your AI')
+    children = -> { IO.popen(['ps', '-axo', 'pid=,ppid=,comm='], &:read).lines.filter_map do |line|
+      pid, parent, command = line.strip.split(/\s+/, 3)
+      pid.to_i if parent.to_i == launcher.pid && File.basename(command.to_s) == 'sapiens4'
+    end }
+    original = children.call
+    expect(original.length).to eq(1)
+    3.times do
+      desktop.click('← Back')
+      desktop.press(/Start fresh/)
+      desktop.click('Continue')
+      desktop.see('Connect your AI')
+      expect(children.call).to eq(original)
+    end
+  ensure
+    launcher&.close
+  end
+
 end

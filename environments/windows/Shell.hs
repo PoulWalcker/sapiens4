@@ -142,6 +142,7 @@ desktopSession memory probe = do
         void $ showWindow label 5
         mapM_ (\button -> void (showWindow button 5)) (drop 1 setupButtons)
       storageScript source = readIORef shellRef >>= mapM_ (\view -> execute memory view source (const $ pure ()))
+      storageError :: String -> IO ()
       storageError message = do
         closeHost host
         writeIORef onboarding True
@@ -167,7 +168,8 @@ desktopSession memory probe = do
               selectedDirectory <- canonicalizePath directory
               current <- activeDataDirectory host
               available <- hostRunning host
-              if choice==AttachExisting && available && current==Just selectedDirectory then pure Nothing else do
+              startedAs <- activeStorageChoice host
+              if available && current==Just selectedDirectory && (choice==AttachExisting || choice==StartNew && startedAs==Just StartNew) then pure Nothing else do
                 let selected = host {dataDirectory=selectedDirectory}
                 checkStorage selected choice
                 closeHost host
@@ -220,11 +222,15 @@ desktopSession memory probe = do
         unless busy $ case field "storage" message of
           _ | field "storageStage" message == String "storage" -> resizeContent hwnd 560 600
           String "new" -> startSelected StartNew (dataDirectory host) Nothing
-          String "existing" -> do
+          String "pick" -> do
             picking <- atomicModifyIORef' starting (\value -> (True,value))
             unless picking $ do
               selected <- pickDirectory hwnd `finally` writeIORef starting False
-              mapM_ (\directory -> startSelected AttachExisting directory Nothing) selected
+              storageScript ("window.storagePicked?.(" ++ T.unpack (TE.decodeUtf8 $ L.toStrict $ encode selected) ++ ")")
+          String "existing" -> do
+            let directory=string (field "directory" message)
+            if isAbsolute directory then startSelected AttachExisting directory Nothing
+              else storageError "Choose a folder before continuing."
           _ -> pure ()
       loaded result = do
         view <- either (ioError . userError) pure result

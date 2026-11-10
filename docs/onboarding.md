@@ -1,10 +1,12 @@
 # Local AI onboarding
 
 Native startup shows **Welcome → Your data** before launching the backend.
-Choose **Start new** or **Open existing data**; the selected directory is saved in
+Choosing another folder opens the picker immediately. Continue applies the
+selection, and cancelling the picker retains the previous selection.
+Choose **Start fresh** or **Use another folder**; the selected directory is saved in
 `storage.json` under `SAPIENS_CONFIG_DIR`. Existing data must pass compatibility
 and ownership checks. No automatic search, copy or migration is performed.
-**Start new** requires an empty directory. **Open existing data** requires a
+**Start fresh** requires an empty directory. **Use another folder** requires a
 complete installation and never initializes missing data. Source launch reopens
 its existing selected directory unless an explicit storage mode is supplied.
 After storage selection: **AI → Computer access → Corpora (if needed) → Ready**.
@@ -78,6 +80,9 @@ current backend. Keep current storage returns immediately. Selecting a folder
 only records a draft; Continue applies it. Native handlers serialize folder
 pickers and startup, and replies are scoped to their owning dialog generation.
 An existing path that resolves to the current directory is also a no-op.
+Repeating Start fresh for the current Data Root created by this running session
+also reuses it; it does not initialize or overwrite it again. A different
+populated directory still fails StartNew validation.
 
 For a different directory, validate it while the current backend still owns its
 lock, then stop/join that process and start the replacement. Failed validation

@@ -3,6 +3,7 @@ module Sapiens.Html where
 import Sapiens.Form as F
 import Prelude
 import Data.Tuple (Tuple)
+import Data.Maybe (Maybe(..), maybe)
 import Effect.Aff (Aff)
 import Halogen as H
 import Halogen.HTML as C
@@ -10,6 +11,7 @@ import Halogen.HTML.Properties as P
 import Halogen.HTML.Events as E
 import Sapiens.Action (Action(..))
 import Web.Event.Event (Event, EventType(..))
+import Web.UIEvent.UIEvent as UIEvent
 
 type Html = H.ComponentHTML Action () Aff
 type Prop = P.IProp () Action
@@ -34,6 +36,11 @@ control props caption = controlWith props [text caption]
 
 controlWith :: Array Prop -> Array Html -> Action -> Html
 controlWith props children action = node "button" ([attr "type" "button",click action] <> props) children
+
+-- Keep the second click of a double click from advancing a new setup screen.
+-- Keyboard and accessibility activations have detail 0 and remain valid.
+navigationControl :: Array Prop -> String -> Action -> Html
+navigationControl props caption action = node "button" ([attr "type" "button",E.handler' (EventType "click") (\event -> if maybe false (\ui -> UIEvent.detail ui > 1) (UIEvent.fromEvent event) then Nothing else Just action)] <> props) [text caption]
 
 chevron :: Boolean -> Html
 chevron sideways = svg "svg" [cls $ "activity-chevron" <> if sideways then " sideways" else "",attr "viewBox" "0 0 16 16",attr "width" "12",attr "height" "12",attr "fill" "none",attr "aria-hidden" "true",attr "focusable" "false"]
