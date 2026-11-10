@@ -209,10 +209,13 @@ decodeDocument r value
   | otherwise = Left "Invalid Memo response"
 
 accountBlocked :: Model -> Boolean
-accountBlocked m = not (remote m) && D.s "location" (activeRecord m) == "Local" && D.n "schema" m.account > 0.0 && (not (D.b "ready" m.account) || D.s "hold" m.account /= "")
+accountBlocked m = setupRequired m || not (remote m) && D.s "location" (activeRecord m) == "Local" && D.n "schema" m.account > 0.0 && (not (D.b "ready" m.account) || D.s "hold" m.account /= "")
 
 dialogBusy :: Dialog -> Boolean
 dialogBusy d = d.busy
 
 dialogError :: Dialog -> String
 dialogError d = d.error
+
+setupRequired :: Model -> Boolean
+setupRequired m = not (remote m) && (not m.setupChecked || not (D.b "completed" m.account))

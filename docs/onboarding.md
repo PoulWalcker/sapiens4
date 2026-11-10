@@ -1,6 +1,12 @@
 # Local AI onboarding
 
-Sapiens offers Codex connection on first launch and in **AI Connections**.
+Native startup shows **Welcome → Your data** before launching the backend.
+Choose **Start new** or **Open existing data**; the selected directory is saved in
+`storage.json` under `SAPIENS_CONFIG_DIR`. Existing data must pass compatibility
+and ownership checks. No automatic search, copy or migration is performed.
+After storage selection: **AI → Computer access → Corpora (if needed) → Ready**.
+The completed setup and selected Corpora survive restart; AI connections remain
+available from **AI Connections**.
 Claude Code, Gemini CLI and Kimi Code remain Coming soon. Browser sign-in uses
 the complete authorization URL produced by Codex. One-time-code sign-in is
 available after cancelling an active browser sign-in.
@@ -9,7 +15,7 @@ available after cancelling an active browser sign-in.
 
 This feature builds independently of the distribution/installer branch. Until
 the module registration dependency is merged upstream, initialize the pinned
-libs4 fork at `006a0ae`.
+libs4 fork at the commit recorded by `git ls-tree HEAD submodules/libs4`.
 
 `build/start.sh` (macOS arm64) and `build/start.ps1` (Windows x64) acquire Codex
 0.167.0 into `.build/codex` before starting the host. This preparation requires
@@ -40,9 +46,8 @@ removed. Disconnect and account replacement take an exclusive profile lock;
 running AI work retains a shared lease. Queued work remains paused after account
 replacement until **Resume AI work**. Chats and settings are retained.
 
-AI connection requests use `/api/host/onboarding`; computer permission requests
-use `/api/host/computer`. AI monitoring does not launch Blindly. Neither live
-Codex status nor explicit permission checks are cached.
+AI connection and computer permission actions share `/api/host/onboarding`.
+Permission checks remain separate from the action that requests Accessibility access.
 
 Accessibility permission is optional on macOS and can be requested/rechecked
 from Computer settings. Windows does not display macOS permission instructions

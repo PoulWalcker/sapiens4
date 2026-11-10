@@ -506,3 +506,10 @@ body.sapi-workspace .notes-wiki :is(h1,h2) { font-family:Georgia,"Times New Roma
 
 :root body.sapi-workspace .provider-title { display:flex;align-items:center;gap:12px; }
 :root[data-theme=dark] body.sapi-workspace .ai-provider-action-danger { color:#ff8992; }
+
+:root body.sapi-workspace dialog.onboarding { inset:0;width:100%;max-width:none;height:100%;max-height:none;margin:0;padding:32px;border:0;border-radius:0;background:var(--sapi-bg);box-shadow:none;overflow:auto; }
+:root body.sapi-workspace dialog.onboarding[open] { display:flex;flex-direction:column; }
+:root body.sapi-workspace dialog.onboarding > .modal-top { width:100%;max-width:480px;align-self:center;flex-shrink:0;margin-top:auto; }
+:root body.sapi-workspace dialog.onboarding > #modal-content { width:100%;max-width:480px;align-self:center;flex-shrink:0;margin-bottom:auto; }
+:root body.sapi-workspace dialog.onboarding::backdrop { background:var(--sapi-bg);backdrop-filter:none; }
+:root body.sapi-workspace .setup-loading { display:grid;min-height:100dvh;place-content:center;gap:16px;padding:32px; }

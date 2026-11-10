@@ -10,6 +10,8 @@ import Data.Int
 import Data.Word
 import Foreign hiding (void)
 import Foreign.C
+import System.Environment (getExecutablePath)
+import System.FilePath ((</>), takeDirectory)
 import System.IO
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -23,6 +25,7 @@ type Arena = IORef [(IO Bool, IO ())]
 type WindowProc = Window -> Word32 -> WordPtr -> IntPtr -> IO IntPtr
 
 foreign import ccall safe "CoInitializeEx" coInitialize :: Ptr () -> Word32 -> IO HRESULT
+foreign import ccall safe "CoCreateInstance" coCreateInstance :: Ptr Word8 -> Object -> Word32 -> Ptr Word8 -> Ptr Object -> IO HRESULT
 foreign import ccall unsafe "CoUninitialize" coUninitialize :: IO ()
 foreign import ccall unsafe "CoTaskMemFree" coFree :: Ptr a -> IO ()
 foreign import ccall unsafe "CLSIDFromString" clsid :: Wide -> Ptr Word8 -> IO HRESULT
@@ -64,6 +67,7 @@ foreign import ccall "dynamic" invoke0 :: FunPtr (Object -> IO HRESULT) -> Objec
 foreign import ccall "dynamic" invokeRef :: FunPtr (Object -> IO Word32) -> Object -> IO Word32
 foreign import ccall "dynamic" invokePtr :: FunPtr (Object -> Ptr a -> IO HRESULT) -> Object -> Ptr a -> IO HRESULT
 foreign import ccall "dynamic" invokeInt :: FunPtr (Object -> Int32 -> IO HRESULT) -> Object -> Int32 -> IO HRESULT
+foreign import ccall "dynamic" invokeIntPtr :: FunPtr (Object -> Word32 -> Ptr a -> IO HRESULT) -> Object -> Word32 -> Ptr a -> IO HRESULT
 foreign import ccall "dynamic" invokeDouble :: FunPtr (Object -> Double -> IO HRESULT) -> Object -> Double -> IO HRESULT
 foreign import ccall "dynamic" invoke2 :: FunPtr (Object -> Ptr a -> Ptr b -> IO HRESULT) -> Object -> Ptr a -> Ptr b -> IO HRESULT
 foreign import ccall "dynamic" invoke3 :: FunPtr (Object -> Ptr a -> Ptr b -> Ptr c -> IO HRESULT) -> Object -> Ptr a -> Ptr b -> Ptr c -> IO HRESULT
@@ -246,3 +250,39 @@ pickFile window directory = allocaBytes 152 $ \dialog -> allocaArray 32768 $ \fi
     pokeByteOff dialog 96 (0x00001000 .|. 0x00000800 .|. 0x00080000 :: Word32)
     selected <- getOpenFileName dialog
     if selected /= 0 then Just <$> readWide filename else pure Nothing
+
+-- The native folder picker returns the selected Data Root without copying it.
+pickDirectory :: Window -> IO (Maybe FilePath)
+pickDirectory owner = withGuid "{DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7}" $ \classId ->
+  withGuid "{D57C7288-D4AD-4768-BE02-9D969532D960}" $ \interfaceId ->
+    bracket (alloca $ \out -> coCreateInstance classId nullPtr 1 interfaceId out >>= check >> peek out) release $ \dialog -> do
+      options <- getValue dialog 10 :: IO Word32
+      callInt dialog 9 (fromIntegral $ options .|. 0x20 .|. 0x40 .|. 0x800 .|. 0x10000000)
+      putString dialog 17 "Open Sapiens data"
+      result <- method dialog 3 >>= \showDialog -> invokePtr showDialog dialog owner
+      if result == -2147023673 then pure Nothing else do
+        check result
+        bracket (getValue dialog 20) release $ \item -> do
+          getName <- method item 5
+          Just <$> bracket (alloca $ \out -> invokeIntPtr getName item 0x80058000 out >>= check >> peek out) coFree readWide
+
+foreign import ccall "dynamic" availableBrowserVersion :: FunPtr (Wide -> Ptr Wide -> IO HRESULT) -> Wide -> Ptr Wide -> IO HRESULT
+
+webViewLoader :: IO Object
+webViewLoader = do
+  executable <- getExecutablePath
+  loader <- withWide (takeDirectory executable </> "WebView2Loader.dll") loadLibrary
+  when (loader == nullPtr) $ ioError $ userError "WebView2Loader.dll is missing from the application package"
+  pure loader
+
+webViewRuntimeAvailable :: IO Bool
+webViewRuntimeAvailable = do
+  loader <- webViewLoader
+  entry <- withCString "GetAvailableCoreWebView2BrowserVersionString" (getProcAddress loader)
+  when (entry == nullFunPtr) $ ioError $ userError "WebView2 runtime detection is unavailable"
+  alloca $ \version -> do
+    poke version nullPtr
+    result <- availableBrowserVersion entry nullPtr version
+    value <- peek version
+    when (value /= nullPtr) (coFree value)
+    pure (result >= 0 && value /= nullPtr)

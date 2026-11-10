@@ -7,6 +7,17 @@ class Host
     @directory = File.realpath(Dir.mktmpdir('sapiens-contract-'))
     @root, @repo = File.join(@directory, "workspace's é"), repo
     @command = command
+    # Initialize real empty data before writing synthetic provider fixtures into it.
+    bootstrap = Contract::Child.new(Contract::BINARY, '--port', '0', '--data-dir', root, '--desktop',
+      env: {'SAPIENS_CONFIG_DIR' => File.join(@directory, 'bootstrap config'), 'SAPIENS_CODEX_BINARY' => File.join(@directory, 'no-provider')}, chdir: @repo)
+    begin
+      Contract.wait(description: 'initialize fixture Data Root') { bootstrap.stdout.include?('Sapiens4: http://') }
+      bootstrap.input.close
+      _, error, code = bootstrap.finish
+      raise error unless code == 0
+    ensure
+      bootstrap.close
+    end
     FileUtils.mkdir_p(File.join(root, 'calls'))
     @provider = {}
     configure
@@ -20,7 +31,7 @@ class Host
     config = File.join(root, 'fixture config')
     FileUtils.mkdir_p(File.join(config, 'codex'))
     File.write(File.join(config, 'codex/auth.json'), 'synthetic fixture authentication')
-    Contract.atomic_json(File.join(config, 'onboarding.json'), schema: 1, welcomed: true, completed: true)
+    Contract.atomic_json(File.join(config, 'onboarding.json'), schema: 2, step: 'complete')
     @environment = {'SAPIENS_CONFIG_DIR' => config, 'SAPIENS_CODEX_BINARY' => binary, 'SAPIENS_CONTRACT_ENV' => root,
       'SAPIENS_CONTRACT_RUBY' => RbConfig.ruby, 'SAPIENS_CONTRACT_PROVIDER' => File.join(__dir__, 'provider.rb'),
       'NO_COLOR' => '1', 'SAPIENS_CODEX_MODEL' => 'gpt-6-sol',

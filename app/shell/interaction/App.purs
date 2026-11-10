@@ -25,6 +25,7 @@ import Sapiens.Connections as C
 import Sapiens.CorporaEffects as Corpora
 import Sapiens.Data as D
 import Sapiens.DialogEffects as Dialog
+import Sapiens.Dialog as DialogView
 import Sapiens.Effects as E
 import Sapiens.Model as M
 import Sapiens.Navigation as N
@@ -76,9 +77,18 @@ handle runtime input = session input
             H.modify_ _ {accountChecking=false}
             current <- H.get
             when (current.sequence == m.sequence) do
-              H.modify_ _ {account=value,setupChecked=true}
-              unless (D.b "completed" value) $ dispatch $ OpenDialog M.Onboarding D.empty
-          Left _ -> H.modify_ _ {accountChecking=false}
+              let selected = case DialogView.startingCorpora current value of
+                    Just record -> Just record
+                    Nothing -> case A.uncons (DialogView.onboardingCorpora current) of
+                      Just {head,tail} | not (D.b "completed" value) && A.null tail -> Just head
+                      _ -> Nothing
+              traverse_ (\record -> when ((D.s "key" record) /= current.active) $ dispatch $ EnterCorpora (D.s "key" record)) selected
+              restored <- H.get
+              H.modify_ _ {account=value,setupChecked=not (D.b "completed" value) || case selected of
+                Just _ -> DialogView.onboardingConnected restored
+                Nothing -> true}
+              if D.b "completed" value then E.sync else dispatch $ OpenDialog M.Onboarding D.empty
+          Left failure -> H.modify_ _ {accountChecking=false,feedback=message failure}
     Finalize -> liftEffect $ C.dispose runtime
     Poll -> do
       m <- H.get

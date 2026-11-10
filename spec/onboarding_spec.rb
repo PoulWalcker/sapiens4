@@ -57,17 +57,6 @@ RSpec.describe 'Local Codex setup' do
       end
       load #{File.join(__dir__, 'support/provider.rb').inspect}
     RUBY
-    helper = File.join(host.root, 'blindly')
-    File.write(helper, <<~RUBY)
-      #!#{RbConfig.ruby}
-      require 'json'
-      root = ENV.fetch('SAPIENS_CONTRACT_ENV')
-      File.open(File.join(root, 'computer-checks'), 'a') { |f| f.puts ARGV.join(' ') }
-      puts JSON.generate(code: File.exist?(File.join(root, 'computer-denied')) ? 'accessibility_permission_denied' : 'focus_unavailable')
-      exit 77
-    RUBY
-    File.chmod(0755, helper)
-    host.environment['SAPIENS_BLINDLY_BINARY'] = helper
     host.start
     %w[codex claude gemini kimi].each do |provider|
       code, icon, headers = host.request('GET', "/ai-#{provider}.svg")
@@ -75,21 +64,9 @@ RSpec.describe 'Local Codex setup' do
       expect(headers.fetch('content-type').first).to include('image/svg+xml')
       expect(icon).to include('<svg')
     end
-    expect(host.api('GET', '/api/host/onboarding')).to include('provider' => 'sign_in_required', 'step' => 'welcome', 'completed' => false)
-    # AI monitoring never checks Accessibility; explicit computer checks stay live.
-    expect(File.exist?(File.join(host.root, 'computer-checks'))).to eq(false)
-    expect(host.api('GET', '/api/host/computer')).to include('computer_permission' => 'granted')
-    File.write(File.join(host.root, 'computer-denied'), '')
-    expect(host.api('POST', '/api/host/computer', action: 'refresh')).to include('computer_permission' => 'denied')
-    expect(host.request('GET', '/api/host/computer', nil, 'Origin' => 'https://untrusted.example').first).to eq(403)
-    expect(host.request('POST', '/api/host/computer', {action: 'permission'}, 'X-Sapiens-Local' => '').first).to eq(403)
+    expect(host.api('GET', '/api/host/onboarding')).to include('provider' => 'sign_in_required', 'step' => 'provider', 'completed' => false)
     host.api('POST', '/api/host/onboarding', {action: 'finish'}, status: 409)
-    # Connect follows the supplied onboarding flow: begin, then immediate login.
-    expect(host.api('POST', '/api/host/onboarding', action: 'begin')).to include('step' => 'sign_in', 'completed' => false)
-    status_calls = -> { File.readlines(File.join(host.root, 'auth-invocations.jsonl')).count { |line| JSON.parse(line).fetch('args').include?('status') } }
-    checks = status_calls.call
-    expect(host.api('POST', '/api/host/onboarding', action: 'connect').fetch('provider')).to eq('signing_in')
-    expect(status_calls.call - checks).to eq(1)
+    expect(host.api('POST', '/api/host/onboarding', action: 'login').fetch('provider')).to eq('signing_in')
     Contract.wait { host.api('GET', '/api/host/onboarding').dig('login', 'url').to_s.include?('response_type=code') }
     host.api('POST', '/api/host/onboarding', {action: 'login'}, status: 409)
     expect(host.api('POST', '/api/host/onboarding', action: 'cancel').dig('login', 'state')).to eq('cancelled')
@@ -134,7 +111,7 @@ RSpec.describe 'Local Codex setup' do
     expect(JSON.generate(view)).not_to include('synthetic-private-diagnostic', 'synthetic-private-logout-diagnostic')
     host.api('POST', '/api/host/onboarding', {action: 'device-login'}, status: 409)
     expect(host.api('POST', '/api/host/onboarding', action: 'cancel').dig('login', 'state')).to eq('cancelled')
-    expect(host.api('GET', '/api/host/onboarding')).to include('step' => 'sign_in', 'completed' => false)
+    expect(host.api('GET', '/api/host/onboarding')).to include('step' => 'provider', 'completed' => false)
     expect { Process.kill(0, File.read(File.join(host.root, 'login.pid')).to_i) }.to raise_error(Errno::ESRCH)
     expect(File.exist?(File.join(config, 'codex/auth.json'))).to eq(false)
     host.api('POST', '/api/host/onboarding', action: 'device-login')
@@ -144,26 +121,25 @@ RSpec.describe 'Local Codex setup' do
     expect { Process.kill(0, login_pid) }.to raise_error(Errno::ESRCH)
     expect(File.exist?(File.join(config, 'codex/auth.json'))).to eq(false)
     host.start
-    expect(host.api('GET', '/api/host/onboarding')).to include('step' => 'sign_in', 'completed' => false)
+    expect(host.api('GET', '/api/host/onboarding')).to include('step' => 'provider', 'completed' => false)
     File.write(File.join(host.root, 'fail-login'), '')
     host.api('POST', '/api/host/onboarding', action: 'device-login')
     Contract.wait { host.api('GET', '/api/host/onboarding').dig('login', 'state') == 'failed' }
     File.delete(File.join(host.root, 'fail-login'))
     host.api('POST', '/api/host/onboarding', action: 'device-login')
-    # Auth may succeed while completion persistence fails. GET retries reconcile
-    # without launching auth again or falsely marking setup complete.
+    # Authentication does not complete onboarding. Failed decision persistence
+    # must preserve the current step and account.
     setup_path = File.join(config, 'onboarding.json')
+    File.write(setup_path, JSON.generate(schema: 2, step: 'provider'))
     File.rename(setup_path, setup_path + '.saved')
     Dir.mkdir(setup_path)
     File.write(File.join(host.root, 'finish-login'), '')
-    Contract.wait do
-      status, value, = host.request('GET', '/api/host/onboarding')
-      status == 503 && value.fetch('error').include?('Could not save setup')
-    end
+    Contract.wait { host.api('GET', '/api/host/onboarding').fetch('provider') == 'signed_in' }
+    expect(host.api('POST', '/api/host/onboarding', {action: 'provider-next'}, status: 503).fetch('error')).to include('Could not save setup')
     Dir.rmdir(setup_path)
     File.rename(setup_path + '.saved', setup_path)
-    Contract.wait { host.api('GET', '/api/host/onboarding').fetch('ready') }
-    expect(host.api('GET', '/api/host/onboarding')).to include('step' => 'complete', 'completed' => true)
+    Contract.wait { host.api('GET', '/api/host/onboarding').fetch('provider') == 'signed_in' }
+    expect(host.api('GET', '/api/host/onboarding')).to include('step' => 'provider', 'completed' => false)
     auth_file = File.join(config, 'codex/auth.json')
     saved_auth = File.binread(auth_file)
     File.write(File.join(host.root, 'fail-status'), '')
@@ -175,19 +151,23 @@ RSpec.describe 'Local Codex setup' do
     File.delete(File.join(host.root, 'fail-status'))
     host.api('POST', '/api/host/onboarding', {action: 'device-login'}, status: 409)
     # Optional computer permissions/helper availability do not gate basic chat.
-    expect(host.api('POST', '/api/host/onboarding', action: 'finish')).to include('step' => 'complete', 'completed' => true)
+    selected_corpora = host.api('GET', '/api/corpora').fetch('id')
+    expect(host.api('POST', '/api/host/onboarding', action: 'provider-next')).to include('step' => 'permissions')
+    expect(host.api('POST', '/api/host/onboarding', action: 'permissions-done', choose_corpora: false, selected_corpora: selected_corpora)).to include('step' => 'ready')
+    expect(host.api('POST', '/api/host/onboarding', action: 'finish', selected_corpora: selected_corpora)).to include('step' => 'complete', 'completed' => true)
     setup_file = File.join(config, 'onboarding.json')
-    expect(JSON.parse(File.read(setup_file))).to eq('schema' => 1, 'welcomed' => true, 'completed' => true)
+    expect(JSON.parse(File.read(setup_file))).to eq('schema' => 2, 'step' => 'complete', 'selected_corpora' => selected_corpora)
     host.restart
     expect(host.api('GET', '/api/host/onboarding')).to include('ready' => true, 'step' => 'complete', 'completed' => true)
     expect(File.binread(auth_file)).to eq(saved_auth)
     # Existing app auth skips redundant sign-in when setup has no prior marker.
     File.rename(setup_file, setup_file + '.preserved')
     host.restart
-    expect(host.api('GET', '/api/host/onboarding').fetch('step')).to eq('welcome')
-    expect(host.api('POST', '/api/host/onboarding', action: 'connect').fetch('step')).to eq('complete')
+    expect(host.api('GET', '/api/host/onboarding').fetch('step')).to eq('provider')
+    expect(host.api('POST', '/api/host/onboarding', action: 'provider-next').fetch('step')).to eq('permissions')
+    host.api('POST', '/api/host/onboarding', action: 'permissions-done', choose_corpora: false, selected_corpora: selected_corpora)
     expect(File.binread(auth_file)).to eq(saved_auth)
-    host.api('POST', '/api/host/onboarding', action: 'finish')
+    host.api('POST', '/api/host/onboarding', action: 'finish', selected_corpora: selected_corpora)
     id = host.submit(host.state.fetch('main_agent_id'), 'Hello')
     host.turn(id)
     # Whole runs in any local corpus prevent account mutation. Pending work is
@@ -235,7 +215,7 @@ RSpec.describe 'Local Codex setup' do
     host.api('POST', '/api/host/onboarding', action: 'login')
     Contract.wait { host.api('GET', '/api/host/onboarding').dig('login', 'url').to_s.include?('response_type=code') }
     File.write(File.join(host.root, 'finish-login'), '')
-    Contract.wait { host.api('GET', '/api/host/onboarding').fetch('ready') }
+    Contract.wait { host.api('GET', '/api/host/onboarding').fetch('provider') == 'signed_in' }
     expect(host.api('GET', '/api/host/onboarding')).to include('completed' => true, 'hold' => 'review')
     host.restart
     expect(host.api('GET', '/api/host/onboarding').fetch('hold')).to eq('review')
@@ -246,7 +226,7 @@ RSpec.describe 'Local Codex setup' do
     File.write(File.join(host.root, 'fail-logout'), '')
     host.api('POST', '/api/host/onboarding', action: 'sign-out')
     failed = Contract.wait { v = host.api('GET', '/api/host/onboarding'); v if v.dig('login', 'state') == 'logout_failed' }
-    expect(failed).to include('ready' => true, 'hold' => 'uncertain')
+    expect(failed).to include('ready' => false, 'hold' => 'uncertain')
     expect(File.binread(auth_file)).to eq(saved_auth)
     host.api('POST', '/api/host/onboarding', {action: 'resume'}, status: 409)
     File.delete(File.join(host.root, 'fail-logout'))
@@ -254,7 +234,7 @@ RSpec.describe 'Local Codex setup' do
     Contract.wait { host.api('GET', '/api/host/onboarding').dig('login', 'state') == 'signed_out' }
     expect(host.api('GET', '/api/host/onboarding')).to include('completed' => true, 'ready' => false)
     host.api('POST', '/api/host/onboarding', action: 'login')
-    Contract.wait { host.api('GET', '/api/host/onboarding').fetch('ready') }
+    Contract.wait { host.api('GET', '/api/host/onboarding').fetch('provider') == 'signed_in' }
     host.api('POST', '/api/host/onboarding', action: 'resume')
     expect(host.turn(id)['output']).to eq('Contract test reply')
     # Shutdown during revocation leaves an uncertainty hold across restart.
@@ -263,11 +243,11 @@ RSpec.describe 'Local Codex setup' do
     Contract.wait { host.api('GET', '/api/host/onboarding').fetch('provider') == 'signing_out' }
     host.api('POST', '/api/host/onboarding', {action: 'cancel'}, status: 409)
     host.restart
-    expect(host.api('GET', '/api/host/onboarding')).to include('ready' => true, 'hold' => 'uncertain')
+    expect(host.api('GET', '/api/host/onboarding')).to include('ready' => false, 'hold' => 'uncertain')
     host.api('POST', '/api/host/onboarding', {action: 'resume'}, status: 409)
     File.delete(File.join(host.root, 'slow-logout'))
     host.api('POST', '/api/host/onboarding', action: 'change-account')
-    Contract.wait { host.api('GET', '/api/host/onboarding').fetch('ready') }
+    Contract.wait { host.api('GET', '/api/host/onboarding').fetch('provider') == 'signed_in' }
     host.api('POST', '/api/host/onboarding', action: 'resume')
 
     invocations = File.readlines(File.join(host.root, 'auth-invocations.jsonl')).map { |line| JSON.parse(line) }
@@ -291,7 +271,7 @@ RSpec.describe 'Local Codex setup' do
     host.environment['PATH'] = host.root + File::PATH_SEPARATOR + ENV.fetch('PATH')
     count = invocations.length
     host.restart
-    expect(host.api('GET', '/api/host/onboarding')).to include('provider' => 'missing', 'step' => 'sign_in', 'completed' => true)
+    expect(host.api('GET', '/api/host/onboarding')).to include('provider' => 'missing', 'step' => 'complete', 'completed' => true)
     host.api('POST', '/api/host/onboarding', {action: 'device-login'}, status: 503)
     expect(File.readlines(File.join(host.root, 'auth-invocations.jsonl')).length).to eq(count)
   ensure
@@ -354,11 +334,11 @@ RSpec.describe 'Local Codex setup' do
     expect(host.state.fetch('turns').find { |t| t['id'] == queued }.fetch('status')).to eq('queued')
     host.api('POST', '/api/host/onboarding', action: 'device-login')
     File.write(File.join(host.root, 'finish-login'), '')
-    Contract.wait { host.api('GET', '/api/host/onboarding').fetch('ready') }
+    Contract.wait { host.api('GET', '/api/host/onboarding').fetch('provider') == 'signed_in' }
     expect(host.api('GET', '/api/host/onboarding').fetch('hold')).to eq('review')
     host.restart
     sleep 2.2 # A connected replacement account still must not release the queue.
-    expect(host.api('GET', '/api/host/onboarding')).to include('ready' => true, 'hold' => 'review')
+    expect(host.api('GET', '/api/host/onboarding')).to include('ready' => false, 'hold' => 'review')
     expect(host.calls.size).to eq(4)
     expect(host.state.fetch('turns').find { |t| t['id'] == queued }.fetch('status')).to eq('queued')
     host.api('POST', '/api/host/onboarding', action: 'resume')

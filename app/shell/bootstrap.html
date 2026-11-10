@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>Sapiens4</title>
+<link rel="stylesheet" href="../theme/styles.css">
+<link rel="stylesheet" href="../theme/live.css">
+<link rel="stylesheet" href="../theme/sapi-theme.css">
+<style>
+html,body{margin:0;min-height:100%;background:var(--sapi-bg)}
+body{display:grid;min-height:100vh;place-items:center}
+main{box-sizing:border-box;width:min(100%,480px);padding:36px}
+h1{font-size:26px;line-height:1.25;font-weight:600;letter-spacing:-.6px;margin:22px 0 12px}
+p{color:var(--sapi-muted);margin:12px 0 24px;line-height:1.6}
+.tiny-label{font-size:11px;letter-spacing:2px;color:var(--sapi-muted)}
+.actions{display:flex;gap:12px;flex-wrap:wrap}
+.sapi-workspace .button{font-size:13px;padding:10px 16px;margin:0}
+#error{color:var(--sapi-ink);white-space:pre-wrap;overflow-wrap:anywhere}
+</style>
+<script>
+if(matchMedia('(prefers-color-scheme:dark)').matches) document.documentElement.dataset.theme='dark';
+</script>
+</head>
+<body class="sapi-workspace">
+<main>
+<span class="tiny-label">SAPIENS4</span>
+<section id="welcome">
+<h1>Welcome to Sapiens4</h1>
+<p>Your AI team, ready to work on your computer.</p>
+<button class="button primary" id="get-started" onclick="storageScreen()">Get started</button>
+</section>
+<section id="storage" hidden>
+<h1>Your data</h1>
+<p>Start here, or open your existing Sapiens data.<br>Your data stays in the directory you choose.</p>
+<div class="actions">
+<button class="button primary" onclick="chooseStorage('new')">Start new</button>
+<button class="button" onclick="chooseStorage('existing')">Open existing data</button>
+</div>
+<p id="error" role="alert"></p>
+</section>
+<p id="loading" role="status" hidden>Opening Sapiens4…</p>
+</main>
+<script>
+function storageScreen(error='') {
+ document.getElementById('welcome').hidden=true;
+ document.getElementById('storage').hidden=false;
+ document.getElementById('loading').hidden=true;
+ document.getElementById('error').textContent=error;
+ document.querySelectorAll('button').forEach(b=>b.disabled=false);
+ document.querySelector('#storage button').focus();
+ const message={storageStage:'storage'};
+ if(window.webkit?.messageHandlers?.browser) window.webkit.messageHandlers.browser.postMessage(message);
+ else window.chrome?.webview?.postMessage(message);
+}
+function storageError(message) { storageScreen(message); }
+function storageLoading() {
+ document.getElementById('welcome').hidden=true;
+ document.getElementById('storage').hidden=true;
+ document.getElementById('loading').hidden=false;
+ document.querySelectorAll('button').forEach(b=>b.disabled=true);
+}
+function chooseStorage(storage) {
+ const message={storage};
+ if(window.webkit?.messageHandlers?.browser) window.webkit.messageHandlers.browser.postMessage(message);
+ else window.chrome?.webview?.postMessage(message);
+}
+</script>
+</body>
+</html>

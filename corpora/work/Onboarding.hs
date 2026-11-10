@@ -13,6 +13,7 @@ import Data.Char (isAsciiUpper, isDigit)
 import Data.IORef
 import Data.Maybe
 import qualified Data.Text as T
+import qualified Data.UUID as UUID
 import System.Directory
 import System.Exit
 import System.FileLock
@@ -28,28 +29,56 @@ import System.Posix.Signals
 #endif
 
 -- Owned by the outer local host only; remote corpus routes cannot reach login.
-data Onboarding = Onboarding FilePath (MVar (Bool,Maybe (Async ()))) (IORef Value) (MVar (Bool,[Async T.Text])) (FilePath,MVar Value)
+data Onboarding = Onboarding FilePath (MVar (Bool,Maybe (Async ()))) (IORef Value) (MVar (Bool,[Async T.Text])) (FilePath,MVar (SetupStep,Maybe UUID.UUID))
+
+-- Authentication remains in the owned Codex profile. Setup persists only the
+-- last explicit decision, so a successful login cannot finish onboarding.
+data SetupStep = AIProvider | ComputerAccess | CorporaChoice | SetupReady | SetupComplete deriving (Eq)
+
+stepName :: SetupStep -> T.Text
+stepName step = case step of
+ AIProvider -> "provider"
+ ComputerAccess -> "permissions"
+ CorporaChoice -> "corpora"
+ SetupReady -> "ready"
+ SetupComplete -> "complete"
+
+readStep :: Value -> SetupStep
+readStep saved
+ -- Schema 1 completed after login alone; collect the remaining decisions once.
+ | int (get saved "schema")==1 && boolean (get saved "completed") = ComputerAccess
+ | int (get saved "schema")==2 = case at saved "step" of
+    "permissions" -> ComputerAccess
+    "corpora" -> CorporaChoice
+    "ready" -> SetupReady
+    "complete" -> SetupComplete
+    _ -> AIProvider
+ | otherwise = AIProvider
 
 openOnboarding :: FilePath -> IO Onboarding
 openOnboarding root = do
  home <- P.codexHome
  let path=takeDirectory home</>"onboarding.json"
-     initial=obj [("schema",num (1::Int)),("welcomed",Bool False),("completed",Bool False)]
- saved <- readJSON path initial `catch` (\(_::IOException) -> pure initial)
- state <- newMVar (if int (get saved "schema")==1 then saved else initial)
+ saved <- readJSON path empty `catch` (\(_::IOException) -> pure empty)
+ state <- newMVar (readStep saved,UUID.fromText (at saved "selected_corpora"))
  stored <- doesPathExist (home</>"auth.json")
  hold <- P.profileHold
  when (not stored && T.null hold) (P.holdProfile "disconnected")
  Onboarding root <$> newMVar (False,Nothing) <*> newIORef (loginState "idle" "") <*> newMVar (False,[]) <*> pure (path,state)
 
 setupState :: Onboarding -> IO Value
-setupState (Onboarding _ _ _ _ (_,state)) = readMVar state
+setupState (Onboarding _ _ _ _ (_,state)) = do
+ (step,selected) <- readMVar state
+ pure (obj [("step",str (stepName step)),("completed",Bool (step==SetupComplete)),("selected_corpora",maybe Null (str . UUID.toText) selected)])
 
-saveSetup :: Onboarding -> (Value -> Value) -> IO ()
-saveSetup (Onboarding _ _ _ _ (path,state)) update = modifyMVar_ state $ \current -> do
- let next=update current
- writeJSON path next `catch` (\(_::IOException) -> failure 503 "Could not save setup. Check that Sapiens can write to its configuration folder, then retry.")
- pure next
+advanceSetup :: Onboarding -> SetupStep -> SetupStep -> Maybe UUID.UUID -> IO ()
+advanceSetup (Onboarding _ _ _ _ (path,state)) expected next selected = modifyMVar_ state $ \(current,previous) -> do
+ require (current==expected) 409 "Setup changed. Check again before continuing."
+ let starting=case selected of Just _ -> selected; Nothing -> previous
+ require (next/=SetupComplete || isJust starting) 409 "Choose your starting Corpora before continuing."
+ writeJSON path (obj [("schema",num (2::Int)),("step",str (stepName next)),("selected_corpora",maybe Null (str . UUID.toText) starting)])
+  `catch` (\(_::IOException) -> failure 503 "Could not save setup. Check that Sapiens can write to its configuration folder, then retry.")
+ pure (next,starting)
 
 loginState :: T.Text -> T.Text -> Value
 loginState state code = loginView state code (if T.null code then "" else "https://auth.openai.com/codex/device")
@@ -107,24 +136,9 @@ providerStatus = do
    pure (case result of Just ExitSuccess -> "signed_in"; Just _ | not stored -> "sign_in_required"; _ -> "unavailable")) `catch` (\(_::IOException) -> pure "unavailable")
 
 onboardingView :: Onboarding -> IO Value
-onboardingView onboarding@(Onboarding _ _ progress _ _) = do
+onboardingView onboarding@(Onboarding root _ progress _ _) = do
  login <- readIORef progress
  provider <- if at login "state" `elem` ["signing_in","signing_out"] then pure (at login "state") else checkedProviderStatus onboarding
- initial <- setupState onboarding
- -- Reconcile a completed login after success or a restart. Persist before the
- -- UI can close onboarding; a failed write stays a recoverable setup error.
- when (provider=="signed_in" && boolean (get initial "welcomed") && not (boolean (get initial "completed"))) $
-  saveSetup onboarding (put "completed" (Bool True))
- saved <- setupState onboarding
- hold <- P.profileHold
- let welcomed=boolean (get saved "welcomed")
-     ready=provider=="signed_in"
-     complete=welcomed && boolean (get saved "completed")
-     step=if not welcomed then "welcome" else if ready then "complete" else "sign_in"
- pure (obj [("schema",num (1::Int)),("step",str step),("completed",Bool complete),("provider",str provider),("login",login),("ready",Bool ready),("hold",str hold)])
-
-computerView :: Onboarding -> IO Value
-computerView (Onboarding root _ _ _ _) = do
  binary <- C.blindlyBinary root
  built <- doesFileExist binary
  computer <- if not built then pure "missing" else if os/="darwin" then pure "not_required" else do
@@ -138,41 +152,39 @@ computerView (Onboarding root _ _ _ _) = do
     "accessibility_permission_denied" -> "denied"
     _ -> "unavailable"
    _ -> "unavailable"
- pure (obj [("computer_permission",str computer),("computer_available",Bool built)])
-
-computerAction :: Onboarding -> Value -> IO Value
-computerAction onboarding@(Onboarding root _ _ _ _) value = do
- case at value "action" of
-  "permission" -> do
-   require (os=="darwin") 400 "Accessibility approval is only required on macOS."
-   binary <- C.blindlyBinary root
-   exists <- doesFileExist binary
-   require exists 503 "Computer helper is missing. Reinstall Sapiens to repair it."
-   (code,_,_) <- C.invoke binary ["request-permission"] 10
-   require (code==ExitSuccess) 503 "Could not request Accessibility access. Open System Settings > Privacy & Security > Accessibility, then try again."
-  "refresh" -> pure ()
-  _ -> failure 400 "Unknown computer action"
- computerView onboarding
+ saved <- setupState onboarding
+ hold <- P.profileHold
+ let ready=provider=="signed_in" && T.null hold
+     complete=boolean (get saved "completed")
+     step=if not complete && not ready then "provider" else at saved "step"
+ pure (obj [("schema",num (2::Int)),("step",str step),("completed",Bool complete),("provider",str provider),("login",login),("computer_permission",str computer),("computer_available",Bool built),("ready",Bool ready),("hold",str hold),("selected_corpora",get saved "selected_corpora")])
 
 onboardingAction :: Onboarding -> Value -> IO Value
-onboardingAction onboarding@(Onboarding _ worker progress _ _) value = do
+onboardingAction onboarding@(Onboarding root worker progress _ _) value = do
  case at value "action" of
-  "begin" -> saveSetup onboarding (put "welcomed" (Bool True))
-  "connect" -> do
-   saveSetup onboarding (put "welcomed" (Bool True))
-   startAuth onboarding "connect"
-  "choose" -> do
-   login <- readIORef progress
-   require (at login "state" `notElem` ["signing_in","signing_out"]) 409 "Cancel sign-in first."
-   saved <- setupState onboarding
-   require (not (boolean (get saved "completed"))) 409 "Setup is already complete."
-   saveSetup onboarding (put "welcomed" (Bool False))
-  "finish" -> do
-   saved <- setupState onboarding
-   require (boolean (get saved "welcomed")) 409 "Start setup from the welcome screen."
+  "provider-next" -> do
    status <- checkedProviderStatus onboarding
-   require (status=="signed_in") 409 "Sign in to Codex before entering your workspace."
-   saveSetup onboarding (put "completed" (Bool True))
+   require (status=="signed_in") 409 "Connect Codex before continuing."
+   hold <- P.profileHold
+   require (T.null hold) 409 "Finish connecting your ChatGPT account before continuing."
+   -- An interrupted later step may need a new login; resume its saved decision.
+   saved <- setupState onboarding
+   when (at saved "step"=="provider") $ advanceSetup onboarding AIProvider ComputerAccess Nothing
+  "permissions-done" -> do
+   status <- checkedProviderStatus onboarding
+   require (status=="signed_in") 409 "Connect Codex before continuing."
+   selected <- maybe (failure 400 "Choose a local Corpora before continuing.") pure (UUID.fromText (at value "selected_corpora"))
+   advanceSetup onboarding ComputerAccess (if boolean (get value "choose_corpora") then CorporaChoice else SetupReady) (Just selected)
+  "corpora-done" -> do
+   selected <- maybe (failure 400 "Choose a local Corpora before continuing.") pure (UUID.fromText (at value "selected_corpora"))
+   advanceSetup onboarding CorporaChoice SetupReady (Just selected)
+  "finish" -> do
+   status <- checkedProviderStatus onboarding
+   require (status=="signed_in") 409 "Connect Codex before entering Sapiens."
+   hold <- P.profileHold
+   require (T.null hold) 409 "Finish connecting your ChatGPT account before continuing."
+   selected <- maybe (failure 400 "Choose a local Corpora before continuing.") pure (UUID.fromText (at value "selected_corpora"))
+   advanceSetup onboarding SetupReady SetupComplete (Just selected)
   action | action `elem` ["login","device-login","change-account","sign-out"] -> startAuth onboarding action
   "resume" -> bracket
    (P.profileLock Exclusive >>= maybe (failure 409 "AI work or sign-in is still running. Try again when it finishes.") pure)
@@ -196,6 +208,13 @@ onboardingAction onboarding@(Onboarding _ worker progress _ _) value = do
     P.holdProfile (if boolean (get saved "completed") then "review" else "")
    writeIORef progress (loginState (if status=="signed_in" then "complete" else "cancelled") "")
    pure (closed,Nothing)
+  "permission" -> do
+   require (os=="darwin") 400 "Accessibility approval is only required on macOS."
+   binary <- C.blindlyBinary root
+   exists <- doesFileExist binary
+   require exists 503 "Computer helper is missing. Reinstall Sapiens to repair it."
+   (code,_,_) <- C.invoke binary ["request-permission"] 10
+   require (code==ExitSuccess) 503 "Could not request Accessibility access. Open System Settings > Privacy & Security > Accessibility, then try again."
   "refresh" -> pure ()
   _ -> failure 400 "Unknown setup action"
  onboardingView onboarding
@@ -208,7 +227,6 @@ startAuth onboarding@(Onboarding _ worker progress _ _) action = modifyMVar_ wor
  running <- maybe (pure False) (fmap isNothing . poll) active
  require (not running) 409 "Account sign-in or sign-out is already running."
  saved <- setupState onboarding
- require (boolean (get saved "welcomed")) 409 "Start setup from the welcome screen."
  let replacing=action `elem` ["change-account","sign-out"]
  binary <- P.codexBinary >>= maybe (failure 503 "Codex is missing. Reinstall Sapiens to repair its runtime.") pure
  environment <- P.codexEnvironment
@@ -216,21 +234,19 @@ startAuth onboarding@(Onboarding _ worker progress _ _) action = modifyMVar_ wor
   (P.profileLock Exclusive >>= maybe (failure 409 "Finish running tasks before changing your ChatGPT account. Another sign-in may also be in progress.") pure)
   unlockFile $ \lease -> do
    status <- checkedProviderStatus onboarding
-   if action=="connect" && status=="signed_in" then unlockFile lease >> pure (False,Nothing)
+   if replacing then require (status `elem` ["signed_in","unavailable"]) 409 "ChatGPT is already disconnected."
    else do
-    if replacing then require (status `elem` ["signed_in","unavailable"]) 409 "ChatGPT is already disconnected."
-    else do
-     require (status/="signed_in") 409 "ChatGPT is already connected."
-     require (status=="sign_in_required") 503 "Could not check your existing sign-in. Recheck before continuing."
-    -- Persist the hold before revocation or login can begin. A crash cannot
-    -- release queued work under an uncertain or newly selected account.
-    P.holdProfile (if replacing then "uncertain" else "disconnected")
-    writeIORef progress (loginState (if replacing then "signing_out" else "signing_in") "")
-    task <- async $ flip finally (unlockFile lease) $
-     authFlow binary environment saved `catch` (\(errorValue::SomeException) -> case fromException errorValue :: Maybe SomeAsyncException of
-      Just _ -> throwIO errorValue
-      Nothing -> writeIORef progress (loginState "failed" ""))
-    pure (False,Just task)
+    require (status/="signed_in") 409 "ChatGPT is already connected."
+    require (status=="sign_in_required") 503 "Could not check your existing sign-in. Recheck before continuing."
+   -- Persist the hold before revocation or login can begin. A crash cannot
+   -- release queued work under an uncertain or newly selected account.
+   P.holdProfile (if replacing then "uncertain" else "disconnected")
+   writeIORef progress (loginState (if replacing then "signing_out" else "signing_in") "")
+   task <- async $ flip finally (unlockFile lease) $
+    authFlow binary environment saved `catch` (\(errorValue::SomeException) -> case fromException errorValue :: Maybe SomeAsyncException of
+     Just _ -> throwIO errorValue
+     Nothing -> writeIORef progress (loginState "failed" ""))
+   pure (False,Just task)
  where
  authFlow binary environment saved = do
   removed <- if action `elem` ["change-account","sign-out"] then do
