@@ -42,6 +42,12 @@ or acquiring Codex. `--skip-build` packages existing outputs with caller-verifie
 provenance. `runghc build/Build.hs` alone does not build Blindly.
 `--allow-missing-provider` supports native validation only.
 
+Both source and package builds fix `MACOSX_DEPLOYMENT_TARGET=13.0` and pass explicit
+minimum-version flags to GHC's C compiler and linker. Their Cabal build directory
+is `submodules/libs4/haskell/.build/macos-13.0`; the old general-purpose cache is
+not reused or deleted. Build and `list-bin` use the same directory. Changing the
+declared target must also change this cache directory.
+
 The macOS audit rejects required binaries above 13.0. Only the exact locked
 Codex 0.167.0 optional voice subtree may require 14.0; its inventory fingerprint
 and dependency boundary are checked. All provider files remain bundled and signed.

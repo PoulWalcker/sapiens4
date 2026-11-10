@@ -11,13 +11,16 @@ import System.Process
 main :: IO ()
 main = do
  root <- getCurrentDirectory >>= buildPath
+ -- Environment changes alone do not invalidate Cabal's cached executables.
+ -- Keep the declared target fixed for both direct source and package builds.
+ when (os=="darwin") $ setEnv "MACOSX_DEPLOYMENT_TARGET" "13.0"
  -- Source releases omit test helpers; development checkouts build the probes.
  helpers <- filterM (doesFileExist . (root </>) . snd)
   ([("sapiens-peer","spec/support/Peer.hs")] ++
    if os=="mingw32" then [("sapiens-windows-probe","spec/support/WindowsProbeMain.hs"),("sapiens-provider","spec/support/WindowsProviderMain.hs")] else [])
  let project = root </> "submodules/libs4/haskell"
      cache = project </> ".cabal"
-     build = project </> ".build"
+     build = project </> (if os=="darwin" then ".build/macos-13.0" else ".build")
      suffix = if os=="mingw32" then ".exe" else ""
      targets = ["sapiens4","sapiens-domain"] ++ map fst helpers ++ if os=="darwin" then ["sapiens-macos"] else if os=="mingw32" then ["sapiens-windows"] else []
  setEnv "CABAL_DIR" cache
@@ -47,7 +50,8 @@ main = do
   createDirectoryIfMissing True build
   callProcess "windres" ["-I",root</>"environments/windows",root</>"environments/windows/resources.rc","-O","coff","-o",build</>"windows-resources.o"]
  let cabal args = callProcess "cabal" (["--project-file="<>project</>"cabal.project","--builddir="<>build]++args)
- cabal (["build"]++map ("exe:"++) (filter (/="sapiens-windows") targets))
+ cabal (["build"]++map ("exe:"++) (filter (/="sapiens-windows") targets)++
+  ["--ghc-options=-optc-mmacosx-version-min=13.0 -optl-mmacosx-version-min=13.0" | os=="darwin"])
  -- The desktop resource already contains the application's DPI/UAC manifest.
  when (os=="mingw32") $ cabal ["build","exe:sapiens-windows","--ghc-options=-fno-gen-manifest"]
  createDirectoryIfMissing True (root </> ".build/bin")

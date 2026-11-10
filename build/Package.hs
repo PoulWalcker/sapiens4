@@ -28,11 +28,12 @@ main = do
 tool :: FilePath -> [String] -> IO ()
 tool root args = do
  let project = root</>"submodules/libs4/haskell"
+     build = project</>(if os=="darwin" then ".build/macos-13.0" else ".build")
      folder = root</>".build/package-tool"
      executable = folder</>"sapiens-package"++if os=="mingw32" then ".exe" else ""
  createDirectoryIfMissing True folder
  setEnv "CABAL_DIR" (project</>".cabal")
  -- Cabal supplies the pinned package environment; GHC --make reuses this tool's
  -- objects across stage/finalize/verify/receipt, unlike runghc on every call.
- callProcess "cabal" ["--project-file="++project</>"cabal.project","--builddir="++project</>".build","exec","--","ghc","-v0","-O0","-ibuild/package","-outputdir",folder,"-o",executable,"build/package/Main.hs"]
+ callProcess "cabal" ["--project-file="++project</>"cabal.project","--builddir="++build,"exec","--","ghc","-v0","-O0","-ibuild/package","-outputdir",folder,"-o",executable,"build/package/Main.hs"]
  callProcess executable args
