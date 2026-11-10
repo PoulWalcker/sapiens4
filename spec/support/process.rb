@@ -67,10 +67,6 @@ module Contract
       end
     end
 
-    def status
-      @thread.value unless @thread.alive?
-    end
-
     def finish(timeout = 15)
       raise "Process #{@pid} timed out: #{@stderr}" unless @thread.join(timeout)
       @readers.each(&:join)

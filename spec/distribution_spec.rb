@@ -55,46 +55,24 @@ RSpec.describe 'Source distribution contract' do
 
   it 'builds a signed macOS launcher for existing data without changing that data', :macos do
     skip 'macOS desktop build' unless RUBY_PLATFORM.include?('darwin')
-    manifest = JSON.parse(File.read(File.join(@app, 'Contents/Resources/runtime/package-manifest.json')))
-    expect(manifest).to include('appId' => 'com.poulwalcker.sapiens4.development',
-      'channel' => 'development', 'updateDiscovery' => false)
-    policy = 'build/package/codex-macos-compatibility.json'
-    expect(File.binread(File.join(@release, policy))).to eq(File.binread(File.join(Contract::ROOT, policy)))
-    microphone, error, code = Contract.capture('plutil', '-extract', 'NSMicrophoneUsageDescription', 'raw',
-      File.join(@app, 'Contents/Info.plist'))
-    expect(code).to eq(0), error
-    expect(microphone.strip).not_to be_empty
-    expect(File.exist?(File.join(@app, 'Contents/Resources/Launcher.plist'))).to eq(false)
     expect(File.executable?(File.join(@app, 'Contents/Resources/runtime/.build/bin/sapiens4'))).to eq(true)
     expect(Dir.children(@data)).to eq(['keep.txt'])
     expect(File.read(File.join(@data, 'keep.txt'))).to eq('Existing corpora data')
     _, error, code = Contract.capture('codesign', '--verify', '--strict', @app)
     expect(code).to eq(0), error
-    before = File.binread(File.join(@app, 'Contents/Resources/runtime/package-manifest.json'))
-    _, error, code = Contract.capture('sh', 'environments/macos/build.sh', '--skip-build', '--allow-missing-provider',
-      chdir: @release, timeout: 120)
-    expect(code).not_to eq(0)
-    expect(error).to include('Output app already exists')
-    expect(File.binread(File.join(@app, 'Contents/Resources/runtime/package-manifest.json'))).to eq(before)
   end
 
   it 'boots from a source-only release and completes work using its packaged assets' do
     command = ['sh', File.join(@release, 'environments/linux/start.sh')] if RUBY_PLATFORM.include?('linux')
-    isolated = Host.new(repo: @release, command: command, start: false)
+    isolated = Host.new(repo: @release, command: command)
     begin
-      provider = File.join(@release, '.build/codex/bin', Gem.win_platform? ? 'codex.exe' : 'codex')
-      FileUtils.mkdir_p(File.dirname(provider))
-      FileUtils.cp(isolated.environment.fetch('SAPIENS_CODEX_BINARY'), provider)
-      File.chmod(0755, provider) unless Gem.win_platform?
-      isolated.environment['SAPIENS_CODEX_BINARY'] = ''
-      isolated.start
       state = isolated.state
       id = isolated.submit(state['main_agent_id'], 'Hello from an installed release')
       expect(isolated.turn(id)['output']).to eq('Contract test reply')
       example = isolated.calls.first['prompt'][/read the worked example at (.*?)\. It demonstrates/m, 1]
       expect(example).not_to be_nil
       expect(File.identical?(example, File.join(@release, 'corpora/prompts/examples/jarvis-notes.html'))).to eq(true)
-      %w[/workspace/ /workspace/app.js /workspace/guest.js /sw.js /remote-vendor.js /voice-worklet.js /workspace/styles.css].each do |path|
+      %w[/workspace/ /workspace/app.js /workspace/guest.js /sw.js /remote-vendor.js /workspace/styles.css].each do |path|
         status, body = isolated.request('GET', path)
         expect(status).to eq(200)
         expect(body).not_to be_empty

@@ -48,6 +48,8 @@ $env:SAPIENS_TEST_BLINDLY4 = 'C:\path\to\blindly4.exe'
 ruby submodules/libs4/ruby/bundle.rb exec rspec
 ```
 
+Set `SAPIENS_TEST_WINDOWS_PACKAGE` to a package built with `environments/windows/build.ps1`
+to include packaged-runtime checks. Test ARM64 and x64 on matching systems.
 Use `--tag desktop` for focused UI runs. Desktop tests automatically use the bundled
 Blindly4 build on macOS and Windows; `SAPIENS_TEST_BLINDLY4` optionally selects a
 different executable. A missing driver or a permission or interaction error fails
@@ -94,37 +96,6 @@ shell downloads unavailable before pairing and reloading. It verifies compatibil
 with a cached client without fetching production assets or using live credentials
 during the test. Record the archive's URL, date and hashes alongside test results.
 This is WebKit coverage of the `/ios` entrypoint, not a physical iOS installation.
-
-## Package checks
-
-Use temporary data/config and no live model calls. The native package scenario
-verifies final inventories, provider version, HTTP assets, stable identity across
-two launches and graceful exit. On macOS:
-
-```sh
-codesign --verify --deep --strict '.build/macos/Sapiens4 Development.app'
-SAPIENS_TEST_PACKAGE_RUNTIME="$PWD/.build/macos/Sapiens4 Development.app/Contents/Resources/runtime" \
-  ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb
-```
-
-On Windows:
-
-```powershell
-$env:SAPIENS_TEST_PACKAGE_RUNTIME = (Resolve-Path .build/windows/Sapiens4-Development-win-x64/runtime).Path
-ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb
-$env:SAPIENS_TEST_WINDOWS_PACKAGE = (Resolve-Path .build/windows/Sapiens4-Development-win-x64).Path
-$env:SAPIENS_TEST_INSTALLER = (Resolve-Path .build/windows/Sapiens-Setup.exe).Path
-ruby submodules/libs4/ruby/bundle.rb exec rspec spec/windows_package_spec.rb
-```
-
-Use a disposable Windows account without an existing Development installation.
-The installer scenario covers install/reinstall, active-operation refusal and
-uninstall preserving synthetic external state and unknown installed files.
-`SAPIENS_TEST_INSTALLER_EVIDENCE` optionally selects its log directory.
-For Stable set `PACKAGE_CHANNEL=stable` and replace Development app/package paths
-with `Sapiens4.app` / `Sapiens4-win-x64`. Use the actual output directory if different.
-Native UI/permissions, target OS and downloaded signed-artifact trust need separate
-acceptance; package checks do not establish them.
 
 ## Coverage limits
 
