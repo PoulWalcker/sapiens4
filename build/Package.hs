@@ -35,5 +35,5 @@ tool root args = do
  setEnv "CABAL_DIR" (project</>".cabal")
  -- Cabal supplies the pinned package environment; GHC --make reuses this tool's
  -- objects across stage/finalize/verify/receipt, unlike runghc on every call.
- callProcess "cabal" ["--project-file="++project</>"cabal.project","--builddir="++build,"exec","--","ghc","-v0","-O0","-ibuild/package","-outputdir",folder,"-o",executable,"build/package/Main.hs"]
+ callProcess "cabal" ["--project-file="++project</>"cabal.project","--builddir="++build,"exec","--","ghc","-v0","-O0","-threaded","-ibuild/package","-outputdir",folder,"-o",executable,"build/package/Main.hs"]
  callProcess executable args
