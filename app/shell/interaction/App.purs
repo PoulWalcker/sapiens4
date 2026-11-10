@@ -196,6 +196,7 @@ handle runtime input = session input
     CloseMenu -> E.runUpdate runtime dispatch U.CloseMenu
     Scroll -> E.captureScroll *> E.persistLocal
     UserScroll -> H.modify_ _ {scrollPosition=Nothing,restoringScroll=false}
+    NativeReport report | report.op == "storage" -> dispatch $ StorageReceived report.body
     NativeReport report -> E.runUpdate runtime dispatch $ U.QueueNative report
     DrainNative -> E.runUpdate runtime dispatch U.DrainNative
     Browser command -> do

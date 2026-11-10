@@ -7,6 +7,7 @@ import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
 import Data.Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy as L
 import DataRoot
@@ -34,7 +35,7 @@ import Data.List (stripPrefix)
 
 data Application = Application { native :: Obj, browser :: IORef Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: IORef (Maybe ServerProcess), address :: IORef Text, startup :: IORef (Maybe (Async ())), starting :: IORef Bool, localLoaded :: IORef Bool, runtime :: FilePath, windowSetup :: IORef (Maybe Text) }
 
-data ServerProcess = ServerProcess ProcessHandle Handle (Async ())
+data ServerProcess = ServerProcess ProcessHandle Handle (Async ()) FilePath
 
 post :: Application -> IO () -> IO ()
 post application action = atomicModifyIORef' (pending application) (\actions -> (actions ++ [action],()))
@@ -46,7 +47,7 @@ check application = do
     current <- readIORef (child application)
     case current of
         Nothing -> pure ()
-        Just (ServerProcess process _ _) -> do
+        Just (ServerProcess process _ _ _) -> do
             alive <- isNothing <$> getProcessExitCode process
             if alive then do
                 b <- readIORef (browser application)
@@ -72,7 +73,7 @@ startServer choice runtime destination = mask $ \restore -> do
     mapM_ (\h -> hSetEncoding h utf8 >> hSetNewlineMode h universalNewlineMode) [input,output,errors] `onException` cleanup
     reader <- async $ withFile (destination </> "desktop-server.log") AppendMode $ \logFile ->
         (forever (hGetLine errors >>= hPutStrLn logFile >> hFlush logFile)) `catch` (\(_ :: IOException) -> pure ())
-    let server = ServerProcess process input reader
+    let server = ServerProcess process input reader destination
         await = do
             ended <- hIsEOF output
             when ended $ do
@@ -91,7 +92,7 @@ startServer choice runtime destination = mask $ \restore -> do
     pure (server, ready)
 
 stopServer :: ServerProcess -> IO ()
-stopServer (ServerProcess process input reader) = stop `finally` (cancel reader >> (hClose input `catch` (\(_ :: IOException) -> pure ())))
+stopServer (ServerProcess process input reader _) = stop `finally` (cancel reader >> (hClose input `catch` (\(_ :: IOException) -> pure ())))
     where
         stop = do
             (hPutStrLn input "stop" >> hFlush input >> hClose input) `catch` (\(_ :: IOException) -> pure ())
@@ -157,7 +158,7 @@ installMethods application = do
                     case selection of
                         Left (e :: IOException) -> showStorageError application (T.pack (storageMessage e))
                         Right Nothing -> pure ()
-                        Right (Just directory) -> startSelected application AttachExisting directory
+                        Right (Just directory) -> startSelected application AttachExisting directory Nothing
     on3 "webView:didFailNavigation:withError:" (\view _ err -> withBrowser $ \b -> failed b view err)
     on3 "webView:didFailProvisionalNavigation:withError:" (\view _ err -> withBrowser $ \b -> failed b view err)
     on1 "webViewWebContentProcessDidTerminate:" $ \view -> withBrowser $ \b -> do
@@ -229,7 +230,7 @@ initialize application target address = do
     void (obj1 win "setContentView:" container); void (obj1 win "setReleasedWhenClosed:" (int 0))
     unless (fixture application) $ do
         size win "setMinSize:" 560 340
-        size win "setContentSize:" 560 340
+        size win "setContentSize:" 560 600
     void (obj0 win "center")
     showWindow application
     timerClass <- cls "NSTimer"; timerSelector <- sel "scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:"; tick <- sel "tick:"
@@ -316,7 +317,7 @@ receiveMessage :: Application -> Obj -> IO ()
 receiveMessage application message = do
     b <- readIORef (browser application)
     active <- readIORef (child application)
-    if isJust active || fixture application then receive b message (setSetupWindow application) else do
+    if isJust active || fixture application then receive b message (setSetupWindow application) (storageMessageReceived application) else do
         sh <- readIORef (shell b)
         sourceView <- obj0 message "webView"
         frame <- obj0 message "frameInfo"
@@ -329,75 +330,127 @@ receiveMessage application message = do
             forM_ raw $ \input -> do
               when (text (field "storageStage" input)=="storage") $ do
                 win <- readIORef (windowRef application)
-                size win "setContentSize:" 560 400
+                size win "setContentSize:" 560 600
               case text (field "storage" input) of
-                "new" -> defaultDataDirectory >>= startSelected application StartNew
+                "new" -> defaultDataDirectory >>= \directory -> startSelected application StartNew directory Nothing
                 "existing" -> do
-                    panel <- new "NSOpenPanel"
-                    void (obj1 panel "setCanChooseDirectories:" (int 1))
-                    void (obj1 panel "setCanChooseFiles:" (int 0))
-                    void (obj1 panel "setAllowsMultipleSelection:" (int 0))
-                    void (obj1 panel "setShowsHiddenFiles:" (int 1))
-                    setText panel "setPrompt:" "Open data"
-                    result <- long panel "runModal"
-                    when (result==1) $ obj0 panel "URL" >>= (\u -> textProp u "path") >>= startSelected application AttachExisting . T.unpack
+                    busy <- atomicModifyIORef' (starting application) (\old -> (True,old))
+                    unless busy $ do
+                        selected <- chooseDataDirectory `finally` writeIORef (starting application) False
+                        forM_ selected $ \directory -> startSelected application AttachExisting directory Nothing
                 _ -> pure ()
 
-startSelected :: Application -> StorageChoice -> FilePath -> IO ()
-startSelected application choice directory = do
+chooseDataDirectory :: IO (Maybe FilePath)
+chooseDataDirectory = do
+    panel <- new "NSOpenPanel"
+    void (obj1 panel "setCanChooseDirectories:" (int 1))
+    void (obj1 panel "setCanChooseFiles:" (int 0))
+    void (obj1 panel "setAllowsMultipleSelection:" (int 0))
+    void (obj1 panel "setShowsHiddenFiles:" (int 1))
+    setText panel "setPrompt:" "Choose data"
+    result <- long panel "runModal"
+    if result/=1 then pure Nothing else Just . T.unpack <$> (obj0 panel "URL" >>= (\u -> textProp u "path"))
+
+serverDirectory :: ServerProcess -> FilePath
+serverDirectory (ServerProcess _ _ _ directory) = directory
+
+serverRunning :: Maybe ServerProcess -> IO Bool
+serverRunning Nothing = pure False
+serverRunning (Just (ServerProcess process _ _ _)) = isNothing <$> getProcessExitCode process
+
+storageReply :: Application -> Value -> Value -> IO ()
+storageReply application request fields = do
+    b <- readIORef (browser application)
+    let payload = case fields of
+            Object values -> Object (KeyMap.insert "request" (field "request" request) values)
+            _ -> fields
+    emit b (object ["action" .= ("storage" :: Text),"fields" .= payload])
+
+storageMessageReceived :: Application -> Value -> IO ()
+storageMessageReceived application request = unless (fixture application) $ do
+    step <- readIORef (windowSetup application)
+    when (step==Just "provider") $ do
+        active <- readIORef (child application)
+        case text (field "operation" request) of
+            "info" -> do
+                directory <- defaultDataDirectory
+                available <- serverRunning active
+                storageReply application request (object ["kind" .= ("info" :: Text),"current" .= maybe "" serverDirectory active,"default" .= directory,"available" .= available])
+            "pick" -> do
+                busy <- atomicModifyIORef' (starting application) (\old -> (True,old))
+                unless busy $ flip finally (writeIORef (starting application) False) $ do
+                    selected <- chooseDataDirectory
+                    storageReply application request $ case selected of
+                        Nothing -> object ["kind" .= ("cancelled" :: Text)]
+                        Just directory -> object ["kind" .= ("picked" :: Text),"directory" .= directory]
+            "apply" -> do
+                let choice=if text (field "mode" request)=="new" then StartNew else AttachExisting
+                directory <- if choice==StartNew then defaultDataDirectory else pure (T.unpack (text (field "directory" request)))
+                when (isAbsolute directory) $ startSelected application choice directory (Just request)
+            _ -> pure ()
+
+startSelected :: Application -> StorageChoice -> FilePath -> Maybe Value -> IO ()
+startSelected application choice directory request = do
     busy <- atomicModifyIORef' (starting application) (\old -> (True,old))
     unless busy $ do
         b <- readIORef (browser application)
         view <- readIORef (shell b)
         script view "window.storageLoading?.()"
+        previousServer <- readIORef (child application)
         task <- async $ do
             result <- try $ do
-                let binary=runtime application </> ".build/bin/sapiens4"
-                (code,_,errors) <- readProcessWithExitCode binary ["check-data",directory,if choice==StartNew then "new" else "existing"] ""
-                unless (code==ExitSuccess) $ ioError (userError errors)
-                guestScript <- TIO.readFile (runtime application </> ".build/web/guest.js")
-                mask $ \restore -> do
-                    (server,readyAddress) <- restore (startServer choice (runtime application) directory)
-                    writeIORef (child application) (Just server)
-                    restore (saveDataDirectory directory) `onException`
-                        (writeIORef (child application) Nothing >> stopServer server)
-                    writeIORef (address application) readyAddress
+                selected <- canonicalizePath directory
+                alive <- serverRunning previousServer
+                if choice==AttachExisting && alive && maybe False ((==selected) . serverDirectory) previousServer then
                     post application $ do
-                        previous <- readIORef (browser application)
-                        old <- readIORef (shell previous)
-                        let recover (e :: SomeException) = do
-                                writeIORef (browser application) previous
-                                atomicModifyIORef' (child application) (\current -> (Nothing,current)) >>= mapM_ stopServer
-                                writeIORef (starting application) False
-                                showStorageError application (T.pack (storageMessage e))
-                        (do
-                            next <- newBrowser readyAddress guestScript
-                            target <- readIORef (delegate previous)
-                            writeIORef (delegate next) target
-                            writeIORef (browser application) next
-                            view <- createShell application target
-                            container <- obj0 old "superview"
-                            void (obj1 container "addSubview:" view)
-                            void (obj1 view "setTranslatesAutoresizingMaskIntoConstraints:" (int 0))
-                            forM_ ["leadingAnchor","trailingAnchor","topAnchor","bottomAnchor"] $ \name -> do
-                                edge <- obj0 view name
-                                parentEdge <- obj0 container name
-                                constraint <- obj1 edge "constraintEqualToAnchor:" parentEdge
-                                void (obj1 constraint "setActive:" (int 1))
-                            win <- readIORef (windowRef application)
-                            size win "setContentSize:" 560 600
-                            loadURL view readyAddress
-                            void (obj0 old "removeFromSuperview")
-                            void (obj0 (origin previous) "release")
-                            writeIORef (starting application) False) `catch` recover
+                        writeIORef (starting application) False
+                        forM_ request $ \input -> storageReply application input (object ["kind" .= ("unchanged" :: Text)])
+                  else do
+                    let binary=runtime application </> ".build/bin/sapiens4"
+                    -- Validate a different target while the current server still
+                    -- owns its lock. Startup repeats validation under the new lock.
+                    (code,_,errors) <- readProcessWithExitCode binary ["check-data",selected,if choice==StartNew then "new" else "existing"] ""
+                    unless (code==ExitSuccess) $ ioError (userError errors)
+                    guestScript <- TIO.readFile (runtime application </> ".build/web/guest.js")
+                    mask $ \restore -> do
+                        restore (mapM_ stopServer previousServer)
+                        (server,readyAddress) <- restore (startServer choice (runtime application) selected)
+                        writeIORef (child application) (Just server)
+                        restore (saveDataDirectory selected) `onException`
+                            (stopServer server `finally` writeIORef (child application) previousServer)
+                        writeIORef (address application) readyAddress
+                        post application $ do
+                            previous <- readIORef (browser application)
+                            old <- readIORef (shell previous)
+                            let recover (e :: SomeException) = do
+                                    writeIORef (browser application) previous
+                                    stopServer server `finally` writeIORef (child application) previousServer
+                                    writeIORef (starting application) False
+                                    storageFailure application request e
+                            (do
+                                next <- newBrowser readyAddress guestScript
+                                target <- readIORef (delegate previous)
+                                writeIORef (delegate next) target
+                                writeIORef (shell next) old
+                                sync previous (object [])
+                                writeIORef (browser application) next
+                                loadURL old readyAddress
+                                void (obj0 (origin previous) "release")
+                                writeIORef (starting application) False) `catch` recover
             case result of
                 Left (e :: SomeException) -> case fromException e :: Maybe SomeAsyncException of
                     Just _ -> throwIO e
-                    Nothing -> do
-                        atomicModifyIORef' (child application) (\current -> (Nothing,current)) >>= mapM_ stopServer
-                        post application $ writeIORef (starting application) False >> showStorageError application (T.pack (storageMessage e))
+                    Nothing -> post application $ do
+                        writeIORef (starting application) False
+                        storageFailure application request e
                 Right () -> pure ()
         writeIORef (startup application) (Just task)
+
+storageFailure :: Application -> Maybe Value -> SomeException -> IO ()
+storageFailure application Nothing e = showStorageError application (T.pack (storageMessage e))
+storageFailure application (Just request) e = do
+    available <- readIORef (child application) >>= serverRunning
+    storageReply application request (object ["kind" .= ("error" :: Text),"error" .= storageMessage e,"available" .= available])
 
 -- Setup size is transient. Save/restore the normal workspace frame only after
 -- completion; all stages continue to use the same NSWindow.
@@ -410,7 +463,7 @@ setSetupWindow application setup step = unless (fixture application) $ do
         if setup then do
             setText win "setFrameAutosaveName:" ""
             size win "setMinSize:" 560 340
-            size win "setContentSize:" 560 (case step of "permissions" -> 360; "ready" -> 400; "corpora" -> 500; _ -> 600)
+            size win "setContentSize:" 560 600
           else do
             size win "setMinSize:" 720 540
             size win "setContentSize:" 1180 820

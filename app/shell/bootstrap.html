@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'unsafe-inline'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'unsafe-inline'">
 <title>Sapiens4</title>
 <link rel="stylesheet" href="../theme/styles.css">
 <link rel="stylesheet" href="../theme/live.css">
@@ -11,8 +11,8 @@
 <style>
 html,body{margin:0;min-height:100%;background:var(--sapi-bg)}
 body{min-height:100vh;display:flex;align-items:stretch;justify-content:center}
-main{box-sizing:border-box;width:min(100%,520px);min-height:100vh;padding:24px 30px;display:flex;flex-direction:column}
-.setup-stage{flex:1;display:flex;flex-direction:column;justify-content:center;padding:16px 0;min-height:0}
+main{box-sizing:border-box;width:min(100%,540px);height:100dvh;min-height:0;padding:24px 30px;display:flex;flex-direction:column}
+.setup-stage{flex:1;display:flex;flex-direction:column;padding:clamp(25px,6vh,55px) 0 24px;min-height:0;overflow:auto}
 h1{font:600 27px/1.2 var(--sapi-font);letter-spacing:-.8px;margin:0 0 10px}
 p{color:var(--sapi-muted);font-size:13px;line-height:1.6;margin:0 0 18px}
 .setup-intro{max-width:410px}
@@ -20,6 +20,7 @@ p{color:var(--sapi-muted);font-size:13px;line-height:1.6;margin:0 0 18px}
 .setup-benefits li::before{content:'✓';color:var(--sapi-muted);margin-right:9px}
 .setup-bootstrap .setup-footer{margin-top:0;min-height:52px}
 .setup-bootstrap .setup-choice{width:100%;min-height:64px;cursor:pointer;text-align:left}
+.setup-bootstrap .setup-choice[aria-pressed=true]{border-color:var(--setup-accent)}
 .setup-choice-list{display:grid;gap:8px;margin:12px 0 8px}
 .setup-choice-symbol{display:grid;place-items:center;width:30px;height:30px;flex:none;border-radius:7px;background:var(--sapi-pink-tint);font-size:18px;font-weight:500}
 .setup-choice-copy{display:grid;gap:3px;flex:1}
@@ -39,7 +40,7 @@ if(matchMedia('(prefers-color-scheme:dark)').matches) document.documentElement.d
 <body class="sapi-workspace setup-bootstrap">
 <main>
 <header class="setup-header">
-  <div class="setup-wordmark"><span class="setup-mark" aria-hidden="true">✳</span><span>sapiens</span></div>
+  <div class="setup-wordmark"><picture aria-hidden="true"><source media="(prefers-color-scheme: dark)" srcset="favicon-dark.svg"><img class="setup-mark" src="favicon.svg" alt=""></picture><span>Sapiens4</span></div>
   <span class="setup-kicker">SETUP</span>
 </header>
 <div class="setup-progress" aria-hidden="true"><div class="setup-progress-fill" id="setup-progress-fill"></div></div>
@@ -56,12 +57,12 @@ if(matchMedia('(prefers-color-scheme:dark)').matches) document.documentElement.d
     <h1>Where should we start?</h1>
     <p class="setup-intro">Create your space or continue with existing Sapiens data.</p>
     <div class="setup-choice-list">
-      <button type="button" class="setup-choice" onclick="chooseStorage('new')">
+      <button type="button" class="setup-choice" aria-pressed="true" onclick="selectStorage('new')">
         <span class="setup-choice-symbol" aria-hidden="true">+</span>
         <span class="setup-choice-copy"><strong>Start fresh</strong><small>Use the default location for your Sapiens data.</small></span>
         <span class="setup-choice-arrow" aria-hidden="true">›</span>
       </button>
-      <button type="button" class="setup-choice" onclick="chooseStorage('existing')">
+      <button type="button" class="setup-choice" aria-pressed="false" onclick="selectStorage('existing')">
         <span class="setup-choice-symbol" aria-hidden="true">↗</span>
         <span class="setup-choice-copy"><strong>Continue with existing data</strong><small>Use your existing agents and conversations.</small></span>
         <span class="setup-choice-arrow" aria-hidden="true">›</span>
@@ -77,10 +78,19 @@ if(matchMedia('(prefers-color-scheme:dark)').matches) document.documentElement.d
 </div>
 <footer class="setup-footer">
   <button class="button" id="storage-back" type="button" onclick="welcomeScreen()" hidden>← Back</button>
-  <button class="button primary" id="get-started" type="button" onclick="storageScreen()">Get started →</button>
+  <button class="button primary" id="get-started" type="button" onclick="continueSetup()">Continue</button>
 </footer>
 </main>
 <script>
+let storageChoice='new';
+function selectStorage(choice) {
+ storageChoice=choice;
+ document.querySelectorAll('#storage .setup-choice').forEach((button,index)=>button.setAttribute('aria-pressed',String((index===0)===(choice==='new'))));
+}
+function continueSetup() {
+ if(!document.getElementById('welcome').hidden) storageScreen();
+ else chooseStorage(storageChoice);
+}
 function welcomeScreen() {
  document.getElementById('welcome').hidden=false;
  document.getElementById('storage').hidden=true;
@@ -95,7 +105,7 @@ function storageScreen(error='') {
  document.getElementById('storage').hidden=false;
  document.getElementById('loading').hidden=true;
  document.getElementById('storage-back').hidden=false;
- document.getElementById('get-started').hidden=true;
+ document.getElementById('get-started').hidden=false;
  document.getElementById('setup-progress-fill').style.width='20%';
  document.getElementById('error').textContent=error;
  document.querySelectorAll('button').forEach(b=>b.disabled=false);
@@ -106,13 +116,8 @@ function storageScreen(error='') {
 }
 function storageError(message) { storageScreen(message); }
 function storageLoading() {
- document.getElementById('welcome').hidden=true;
- document.getElementById('storage').hidden=true;
- document.getElementById('loading').hidden=false;
  document.querySelectorAll('button').forEach(b=>b.disabled=true);
  document.getElementById('setup-progress-fill').style.width='32%';
- document.getElementById('storage-back').hidden=true;
- document.getElementById('get-started').hidden=true;
 }
 function chooseStorage(storage) {
  const message={storage};

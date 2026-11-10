@@ -3,6 +3,58 @@ require 'sqlite3'
 require 'time'
 
 RSpec.describe 'Local Codex setup' do
+  it 'allows skipping AI and revisiting setup decisions without enabling execution' do
+    host = Host.new(start: false)
+    config = host.environment.fetch('SAPIENS_CONFIG_DIR')
+    File.delete(File.join(config, 'onboarding.json'))
+    File.delete(File.join(config, 'codex/auth.json'))
+    host.environment['SAPIENS_CODEX_BINARY'] = File.join(host.root, 'missing-codex')
+    host.start
+    selected = host.api('GET', '/api/corpora').fetch('id')
+    expect(host.api('POST', '/api/host/onboarding', action: 'provider-skip')).to include('step' => 'permissions', 'ready' => false)
+    host.restart
+    expect(host.api('GET', '/api/host/onboarding')).to include('step' => 'permissions', 'completed' => false)
+    host.api('POST', '/api/host/onboarding', action: 'permissions-done', selected_corpora: selected)
+    expect(host.api('POST', '/api/host/onboarding', action: 'back')).to include('step' => 'permissions', 'selected_corpora' => selected)
+    expect(host.api('POST', '/api/host/onboarding', action: 'back')).to include('step' => 'provider')
+    host.api('POST', '/api/host/onboarding', {action: 'back'}, status: 409)
+    host.api('POST', '/api/host/onboarding', action: 'provider-skip')
+    host.api('POST', '/api/host/onboarding', action: 'permissions-done', choose_corpora: true, selected_corpora: selected)
+    expect(host.api('POST', '/api/host/onboarding', action: 'back')).to include('step' => 'permissions')
+    host.api('POST', '/api/host/onboarding', action: 'permissions-done', choose_corpora: true, selected_corpora: selected)
+    host.api('POST', '/api/host/onboarding', action: 'corpora-done', selected_corpora: selected)
+    expect(host.api('POST', '/api/host/onboarding', action: 'back', choose_corpora: true)).to include('step' => 'corpora')
+    host.api('POST', '/api/host/onboarding', action: 'corpora-done', selected_corpora: selected)
+    expect(host.api('POST', '/api/host/onboarding', action: 'finish', selected_corpora: selected)).to include('completed' => true, 'ready' => false, 'hold' => 'disconnected')
+    host.api('POST', '/api/host/onboarding', {action: 'back'}, status: 409)
+    host.api('POST', "/api/agents/#{host.state.fetch('main_agent_id')}/messages", {text: 'AI is still unavailable'}, status: 409)
+    expect(host.calls).to be_empty
+  ensure
+    host&.close
+  end
+
+  it 'keeps an unverified existing login held when optional setup completes' do
+    host = Host.new(start: false)
+    config = host.environment.fetch('SAPIENS_CONFIG_DIR')
+    File.delete(File.join(config, 'onboarding.json'))
+    binary = host.environment.fetch('SAPIENS_CODEX_BINARY')
+    provider = File.read(binary)
+    File.write(binary, "#!#{RbConfig.ruby}\nexit 1 if ARGV.include?('status')\nload #{File.join(__dir__, 'support/provider.rb').inspect}\n")
+    host.start
+    selected = host.api('GET', '/api/corpora').fetch('id')
+    host.api('POST', '/api/host/onboarding', action: 'provider-skip')
+    host.api('POST', '/api/host/onboarding', action: 'permissions-done', selected_corpora: selected)
+    expect(host.api('POST', '/api/host/onboarding', action: 'finish', selected_corpora: selected)).to include('completed' => true, 'provider' => 'unavailable', 'hold' => 'review')
+    File.write(binary, provider)
+    host.restart
+    expect(host.api('GET', '/api/host/onboarding')).to include('completed' => true, 'provider' => 'signed_in', 'ready' => false, 'hold' => 'review')
+    host.api('POST', "/api/agents/#{host.state.fetch('main_agent_id')}/messages", {text: 'Wait for account review'}, status: 409)
+    host.api('POST', '/api/host/onboarding', action: 'resume')
+    host.turn(host.submit(host.state.fetch('main_agent_id'), 'Account reviewed'))
+  ensure
+    host&.close
+  end
+
   it 'blocks AI with existing authentication until setup is durably complete' do
     host = Host.new(start: false)
     setup = File.join(host.environment.fetch('SAPIENS_CONFIG_DIR'), 'onboarding.json')
@@ -161,11 +213,12 @@ RSpec.describe 'Local Codex setup' do
     # Finishing setup must not clear an independent safety hold.
     hold = File.join(host.environment.fetch('SAPIENS_CONFIG_DIR'), 'account-state.json')
     Contract.atomic_json(hold, hold: 'review')
-    host.api('POST', '/api/host/onboarding', {action: 'finish', selected_corpora: selected}, status: 409)
+    expect(host.api('POST', '/api/host/onboarding', action: 'finish', selected_corpora: selected)).to include('completed' => true, 'hold' => 'review')
     expect(JSON.parse(File.read(hold)).fetch('hold')).to eq('review')
-    host.api('POST', '/api/host/onboarding', action: 'resume')
     expect(host.calls).to be_empty
-    host.api('POST', '/api/host/onboarding', action: 'finish', selected_corpora: selected)
+    host.restart
+    expect(host.api('GET', '/api/host/onboarding')).to include('completed' => true, 'hold' => 'review')
+    host.api('POST', '/api/host/onboarding', action: 'resume')
     Contract.wait(timeout: 85, description: 'scheduled AI execution after setup') { !host.calls.empty? }
     turn = host.state.fetch('turns').find { |t| t['id'] == scheduled.fetch('id') }
     expect(%w[running output_pending done]).to include(turn.fetch('status'))

@@ -81,6 +81,11 @@ data Action
   | ScanFrame Int
   | UploadQR
   | StopScan
+  | StorageNavigate M.SetupPage
+  | StorageChoose M.StorageChoice
+  | StoragePick
+  | StorageApply
+  | StorageReceived Json
   | ProviderNavigate M.ProviderPage
   | OnboardingPoll Int
   | HostPairPoll Int

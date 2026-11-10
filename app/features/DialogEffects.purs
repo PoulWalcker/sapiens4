@@ -74,6 +74,38 @@ handle runtime dispatch action = case action of
         void $ H.fork $ H.liftAff $ C.cancelPairing runtime
         H.modify_ Dialog.close
         E.sync runtime
+  StorageNavigate page -> do
+    m <- H.get
+    traverse_ (\d -> when (d.kind == M.Onboarding && not (Dialog.authenticating d) && D.s "step" (F.setupValue d.content) == "provider") do
+      E.modifyDialog d.identity \current -> current {storage=current.storage {page=page},status=M.Editing}
+      when (page == M.ChooseStorage && d.storage.current == "") $ storageRequest m d "info" "" "") m.dialog
+  StorageChoose choice -> do
+    m <- H.get
+    traverse_ (\d -> when (d.kind == M.Onboarding && d.storage.page == M.ChooseStorage && not (M.dialogBusy d)) do
+      E.modifyDialog d.identity \current -> current {storage=current.storage {choice=choice},status=M.Editing}
+      when (choice == M.ExistingStorage && d.storage.directory == "") $ dispatch StoragePick) m.dialog
+  StoragePick -> do
+    m <- H.get
+    traverse_ (\d -> when (d.kind == M.Onboarding && d.storage.page == M.ChooseStorage && not (M.dialogBusy d)) $ storageRequest m d "pick" "" "") m.dialog
+  StorageApply -> do
+    m <- H.get
+    traverse_ (\d -> when (d.kind == M.Onboarding && d.storage.page == M.ChooseStorage && not (M.dialogBusy d)) do
+      let storage = d.storage
+          unchanged = storage.choice == M.KeepStorage || storage.choice == M.ExistingStorage && storage.directory == storage.current
+      if unchanged && storage.available then E.modifyDialog d.identity \current -> current {storage=current.storage {page=M.SetupSteps},status=M.Editing}
+      else when (storage.current /= "" && (storage.choice /= M.ExistingStorage || storage.directory /= "")) $
+        storageRequest m d "apply" (if storage.choice == M.FreshStorage then "new" else "existing") (if storage.choice == M.KeepStorage then storage.current else storage.directory)) m.dialog
+  StorageReceived value -> E.inDialog (D.int $ D.get "request" value) \d -> when (d.kind == M.Onboarding && M.dialogBusy d) do
+    let kind = D.s "kind" value
+    E.modifyDialog d.identity \current ->
+      let storage = current.storage
+          next = case kind of
+            "info" -> storage {current=D.s "current" value,defaultDirectory=D.s "default" value,available=D.b "available" value}
+            "picked" -> storage {choice=M.ExistingStorage,directory=D.s "directory" value}
+            "unchanged" -> storage {page=M.SetupSteps,available=true}
+            "error" -> storage {available=D.b "available" value}
+            _ -> storage
+      in current {storage=next,status=if kind == "error" then M.Rejected (D.s "error" value) else M.Editing}
   ProviderNavigate page -> do
     m <- H.get
     traverse_ (\d -> when (A.elem d.kind [M.AIProviders,M.Onboarding] && not (M.dialogBusy d) && (not (Dialog.authenticating d) || page == M.CodexAuth)) do
@@ -103,6 +135,12 @@ handle runtime dispatch action = case action of
   DialogCommand command -> commandAction command
   _ -> pure unit
   where
+  -- Native operations own a dialog generation. Stale picker replies and
+  -- repeated clicks cannot apply a selection after its owner has changed.
+  storageRequest m d operation mode directory = E.inDialog d.identity \current -> do
+    let requested = current {identity=m.sequence+1,status=M.Submitting ""}
+    H.modify_ _ {dialog=Just requested,sequence=requested.identity}
+    liftEffect $ B.nativeMessage $ D.json {storage:{operation,mode,directory,request:requested.identity}}
   -- Let rendering finish, then recheck the dialog generation before focusing.
   focusSetup id target = void $ H.fork do
     H.liftAff $ toAffE afterRender

@@ -210,7 +210,7 @@ history browser tab predicate action = do
         let done = pending { tabAwaiting = False }
         save browser done; report browser done
 
-receive browser message onSetup = do
+receive browser message onSetup onStorage = do
     sh <- readIORef (shell browser)
     sourceView <- obj0 message "webView"
     frame <- obj0 message "frameInfo"
@@ -227,7 +227,8 @@ receive browser message onSetup = do
           case field "onboarding" input of
             Bool setup -> onSetup setup (text (field "onboardingStep" input))
             _ -> pure ()
-          if bool (field "activate" input) then do
+          if not (T.null (text (field "operation" (field "storage" input)))) then onStorage (field "storage" input)
+          else if bool (field "activate" input) then do
             win <- obj0 sh "window"
             void (obj1 win "deminiaturize:" nullPtr)
             void (obj1 win "makeKeyAndOrderFront:" nullPtr)

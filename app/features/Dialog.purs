@@ -25,7 +25,7 @@ nameHelp :: String
 nameHelp = "Start with A–Z. Letters, numbers, and - _ . : # + | ( ) & $ ^ are allowed. No spaces."
 
 make :: M.DialogKind -> F.Context -> M.Model -> M.Dialog
-make kind record m = {providerPage:M.Providers,kind,title,record,fields,content:F.NoContent,status:M.Editing,identity:m.sequence+1}
+make kind record m = {storage:M.emptyStorage,providerPage:M.Providers,kind,title,record,fields,content:F.NoContent,status:M.Editing,identity:m.sequence+1}
   where
   name = F.contextName record
   title = case kind of
@@ -68,13 +68,13 @@ view m = case m.dialog of
   Nothing -> V.node "dialog" [V.id "modal"] []
   Just d -> V.node "dialog" [V.id $ if M.corporaDialog d.kind then "corpora-dialog" else "modal",V.cls $ if d.kind == M.AppMenu then "app-menu-sheet" else if d.kind == M.Onboarding then "onboarding" else "",V.attr "aria-labelledby" "dialog-title",V.on "cancel" \e -> Link e CloseDialog]
     [V.div (if M.corporaDialog d.kind then "corpora-menu-heading" else "modal-top")
-      [V.when (d.kind == M.Onboarding) $ V.div "setup-wordmark" [V.span [V.cls "setup-mark",V.attr "aria-hidden" "true"] "✳",V.span [] "sapiens"]
+      [V.when (d.kind == M.Onboarding) $ V.div "setup-wordmark" [V.node "img" [V.cls "setup-mark",V.attr "src" (if m.theme == "dark" then "/favicon-dark.svg" else "/favicon.svg"),V.attr "alt" "",V.attr "aria-hidden" "true"] [],V.span [] "Sapiens4"]
       ,V.when (d.kind /= M.Onboarding) $ V.span [V.cls "tiny-label"] "SAPIENS4"
       ,V.when (d.kind == M.Onboarding) $ V.span [V.cls "setup-kicker"] "SETUP"
       ,V.when (dismissible d) $ V.icon (if M.corporaDialog d.kind then "Close" else "Close dialog") "×" CloseDialog]
-    ,V.when (d.kind == M.Onboarding) $ V.node "div" [V.cls "setup-progress",V.attr "aria-hidden" "true"] [V.div ("setup-progress-fill setup-progress-" <> D.s "step" (F.setupValue d.content)) []]
-    ,V.node "div" [V.id $ if M.corporaDialog d.kind then "corpora-dialog-body" else "modal-content"] [V.when (A.elem d.kind [M.AIProviders,M.Onboarding] && d.providerPage /= M.Providers && not (authenticating d)) $ V.control [V.cls "ai-provider-back"] "‹  AI Connections" $ ProviderNavigate M.Providers,V.node "h2" [V.id "dialog-title",V.attr "tabindex" "-1",V.cls (if A.elem d.kind [M.AIProviders,M.Onboarding] then "provider-title" else "")] ((if A.elem d.kind [M.AIProviders,M.Onboarding] && d.providerPage /= M.Providers then [providerIcon "codex"] else []) <> [V.text $ dialogTitle d]),body m d,V.textNode "p" [V.cls "corpora-feedback",V.attr "role" "status"] ((M.dialogError d))
-      ,V.when (A.elem d.kind [M.Onboarding,M.AIProviders,M.Computer] && M.dialogError d /= "") $ V.button "button" "Check again" $ OnboardingPoll d.identity]]
+    ,V.when (d.kind == M.Onboarding) $ V.node "div" [V.cls "setup-progress",V.attr "aria-hidden" "true"] [V.div ("setup-progress-fill setup-progress-" <> (if d.storage.page == M.SetupWelcome then "welcome" else if d.storage.page == M.ChooseStorage then "storage" else D.s "step" (F.setupValue d.content))) []]
+    ,V.node "div" [V.id $ if M.corporaDialog d.kind then "corpora-dialog-body" else "modal-content"] [V.when (A.elem d.kind [M.AIProviders,M.Onboarding] && d.providerPage /= M.Providers && d.storage.page == M.SetupSteps && not (authenticating d)) $ V.control [V.cls "ai-provider-back"] "‹  AI Connections" $ ProviderNavigate M.Providers,V.node "h2" [V.id "dialog-title",V.attr "tabindex" "-1",V.cls (if A.elem d.kind [M.AIProviders,M.Onboarding] then "provider-title" else "")] ((if A.elem d.kind [M.AIProviders,M.Onboarding] && d.providerPage /= M.Providers && d.storage.page == M.SetupSteps then [providerIcon "codex"] else []) <> [V.text $ dialogTitle d]),body m d,V.textNode "p" [V.cls "corpora-feedback",V.attr "role" "status"] ((M.dialogError d))
+      ,V.when (A.elem d.kind [M.Onboarding,M.AIProviders,M.Computer] && d.storage.page == M.SetupSteps && M.dialogError d /= "") $ V.button "button" "Check again" $ OnboardingPoll d.identity]]
 
 authenticating :: M.Dialog -> Boolean
 authenticating d = (M.dialogBusy d) || A.elem (D.s "provider" (F.setupValue d.content)) ["signing_in","signing_out"]
@@ -92,6 +92,8 @@ dialogTitle d
       M.Providers -> "Your AI lineup"
       M.CodexAuth -> connectionTitle (F.setupValue d.content)
       _ -> "Codex"
+  | d.kind == M.Onboarding && d.storage.page == M.ChooseStorage = "Where should we start?"
+  | d.kind == M.Onboarding && d.storage.page == M.SetupWelcome = "Your AI team starts here."
   | d.kind == M.Onboarding = case D.s "step" (F.setupValue d.content) of
       "permissions" -> "Computer access"
       "corpora" -> "Choose your Corpora"
@@ -127,7 +129,7 @@ body m d = case d.kind of
       [V.span [] (if m.snapshot.computer.built then "Computer helper is installed" else "Computer helper is missing. Reinstall Sapiens to repair it.")
       ,V.span [V.cls "tag"] (if owner == "" then "Available" else "In use · " <> (M.agent m owner).name)]
     ,V.p "" (if windows then "Windows UI Automation works with accessible apps. Elevated apps and secure system dialogs cannot be controlled." else "Computer control is optional. Chat does not need Accessibility access.")
-    ,computerAccess m d (F.setupValue d.content)]
+    ,computerAccess d (F.setupValue d.content)]
   M.Onboarding -> onboardingView m d (F.setupValue d.content)
   M.AgentSettings -> form "Save"
     [V.node "div" [V.cls "settings-tabs",V.attr "role" "tablist",V.label "Sapi settings"] $ map (\caption -> V.textNode "button" [V.attr "type" "button",V.attr "role" "tab",V.attr "aria-selected" $ show $ caption == "Profile",V.disabled $ caption /= "Profile"] (caption)) ["Profile","Context","Usage","Limits"]
@@ -391,38 +393,76 @@ onboardingConnected :: M.Model -> Boolean
 onboardingConnected m = M.online m && m.snapshot.corpora.id == (M.activeRecord m).id && A.any ((_ == m.active) <<< _.key) (onboardingCorpora m)
 
 onboardingView :: M.Model -> M.Dialog -> Json -> V.Html
-onboardingView m d value = V.div "setup-screen" $
-  [V.when (not (onboardingConnected m) && A.elem step ["permissions","corpora","ready"]) $ V.textNode "p" [V.attr "role" "status"] (D.fallback "Opening your Corpora…" m.feedback)] <> case step of
-  "permissions" ->
-    [V.p "setup-intro" "Computer control is optional. Chat works without it."
-    ,computerAccess m d value]
-  "corpora" ->
-    [V.p "setup-intro" "Choose the Corpora you'd like to open first."
-    ,V.div "setup-corpora-list" $ map (\r -> V.control [V.cls "setup-corpora-choice",V.disabled $ (M.busy m),V.attr "aria-pressed" $ show $ (r.key) == m.active] (r.name) (EnterCorpora (r.key))) (onboardingCorpora m)
-    ,V.div "setup-footer" [V.control [V.cls "button primary",V.disabled $ M.dialogBusy d || (M.busy m) || not (onboardingConnected m)] "Continue" $ DialogCommand $ Intent.Setup "corpora-done"]]
-  "ready" ->
-    [V.p "setup-intro" "Your Sapiens workspace is ready to use."
-    ,V.div "setup-summary"
-      [V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "AI connection",V.span [] (if D.s "provider" value == "signed_in" then "Codex connected" else "Not connected")]
-      ,V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "Computer access",V.span [] (case permission of
-        "granted" -> "Enabled"
-        "not_required" -> "Available for accessible apps"
-        "missing" -> "Helper unavailable"
-        _ -> "Not enabled")]
-      ,V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "Corpora",V.span [] ((M.activeRecord m).name)]
-      ,V.div "setup-summary-divider" []
-      ,V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "Remote Control",V.span [V.cls "setup-muted"] "Available in Settings"]
-      ,V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "Analytics",V.span [V.cls "setup-muted"] "Coming soon"]]
-    ,V.div "setup-footer" [V.control [V.cls "button primary",V.disabled $ M.dialogBusy d || (M.busy m) || not (onboardingConnected m)] (if M.dialogBusy d then "Opening Sapiens…" else "Open Sapiens") $ DialogCommand $ Intent.Setup "finish"]]
-  _ ->
-    [aiProvidersView d value
-    ,V.when (A.elem d.providerPage [M.Providers,M.CodexDetails] && D.b "ready" value) $ V.div "setup-footer" [V.control [V.cls "button primary",V.disabled $ M.dialogBusy d] "Continue" $ DialogCommand $ Intent.Setup "provider-next"]]
+onboardingView _ d _ | d.storage.page /= M.SetupSteps = storageView d
+onboardingView m d value = V.div "setup-screen"
+  [V.div "setup-step-content" content
+  ,V.when navigation $ V.div "setup-footer"
+    [V.div "setup-navigation"
+      [V.div "setup-back" [if needsCorpora then setupButton d "back" "← Back" else V.when m.env.native $ V.control [V.cls "button",V.disabled $ authenticating d] "← Back" $ StorageNavigate M.ChooseStorage]
+      ,V.control [V.cls "button primary",V.disabled $ M.dialogBusy d || needsCorpora && (M.busy m || not (onboardingConnected m))] caption $ DialogCommand $ Intent.Setup forward]]]
   where
   permission = D.s "computer_permission" value
   step = D.s "step" value
+  needsCorpora = step /= "provider"
+  navigation = needsCorpora || A.elem d.providerPage [M.Providers,M.CodexDetails] && not (authenticating d)
+  forward = case step of
+    "permissions" -> "permissions-done"
+    "corpora" -> "corpora-done"
+    "ready" -> "finish"
+    _ -> if D.b "ready" value then "provider-next" else "provider-skip"
+  caption = case step of
+    "ready" -> if M.dialogBusy d then "Opening Sapiens4…" else "Open Sapiens4"
+    "provider" | not (D.b "ready" value) -> "Skip for now"
+    _ -> "Continue"
+  content = case step of
+    "permissions" ->
+      [V.p "setup-intro" "Computer control is optional. Chat works without it."
+      ,computerAccess d value]
+    "corpora" ->
+      [V.p "setup-intro" "Choose the Corpora you'd like to open first."
+      ,V.div "setup-corpora-list" $ map (\r -> V.control [V.cls "setup-corpora-choice",V.disabled $ M.busy m,V.attr "aria-pressed" $ show $ r.key == m.active] r.name (EnterCorpora r.key)) (onboardingCorpora m)]
+    "ready" ->
+      [V.p "setup-intro" "Your Sapiens4 workspace is ready to use."
+      ,V.div "setup-summary"
+        [V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "AI connection",V.span [] (if D.s "provider" value == "signed_in" then "Codex connected" else "Not connected")]
+        ,V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "Computer access",V.span [] (case permission of
+          "granted" -> "Enabled"
+          "not_required" -> "Available for supported apps"
+          "missing" -> "Helper unavailable"
+          _ -> "Not enabled")]
+        ,V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "Corpora",V.span [] (M.activeRecord m).name]
+        ,V.div "setup-summary-divider" []
+        ,V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "Remote Control",V.span [V.cls "setup-muted"] "Available in Settings"]
+        ,V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "Analytics",V.span [V.cls "setup-muted"] "Coming soon"]]]
+    _ -> [aiProvidersView d value]
 
-computerAccess :: M.Model -> M.Dialog -> Json -> V.Html
-computerAccess m d value = V.div "setup-screen"
+storageView :: M.Dialog -> V.Html
+storageView d = V.div "setup-screen"
+  [V.div "setup-step-content" $ if storage.page == M.SetupWelcome then
+    [V.p "setup-intro" "Meet Sapiens4 — a place for AI agents to collaborate, manage tasks, and work on your computer."]
+    else
+    [V.p "setup-intro" "Keep your current space or choose another storage location. Changes apply when you continue."
+    ,V.div "setup-choice-list"
+      [choice M.KeepStorage "Keep current storage" storage.current
+      ,choice M.FreshStorage "Start fresh" storage.defaultDirectory
+      ,V.node "div" [V.cls "setup-storage-option",V.attr "data-change" $ show $ storage.choice == M.ExistingStorage && storage.directory /= ""]
+        [choice M.ExistingStorage "Continue with existing data" (D.fallback "Choose a folder with your existing agents and conversations." storage.directory)
+        ,V.when (storage.choice == M.ExistingStorage && storage.directory /= "") $ V.control [V.cls "setup-storage-change",V.label "Choose another folder",V.disabled busy] "Change" StoragePick]]
+    ,V.p "setup-note" "Existing data stays in its original location."]
+  ,V.div "setup-footer" [V.div "setup-navigation"
+    [V.div "setup-back" [V.when (storage.page /= M.SetupWelcome) $ V.control [V.cls "button",V.disabled busy] "← Back" $ StorageNavigate M.SetupWelcome]
+    ,V.control [V.cls "button primary",V.disabled $ busy || storage.page == M.ChooseStorage && (storage.current == "" || storage.choice == M.ExistingStorage && storage.directory == "")] "Continue" (if storage.page == M.SetupWelcome then StorageNavigate M.ChooseStorage else StorageApply)]]]
+  where
+  storage = d.storage
+  busy = M.dialogBusy d
+  folder path =
+    let parts = A.filter (_ /= "") $ S.split (S.Pattern "/") $ S.replaceAll (S.Pattern "\\") (S.Replacement "/") path
+    in (if A.length parts > 2 then "…/" else "") <> S.joinWith "/" (A.drop (max 0 $ A.length parts - 2) parts)
+  choice key title detail = V.node "button" [V.attr "type" "button",V.cls "setup-choice",V.label title,V.disabled busy,V.attr "aria-pressed" $ show $ key == storage.choice,V.click $ StorageChoose key]
+    [V.div "setup-choice-copy" [V.textNode "strong" [] title,V.textNode "small" [V.attr "title" detail] (folder detail)]]
+
+computerAccess :: M.Dialog -> Json -> V.Html
+computerAccess d value = V.div "computer-access"
   [V.p "" $ case permission of
     "missing" -> "Computer helper missing. Reinstall Sapiens to repair it."
     "granted" -> "Computer control enabled."
@@ -431,8 +471,6 @@ computerAccess m d value = V.div "setup-screen"
     _ -> "Couldn't check Accessibility. Check again or open System Settings."
   ,V.node "div" [V.cls "actions",V.style "margin-top:24px"]
     [V.when (A.elem permission ["not_requested","denied","unavailable"]) $ setupButton d "permission" "Enable access"
-    ,V.when (permission /= "missing" && permission /= "not_required") $ setupButton d "refresh" "Check again"
-    ,if d.kind == M.Onboarding then
-      V.control [V.cls "button primary",V.style "margin-left:auto",V.disabled $ M.dialogBusy d || A.length (onboardingCorpora m) <= 1 && not (onboardingConnected m)] (if A.elem permission ["granted","not_required"] then "Continue" else "Not now") $ DialogCommand $ Intent.Setup "permissions-done"
-     else V.control [V.cls "button",V.style "margin-left:auto"] (if A.elem permission ["not_requested","denied","unavailable"] then "Not now" else "Done") CloseDialog]]
+    ,V.when (permission /= "missing" && permission /= "not_required") $ setupButton d "refresh" "Recheck access"
+    ,V.when (d.kind /= M.Onboarding) $ V.control [V.cls "button",V.style "margin-left:auto"] "Done" CloseDialog]]
   where permission = D.s "computer_permission" value

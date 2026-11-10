@@ -7,9 +7,11 @@ import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
 import Data.Aeson hiding (Object)
+import qualified Data.Aeson as JSON
 import Data.Bits
 import Data.IORef
 import Data.Int
+import Data.Maybe (isNothing)
 import Data.Word
 import DataRoot
 import Network.URI (URI(..), URIAuth(..), parseURI, escapeURIString, isUnreserved, unEscapeString)
@@ -28,6 +30,7 @@ import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as L
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import qualified Data.Aeson.KeyMap as KeyMap
 
 runDesktop :: Bool -> IO ()
 runDesktop probe = runInBoundThread $
@@ -111,7 +114,7 @@ desktopSession memory probe = do
   retain memory (freeHaskellFunPtr proc)
   instanceHandle <- moduleHandle nullPtr
   hwnd <- createMainWindow instanceHandle proc
-  resizeContent hwnd 560 340
+  resizeContent hwnd 560 600
   label <- withWide "STATIC" $ \className -> withWide "Starting Sapiens4…" $ \title ->
     createWindow 0 className title 0x50000201 0 0 1440 960 hwnd nullPtr instanceHandle nullPtr
   setupButtons <- forM [(101,"Install WebView2"),(102,"Retry"),(103,"Cancel")] $ \(ident,title) ->
@@ -142,42 +145,86 @@ desktopSession memory probe = do
       storageError message = do
         closeHost host
         writeIORef onboarding True
-        resizeContent hwnd 560 400
+        resizeContent hwnd 560 600
         writeIORef starting False
         storageScript ("window.storageError(" ++ T.unpack (TE.decodeUtf8 $ L.toStrict $ encode message) ++ ")")
-      startSelected choice directory = do
+      storageReply request fields = readIORef shellRef >>= mapM_ (\view -> do
+        let payload = case fields of JSON.Object values -> JSON.Object (KeyMap.insert "request" (field "request" request) values); _ -> fields
+        execute memory view ("window.sapiensBrowserEvent?.(" ++ T.unpack (TE.decodeUtf8 $ L.toStrict $ encode $ object ["action" .= ("storage" :: String),"fields" .= payload]) ++ ")") (const $ pure ()))
+      storageFailure request e = case request of
+        Nothing -> storageError (storageMessage e)
+        Just input -> do
+          available <- hostRunning host
+          storageReply input (object ["kind" .= ("error" :: String),"error" .= storageMessage e,"available" .= available])
+      startSelected choice directory request = do
         busy <- atomicModifyIORef' starting (\value -> (True,value))
         unless busy $ do
-          storageScript "window.storageLoading()"
-          let selected = host {dataDirectory=directory}
+          storageScript "window.storageLoading?.()"
+          previous <- readIORef (serverProcess host)
+          previousOrigin <- readIORef (origin host)
           task <- async $ do
             result <- try $ do
-              checkStorage selected choice
-              url <- startHost choice selected
-              saveDataDirectory directory `onException` closeHost selected
-              pure url
-            post $ case result of
-              Left (e :: SomeException) -> storageError (storageMessage e)
-              Right url -> flip catch (\(e :: SomeException) -> storageError (storageMessage e)) $ do
-                view <- readIORef shellRef >>= maybe (ioError $ userError "The application window closed.") pure
-                browser <- newBrowser memory hwnd view selected top
-                writeIORef browserRef (Just browser)
-                writeIORef starting False
-                writeIORef onboardingStep ""
-                resizeContent hwnd 560 600
-                navigate view url
-                when probe $ do
-                  putStrLn "TITLE: Sapiens4"
-                  putStrLn $ "Sapiens4: " ++ url
+              selectedDirectory <- canonicalizePath directory
+              current <- activeDataDirectory host
+              available <- hostRunning host
+              if choice==AttachExisting && available && current==Just selectedDirectory then pure Nothing else do
+                let selected = host {dataDirectory=selectedDirectory}
+                checkStorage selected choice
+                closeHost host
+                -- Keep the previous directory available for explicit recovery
+                -- if the replacement process cannot start.
+                started <- try (startHost choice selected)
+                url <- case started of
+                  Left (e :: SomeException) -> writeIORef (serverProcess host) previous >> writeIORef (origin host) previousOrigin >> throwIO e
+                  Right address -> pure address
+                saveDataDirectory selectedDirectory `onException` (closeHost host >> writeIORef (serverProcess host) previous >> writeIORef (origin host) previousOrigin)
+                pure (Just (selected,url))
+            post $ do
+              writeIORef starting False
+              case result of
+                Left (e :: SomeException) -> storageFailure request e
+                Right Nothing -> mapM_ (\input -> storageReply input (object ["kind" .= ("unchanged" :: String)])) request
+                Right (Just (selected,url)) -> flip catch (\(e :: SomeException) -> storageFailure request e) $ do
+                  view <- readIORef shellRef >>= maybe (ioError $ userError "The application window closed.") pure
+                  atomicModifyIORef' browserRef (\value -> (Nothing,value)) >>= mapM_ closeBrowser
+                  browser <- newBrowser memory hwnd view selected top
+                  writeIORef browserRef (Just browser)
+                  writeIORef onboardingStep ""
+                  resizeContent hwnd 560 600
+                  navigate view url
+                  when probe $ do
+                    putStrLn "TITLE: Sapiens4"
+                    putStrLn $ "Sapiens4: " ++ url
           writeIORef workerRef (Just task)
+      storageMessageReceived request = do
+        step <- readIORef onboardingStep
+        when (step=="provider") $ case string (field "operation" request) of
+          "info" -> do
+            directory <- activeDataDirectory host
+            available <- hostRunning host
+            storageReply request (object ["kind" .= ("info" :: String),"current" .= maybe "" id directory,"default" .= dataDirectory host,"available" .= available])
+          "pick" -> do
+            busy <- atomicModifyIORef' starting (\value -> (True,value))
+            unless busy $ flip finally (writeIORef starting False) $ do
+              selected <- pickDirectory hwnd
+              storageReply request $ case selected of
+                Nothing -> object ["kind" .= ("cancelled" :: String)]
+                Just directory -> object ["kind" .= ("picked" :: String),"directory" .= directory]
+          "apply" -> do
+            let choice=if string (field "mode" request)=="new" then StartNew else AttachExisting
+                directory=if choice==StartNew then dataDirectory host else string (field "directory" request)
+            when (isAbsolute directory) $ startSelected choice directory (Just request)
+          _ -> pure ()
       chooseStorage message = do
         busy <- readIORef starting
         unless busy $ case field "storage" message of
-          _ | field "storageStage" message == String "storage" -> resizeContent hwnd 560 400
-          String "new" -> startSelected StartNew (dataDirectory host)
+          _ | field "storageStage" message == String "storage" -> resizeContent hwnd 560 600
+          String "new" -> startSelected StartNew (dataDirectory host) Nothing
           String "existing" -> do
-            selected <- pickDirectory hwnd
-            mapM_ (startSelected AttachExisting) selected
+            picking <- atomicModifyIORef' starting (\value -> (True,value))
+            unless picking $ do
+              selected <- pickDirectory hwnd `finally` writeIORef starting False
+              mapM_ (\directory -> startSelected AttachExisting directory Nothing) selected
           _ -> pure ()
       loaded result = do
         view <- either (ioError . userError) pure result
@@ -214,16 +261,13 @@ desktopSession memory probe = do
                       Bool compact -> do
                         previous <- atomicModifyIORef' onboarding (\old -> (compact,old))
                         let step = string (field "onboardingStep" message)
-                            contentHeight = case step of
-                              "permissions" -> 360
-                              "ready" -> 400
-                              "corpora" -> 500
-                              _ -> 600
                         previousStep <- atomicModifyIORef' onboardingStep (\old -> (step,old))
                         when (compact /= previous || compact && step /= previousStep) $
-                          resizeContent hwnd (if compact then 560 else 1440) (if compact then contentHeight else 960)
+                          resizeContent hwnd (if compact then 560 else 1440) (if compact then 600 else 960)
                       _ -> pure ()
-                    readIORef browserRef >>= mapM_ (\browser -> syncBrowser browser message)
+                    case field "storage" message of
+                      request@(JSON.Object _) -> storageMessageReceived request
+                      _ -> readIORef browserRef >>= mapM_ (\browser -> syncBrowser browser message)
                 | otherwise -> pure ()
           on 15 "{D33A35BF-1C49-4F98-93AB-006E0533FE1C}" $ \event -> do
             success <- getValue event 3 :: IO Int32
@@ -242,7 +286,7 @@ desktopSession memory probe = do
                       case saved of
                         Left (e :: SomeException) -> storageError (storageMessage e)
                         Right Nothing -> pure ()
-                        Right (Just directory) -> startSelected AttachExisting directory
+                        Right (Just directory) -> startSelected AttachExisting directory Nothing
             else do
               base <- readIORef (origin host)
               let message = "Cannot load Sapiens4: " ++ show code
@@ -254,7 +298,7 @@ desktopSession memory probe = do
                   writeIORef recoveryError (Just message)
                   writeIORef starting True
                   writeIORef onboarding True
-                  resizeContent hwnd 560 400
+                  resizeContent hwnd 560 600
                   navigate view bootstrapURL
             when probe $ do
               identity <- getValue event 5 :: IO Word64

@@ -45,6 +45,17 @@ derive instance eqDialogKind :: Eq DialogKind
 corporaDialog :: DialogKind -> Boolean
 corporaDialog kind = A.elem kind [CreateCorpora,EditCorpora,ConnectRemote,HostPairing,RelayList,RelayAdd,RelaySwitch,RelayTerms,Notice]
 
+data SetupPage = SetupSteps | ChooseStorage | SetupWelcome
+derive instance eqSetupPage :: Eq SetupPage
+
+data StorageChoice = KeepStorage | FreshStorage | ExistingStorage
+derive instance eqStorageChoice :: Eq StorageChoice
+
+type StorageDraft = {page :: SetupPage, choice :: StorageChoice, directory :: String, current :: String, defaultDirectory :: String, available :: Boolean}
+
+emptyStorage :: StorageDraft
+emptyStorage = {page:SetupSteps,choice:KeepStorage,directory:"",current:"",defaultDirectory:"",available:true}
+
 data ProviderPage = Providers | CodexDetails | CodexAuth | ConfirmChange | ConfirmDisconnect
 derive instance eqProviderPage :: Eq ProviderPage
 
@@ -68,7 +79,7 @@ setDialogBusy running d = d {status=if running then Submitting (dialogError d) e
 setDialogError :: String -> Dialog -> Dialog
 setDialogError message d = d {status=if dialogBusy d then Submitting message else if message == "" then Editing else Rejected message}
 
-type Dialog = { providerPage :: ProviderPage, kind :: DialogKind, title :: String, record :: F.Context, fields :: F.Fields, content :: F.Content, status :: DialogStatus, identity :: Int }
+type Dialog = { storage :: StorageDraft, providerPage :: ProviderPage, kind :: DialogKind, title :: String, record :: F.Context, fields :: F.Fields, content :: F.Content, status :: DialogStatus, identity :: Int }
 
 data ConnectionState = Offline | Online | ChangingLifecycle Boolean
 derive instance eqConnectionState :: Eq ConnectionState

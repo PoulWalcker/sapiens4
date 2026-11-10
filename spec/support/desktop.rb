@@ -178,6 +178,7 @@ class Desktop
   end
 
   def click_node(node)
+    control('activate')
     raise "No verified screen coordinates: #{node.inspect}" unless node['position'] && node['size']
     raise 'Cannot click a disabled or empty control' if node['enabled'] == false ||
       node.fetch('size')['width'] <= 0 || node['size']['height'] <= 0

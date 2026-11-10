@@ -8,6 +8,12 @@ and ownership checks. No automatic search, copy or migration is performed.
 complete installation and never initializes missing data. Source launch reopens
 its existing selected directory unless an explicit storage mode is supplied.
 After storage selection: **AI → Computer access → Corpora (if needed) → Ready**.
+AI connection and computer access are optional. **Skip for now** opens the
+remaining setup steps without Codex; finishing opens the dashboard and settings.
+Only AI task execution requires a ready account. **Back** revisits earlier setup
+decisions without losing the selected Corpora or changing account credentials.
+Forward actions require an available local Corpora; permission grants and sign-in
+are never required merely to explore the application.
 The completed setup and selected Corpora survive restart; AI connections remain
 available from **AI Connections**.
 Claude Code, Gemini CLI and Kimi Code remain Coming soon. Browser sign-in uses
@@ -36,6 +42,8 @@ alone cannot release queued, scheduled or delegated AI work in any local Corpora
 Finishing setup validates the local selection and saves completion before
 resuming saved services. If resuming fails, retry Finish or reload the Corpora
 list; already-open services are reused. Account-safety holds remain independent.
+Finishing with an unavailable existing login leaves AI held for explicit review;
+finishing without any login keeps the disconnected hold until connection succeeds.
 
 Only the current setup schema is supported. Missing `onboarding.json` starts
 setup; unreadable, corrupt or incompatible settings stop startup with a recovery
@@ -61,3 +69,20 @@ Existing synthetic API scenarios live in `spec/onboarding_spec.rb`; they do not
 prove real OAuth, actual model output, clean-machine installation or macOS 13
 compatibility. No installer, release workflow or publishing behavior is included
 in this feature branch.
+
+## Revisiting storage during setup
+
+Back from the native AI step opens storage selection inside the existing page.
+Welcome, storage and AI navigation retain the storage draft without stopping the
+current backend. Keep current storage returns immediately. Selecting a folder
+only records a draft; Continue applies it. Native handlers serialize folder
+pickers and startup, and replies are scoped to their owning dialog generation.
+An existing path that resolves to the current directory is also a no-op.
+
+For a different directory, validate it while the current backend still owns its
+lock, then stop/join that process and start the replacement. Failed validation
+leaves the current backend and selection intact. If replacement startup fails
+after stopping the prior process, the draft remains visible; choosing Keep
+current storage and Continue reopens the previous directory. No data is moved
+or deleted. Storage details show the final two path components; hovering reveals
+the full path. Change is part of the existing-data card.

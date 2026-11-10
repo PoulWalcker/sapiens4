@@ -132,12 +132,24 @@ onboardingView onboarding@(Onboarding root _ progress _ _) = do
  hold <- P.profileHold
  let ready=provider=="signed_in" && T.null hold
      complete=boolean (get saved "completed")
-     step=if not complete && not ready then "provider" else at saved "step"
+     step=at saved "step"
  pure (obj [("schema",num (2::Int)),("step",str step),("completed",Bool complete),("provider",str provider),("login",login),("computer_permission",str computer),("computer_available",Bool built),("ready",Bool ready),("hold",str hold),("selected_corpora",get saved "selected_corpora")])
 
 onboardingAction :: Onboarding -> (UUID.UUID -> IO ()) -> Value -> IO Value
-onboardingAction onboarding@(Onboarding root worker progress _ _) validateSelected value = do
+onboardingAction onboarding@(Onboarding root worker progress _ (_,state)) validateSelected value = do
+ when (at value "action" `elem` ["back","provider-skip"]) $ do
+  login <- readIORef progress
+  require (at login "state" `notElem` ["signing_in","signing_out"]) 409 "Finish or cancel sign-in before changing setup steps."
  case at value "action" of
+  "back" -> do
+   (current,_) <- readMVar state
+   previous <- case current of
+    ComputerAccess -> pure AIProvider
+    CorporaChoice -> pure ComputerAccess
+    SetupReady -> pure (if boolean (get value "choose_corpora") then CorporaChoice else ComputerAccess)
+    _ -> failure 409 "Setup cannot move back from this step."
+   advanceSetup onboarding current previous Nothing
+  "provider-skip" -> advanceSetup onboarding AIProvider ComputerAccess Nothing
   "provider-next" -> do
    status <- checkedProviderStatus onboarding
    require (status=="signed_in") 409 "Connect Codex before continuing."
@@ -147,8 +159,6 @@ onboardingAction onboarding@(Onboarding root worker progress _ _) validateSelect
    saved <- setupState onboarding
    when (at saved "step"=="provider") $ advanceSetup onboarding AIProvider ComputerAccess Nothing
   "permissions-done" -> do
-   status <- checkedProviderStatus onboarding
-   require (status=="signed_in") 409 "Connect Codex before continuing."
    selected <- maybe (failure 400 "Choose a local Corpora before continuing.") pure (UUID.fromText (at value "selected_corpora"))
    validateSelected selected
    advanceSetup onboarding ComputerAccess (if boolean (get value "choose_corpora") then CorporaChoice else SetupReady) (Just selected)
@@ -163,12 +173,16 @@ onboardingAction onboarding@(Onboarding root worker progress _ _) validateSelect
     P.profileLock (if boolean (get saved "completed") then Shared else Exclusive)
      >>= maybe (failure 409 "AI work or sign-in is still running. Try again when it finishes.") pure)
    unlockFile $ \_ -> do
-    status <- checkedProviderStatus onboarding
-    require (status=="signed_in") 409 "Connect Codex before entering Sapiens."
-    hold <- P.profileHold
-    require (T.null hold) 409 "Finish connecting your ChatGPT account before continuing."
+    saved <- setupState onboarding
+    require (at saved "step"=="ready" || boolean (get saved "completed")) 409 "Finish the setup steps before entering Sapiens."
     selected <- maybe (failure 400 "Choose a local Corpora before continuing.") pure (UUID.fromText (at value "selected_corpora"))
     validateSelected selected
+    unless (boolean (get saved "completed")) $ do
+     status <- checkedProviderStatus onboarding
+     hold <- P.profileHold
+     -- An unavailable existing login must not release old queues merely because
+     -- setup is optional. Preserve all existing account-safety holds.
+     when (status/="signed_in" && T.null hold) (P.holdProfile "review")
     advanceSetup onboarding SetupReady SetupComplete (Just selected)
   action | action `elem` ["login","device-login","change-account","sign-out"] -> startAuth onboarding action
   "resume" -> bracket
