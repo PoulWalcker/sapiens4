@@ -37,7 +37,7 @@ data Registry = Registry
  , registryGuard :: MVar (), registrySaved :: IORef Value
  , registryLocals :: IORef (M.Map Text (Service, Bridge, IO ()))
  , registryClients :: IORef (M.Map Text Client)
- , registryPending :: IORef (M.Map Text Value)
+ , registryPending :: IORef (M.Map Text Pairing)
  , registryPairClients :: IORef (M.Map Text Client)
  , registryClosed :: IORef Bool
  }
@@ -45,7 +45,7 @@ data Registry = Registry
 registryPath :: Registry -> FilePath
 registryPath registry = serviceRoot (registryService registry) </> "host-corpora.json"
 localAvailable :: Bool
-localAvailable = os `elem` ["darwin", "mingw32"]
+localAvailable = os `elem` ["darwin", "mingw32", "linux"]
 registryLock :: Registry -> IO a -> IO a
 registryLock registry = withMVar (registryGuard registry) . const
 saveRegistry :: Registry -> IO ()
@@ -207,18 +207,45 @@ registryCreate registry input = do
    modifyIORef' (registryLocals registry) (M.insert identity child)
   pure $ put "location" (str "Local") metadata
 
+data Pairing = Pairing Text Text PairingProgress
+data PairingProgress = AwaitingApproval | PairApproved Value | PairFailed Text PairingProgress | PairCancelled PairingProgress
+data PairingEvent = ApprovePair Value | FailPair Text | CancelPair
+instance ToJSON Pairing where
+ toJSON (Pairing identity code progress) = merge (obj [("id",str identity),("code",str code)]) (fields progress)
+  where
+  fields AwaitingApproval = obj [("state",str "waiting")]
+  fields (PairApproved corpora) = obj [("state",str "approved"),("corpora",put "location" (str "Remote") corpora)]
+  fields (PairFailed reason prior) = merge (fields prior) (obj [("state",str "failed"),("error",str reason)])
+  fields (PairCancelled prior) = put "state" (str "cancelled") (fields prior)
+pairWaiting :: Pairing -> Bool
+pairWaiting (Pairing _ _ AwaitingApproval) = True
+pairWaiting _ = False
+pairCancelled :: Pairing -> Bool
+pairCancelled (Pairing _ _ (PairCancelled _)) = True
+pairCancelled _ = False
+advancePairing :: PairingEvent -> Pairing -> Pairing
+advancePairing event pairing@(Pairing identity code progress) = Pairing identity code $ case event of
+ CancelPair | pairCancelled pairing -> progress
+ CancelPair -> PairCancelled progress
+ FailPair _ | pairCancelled pairing -> progress
+ FailPair reason -> PairFailed reason progress
+ ApprovePair _ | pairCancelled pairing -> progress
+ ApprovePair corpora -> PairApproved corpora
+canApprovePairing :: Bool -> Maybe Pairing -> Bool
+canApprovePairing closed pending = not closed && maybe False (not . pairCancelled) pending
+
 beginPair :: Registry -> Value -> IO Value
 beginPair registry input = do
  client <- invitation input
  identity <- newId
  config <- readMVar (clientConfig client)
  code <- confirmationCode (get input "desktop") (get config "public") (at input "room")
- let item = obj [("id",str identity),("state",str "waiting"),("code",str code)]
+ let item = Pairing identity code AwaitingApproval
  registryLock registry $ do
   saved <- readIORef (registrySaved registry)
   require (not $ boolean $ get (get saved "relay_servers") "reset_pending") 409 "Relay switch interrupted. Restart the app to finish."
   pending <- readIORef (registryPending registry)
-  require (all ((/= "waiting") . (`at` "state")) pending) 409 "A connection is already waiting for approval"
+  require (all (not . pairWaiting) pending) 409 "A connection is already waiting for approval"
   writeIORef (registryPending registry) (M.singleton identity item)
   modifyIORef' (registryPairClients registry) (M.insert identity client)
  let run = do
@@ -226,7 +253,7 @@ beginPair registry input = do
       registryLock registry $ do
        closed <- readIORef (registryClosed registry)
        pending <- readIORef (registryPending registry)
-       unless (closed || maybe True ((== "cancelled") . (`at` "state")) (M.lookup identity pending)) $ do
+       when (canApprovePairing closed (M.lookup identity pending)) $ do
         saved <- readIORef (registrySaved registry)
         opened <- readIORef (registryLocals registry)
         let corporaId = at corpora "id"
@@ -234,13 +261,12 @@ beginPair registry input = do
         configValue <- readMVar (clientConfig client)
         writeIORef (registrySaved registry) $ put "remotes" (put corporaId configValue $ get saved "remotes") saved
         saveRegistry registry
-        modifyIORef' (registryPending registry) (M.adjust (mergeWith $ obj [("state",str "approved"),("corpora",put "location" (str "Remote") corpora)]) identity)
+        modifyIORef' (registryPending registry) (M.adjust (advancePairing (ApprovePair corpora)) identity)
      failed (errorValue :: SomeException) = registryLock registry $
-      modifyIORef' (registryPending registry) $ M.adjust (\current -> if at current "state" == "cancelled" then current else merge current $ obj [("state",str "failed"),("error",str $ exceptionMessage errorValue)]) identity
+      modifyIORef' (registryPending registry) $ M.adjust (advancePairing (FailPair (exceptionMessage errorValue))) identity
      finish = closeClient client >> registryLock registry (modifyIORef' (registryPairClients registry) (M.delete identity))
  void $ forkIO $ (run `catch` failed) `finally` finish
- pure item
- where mergeWith value current = merge current value
+ pure (toJSON item)
 
 exceptionMessage :: SomeException -> Text
 exceptionMessage errorValue = case fromException errorValue of
@@ -251,12 +277,12 @@ pairing :: Registry -> Text -> Bool -> IO Value
 pairing registry identity cancelPairing = registryLock registry $ do
  pending <- readIORef (registryPending registry)
  item <- maybe (failure 404 "Unknown pairing") pure (M.lookup identity pending)
- if not cancelPairing then pure item else do
-  let updated = put "state" (str "cancelled") item
+ if not cancelPairing then pure (toJSON item) else do
+  let updated = advancePairing CancelPair item
   modifyIORef' (registryPending registry) (M.insert identity updated)
   clients <- readIORef (registryPairClients registry)
   mapM_ revokeClient (M.lookup identity clients)
-  pure updated
+  pure (toJSON updated)
 
 closeRegistry :: Registry -> IO ()
 closeRegistry registry = do
@@ -339,39 +365,44 @@ selectedConnection registry = do
  require (not (boolean $ get (get row "connection") "beta") || boolean (get state "beta_accepted")) 409 "Accept the beta terms before pairing."
  pure $ get row "connection"
 
-relayChange :: Registry -> Value -> IO Value
-relayChange registry input = registryLock registry $ do
- state <- relayState registry
- require (get input "revision" == get state "revision") 409 "Relay settings changed. Reopen the selector."
+data RelayChange = RelayChange Value Bool
+planRelayChange :: Text -> Value -> Value -> Validation RelayChange
+planRelayChange key state input = do
+ check (get input "revision" == get state "revision") 409 "Relay settings changed. Reopen the selector."
  let action = at input "action"; identity = at input "id"
- row <- if T.null identity then pure Null else findRelay state identity
+ row <- if T.null identity then pure Null else maybe (Left (APIError 404 "Unknown relay server")) Right (findId identity (items state "servers"))
  (changed,reset) <- case action of
   "save" -> do
    let name = at input "name"
-   require (not (T.null $ T.strip name) && T.length name <= 200) 400 "Enter a name (up to 200 characters)."
-   connection <- validateConnection (get input "connection") `catch` \(APIError _ message) -> failure 409 message
-   base <- if row /= Null then pure row else do
-    key <- newId
-    pure $ obj [("id",str key),("archived",Bool False),("available",Bool True),("builtin",Bool False)]
-   let different = row /= Null && connection /= get row "connection"
+   check (not (T.null $ T.strip name) && T.length name <= 200) 400 "Enter a name (up to 200 characters)."
+   connection <- either (\(APIError _ message) -> Left (APIError 409 message)) Right (connectionValue (get input "connection"))
+   let base = if row /= Null then row else obj [("id",str key),("archived",Bool False),("available",Bool True),("builtin",Bool False)]
+       different = row /= Null && connection /= get row "connection"
        updated = merge (if different then remove ["address"] base else base) $ obj [("name",str $ T.strip name),("connection",connection)]
        rows = if row == Null then items state "servers" ++ [updated] else map (\old -> if get old "id" == get row "id" then updated else old) (items state "servers")
        selected = identity == at state "selected"
    pure (put "servers" (arr rows) $ if different && selected then put "beta_accepted" (Bool False) state else state, different && selected)
   "switch" -> do
-   require (row /= Null && not (boolean $ get row "archived") && boolean (get row "available")) 409 "This relay is unavailable."
+   check (row /= Null && not (boolean $ get row "archived") && boolean (get row "available")) 409 "This relay is unavailable."
    let reset = identity /= at state "selected"
    pure (put "selected" (str identity) $ if reset then put "beta_accepted" (Bool False) state else state,reset)
   value | value `elem` ["archive","restore"] -> do
-   require (row /= Null) 404 "Unknown relay server"
-   require (action /= "archive" || identity /= at state "selected") 409 "Switch servers before archiving this relay."
+   check (row /= Null) 404 "Unknown relay server"
+   check (action /= "archive" || identity /= at state "selected") 409 "Switch servers before archiving this relay."
    pure (put "servers" (arr $ map (\old -> if at old "id" == identity then put "archived" (Bool $ action == "archive") old else old) $ items state "servers") state,False)
   "accept-beta" -> do
-   require (get input "accepted" == Bool True) 400 "Accept the beta terms to continue."
+   check (get input "accepted" == Bool True) 400 "Accept the beta terms to continue."
    pure (put "beta_accepted" (Bool True) state,False)
-  _ -> failure 400 "Unknown relay action"
- require (not reset || get input "confirm_revoke" == Bool True) 409 "Confirm revoking all paired devices and remote corpora connections."
+  _ -> Left (APIError 400 "Unknown relay action")
+ check (not reset || get input "confirm_revoke" == Bool True) 409 "Confirm revoking all paired devices and remote corpora connections."
  let next = put "revision" (num $ int (get state "revision") + 1) changed
+ pure (RelayChange next reset)
+
+relayChange :: Registry -> Value -> IO Value
+relayChange registry input = registryLock registry $ do
+ state <- relayState registry
+ key <- newId
+ RelayChange next reset <- validated (planRelayChange key state input)
  modifyIORef' (registrySaved registry) $ put "relay_servers" next
  when reset $ do
   queueRelayCleanup registry
@@ -407,7 +438,7 @@ cleanupRelays registry relay identity = do
 
 resetConnections :: Registry -> Value -> IO ()
 resetConnections registry connection = do
- modifyIORef' (registryPending registry) $ M.map $ put "state" (str "cancelled")
+ modifyIORef' (registryPending registry) $ M.map (advancePairing CancelPair)
  clients <- atomicModifyIORef' (registryClients registry) (\current -> (M.empty,current))
  pending <- readIORef (registryPairClients registry)
  mapM_ revokeClient (M.elems clients ++ M.elems pending)

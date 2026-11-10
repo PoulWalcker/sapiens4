@@ -68,7 +68,11 @@ class RemotePeer
   def close
     @input.close
     unless @process.join(5)
-      Process.kill('KILL', @process.pid)
+      begin
+        Process.kill('KILL', @process.pid)
+      rescue Errno::ESRCH
+        # The peer exited between the timed join and the signal.
+      end
       @process.join
     end
     @output.close

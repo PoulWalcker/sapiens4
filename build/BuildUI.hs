@@ -47,6 +47,10 @@ buildUI root = do
    copyFile (libs</>"node_modules/purescript/purs.bin") (bin</>"purs.exe")
    current <- getEnv "PATH"
    setEnv "PATH" (bin++[searchPathSeparator]++current)
+   -- Limit compiler parallelism to mitigate runtime crashes under Windows x64 emulation.
+   -- This also covers the compiler launched by Spago; retain other user RTS settings.
+   runtime <- lookupEnv "GHCRTS"
+   setEnv "GHCRTS" (maybe "" (<> " ") runtime <> "-N1")
   withCurrentDirectory work $ do
    tool "spago" ["install","--quiet"]
    sourceJSON <- readTool "spago" ["sources","--json","--quiet"]

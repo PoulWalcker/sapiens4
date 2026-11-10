@@ -15,15 +15,17 @@ import Network.URI
 connectionFormat :: Text
 connectionFormat = "sapiens-relay-connection-v1"
 validateConnection :: Value -> IO Value
-validateConnection value = do
- require (at value "format" == connectionFormat) 400 "Choose a Sapiens relay connection file"
- relay <- origin (get value "relay")
+validateConnection = validated . connectionValue
+connectionValue :: Value -> Validation Value
+connectionValue value = do
+ check (at value "format" == connectionFormat) 400 "Choose a Sapiens relay connection file"
+ relay <- relayURL <$> decodeRelayOrigin (get value "relay")
  if boolean (get value "beta") then do
-  require (T.null (at value "token")) 400 "Beta connections do not use an admin token"
+  check (T.null (at value "token")) 400 "Beta connections do not use an admin token"
   pure (obj [("format",str connectionFormat),("relay",str relay),("beta",Bool True)])
  else do
   let credential = at value "token"
-  require (T.length credential >= 32 && T.length credential <= 256 && T.all (\c -> ord c >= 33 && ord c <= 126) credential) 400 "Invalid relay provisioning token"
+  check (T.length credential >= 32 && T.length credential <= 256 && T.all (\c -> ord c >= 33 && ord c <= 126) credential) 400 "Invalid relay provisioning token"
   pure (obj [("format",str connectionFormat),("relay",str relay),("token",str credential)])
 readConnection :: FilePath -> IO Value
 readConnection path = do

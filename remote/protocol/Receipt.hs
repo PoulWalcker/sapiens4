@@ -13,28 +13,62 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 
 legacyJSON :: B.ByteString -> Either String B.ByteString
-legacyJSON bytes = case [value | (value, rest) <- readP_to_S (spaces *> value <* spaces <* eof) (T.unpack $ TE.decodeUtf8 bytes), null rest] of
- [] -> Left "Cannot decode legacy receipt JSON"
- values -> Right $ TE.encodeUtf8 $ T.pack $ last values
- where
- spaces = skipMany (satisfy (`elem` (" \r\n\t" :: String)))
- token parser = parser <* spaces
- quoted = do
+legacyJSON bytes = TE.encodeUtf8 . T.pack . renderLegacy <$> parseLegacy bytes
+
+-- Python receipt hashes distinguish integers from floats (including -0.0).
+-- Preserve that distinction while parsing; Aeson's numeric Value cannot do so.
+data LegacyValue
+ = LegacyObject (M.Map String LegacyValue)
+ | LegacyArray [LegacyValue]
+ | LegacyString String
+ | LegacyInteger Integer
+ | LegacyFloat Double
+ | LegacyBool Bool
+ | LegacyNull
+
+parseLegacy :: B.ByteString -> Either String LegacyValue
+parseLegacy bytes = do
+ text <- either (const invalid) Right (TE.decodeUtf8' bytes)
+ case reverse (readP_to_S (spaces *> legacyValue <* spaces <* eof) (T.unpack text)) of
+  (value,_) : _ -> Right value
+  [] -> invalid
+ where invalid = Left "Cannot decode legacy receipt JSON"
+
+spaces :: ReadP ()
+spaces = skipMany (satisfy (`elem` (" \r\n\t" :: String)))
+
+token :: ReadP a -> ReadP a
+token parser = parser <* spaces
+
+quoted :: ReadP String
+quoted = do
   (raw,_) <- gather $ char '"' *> many (satisfy (\c -> c /= '"' && c /= '\\') <|> (char '\\' *> get)) <* char '"'
   case eitherDecodeStrict (TE.encodeUtf8 $ T.pack raw) of
    Right (String decoded) -> pure (T.unpack decoded)
    _ -> pfail
- value = choice
-  [ do fields <- between (token $ char '{') (char '}') $ sepBy ((,) <$> token quoted <*> (token (char ':') *> token value)) (token $ char ',')
-       pure $ "{" ++ intercalate ", " [quote key ++ ": " ++ child | (key,child) <- M.toAscList $ M.fromList fields] ++ "}"
-  , do children <- between (token $ char '[') (char ']') $ sepBy (token value) (token $ char ',')
-       pure $ "[" ++ intercalate ", " children ++ "]"
-  , quote <$> quoted
-  , string "null", string "true", string "false"
+
+legacyValue :: ReadP LegacyValue
+legacyValue = choice
+  [ LegacyObject . M.fromList <$> between (token $ char '{') (char '}')
+      (sepBy ((,) <$> token quoted <*> (token (char ':') *> token legacyValue)) (token $ char ','))
+  , LegacyArray <$> between (token $ char '[') (char ']') (sepBy (token legacyValue) (token $ char ','))
+  , LegacyString <$> quoted
+  , LegacyNull <$ string "null", LegacyBool True <$ string "true", LegacyBool False <$ string "false"
   , do raw <- munch1 (`elem` ("-+0123456789.eE" :: String))
-       if any (`elem` (".eE" :: String)) raw then maybe pfail (pure . floatJSON) (readMaybe raw)
-        else maybe pfail (pure . show) (readMaybe raw :: Maybe Integer)
+       if any (`elem` (".eE" :: String)) raw then maybe pfail (pure . LegacyFloat) (readMaybe raw)
+        else maybe pfail (pure . LegacyInteger) (readMaybe raw)
   ]
+
+renderLegacy :: LegacyValue -> String
+renderLegacy value = case value of
+ LegacyObject fields -> "{" ++ intercalate ", " [quote key ++ ": " ++ renderLegacy child | (key,child) <- M.toAscList fields] ++ "}"
+ LegacyArray children -> "[" ++ intercalate ", " (map renderLegacy children) ++ "]"
+ LegacyString text -> quote text
+ LegacyInteger number -> show number
+ LegacyFloat number -> floatJSON number
+ LegacyBool True -> "true"
+ LegacyBool False -> "false"
+ LegacyNull -> "null"
 
 quote :: String -> String
 quote value = '"' : concatMap escape value ++ "\""

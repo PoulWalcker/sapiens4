@@ -2,19 +2,24 @@ RSpec.describe 'Source distribution contract' do
   before(:context) do
     @folder = File.realpath(Dir.mktmpdir('sapiens source release '))
     @release = File.join(@folder, 'source')
-    files, error, code = Contract.capture('git', 'ls-files', '--recurse-submodules',
+    files, error, code = Contract.capture('git', 'ls-files', '-z', '--recurse-submodules',
       'build', 'corpora', 'remote', 'environments', 'app',
       'license', 'README.md', 'submodules/blindly4/license', 'submodules/blindly4/README.md', 'submodules/libs4')
     expect(code).to eq(0), error
-    files.lines.map(&:strip).each do |file|
+    additions, error, code = Contract.capture('git', 'ls-files', '-z', '--others', '--exclude-standard',
+      'build', 'corpora', 'remote', 'environments', 'app', 'license')
+    expect(code).to eq(0), error
+    (files.split("\0") + additions.split("\0")).uniq.each do |file|
       next if file.end_with?('.py', '.swift', '.cs')
       target = File.join(@release, file)
       FileUtils.mkdir_p(File.dirname(target))
       FileUtils.cp(File.join(Contract::ROOT, file), target)
     end
-    if ENV['SAPIENS_TEST_CABAL_CACHE']
-      cache = File.realpath(ENV['SAPIENS_TEST_CABAL_CACHE'])
-      destination = File.join(@release, 'submodules/libs4/haskell/.cabal')
+    {'SAPIENS_TEST_CABAL_CACHE' => 'submodules/libs4/haskell/.cabal',
+     'SAPIENS_TEST_UI_CACHE' => 'submodules/libs4/.cache'}.each do |name, relative|
+      next unless ENV[name]
+      cache = File.realpath(ENV[name])
+      destination = File.join(@release, relative)
       if Gem.win_platform?
         FileUtils.cp_r(cache, destination)
       else
@@ -63,7 +68,8 @@ RSpec.describe 'Source distribution contract' do
   end
 
   it 'boots from a source-only release and completes work using its packaged assets' do
-    isolated = Host.new(repo: @release)
+    command = ['sh', File.join(@release, 'environments/linux/start.sh')] if RUBY_PLATFORM.include?('linux')
+    isolated = Host.new(repo: @release, command: command)
     begin
       state = isolated.state
       id = isolated.submit(state['main_agent_id'], 'Hello from an installed release')

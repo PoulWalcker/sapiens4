@@ -76,6 +76,7 @@ and needs operator monitoring. Private provisioning remains token-protected.
 | Android | `/android` | Chrome → Install / Add to Home screen |
 | macOS | `/mac` | Safari → Add to Dock, or browser Install |
 | Windows | `/windows` | Chrome/Edge Install |
+| Linux | `/linux` | Open in a supported browser; use its Install action when available |
 
 All paths share one app identity; `/` chooses platform guidance. Assets live at
 the origin root. Native browser views and desktop screen streaming are not

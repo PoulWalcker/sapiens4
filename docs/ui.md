@@ -6,7 +6,7 @@ input and external events. Halogen owns rendering and subscription cleanup.
 | Source | Responsibility |
 | --- | --- |
 | `app/shell` | Model, actions, navigation, component lifecycle, shared HTML |
-| `app/features` | Conversations, tasks, Memo, workspaces, dialogs and connections |
+| `app/features` | Conversations, tasks, workspaces, dialogs and connections |
 | `app/theme` | Styles and responsive layout |
 
 Requests carry identities and a corpora epoch so late responses cannot replace
@@ -18,8 +18,8 @@ corpora's cached preferences.
 Browser/native APIs and third-party bindings live in
 `submodules/libs4/purescript/src/Libs4/Browser.purs` and its foreign implementation.
 Application behavior stays here. Host payloads are JSON; navigation, actions,
-dialog kinds and resource lifecycles use algebraic types. Memo markup is rendered
-through an allowlist, and native guest views have no app-control bridge.
+dialog kinds and resource lifecycles use algebraic types. Work → Memo opens or focuses the selected Sapi’s bookmarked Notes.html in its workspace.
+Closing the tab preserves its bookmark. Native guest views have no app-control bridge.
 
 Build with GHC, Cabal, Node.js 22.5+ and npm:
 

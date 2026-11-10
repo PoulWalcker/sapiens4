@@ -80,6 +80,72 @@ RSpec.describe 'Delegation and completion contracts' do
     expect(host.request('POST', "/api/agents/#{chief}/messages", {text: 'Duplicate', workload: original}).first).to eq(409)
   end
 
+  it 'resumes the waiting chief task from a normal chat reply after restart' do
+    researcher = host.agent
+    route_to(researcher, 'ChiefTriage' => {response: decision('RequestUnclear', question: 'Which products?')})
+    original = host.submit(chief)
+    host.idle
+    expect(tasks.first['execution']['state']).to eq('WaitingForAdmin')
+    host.restart
+    route_to(researcher)
+    clarification = host.submit(chief, 'Products A and B')
+    host.idle
+    task = tasks.first
+    expect(tasks.size).to eq(1)
+    expect(task['workloadId']).to eq(original)
+    expect(task['calls'][1]).to include('callId' => clarification, 'causedBy' => original,
+      'activation' => 'RequestClarified', 'request' => 'Products A and B')
+    expect(task['execution']['state']).to eq('Completed')
+    following = host.submit(chief, 'A separate comparison')
+    host.idle
+    expect(tasks.map { |work| work['workloadId'] }).to contain_exactly(original, following)
+  end
+
+  it 'keeps a reply to another Sapi separate from the waiting chief task' do
+    researcher = host.agent
+    route_to(researcher, 'ChiefTriage' => {response: decision('RequestUnclear', question: 'Which products?')})
+    original = host.submit(chief)
+    host.idle
+    waiting = tasks.first
+    expect(waiting['execution']['state']).to eq('WaitingForAdmin')
+    separate = host.submit(researcher, 'A different request')
+    host.idle
+    expect(tasks).to eq([waiting])
+    expect(tasks(researcher).map { |work| work['workloadId'] }).to eq([separate])
+    expect(tasks.first['workloadId']).to eq(original)
+  end
+
+  it 'does not guess between waiting chief tasks and retains explicit clarification' do
+    researcher = host.agent
+    route_to(researcher, 'ChiefTriage' => {block: true,
+      response: decision('RequestUnclear', question: 'Which products?')})
+    first = host.submit(chief, 'First comparison')
+    Contract.wait { host.calls.count { |call| call['node'] == 'ChiefTriage' } == 1 }
+    second = host.submit(chief, 'Second comparison')
+    Contract.wait { host.calls.count { |call| call['node'] == 'ChiefTriage' } == 2 }
+    host.release
+    host.idle
+    waiting = tasks
+    expect(waiting.map { |work| work['workloadId'] }).to contain_exactly(first, second)
+    expect(waiting.map { |work| work['execution']['state'] }).to eq(['WaitingForAdmin', 'WaitingForAdmin'])
+    turns = host.state['turns'].map { |turn| turn['id'] }
+    status, body = host.request('POST', "/api/agents/#{chief}/messages", {text: 'Ambiguous answer'})
+    expect(status).to eq(409)
+    expect(body['error']).to include('several tasks waiting')
+    expect(tasks).to eq(waiting)
+    expect(host.state['turns'].map { |turn| turn['id'] }).to eq(turns)
+    route_to(researcher)
+    explicit = host.submit(chief, 'Answer the first comparison', workload: first)
+    host.idle
+    automatic = host.submit(chief, 'Answer the remaining comparison')
+    host.idle
+    completed = tasks.to_h { |work| [work['workloadId'], work] }
+    expect(completed.keys).to contain_exactly(first, second)
+    expect(completed[first]['calls'][1]['callId']).to eq(explicit)
+    expect(completed[second]['calls'][1]['callId']).to eq(automatic)
+    expect(completed.values.map { |work| work['execution']['state'] }).to eq(['Completed', 'Completed'])
+  end
+
   it 'rejects an unrecognized provider decision without dispatching work' do
     host.configure(rules: {'Assessing' => {response: decision('StartCron', minutes: 5)}})
     id = host.submit(chief)

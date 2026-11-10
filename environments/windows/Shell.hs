@@ -192,7 +192,7 @@ desktopSession memory probe = do
           on 7 "{9ADBE429-F36D-432B-9DDC-F8881FBD76E3}" $ \event -> do
             destination <- getString event 3
             base <- readIORef (origin host)
-            unless (Navigation.trusted base destination || null base && bootstrapSource destination) $ callInt event 8 1
+            unless (Navigation.trusted base destination || isNothing base && bootstrapSource destination) $ callInt event 8 1
             when probe $ (getValue event 9 :: IO Word64) >>= \identity -> putStrLn $ "NAVIGATION START " ++ show identity
           on 44 "{D4C185FE-C81C-4989-97AF-2D3FA7AB5651}" $ \event -> do
             callInt event 6 1
@@ -207,7 +207,7 @@ desktopSession memory probe = do
             case decodeStrict (TE.encodeUtf8 $ T.pack raw) of
               Nothing -> pure ()
               Just message
-                | null base && bootstrapSource source && bootstrapSource current -> chooseStorage message
+                | isNothing base && bootstrapSource source && bootstrapSource current -> chooseStorage message
                 | Navigation.trusted base source && Navigation.trusted base current -> do
                     applyWindowTheme hwnd light dark lastTheme message
                     case field "onboarding" message of
@@ -246,7 +246,7 @@ desktopSession memory probe = do
             else do
               base <- readIORef (origin host)
               let message = "Cannot load Sapiens4: " ++ show code
-              case parseURI base of
+              case base of
                 Nothing -> failStart message
                 Just _ -> do
                   (atomicModifyIORef' browserRef (\value -> (Nothing,value)) >>= mapM_ closeBrowser) `finally` closeHost host

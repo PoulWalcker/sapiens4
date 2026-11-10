@@ -64,6 +64,23 @@ RSpec.describe 'Idle storage and saved-state projection', :host do
     expect(host.state['turns'].find { |t| t['id'] == 'saved-call' }['status']).to eq('cancelled')
   end
 
+  it 'rechecks archive output without state edits and recovers from a malformed archive' do
+    archive = File.join(host.root, 'agentpy/corpora/archive', @owner, 'runs/saved-call.json')
+    FileUtils.mkdir_p(File.dirname(archive))
+    save_turn(@turn.merge(status: 'done', error: nil))
+    Contract.atomic_json(archive, output: 'First archived result')
+    expect(host.state['turns'].find { |t| t['id'] == 'saved-call' }['output']).to eq('First archived result')
+    Contract.atomic_json(archive, output: 'Externally replaced result')
+    expect(host.state['turns'].find { |t| t['id'] == 'saved-call' }['output']).to eq('Externally replaced result')
+    File.write(archive, '{')
+    expect(host.request('GET', '/api/state').first).to eq(500)
+    Contract.atomic_json(archive, output: 'Repaired result')
+    expect(host.state['turns'].find { |t| t['id'] == 'saved-call' }['output']).to eq('Repaired result')
+    host.restart
+    expect(host.state['turns'].find { |t| t['id'] == 'saved-call' }['output']).to eq('Repaired result')
+    expect(host.calls).to be_empty
+  end
+
   it 'returns only the latest 500 pulse records in descending order' do
     SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
       db.transaction { 520.times { |i| db.execute('INSERT INTO pulse_calls(value) VALUES (?)', [JSON.generate(fixture: i)]) } }

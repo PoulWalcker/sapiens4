@@ -29,29 +29,41 @@ import qualified Routines as R
 import Provider
 import qualified GroupChat as G
 
+data ConversationArchive = ConversationArchive Text [Value]
+data Retention = Retention Value [ConversationArchive]
+
+-- Archive decisions depend only on the snapshot. Writing archives still precedes
+-- saving the reduced state, so interruption cannot discard unarchived history.
+retainConversation :: Value -> Retention
+retainConversation state = foldl (apply bounded) (foldl (apply counted) (Retention state []) fields) fields
+ where
+ fields = ["chat","events","turns"]
+ pending row = at row "status" `elem` ["queued","running","output_pending"]
+ apply prune (Retention current archives) field =
+  let (result,removed) = prune field current
+  in Retention result (archives ++ [ConversationArchive field removed | not (null removed)])
+ counted field current =
+  let settled = filter (not . pending) (items current field)
+      removed = take (max 0 (length settled-100)) settled
+  in (put field (arr (filter (`notElem` removed) (items current field))) current,removed)
+ bounded field current = prune current [] (items current field)
+  where
+  prune value removed [] = (value,removed)
+  prune value removed (row:rest)
+   | BL.length (encode value)<=800000 = (value,removed)
+   | pending row || (field=="turns" && Just row==listToMaybe (reverse (items value field))) = prune value removed rest
+   | otherwise = prune (put field (arr (filter (/=row) (items value field))) value) (removed++[row]) rest
+
 trimConversation :: Service -> Text -> IO ()
 trimConversation s a = do
  state <- stateJSON <$> agentState s a
- bounded <- foldM (\current field -> do
-  let rows=items current field
-      settled=filter (\row -> at row "status" `notElem` ["queued","running","output_pending"]) rows
-      removed=take (max 0 (length settled-100)) settled
-  unless (null removed) $ newId >>= \i -> writeJSON (archivePath s a (field<>"/"<>i)) (arr removed)
-  pure (put field (arr (filter (`notElem` removed) rows)) current)) state ["chat","events","turns"]
- final <- foldM (\current field -> do
-  let prune value removed [] = pure (value,removed)
-      prune value removed (row:rest)
-       | BL.length (encode value)<=800000 = pure (value,removed)
-       | at row "status" `elem` ["queued","running","output_pending"] || (field=="turns" && Just row==listToMaybe (reverse (items value field))) = prune value removed rest
-       | otherwise = prune (put field (arr (filter (/=row) (items value field))) value) (removed++[row]) rest
-  (result,removed) <- prune current [] (items current field)
-  unless (null removed) $ newId >>= \i -> writeJSON (archivePath s a (field<>"/"<>i)) (arr removed)
-  pure result) bounded ["chat","events","turns"]
+ let Retention final archives = retainConversation state
+ forM_ archives $ \(ConversationArchive field rows) -> newId >>= \i -> writeJSON (archivePath s a (field<>"/"<>i)) (arr rows)
  when (final/=state) (decodeValue 500 final >>= saveState s a)
 submitTurn :: Service -> Text -> Value -> IO Value
 submitTurn s a d = withReadyProfile $ do
- let raw=get d "text" `fallback` str ""; input=T.strip (text raw); flowValue=get d "flow" `fallback` str "chat"
- require (case raw of String t -> T.length t<=16000; _ -> False) 400 "Message must be text, at most 16000 characters"
+ input <- either (failure 400) pure (messageText (get d "text"))
+ let flowValue=get d "flow" `fallback` str "chat"
  attachments <- resolveAttachments s a (get d "attachments" `fallback` arr []) True
  require (not (T.null input) || not (null attachments)) 400 "Write a message or attach a file"
  flow <- decodeValue 400 flowValue
@@ -67,17 +79,26 @@ submitTurn s a d = withReadyProfile $ do
   Nothing -> do
    suffix <- attachmentPrompt s attachments
    let message=input<>suffix
-   i <- if has d "workload" then D.clarify s a (at d "workload") message else do
-    i <- newId
-    time <- now
-    let turn=toJSON (newTurn (RunId i) flow message time Null True)
-        msg=obj [("role",str "user"),("content",str message),("turn",str i),("time",str time),("origin",Null)]
-    modifyState s a $ \state -> merge state (obj [("turns",arr (items state "turns"++[turn])),("chat",arr (items state "chat"++[msg]))])
-    pure i
+   workload <- if has d "workload" then pure (Just (at d "workload"))
+    else if flow == Chat then D.waitingClarification s a else pure Nothing
+   i <- case workload of
+    Just wid -> D.clarify s a wid message
+    Nothing -> do
+     i <- newId
+     time <- now
+     agentState s a >>= saveState s a . enqueueTurn (RunId i) flow message time
+     pure i
    DB.message s i input attachments
+   DB.forgetDrafts s a attachments
    DB.project s a
    trimConversation s a
    pure (obj [("id",str i),("agent",str a),("status",str "queued"),("flow",toJSON flow)])
+enqueueTurn :: RunId -> Flow -> Text -> Text -> AgentState -> AgentState
+enqueueTurn identity flow input time state = mapStateFields (appendItems "chat" [message])
+ state { agentTurns=agentTurns state ++ [newTurn identity flow input time Null True] }
+ where
+ message = obj [("role",str "user"),("content",str input),("turn",toJSON identity),("time",str time),("origin",Null)]
+
 turnAction :: Service -> Text -> Text -> Text -> IO Value
 turnAction s a identity rawAction = (if rawAction=="retry" then withReadyProfile else id) $ do
  requireActive s a
@@ -86,73 +107,106 @@ turnAction s a identity rawAction = (if rawAction=="retry" then withReadyProfile
  turn <- maybe (failure 404 "Unknown active turn") pure (find ((==RunId identity) . turnId) (agentTurns state))
  work <- D.findWork s (RunId identity)
  require (not (maybe False (any ((==Just (RunId identity)) . D.callParent) . D.workCalls . fst) work)) 409 "This request was delegated; use the recipient call controls"
- let leader=batchLeader turn
-     update f = mapTurns (\t -> if batchLeader t == leader then f t else t)
- case action of
-  Retry -> do
-   require (retryableStatus (turnStatus turn)) 409 "Only failed or interrupted batches can be retried"
-   saveState s a (update retryTurn state)
-  Cancel -> do
-   require (turnStatus turn `notElem` [Done,OutputPending]) 409 "Completed input cannot be cancelled"
-   runs <- readMVar (serviceRuns s)
-   case M.lookup leader runs of
-    Just run -> writeIORef (runCancel run) True
-    Nothing -> saveState s a (update (\t -> t { turnStatus = Cancelled }) state)
+ runs <- readMVar (serviceRuns s)
+ change <- turnResult (controlTurn action (M.member (batchLeader turn) runs) turn state)
+ case change of
+  SaveTurns changed -> saveState s a changed
+  StopTurn identity -> forM_ (M.lookup identity runs) $ \run -> writeIORef (runCancel run) True
  DB.project s a
  trimConversation s a
  D.reconcileWorks s
  updated <- agentState s a
  pure (obj [("id",str identity),("status",maybe Null (toJSON . turnStatus) (find ((==RunId identity) . turnId) (agentTurns updated)))])
+data TurnChange = SaveTurns AgentState | StopTurn RunId
+controlTurn :: TurnAction -> Bool -> Turn -> AgentState -> Either TurnControlError TurnChange
+controlTurn action running turn state = do
+ validateTurnAction action (turnStatus turn)
+ let leader = batchLeader turn
+     update f = mapTurns (\t -> if batchLeader t == leader then f t else t) state
+ pure $ case action of
+  Retry -> SaveTurns (update retryTurn)
+  Cancel | running -> StopTurn leader
+  Cancel -> SaveTurns (update (\t -> t { turnStatus=Cancelled }))
+
 recover :: Service -> Text -> IO ()
 recover s a = do
- modifyTurns s a $ \t -> if turnStatus t == Running then
-  (withTurnFields (put "error" (str "Runner stopped before saving a reply; inspect effects before retrying")) t) { turnStatus = Interrupted } else t
+ modifyTurns s a recoverTurn
  DB.project s a
+data RunOutcome = RunCompleted Text [Value] | RunRejected Text [Value] | RunStopped Text [Value]
+
+runOutcome :: Bool -> Either SomeException (Text,[Value]) -> RunOutcome
+runOutcome stopped result
+ | stopped = RunStopped output logs
+ | Just reason <- error = RunRejected reason logs
+ | otherwise = RunCompleted output logs
+ where
+ (output,logs,error)=case result of
+  Right (value,entries) -> (value,entries,Nothing)
+  Left exception -> case fromException exception of
+   Just (RunFailure reason entries) -> ("",entries,Just reason)
+   Nothing -> ("",[],Just (D.exceptionText exception))
+
+outcomeFields :: RunOutcome -> (Text,[Value],Maybe Text)
+outcomeFields outcome = case outcome of
+ RunCompleted output logs -> (output,logs,Nothing)
+ RunRejected reason logs -> ("",logs,Just reason)
+ RunStopped output logs -> (output,logs,Just "Stopped by Admin. Saved work is preserved; review external effects before retrying.")
+
+settleRun :: RunOutcome -> Text -> [RunId] -> Turn -> AgentState -> AgentState
+settleRun outcome time ids turn state = result
+ where
+ i=runIdText (turnId turn)
+ (output,logs,failureText)=outcomeFields outcome
+ failedStatus=case outcome of RunStopped _ _->Interrupted; _->Failed
+ buffered=turnField turn "agency_kind"==str "chatInput"
+ origin=turnField turn "origin"
+ warnings=[at entry "warning" | entry<-logs,has entry "warning"]
+ update t | turnId t `notElem` ids = t
+          | otherwise = withTurnFields warningFields $ case failureText of
+             Just e -> (withTurnFields (put "error" (str e)) t) { turnStatus = failedStatus }
+             Nothing | buffered -> t { turnStatus = OutputPending }
+                     | otherwise -> (withTurnFields (put "output_at" (str time)) t) { turnStatus = Done }
+ warningFields = if null warnings then remove ["warning"] else put "warning" (str (T.intercalate " " warnings))
+ updated=mapTurns update state
+ result | isJust failureText = updated
+        | buffered = mapStateFields (appendItems "output_buffer" [obj [("turn",str i),("members",toJSON ids),("content",str output),("origin",origin)]]) updated
+        | has origin "group" = updated
+        | otherwise = mapStateFields (put "last_output" (str output) . appendItems "chat" [obj [("role",str "agent"),("content",str output),("turn",str i),("time",str time),("origin",origin)]]) updated
+
 finish :: Service -> Run -> Turn -> Either SomeException (Text,[Value]) -> IO ()
 finish s run turn outcome = do
  stop <- readIORef (runCancel run)
  let a=agentIdText (runOwner run); i=runIdText (runId run)
-     (output,logs,error)=case outcome of
-      Left e -> case fromException e of
-       Just (RunFailure message entries)->("",entries,Just message)
-       Nothing->("",[],Just (D.exceptionText e))
-      Right (value,entries)->(value,entries,Nothing)
-     failureText=if stop then Just "Stopped by Admin. Saved work is preserved; review external effects before retrying." else error
+     completed=runOutcome stop outcome
+     (output,logs,failureText)=outcomeFields completed
  writeJSON (archivePath s a ("runs/"<>i)) (obj [("output",str output),("logs",arr logs),("error",maybe Null str failureText)])
  state <- agentState s a
  time <- now
  ids <- decodeValue 500 (turnField turn "batch_members" `fallback` toJSON [turnId turn]) :: IO [RunId]
- let buffered=turnField turn "agency_kind"==str "chatInput"
-     origin=turnField turn "origin"
-     warnings=[at entry "warning" | entry<-logs,has entry "warning"]
-     update t | turnId t `notElem` ids = t
-              | otherwise = withTurnFields warningFields $ case failureText of
-                 Just e -> (withTurnFields (put "error" (str e)) t) { turnStatus = if stop then Interrupted else Failed }
-                 Nothing | buffered -> t { turnStatus = OutputPending }
-                         | otherwise -> (withTurnFields (put "output_at" (str time)) t) { turnStatus = Done }
-     warningFields = if null warnings then remove ["warning"] else put "warning" (str (T.intercalate " " warnings))
-     updated=mapTurns update state
-     result | isJust failureText = updated
-            | buffered = mapStateFields (appendItems "output_buffer" [obj [("turn",str i),("members",toJSON ids),("content",str output),("origin",origin)]]) updated
-            | has origin "group" = updated
-            | otherwise = mapStateFields (put "last_output" (str output) . appendItems "chat" [obj [("role",str "agent"),("content",str output),("turn",str i),("time",str time),("origin",origin)]]) updated
+ let result = settleRun completed time ids turn state
  saveState s a result
  DB.project s a
  trimConversation s a
  D.reconcileWorks s
+reserveBatch :: NonEmpty Turn -> Pulse -> Int -> Bool -> AgentState -> (AgentState,AgentState,Turn)
+reserveBatch batch tick slot batching state = (marked,snapshot,execution)
+ where
+ first=NE.head batch; i=turnId first; ids=map turnId (NE.toList batch)
+ reserve t
+  | turnId t `notElem` ids = t
+  | otherwise = (withTurnFields (mergeFields (batchFields ++ [("batch_members",toJSON ids) | batching && turnId t==i]) . remove ["error"]) t) { turnStatus = Running, turnBatchId = if batching then Just i else turnBatchId t }
+ batchFields = if batching then [("agency_kind",str "chatInput"),("slot",num slot),("pulseId",str (pulseIdentity tick))] else []
+ marked=mapTurns reserve state
+ snapshot=mapStateFields (mergeFields ([("current_turn",toJSON i)] ++ [("agency_batch",arr [obj [("id",toJSON (turnId t)),("content",str (turnInput t))] | t <- NE.toList batch]) | batching])) marked
+ execution=(reserve first) { turnInput = T.intercalate "\n\n" (map turnInput (NE.toList batch)) }
+
 launch :: Service -> Text -> NonEmpty Turn -> Pulse -> Int -> Bool -> IO ()
 launch s a batch tick slot batching = mask_ $ do
  acquired <- runLease
  forM_ acquired $ \lease -> flip onException (unlockFile lease) $ do
   state <- agentState s a
-  let first=NE.head batch; i=turnId first; ids=map turnId (NE.toList batch)
-      reserve t
-       | turnId t `notElem` ids = t
-       | otherwise = (withTurnFields (mergeFields (batchFields ++ [("batch_members",toJSON ids) | batching && turnId t==i]) . remove ["error"]) t) { turnStatus = Running, turnBatchId = if batching then Just i else turnBatchId t }
-      batchFields = if batching then [("agency_kind",str "chatInput"),("slot",num slot),("pulseId",str (pulseIdentity tick))] else []
-      marked=mapTurns reserve state
-      snapshot=mapStateFields (mergeFields ([("current_turn",toJSON i)] ++ [("agency_batch",arr [obj [("id",toJSON (turnId t)),("content",str (turnInput t))] | t <- NE.toList batch]) | batching])) marked
-      execution=(reserve first) { turnInput = T.intercalate "\n\n" (map turnInput (NE.toList batch)) }
+  let (marked,snapshot,execution) = reserveBatch batch tick slot batching state
+      i=turnId (NE.head batch)
   saveState s a marked
   cancel <- newIORef False
   process <- newMVar Nothing
@@ -171,6 +225,7 @@ launch s a batch tick slot batching = mask_ $ do
     D.pendingWorks s
     G.reconcileGroups s
     G.dispatchGroups s
+    notifyChange s
 publish :: Service -> Text -> Pulse -> IO ()
 publish s a tick = forM_ [1,2] $ \slot -> do
  state <- agentState s a
@@ -194,16 +249,23 @@ admit :: Service -> Text -> Pulse -> IO ()
 admit s a tick = do
  runs <- readMVar (serviceRuns s)
  state <- agentState s a
- let owners=nub (map runOwner (M.elems runs))
-     mine=filter ((==AgentId a) . runOwner) (M.elems runs)
-     available=[n | n<-[1,2],n `notElem` map runSlot mine]
-     scheduled=pulseFrequency tick==Bph60
-     queued=[t | t<-agentTurns state,turnStatus t==Queued,boolean (turnField t "batchable"),has (turnField t "origin") "routine"==scheduled]
-     legacy=[t | t<-agentTurns state,turnStatus t==Queued,not (boolean (turnField t "batchable"))]
- when (AgentId a `elem` owners || length owners<4) $ case (legacy,available,NE.nonEmpty queued) of
-  (first:_,_,_) | null mine && not scheduled -> launch s a (first :| []) tick 0 False
-  (_,slot:_,Just batch) | all ((/=0) . runSlot) mine -> launch s a (if scheduled then NE.head batch :| [] else batch) tick slot True
-  _ -> pure ()
+ mapM_ (\(Admission batch slot batching) -> launch s a batch tick slot batching)
+  (admission (AgentId a) [(runOwner run,runSlot run) | run <- M.elems runs] state tick)
+
+data Admission = Admission (NonEmpty Turn) Int Bool
+admission :: AgentId -> [(AgentId,Int)] -> AgentState -> Pulse -> Maybe Admission
+admission owner runs state tick
+ | owner `notElem` owners && length owners>=4 = Nothing
+ | first:_ <- legacy, null mine, not scheduled = Just (Admission (first :| []) 0 False)
+ | slot:_ <- available, Just batch <- NE.nonEmpty queued, all (/=0) mine = Just (Admission (if scheduled then NE.head batch :| [] else batch) slot True)
+ | otherwise = Nothing
+ where
+ owners=nub (map fst runs)
+ mine=[slot | (agent,slot)<-runs,agent==owner]
+ available=[n | n<-[1,2],n `notElem` mine]
+ scheduled=pulseFrequency tick==Bph60
+ queued=[t | t<-agentTurns state,turnStatus t==Queued,boolean (turnField t "batchable"),has (turnField t "origin") "routine"==scheduled]
+ legacy=[t | t<-agentTurns state,turnStatus t==Queued,not (boolean (turnField t "batchable"))]
 onPulse :: Service -> Pulse -> IO ()
 onPulse s tick = do
  R.dispatch s tick
@@ -219,6 +281,12 @@ onPulse s tick = do
     publish s a tick
     admit s a tick
     when (pulseFrequency tick==Bph60) $ admit s a tick
+advanceDeadline :: Frequency -> Int -> Int -> (Int,Int)
+advanceDeadline frequency time due = (elapsed,due+elapsed*interval)
+ where
+ interval=periodMillis frequency
+ elapsed=(time-due) `div` interval+1
+
 milliseconds :: IO Int
 milliseconds = fromIntegral . (`div` 1000000) <$> getMonotonicTimeNSec
 startExecution :: Service -> IO ()
@@ -239,11 +307,11 @@ startExecution s = modifyMVar_ (serviceWorker s) $ \existing -> case existing of
          writeIORef (servicePulse s) (put "running" (Bool active) pulse)
          time <- milliseconds
          if not active then writeIORef deadlines (M.fromList [(f,time+periodMillis f) | f <- [minBound..maxBound]]) else forM_ [minBound..maxBound] $ \frequency -> do
-          let interval=periodMillis frequency; key=wireName frequency
+          let key=wireName frequency
           due <- fromMaybe time . M.lookup frequency <$> readIORef deadlines
           when (time>=due) $ do
-           let elapsed=(time-due) `div` interval+1
-           modifyIORef' deadlines (M.insert frequency (due+elapsed*interval))
+           let (elapsed,next)=advanceDeadline frequency time due
+           modifyIORef' deadlines (M.insert frequency next)
            current <- readIORef (servicePulse s)
            let number=int (get (get current "numbers") key)+elapsed; numbers=put key (num number) (get current "numbers"); identity=at current "id"
            writeIORef (servicePulse s) (put "numbers" numbers current)

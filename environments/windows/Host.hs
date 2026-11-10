@@ -27,7 +27,7 @@ data Host = Host
   { dataDirectory :: FilePath
   , runtimeDirectory :: FilePath
   , serverProcess :: IORef (Maybe ServerProcess)
-  , origin :: IORef String
+  , origin :: IORef (Maybe URI)
   }
 
 data ServerProcess = ServerProcess
@@ -63,7 +63,7 @@ prepareHost args = do
   let paths = hostPaths args executable local dataEnv runtimeEnv
   directory <- makeAbsolute (dataPath paths)
   runtime <- makeAbsolute (runtimePath paths)
-  Host directory runtime <$> newIORef Nothing <*> newIORef ""
+  Host directory runtime <$> newIORef Nothing <*> newIORef Nothing
 
 startHost :: StorageChoice -> Host -> IO String
 startHost choice host = mask $ \restore -> do
@@ -121,12 +121,12 @@ awaitHost host output errors = do
   request <- parseRequest (show base ++ "/api/health")
   response <- httpLbs request { responseTimeout = responseTimeoutMicro 10000000 } manager
   case decode (responseBody response) of
-    Just (Object fields) | K.lookup "status" fields == Just (String "ok") -> writeIORef (origin host) (show base) >> pure (show uri)
+    Just (Object fields) | K.lookup "status" fields == Just (String "ok") -> writeIORef (origin host) (Just base) >> pure (show uri)
     _ -> ioError $ userError "Server readiness check failed"
 
 closeHost :: Host -> IO ()
 closeHost host = mask_ $ do
-  writeIORef (origin host) ""
+  writeIORef (origin host) Nothing
   current <- readIORef (serverProcess host)
   forM_ current $ \server -> do
     stopServer server

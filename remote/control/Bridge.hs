@@ -12,6 +12,7 @@ import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
 import Data.Aeson hiding (pairs)
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Char
 import Data.IORef
@@ -109,15 +110,29 @@ replyFrame :: Value -> Text -> Value -> IO Value
 replyFrame config ident value = do
  expires <- (+86390) <$> seconds
  pack (get config "private") (get config "peer") (at config "room") DesktopToPhone (obj [("id",str ident),("expires",toJSON expires),("kind",str "response"),("result",value)])
+data PairingApproval = PairingApproval { approvedConfig :: Value, approvalRequest :: Text }
+planApproval :: Double -> Value -> Value -> Validation PairingApproval
+planApproval time input config = do
+ let pending = get config "pending"
+ check (pending/=Null && expiry (get config "expires") > time && get input "peer" == get pending "peer") 409 "Pairing expired or phone changed; generate a new QR"
+ let paired = merge (remove ["secret","invitation"] config) (obj [("peer",get pending "peer"),("paired_at",toJSON time),("device_info",fallback (get pending "device_info") empty),("pending",Null)])
+ pure (PairingApproval paired (at pending "id"))
+
+pairingProof :: Double -> Bool -> Value -> Value -> Value -> Validation Value
+pairingProof time proof config peer message = do
+ check (at message "kind"=="pair" && expiry (get config "expires")>time && has message "secret" && proof) 400 "Invalid pairing proof"
+ let pending = get config "pending"
+ check (pending==Null || get pending "peer"==peer) 400 "Another phone is awaiting approval"
+ pure (put "pending" (obj [("peer",peer),("id",get message "id"),("device_info",cleanDeviceInfo (get message "device_info"))]) config)
+
 approvePairing :: Bridge -> Value -> IO Value
 approvePairing b input = modifyMVar (bridgeConfig b) $ \config -> do
  time <- seconds
- let pending = get config "pending"
- require (pending/=Null && expiry (get config "expires") > time && get input "peer" == get pending "peer") 409 "Pairing expired or phone changed; generate a new QR"
+ approval <- validated (planApproval time input config)
  void (request (at config "relay") ("/api/rooms/"<>at config "room"<>"/trust") (at config "token") "POST" (Just empty))
  identity <- Service.corporaIdentity (bridgeService b)
- let paired = merge (remove ["secret","invitation"] config) (obj [("peer",get pending "peer"),("paired_at",toJSON time),("device_info",fallback (get pending "device_info") empty),("pending",Null)])
- accept <- replyFrame paired (at pending "id") (obj [("paired",Bool True),("corpora",identity)])
+ let paired = approvedConfig approval
+ accept <- replyFrame paired (approvalRequest approval) (obj [("paired",Bool True),("corpora",identity)])
  let updated = put "accept" accept paired
  saveConfig b updated
  pure (updated,obj [("approved",Bool True)])
@@ -135,26 +150,37 @@ closeBridge :: Bridge -> IO ()
 closeBridge b = readMVar (bridgeThread b) >>= mapM_ cancel
 cleanDeviceInfo :: Value -> Value
 cleanDeviceInfo value = obj [(k,str (T.take 200 (T.strip (T.filter isPrint s)))) | k <- ["name","platform","client"], String s <- [get value k]]
+connectionUpdate :: Double -> S.Set Text -> Value -> Value -> (Bool,Text,Value)
+connectionUpdate time connections config message = (changed,connection,final)
+ where
+ raw = at message "connection_id"
+ connection = if T.length raw <=100 then raw else ""
+ info = cleanDeviceInfo (get message "device_info")
+ changed = get config "last_connected_at"==Null || (not (T.null connection) && S.notMember connection connections) || (T.null connection && at message "op"=="resume")
+ updated = if changed then merge config (obj [("last_connected_at",toJSON time),("last_connection_id",if T.null connection then Null else str connection)]) else config
+ final = if info/=empty then put "device_info" info updated else updated
+
 recordConnection :: Bridge -> Value -> Value -> IO Value
 recordConnection b config message = do
- let raw = at message "connection_id"
-     connection = if T.length raw <=100 then raw else ""
-     info = cleanDeviceInfo (get message "device_info")
  connections <- readIORef (bridgeConnections b)
  time <- seconds
- let changed = get config "last_connected_at"==Null || (not (T.null connection) && S.notMember connection connections) || (T.null connection && at message "op"=="resume")
-     updated = if changed then merge config (obj [("last_connected_at",toJSON time),("last_connection_id",if T.null connection then Null else str connection)]) else config
-     final = if info/=empty then put "device_info" info updated else updated
+ let (changed,connection,final)=connectionUpdate time connections config message
  when changed (writeIORef (bridgeConnections b) (if S.size connections >128 then S.singleton connection else S.insert connection connections))
  when (final/=config) (saveConfig b final)
  pure final
+data RemoteRequest = RemoteRequest Text Text (Maybe Value)
+remoteRequest :: Value -> Validation RemoteRequest
+remoteRequest message = do
+ let method = at message "method"; target = at message "path"; path = T.takeWhile (/='?') target; parts = T.splitOn "/" (T.dropAround (=='/') path)
+ check (at message "op"=="api") 409 "Remote operation not allowed"
+ check (method `elem` ["GET","POST","PUT"] && T.length target<=8192) 409 "Unsupported remote API request"
+ check ("/api/" `T.isPrefixOf` target && not (T.any (=='%') path) && not (T.any (`elem` ("\\#"::String)) target) && ".." `notElem` parts && take 2 parts `notElem` [["api","remote"],["api","host"]] && not (method/="GET" && length parts==4 && last parts=="browser")) 409 "Remote API route is not allowed"
+ pure (RemoteRequest method target (if get message "data"==Null then Nothing else Just (get message "data")))
+
 executeRemote :: Bridge -> Value -> IO Value
 executeRemote b message = do
- let method = at message "method"; target = at message "path"; path = T.takeWhile (/='?') target; parts = T.splitOn "/" (T.dropAround (=='/') path)
- require (at message "op"=="api") 409 "Remote operation not allowed"
- require (method `elem` ["GET","POST","PUT"] && T.length target<=8192) 409 "Unsupported remote API request"
- require ("/api/" `T.isPrefixOf` target && not (T.any (=='%') path) && not (T.any (`elem` ("\\#"::String)) target) && ".." `notElem` parts && take 2 parts `notElem` [["api","remote"],["api","host"]] && not (method/="GET" && length parts==4 && last parts=="browser")) 409 "Remote API route is not allowed"
- (status,body,mime) <- Service.dispatch (bridgeService b) method target (if get message "data" == Null then Nothing else Just (get message "data"))
+ RemoteRequest method target input <- validated (remoteRequest message)
+ (status,body,mime) <- Service.dispatch (bridgeService b) method target input
   `catch` \(APIError status messageText) -> pure (status,encode (obj [("error",str messageText)]),"application/json")
  let isJSON = "application/json" `T.isPrefixOf` mime
  pure (obj [("status",num status),("body",if isJSON then fromMaybeValue (decode body) else str (b64 (BL.toStrict body))),("mime",str mime),("binary",Bool (not isJSON))])
@@ -170,10 +196,7 @@ processFrame b config frame = do
  time <- seconds
  if get config "peer"==Null then do
   proof <- constantEqual (at message "secret") (at config "secret")
-  require (at message "kind"=="pair" && expiry (get config "expires")>time && has message "secret" && proof) 400 "Invalid pairing proof"
-  let pending = get config "pending"
-  require (pending==Null || get pending "peer"==peer) 400 "Another phone is awaiting approval"
-  let updated = put "pending" (obj [("peer",peer),("id",get message "id"),("device_info",cleanDeviceInfo (get message "device_info"))]) config
+  updated <- validated (pairingProof time proof config peer message)
   saveConfig b updated
   pure (updated,Nothing)
  else do
@@ -186,17 +209,23 @@ processFrame b config frame = do
     else do
      let path = serviceRoot (bridgeService b) </> "remote-receipts.sqlite3"
          currentDigest = hash (BL.toStrict (encode (obj (sortOn fst (pairs message)))))
-         digest = either (const currentDigest) hash (legacyJSON plaintext)
+         -- New receipts and matching pre-v2 canonical receipts never need legacyJSON.
+         -- Limit the slow Python-era fallback to 4 KiB during the one-day migration
+         -- window. Oversized mismatches are rejected without parsing or re-execution.
+         stored = "v2:" <> currentDigest
+         legacyDigest = either (const currentDigest) hash (legacyJSON plaintext)
+         matches saved = if "v2:" `T.isPrefixOf` saved then saved == stored
+          else saved == currentDigest || (BS.length plaintext <= 4096 && saved == legacyDigest)
          room = at current "room"; ident = at message "id"
      receipt <- withDB path $ \db -> withTransaction db $ do
       execute_ db "CREATE TABLE IF NOT EXISTS receipts (room TEXT,id TEXT,hash TEXT,reply TEXT,created REAL,PRIMARY KEY(room,id))"
       execute db "DELETE FROM receipts WHERE created < ?" (Only (time-86400))
       rows <- query db "SELECT hash,reply FROM receipts WHERE room=? AND id=?" (room,ident) :: IO [(Text,Maybe Text)]
-      when (null rows) (execute db "INSERT INTO receipts VALUES (?,?,?,NULL,?)" (room,ident,digest,time))
+      when (null rows) (execute db "INSERT INTO receipts VALUES (?,?,?,NULL,?)" (room,ident,stored,time))
       pure rows
      case receipt of
       (saved,raw):_ -> do
-       require (saved==digest || saved==currentDigest) 400 "Request ID was reused"
+       require (matches saved) 400 "Request ID was reused"
        maybe (replyFrame current ident (obj [("error",str "Outcome uncertain after interruption. Check desktop history before sending again.")])) (pure . parseJSONText) raw
       [] -> do
        result <- executeReply b current message

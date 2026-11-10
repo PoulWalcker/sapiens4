@@ -41,6 +41,15 @@ end
 Array(rule['actions']).each do |action|
   if action['write']
     File.write(File.expand_path(action['write'], Dir.pwd), action.fetch('content'))
+  elsif action['generated_command']
+    require_relative 'generated_command'
+    result = GeneratedCommand.capture(Dir.pwd, action.fetch('generated_command'), action.fetch('arguments'))
+    record[:commands] ||= []
+    record[:commands] << result
+    File.write(path + '.new', JSON.generate(record))
+    File.rename(path + '.new', path)
+  elsif action['gate']
+    sleep 0.02 until File.exist?(File.join(root, action['gate'])) || File.exist?(File.join(root, 'released'))
   elsif action['control']
     uri = URI(JSON.parse(File.read('host-control.json')).fetch('url'))
     request = Net::HTTP::Post.new(uri)

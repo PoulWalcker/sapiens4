@@ -1,7 +1,35 @@
 require_relative 'support/desktop'
 require_relative 'support/proxy'
+require_relative 'support/voice'
+require 'securerandom'
 
 RSpec.describe 'Navigating work', :desktop do
+  include VoiceAudio
+
+  it 'applies the Send button availability to the keyboard shortcut for a voice draft' do
+    @host = desktop_host
+    owner = chief
+    clip = host.api('POST', "/api/agents/#{owner}/voice",
+      recording: SecureRandom.uuid, index: 0, final: true, data: voice_piece(1)).fetch('messages').first
+    host.api('PUT', '/api/preferences', attachment_drafts: {owner => [clip.fetch('id')]})
+    lifecycle = lambda do |action|
+      host.api('PUT', '/api/corpora/lifecycle', action: action, operation: SecureRandom.uuid, revision: host.state['corpora']['revision'])
+    end
+    lifecycle.call('pause')
+    start_desktop
+    desktop.see('Transcribing…')
+    desktop.fill('Message ChiefSapi', 'Keep this draft')
+    desktop.key('enter')
+    expect(desktop.text).not_to include('Sending voice messages in order')
+
+    lifecycle.call('activate')
+    Contract.wait(description: 'Send button enabled') { desktop.find('Send message')['enabled'] }
+    desktop.click('Message ChiefSapi')
+    desktop.key('enter')
+    desktop.see('Sending voice messages in order')
+    expect(host.calls).to be_empty
+  end
+
   def completed_task
     @host = desktop_host
     host.configure(mode: 'Exec')
@@ -25,6 +53,28 @@ RSpec.describe 'Navigating work', :desktop do
     desktop.reload
     desktop.see(changed)
     expect(desktop.find('Message ChiefSapi')['value']).to eq('Draft with a saved appearance')
+  end
+
+  it 'retains the conversation and unsent draft across a malformed snapshot and recovers' do
+    @host = desktop_host
+    malformed = false
+    proxy = HostProxy.new(host) do |request, response|
+      if malformed && request.path.end_with?('/api/state')
+        [response[0], response[1].merge('agents' => 'invalid agent collection'), response[2]]
+      else
+        response
+      end
+    end
+    start_desktop(proxy.url)
+    desktop.fill('Message ChiefSapi', 'Keep this draft during recovery')
+    malformed = true
+    desktop.see('Invalid snapshot response: agents: expected array')
+    expect(desktop.find('Message ChiefSapi')['value']).to eq('Keep this draft during recovery')
+    malformed = false
+    desktop.see('Active')
+    expect(desktop.find('Message ChiefSapi')['value']).to eq('Keep this draft during recovery')
+  ensure
+    proxy&.close
   end
 
   it 'lets a person send a message and read the reply' do
@@ -64,7 +114,7 @@ RSpec.describe 'Navigating work', :desktop do
     proxy = HostProxy.new(host) do |request, response|
       if request.path.end_with?('/tasks')
         requested << true
-        Timeout.timeout(15) { release.pop }
+        Timeout.timeout(Desktop.linux? ? 60 : 15) { release.pop }
       end
       response
     end
@@ -89,7 +139,7 @@ RSpec.describe 'Navigating work', :desktop do
     proxy = HostProxy.new(host) do |request, response|
       if request.path.start_with?(old_route) && request.path.end_with?('/tasks')
         requested << true
-        Timeout.timeout(15) { release.pop }
+        Timeout.timeout(Desktop.linux? ? 60 : 15) { release.pop }
         returned << true
       end
       response
@@ -151,8 +201,9 @@ RSpec.describe 'Navigating work', :desktop do
   it 'keeps the next draft when the previous send is still being confirmed' do
     @host = desktop_host
     host.agent('Researcher')
+    host.configure(block: true)
     requested, release = Queue.new, Queue.new
-    proxy = HostProxy.new(host) do |request, response|
+    proxy = HostProxy.new(host, updates: true) do |request, response|
       if request.request_method == 'POST' && request.path.end_with?('/messages')
         requested << true
         Timeout.timeout(15) { release.pop }
@@ -163,9 +214,13 @@ RSpec.describe 'Navigating work', :desktop do
     desktop.fill('Message ChiefSapi', 'First request')
     desktop.press('Send message')
     Timeout.timeout(10) { requested.pop }
+    # Wait for the first turn to appear before editing its composer. Both the
+    # submit response and provider completion stay withheld during this input.
+    desktop.find('First request', role: 'AXStaticText')
     desktop.fill('Message ChiefSapi', 'Keep this next request')
     desktop.press('Open Researcher')
     release << true
+    host.release
     host.idle
     desktop.press('Open ChiefSapi')
     desktop.see('Contract test reply')
@@ -173,57 +228,46 @@ RSpec.describe 'Navigating work', :desktop do
     expect(host.state['turns'].map { |turn| turn['input'] }).to eq(['First request'])
   ensure
     release << true if release
+    host&.release
+    @desktop&.close
+    @desktop = nil
     proxy&.close
   end
 
-  it 'keeps task history visible when a Memo finishes loading after navigation' do
-    completed_task
-    File.write(File.join(host.workspace(chief), 'Notes.html'),
-      '<section id="about">Notebook</section><section id="map"></section><section id="content"><p>Late Memo content.</p></section>')
-    requested, release, returned = Queue.new, Queue.new, Queue.new
-    proxy = HostProxy.new(host) do |request, response|
-      if request.path.end_with?('/notes')
-        requested << true
-        Timeout.timeout(15) { release.pop }
-        returned << true
-      end
-      response
-    end
-    start_desktop(proxy.url)
+  it 'reuses the selected Sapi’s Memo tab and can reopen it after the tab closes' do
+    @host = desktop_host
+    researcher = host.agent('Researcher')
+    root = host.workspace(researcher)
+    File.write(File.join(root, 'Notes.html'), '<p>Voca’s role is “Proofreader.”</p><a href="transcript.txt">Recording transcript</a>')
+    File.write(File.join(root, 'transcript.txt'), 'Audio transcript file')
+    start_desktop
+    desktop.press('Open Researcher')
     work_view('Memo')
-    Timeout.timeout(10) { requested.pop }
-    desktop.press('Work')
-    desktop.see('Compare the products.')
-    release << true
-    Timeout.timeout(10) { returned.pop }
-    expect(desktop.see('Compare the products.')).not_to include('Late Memo content.')
+    desktop.see('Voca’s role is “Proofreader.”')
+    tab = host.control(researcher, 'workspace')['tabs'].fetch(0)
     work_view('Memo')
-    expect(desktop.see('Late Memo content.')).to include('Notebook')
-  ensure
-    release << true if release
-    proxy&.close
+    desktop.see('Voca’s role is “Proofreader.”')
+    expect(host.control(researcher, 'workspace')['tabs'].map { |t| t['id'] }).to eq([tab['id']])
+    desktop.press('Close Notes.html')
+    Contract.wait { host.control(researcher, 'workspace')['tabs'].empty? }
+    work_view('Memo')
+    desktop.see('Voca’s role is “Proofreader.”')
+    desktop.press('Recording transcript')
+    desktop.see('Audio transcript file')
+    expect(host.control(chief, 'workspace')['tabs']).to be_empty
   end
 
-  it 'lets the person retry a Memo that was temporarily unavailable' do
-    completed_task
-    File.write(File.join(host.workspace(chief), 'Notes.html'),
-      '<section id="about">Notebook</section><section id="map"></section><section id="content"><p>Recovered Memo.</p></section>')
-    fail_next = true
-    proxy = HostProxy.new(host) do |request, response|
-      if request.path.end_with?('/notes') && fail_next
-        fail_next = false
-        [503, {error: 'Memo temporarily unavailable'}, {'Content-Type' => 'application/json'}]
-      else
-        response
-      end
-    end
-    start_desktop(proxy.url)
+  it 'keeps a missing Memo closed and opens it after the file is restored' do
+    @host = desktop_host
+    path = File.join(host.workspace(chief), 'Notes.html')
+    File.delete(path)
+    start_desktop
     work_view('Memo')
-    desktop.see('Memo temporarily unavailable')
-    desktop.press('Try again')
-    expect(desktop.see('Recovered Memo.')).to include('Notebook')
-  ensure
-    proxy&.close
+    desktop.see('Notes.html is missing')
+    expect(host.control(chief, 'workspace')['tabs']).to be_empty
+    File.write(path, '<p>Recovered notebook</p>')
+    work_view('Memo')
+    desktop.see('Recovered notebook')
   end
 
   it 'keeps a person’s workspace available after visiting somebody with no tabs' do

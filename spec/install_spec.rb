@@ -12,6 +12,12 @@ RSpec.describe 'Public installation entry points' do
       expect(body).not_to be_empty
     end
     expect(relay.request('GET', '/api/state', nil, bearer: nil).first).to eq(401)
+    code, page = relay.request('GET', '/linux', nil, bearer: nil)
+    expect(code).to eq(200)
+    expect(page).to include('/manifest.webmanifest?platform=linux')
+    code, linux = relay.request('GET', '/manifest.webmanifest?platform=linux', nil, bearer: nil)
+    expect(code).to eq(200)
+    expect(linux.fetch('start_url')).to eq('/linux')
   ensure
     relay&.close
   end

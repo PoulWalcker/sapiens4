@@ -1,27 +1,31 @@
 {-# LANGUAGE OverloadedStrings #-}
-module Groups (module GroupModel, groupControl) where
+module Groups (module GroupModel, GroupOperation(..), groupControl) where
 
 import Types
+import Data.Aeson (Value)
+import Data.Text (Text)
 import GroupModel
 import qualified GroupChat as Chat
 import qualified GroupWork as Work
 
-groupControl s actor input = do
- let op = at input "op"; payload = remove ["op","group"] input; gid = at input "group"
- case op of
-  "group_create" -> createGroup s payload actor
-  "group_update" -> updateGroup s gid payload actor
-  _ -> do
-   group <- getGroup s gid (op /= "group_get")
-   authorizeGroup s group actor Member
-   case op of
-    "group_get" -> pure group
-    "group_message" -> Chat.submitGroup s gid payload actor
-    "group_task_create" -> Work.createTask s gid payload actor
-    "group_task_update" -> Work.updateTask s gid (at payload "task") (remove ["task"] payload) actor
-    "group_task_run" -> do
-     root <- Chat.activeRoot s gid actor
-     result <- Work.startTask s gid (at payload "task") (get payload "revision") actor root
-     Chat.dispatchGroups s
-     pure result
-    _ -> failure 400 "Unknown Group operation"
+data GroupOperation = GroupCreate | GroupUpdate | GroupGet | GroupMessage | GroupTaskCreate | GroupTaskUpdate | GroupTaskRun deriving (Eq, Show)
+groupControl :: Service -> Text -> GroupOperation -> Value -> IO Value
+groupControl s actor operation input = case operation of
+ GroupCreate -> createGroup s payload actor
+ GroupUpdate -> updateGroup s gid payload actor
+ GroupGet -> withGroup False pure
+ GroupMessage -> withGroup True (const (Chat.submitGroup s gid payload actor))
+ GroupTaskCreate -> withGroup True (const (Work.createTask s gid payload actor))
+ GroupTaskUpdate -> withGroup True (const (Work.updateTask s gid (at payload "task") (remove ["task"] payload) actor))
+ GroupTaskRun -> withGroup True $ \_ -> do
+  root <- Chat.activeRoot s gid actor
+  result <- Work.startTask s gid (at payload "task") (get payload "revision") actor root
+  Chat.dispatchGroups s
+  pure result
+ where
+ payload = remove ["op","group"] input
+ gid = at input "group"
+ withGroup active action = do
+  group <- getGroup s gid active
+  authorizeGroup s group actor Member
+  action group

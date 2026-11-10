@@ -4,6 +4,7 @@
 module Service (Service, APIError(..), openService, startService, closeService, serviceRoot, attachEndpoint, dispatch, snapshot, corporaIdentity) where
 
 import Control.Concurrent
+import Control.Concurrent.STM (newTVarIO, readTVarIO)
 import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
@@ -11,12 +12,12 @@ import Data.Aeson hiding (pairs)
 import qualified Data.ByteString.Lazy as BL
 import Data.IORef
 import qualified Data.Map.Strict as M
+import qualified Data.Set as Set
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
-import Network.URI (unEscapeString)
 import System.Directory
 import System.Environment
 import System.FileLock
@@ -27,9 +28,11 @@ import System.Posix.Files (setFileMode)
 #endif
 import Types
 import DataRoot
+import qualified Computer
 import qualified Store as DB
 import Population
 import Workspace
+import Voice (receivePiece, cancelRecording, retryTranscription, draftable)
 import Memo
 import qualified Management as Mgt
 import qualified Execution as E
@@ -61,8 +64,13 @@ openService choice path = do
       endpoint <- newIORef ""
       pulse <- newIORef empty
       actors <- newMVar M.empty
-      let s=Service root repo guard lock stopping worker runs lease endpoint pulse actors database
+      states <- newMVar M.empty
+      revision <- newTVarIO 0
+      subscribers <- newTVarIO 0
+      files <- newIORef Set.empty
+      let s=Service root repo guard lock stopping worker runs lease endpoint pulse actors database states revision subscribers files
       DB.initialize s
+      migrateWorkspaces s
       let identityPath=root </> "corpora-identity.json"
       exists <- doesFileExist identityPath
       unless exists $ do i<-UUID.toText <$> UUID.nextRandom; writeJSON identityPath (obj [("version",num 1),("corpora_id",str i)])
@@ -80,7 +88,6 @@ openService choice path = do
       prefs <- DB.singleton s DB.Preferences
       let panel=at prefs "panel"; updated=if panel=="mindmap" then put "panel" (str "notes") prefs else if panel `elem` ["cron","log"] then put "panel" (str "chat") prefs else prefs
       DB.saveSingleton s DB.Preferences (remove ["work_views"] updated)
-      migrateWorkspaces s
       savedPulse <- DB.singleton s DB.SystemPulse
       identityPulse <- if has savedPulse "pulse" then pure (at savedPulse "pulse") else ("pulse_" <>) <$> newId
       cfg <- corporaSettings s
@@ -115,8 +122,12 @@ snapshot :: Service -> IO Value
 snapshot s = locked s (snapshotUnlocked s)
 snapshotUnlocked :: Service -> IO Value
 snapshotUnlocked s = do
+ revision <- readTVarIO (serviceRevision s)
  rows <- DB.agents s
- mapM_ (DB.project s . (`at` "id")) rows
+ archives <- fmap concat $ forM rows $ \row -> do
+  let owner = at row "id"
+  turns <- DB.projectArchives s owner
+  pure [archivePath s owner ("runs/" <> runIdText (turnId t)) | t <- turns]
  GC.reconcileGroups s
  turns <- DB.turns s
  prefs <- DB.singleton s DB.Preferences
@@ -132,7 +143,9 @@ snapshotUnlocked s = do
  pulse <- readIORef (servicePulse s)
  chief <- DB.mainAgent s
  works <- D.readWorks s
- drafts <- forM (pairs (get prefs "attachment_drafts")) $ \(a,ids) -> (a,) . arr . filter (\x->get x "id" `elem` list ids) <$> DB.attachments s a
+ drafts <- forM (pairs (get prefs "attachment_drafts")) $ \(a,ids) -> do
+  indexed <- attachmentIndex s a
+  pure (a, arr [row | String i <- list ids, Just row <- [M.lookup i indexed], draftable row])
  dir <- directory s
  orchestration <- forM rows $ \row -> do
   let a=at row "id"
@@ -146,22 +159,37 @@ snapshotUnlocked s = do
   pure (run,merge value (obj [("turn",str (runIdText (runId run))),("stopping",Bool stopping),("agencyKind",str "chatInput"),("slot",num (runSlot run))]))
  let groupTurns=M.fromList [(at request "id",at g "id") | g<-groups,request<-items g "requests"]
      projected=[maybe t (\gid->put "group" (str gid) t) (M.lookup (at t "id") groupTurns) | t<-turns]
- pure $ obj [("agents",arr agentRows),("turns",arr projected),("preferences",prefs),("corpora",corpora),("groups",arr groups),("routines",arr routines),("creation_template",str (T.strip creation)),("computer",obj [("owner",owner),("built",Bool built),("platform",str (if os=="mingw32" then "win32" else T.pack os))]),("pulses",arr pulses),("events",events),("pulse",pulse),("provider",str "codex"),("activity",obj [(agentIdText (runOwner r),v) | (r,v)<-activity]),("run_activity",obj [(runIdText (runId r),v) | (r,v)<-activity]),("main_agent_id",str chief),("workloads",arr (D.workSummaries works)),("attachment_drafts",obj drafts),("orchestration",obj orchestration)]
+ -- Watch metadata for inputs that may be edited without going through the API.
+ binary <- blindly s
+ let owners = map (`at` "id") rows
+     stateFiles = [agentRoot s a </> f | a <- owners, f <- ["state.json","host.json","run-settings.json","execution.json"]]
+     notes = [workspaceRoot s (at row "id") </> f | row <- rows ++ groups, f <- ["Notes.html","Notes.history.json"]]
+     documents = [T.unpack (at t "path") | (_,w) <- pairs (get prefs "workspaces"), t <- items w "tabs", has t "path"]
+ writeIORef (snapshotFiles s) $! Set.fromList $ [binary,repositoryRoot s </> "corpora/prompts/creation-request.md",serviceRoot s </> "corpora-settings.json",serviceRoot s </> "agentpy/corpora/directory.json"] ++ stateFiles ++ notes ++ archives ++ documents
+ pure $ obj [("updates_revision",toJSON revision),("agents",arr agentRows),("turns",arr projected),("preferences",prefs),("corpora",corpora),("groups",arr groups),("routines",arr routines),("creation_template",str (T.strip creation)),("computer",obj [("owner",owner),("built",Bool built),("backend",str "native"),("platform",str (if os=="mingw32" then "win32" else T.pack os))]),("pulses",arr pulses),("events",events),("pulse",pulse),("provider",str "codex"),("activity",obj [(agentIdText (runOwner r),v) | (r,v)<-activity]),("run_activity",obj [(runIdText (runId r),v) | (r,v)<-activity]),("main_agent_id",str chief),("workloads",arr (D.workSummaries works)),("attachment_drafts",obj drafts),("orchestration",obj orchestration)]
+validatePreferenceShape :: Value -> Validation ()
+validatePreferenceShape d = do
+ check (all (`elem` ["selected","panel","scope","groupView","panes","drafts","attachment_drafts"]) (keys d)) 400 "Unknown preference field"
+ forM_ ["panes","drafts","attachment_drafts"] $ \k -> when (has d k) $ check (case get d k of Object _->True; _->False) 400 (k<>" must be an object")
+
+validatePreferences :: [Value] -> [Value] -> Value -> Validation ()
+validatePreferences rows groups d = do
+ when (has d "selected") $ check (get d "selected" `elem` map (`get` "id") (rows++groups)) 400 "Unknown selected Sapi"
+ when (get d "groupView"/=Null) $ check (get d "groupView" `elem` map (`get` "id") groups) 400 "Unknown Group view"
+ check (get d "panel" `fallback` str "chat" `elem` map str ["chat","tasks","notes","work","updates"]) 400 "Unknown panel"
+ check (get d "scope" `fallback` str "all" `elem` map str ["all","sapis","groups"]) 400 "Unknown view"
+ forM_ (pairs (get d "panes")) $ \(k,v) -> check (k `elem` ["sidebar","chat","workspace"] && (case v of Bool _->True; _->False)) 400 "Invalid panel visibility"
+ forM_ (pairs (get d "drafts")) $ \(_,v) -> check (case v of String t->T.length t<=16000; _->False) 400 "Invalid draft"
+
 savePreferences :: Service -> Value -> IO Value
 savePreferences s d = do
- require (all (`elem` ["selected","panel","scope","groupView","panes","drafts","attachment_drafts"]) (keys d)) 400 "Unknown preference field"
- forM_ ["panes","drafts","attachment_drafts"] $ \k -> when (has d k) $ require (case get d k of Object _->True; _->False) 400 (k<>" must be an object")
+ validated (validatePreferenceShape d)
  rows <- DB.agents s
  groups <- DB.values s DB.Groups
- when (has d "selected") $ require (get d "selected" `elem` map (`get` "id") (rows++groups)) 400 "Unknown selected Sapi"
- when (get d "groupView"/=Null) $ require (get d "groupView" `elem` map (`get` "id") groups) 400 "Unknown Group view"
- require (get d "panel" `fallback` str "chat" `elem` map str ["chat","tasks","notes","work","updates"]) 400 "Unknown panel"
- require (get d "scope" `fallback` str "all" `elem` map str ["all","sapis","groups"]) 400 "Unknown view"
- forM_ (pairs (get d "panes")) $ \(k,v) -> require (k `elem` ["sidebar","chat","workspace"] && (case v of Bool _->True; _->False)) 400 "Invalid panel visibility"
- forM_ (pairs (get d "drafts")) $ \(_,v) -> require (case v of String t->T.length t<=16000; _->False) 400 "Invalid draft"
- forM_ (pairs (get d "attachment_drafts")) $ \(a,ids) -> void (resolveAttachments s a ids False)
+ validated (validatePreferences rows groups d)
+ drafts <- forM (pairs (get d "attachment_drafts")) $ \(a,ids) -> (\found -> (a, arr [get r "id" | r <- found, draftable r])) <$> resolveAttachments s a ids False
  prefs <- DB.singleton s DB.Preferences
- let current=merge prefs d
+ let current=merge prefs (if has d "attachment_drafts" then put "attachment_drafts" (obj drafts) d else d)
  DB.saveSingleton s DB.Preferences current
  pure (obj [("saved",Bool True),("preferences",current)])
 dispatch :: Service -> Text -> Text -> Maybe Value -> IO (Int,BL.ByteString,Text)
@@ -170,11 +198,12 @@ dispatch s method target body = locked s $ do
  when write $ require (case d of Object _->True; _->False) 400 "Expected a JSON object"
  cfg <- corporaSettings s
  when (write && corporaStatus cfg/=Active && ("/messages" `T.isSuffixOf` path || "/run" `T.isSuffixOf` path || "/turns/" `T.isInfixOf` path)) $ failure 409 "Activate this corpora before starting work"
- let json code action = do value<-action; pure (code,encode value,"application/json; charset=utf-8")
+ let json code action = do value<-action; when write (notifyChange s); pure (code,encode value,"application/json; charset=utf-8")
      owner kind a=if kind=="groups" then void (G.getGroup s a False) else void (DB.agent s a)
  case (method,parts) of
   ("GET",["api","health"]) -> json 200 (pure (obj [("status",str "ok"),("provider",str "codex")]))
   ("GET",["api","state"]) -> json 200 (snapshotUnlocked s)
+  ("GET",["api","computer"]) -> json 200 (Computer.computerStatus (repositoryRoot s))
   ("GET",["api","corpora"]) -> json 200 (corporaIdentity s)
   ("GET",["api","corpora","operations",operation]) -> json 200 $ do identity<-corporaIdentity s; pure (obj [("applied",Bool (has (toJSON (corporaOperations cfg)) operation)),("corpora",identity)])
   ("PUT",["api","corpora","lifecycle"]) -> json 200 (Mgt.lifecycle s d)
@@ -185,10 +214,8 @@ dispatch s method target body = locked s $ do
    if "format=json" `T.isInfixOf` query then json 200 (D.taskList s a) else do value<-D.workTasks s a True; pure (200,encode value,"application/yaml; charset=utf-8")
   ("GET",["api",kind,a,"notes"]) | kind `elem` ["agents","groups"] -> do
    owner kind a
-   let image=lookup "image" [(k,T.drop 1 v) | entry<-T.splitOn "&" (T.drop 1 query),let (k,v)=T.breakOn "=" entry]
-   case image of
-    Nothing -> json 200 (readMemo (workspaceRoot s a))
-    Just name -> do (bytes,mime)<-memoImage (workspaceRoot s a) (T.pack (unEscapeString (T.unpack name))); pure (200,bytes,mime)
+   require (T.null query) 404 "Unknown Notes resource"
+   json 200 (readMemo (workspaceRoot s a))
   ("GET",["api",kind,a,"browser",tab,"content"]) | kind `elem` ["agents","groups"] -> owner kind a >> json 200 (workspaceText s a tab)
   ("GET",["api","groups"]) -> json 200 (obj . (:[]) . ("groups",) . arr <$> G.snapshotGroups s)
   ("GET",["api","groups",gid]) -> json 200 (G.getGroup s gid False)
@@ -206,6 +233,9 @@ dispatch s method target body = locked s $ do
   ("POST",["api","agents",a,"turns",tid,action]) -> json 200 (E.turnAction s a tid action)
   ("PUT",["api","preferences"]) -> json 200 (savePreferences s d)
   ("POST",["api",kind,a,"attachments"]) | kind `elem` ["agents","groups"] -> owner kind a >> json 201 (createAttachment s a d)
+  ("POST",["api",kind,a,"voice"]) | kind `elem` ["agents","groups"] -> owner kind a >> json 200 (receivePiece s a d)
+  ("POST",["api",kind,a,"voice",recording,"cancel"]) | kind `elem` ["agents","groups"] -> owner kind a >> json 200 (cancelRecording s a recording)
+  ("POST",["api",kind,a,"attachments",i,"transcribe"]) | kind `elem` ["agents","groups"] -> owner kind a >> json 200 (retryTranscription s a i)
   ("POST",["api",kind,a,"browser"]) | kind `elem` ["agents","groups"] -> owner kind a >> json 200 (workspaceObserved s a d)
   ("POST",["api","groups",gid,"control"]) -> do
    void (G.getGroup s gid True)

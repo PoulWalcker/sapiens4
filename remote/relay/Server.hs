@@ -80,7 +80,7 @@ relayAsset :: Relay -> Request -> IO (Maybe Response)
 relayAsset relay req = do
  let path = TE.decodeUtf8 (rawPathInfo req)
      platform = T.dropAround (=='/') path
-     platforms = ["ios","android","mac","windows"]
+     platforms = ["ios","android","mac","windows","linux"]
      entry = platform `elem` platforms || path == "/beta"
  found <- asset (relayRepo relay) (if entry then "/" else path)
  case found of
@@ -98,6 +98,14 @@ relayAsset relay req = do
      pure (case fmap TE.decodeUtf8 selected of Just p | p `elem` platforms -> encode (put "start_url" (str ("/"<>p)) (maybe Null id (decode content))); _ -> content)
     else pure content
    pure (Just (responseLBS status200 (relayHeaders relay mime) updated))
+deliveryBatch :: S.Set Int -> Value -> S.Set Int -> (S.Set Int,Maybe Value)
+deliveryBatch live result inflight
+ | S.null kept && not (null rows) = (S.fromList (map (int . (`get` "id")) rows),Just result)
+ | otherwise = (kept,Nothing)
+ where
+ kept=S.intersection inflight live
+ rows=items result "messages"
+
 socketApp :: Relay -> WS.ServerApp
 socketApp relay pending = do
  count <- modifyMVar (relayCount relay) (\n -> pure (n+1,n))
@@ -124,9 +132,7 @@ socketApp relay pending = do
          unless active (failure 401 "Connected in another tab")
          result <- transact (relayDB relay) "GET" path bearer empty (relayAdmin relay) False
          live <- withDB (relayDB relay) (\db -> query db "SELECT id FROM messages WHERE room=?" (Only room)) :: IO [Only Int]
-         batch <- modifyMVar inflight $ \ids -> do
-          let kept = S.intersection ids (S.fromList [i | Only i <- live]); rows = items result "messages"
-          if S.null kept && not (null rows) then pure (S.fromList (map (int . (`get` "id")) rows),Just result) else pure (kept,Nothing)
+         batch <- modifyMVar inflight (pure . deliveryBatch (S.fromList [i | Only i<-live]) result)
          forM_ batch (send . put "type" (str "messages"))
          threadDelay 100000
         receive = forever $ do

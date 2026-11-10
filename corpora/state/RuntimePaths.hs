@@ -29,7 +29,10 @@ profileRoot = do
   [path] -> either fail pure =<< eitherDecodeFileStrict path
   _ -> fail "Ambiguous package profile"
  home <- getHomeDirectory
- base <- if os=="mingw32" then lookupEnv "LOCALAPPDATA" >>= maybe (pure home) pure else pure (home </> "Library/Application Support")
+ base <- case os of
+  "mingw32" -> lookupEnv "LOCALAPPDATA" >>= maybe (pure home) pure
+  "darwin" -> pure (home </> "Library/Application Support")
+  _ -> getXdgDirectory XdgData ""
  pure (base </> name)
 
 configDirectory :: IO FilePath

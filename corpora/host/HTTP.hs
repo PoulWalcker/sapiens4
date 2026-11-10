@@ -24,18 +24,25 @@ respondError action = action `catches`
   Handler (\(e::IOException) -> pure (jsonResponse 500 (obj [("error",str (T.pack (displayException e)))])))]
 bodyObject :: Int -> Request -> IO Value
 bodyObject maximumSize req = do
- let lengthValue = lookup hContentLength (requestHeaders req)
-     size = lengthValue >>= \b -> case reads (T.unpack (TE.decodeUtf8 b)) of [(n,"")] -> Just (n::Int); _ -> Nothing
- require (lengthValue == Nothing || size /= Nothing) 400 "Invalid content length"
- require (maybe False (\n -> n > 0 && n <= maximumSize) size) 413 "Request body is empty or too large"
+ validated (validateContentLength maximumSize (lookup hContentLength (requestHeaders req)))
  let consume total chunks = do
       chunk <- getRequestBodyChunk req
       require (total+B.length chunk <= maximumSize) 413 "Request body is empty or too large"
       if B.null chunk then pure (B.concat (reverse chunks)) else consume (total+B.length chunk) (chunk:chunks)
  raw <- timeout 10000000 (consume 0 []) >>= maybe (failure 408 "Request body timed out") pure
+ validated (decodeBody raw)
+
+validateContentLength :: Int -> Maybe B.ByteString -> Validation ()
+validateContentLength maximumSize lengthValue = do
+ let size = lengthValue >>= \b -> case reads (T.unpack (TE.decodeUtf8 b)) of [(n,"")] -> Just (n::Int); _ -> Nothing
+ check (lengthValue == Nothing || size /= Nothing) 400 "Invalid content length"
+ check (maybe False (\n -> n > 0 && n <= maximumSize) size) 413 "Request body is empty or too large"
+
+decodeBody :: B.ByteString -> Validation Value
+decodeBody raw =
  case eitherDecodeStrict raw of
-  Right v@(Object _) -> pure v
-  Right _ -> failure 400 "Expected a JSON object"
-  Left _ -> failure 400 "Invalid JSON"
+  Right v@(Object _) -> Right v
+  Right _ -> Left . APIError 400 $ "Expected a JSON object"
+  Left _ -> Left . APIError 400 $ "Invalid JSON"
 requestTarget :: Request -> Text
 requestTarget req = TE.decodeUtf8 (rawPathInfo req <> rawQueryString req)

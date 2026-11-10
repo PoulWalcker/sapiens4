@@ -11,6 +11,7 @@ independent judgment with human oversight.
 | --- | --- |
 | macOS 13+ | [Build and run the desktop app](environments/macos/README.md) |
 | Windows 10/11, ARM64 or x64 | [Portable packages and source setup](environments/windows/README.md) |
+| Ubuntu 22.04 / 24.04, x86-64 X11 (development adapter) | [Linux host and desktop setup](environments/linux/README.md) |
 | Remote browser or mobile app | [Pairing and relay setup](docs/remote.md) |
 
 Source builds require GHC 9.14.1, Cabal 3.18.2, Git, authenticated Codex CLI
@@ -48,9 +49,6 @@ Dependencies retain their own layout under `submodules/`.
 - [UI architecture](docs/ui.md)
 - [Running behavior tests](docs/testing.md)
 - [Contributing](docs/contributing.md)
-
-Windows support was contributed through the
-[fatmahalqaisi-code/sapiens4 fork](https://github.com/fatmahalqaisi-code/sapiens4).
 
 ## License
 

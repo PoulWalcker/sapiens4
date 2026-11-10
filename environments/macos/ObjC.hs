@@ -2,19 +2,22 @@
 module ObjC where
 
 import Control.Monad
+import Control.Exception (bracket)
+import Data.Maybe (fromMaybe)
 import Data.Aeson
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Foreign hiding (void)
+import Foreign hiding (void, new)
 import Foreign.C
 
 type Obj = Ptr ()
 type Sel = Ptr ()
 foreign import ccall safe "dlopen" loadLibrary :: CString -> CInt -> IO Obj
 
+loadFrameworks :: IO ()
 loadFrameworks = forM_ ["Cocoa", "WebKit"] $ \name -> withCString ("/System/Library/Frameworks/" ++ name ++ ".framework/" ++ name) $ \path -> do
     loaded <- loadLibrary path 2
     when (loaded == nullPtr) $ ioError (userError ("Could not load " ++ name))
@@ -75,8 +78,15 @@ allocated name = cls name >>= \c -> obj0 c "alloc"
 str :: Text -> IO Obj
 str value = B.useAsCString (TE.encodeUtf8 value) $ \p -> cls "NSString" >>= \c -> obj1 c "stringWithUTF8String:" (castPtr p)
 string :: Obj -> IO Text
-string o | o == nullPtr = pure T.empty
-string o = obj0 o "UTF8String" >>= \p -> if p == nullPtr then pure T.empty else TE.decodeUtf8With (\_ _ -> Just '\xfffd') <$> B.packCString (castPtr p)
+string = fmap (fromMaybe T.empty) . optionalString
+
+optionalString :: Obj -> IO (Maybe Text)
+optionalString o | o == nullPtr = pure Nothing
+optionalString o = obj0 o "UTF8String" >>= \p -> if p == nullPtr then pure Nothing else
+    Just . TE.decodeUtf8With (\_ _ -> Just '\xfffd') <$> B.packCString (castPtr p)
+
+withAutoreleasePool :: IO a -> IO a
+withAutoreleasePool action = bracket (new "NSAutoreleasePool") (void . (`obj0` "drain")) (const action)
 textProp o key = obj0 o key >>= string
 setText o key value = str value >>= void . obj1 o key
 rect o key (x,y,w,h) = sel key >>= \s -> callRect o s (realToFrac x) (realToFrac y) (realToFrac w) (realToFrac h)
