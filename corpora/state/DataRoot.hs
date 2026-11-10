@@ -16,10 +16,8 @@ import Database.SQLite.Simple
 import Domain (AgentState, CorporaConfig)
 import Network.URI (escapeURIString, isUnreserved)
 import System.Directory
-import System.Environment
 import System.FilePath
 import System.FileLock
-import System.Info
 import System.IO
 import System.IO.Error (ioeGetErrorString)
 
@@ -93,6 +91,8 @@ validateDataRoot choice = validate []
   when (root `elem` ancestors) $ storageError "The Corpora registry contains a directory cycle. Restore it from backup."
   names <- listDirectory root
   let meaningful=filter (`notElem` ["host.lock","desktop-server.log"]) names
+  when (null ancestors && choice==StartNew && not (null meaningful)) $
+   storageError "Start new requires an empty data directory. Use Open existing data to attach this installation."
   let initializing = null ancestors && (null meaningful && choice==StartNew || choice==CreateCorpora && all (`elem` ["corpora-identity.json","corpora-settings.json"]) meaningful)
   if initializing && choice==CreateCorpora then do
    identity <- readDataJSON (root </> "corpora-identity.json")
@@ -108,7 +108,7 @@ validateDataRoot choice = validate []
     Object fields | Just (Number 1) <- K.lookup "version" fields,
                     Just (String ident) <- K.lookup "corpora_id" fields,
                     Just _ <- UUID.fromText ident -> pure ()
-    _ -> storageError "This is not a complete Sapiens Data Root. Select the folder containing corpora-identity.json and corpora.sqlite3."
+    _ -> storageError "Invalid CORPORA identity. Restore corpora-identity.json from backup."
    let database=root </> "corpora.sqlite3"
    header <- withBinaryFile database ReadMode (\h -> B.hGet h 100)
    unless (B.take 16 header=="SQLite format 3\NUL" && B.length header==100) $

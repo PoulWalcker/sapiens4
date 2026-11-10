@@ -3,6 +3,7 @@ module Onboarding where
 
 import Types
 import qualified Provider as P
+import Provider (SetupStep(..), stepName)
 import qualified Computer as C
 import Control.Concurrent
 import Control.Concurrent.Async
@@ -31,36 +32,11 @@ import System.Posix.Signals
 -- Owned by the outer local host only; remote corpus routes cannot reach login.
 data Onboarding = Onboarding FilePath (MVar (Bool,Maybe (Async ()))) (IORef Value) (MVar (Bool,[Async T.Text])) (FilePath,MVar (SetupStep,Maybe UUID.UUID))
 
--- Authentication remains in the owned Codex profile. Setup persists only the
--- last explicit decision, so a successful login cannot finish onboarding.
-data SetupStep = AIProvider | ComputerAccess | CorporaChoice | SetupReady | SetupComplete deriving (Eq)
-
-stepName :: SetupStep -> T.Text
-stepName step = case step of
- AIProvider -> "provider"
- ComputerAccess -> "permissions"
- CorporaChoice -> "corpora"
- SetupReady -> "ready"
- SetupComplete -> "complete"
-
-readStep :: Value -> SetupStep
-readStep saved
- -- Schema 1 completed after login alone; collect the remaining decisions once.
- | int (get saved "schema")==1 && boolean (get saved "completed") = ComputerAccess
- | int (get saved "schema")==2 = case at saved "step" of
-    "permissions" -> ComputerAccess
-    "corpora" -> CorporaChoice
-    "ready" -> SetupReady
-    "complete" -> SetupComplete
-    _ -> AIProvider
- | otherwise = AIProvider
-
 openOnboarding :: FilePath -> IO Onboarding
 openOnboarding root = do
  home <- P.codexHome
  let path=takeDirectory home</>"onboarding.json"
- saved <- readJSON path empty `catch` (\(_::IOException) -> pure empty)
- state <- newMVar (readStep saved,UUID.fromText (at saved "selected_corpora"))
+ state <- P.readSetup >>= newMVar
  stored <- doesPathExist (home</>"auth.json")
  hold <- P.profileHold
  when (not stored && T.null hold) (P.holdProfile "disconnected")
@@ -73,7 +49,7 @@ setupState (Onboarding _ _ _ _ (_,state)) = do
 
 advanceSetup :: Onboarding -> SetupStep -> SetupStep -> Maybe UUID.UUID -> IO ()
 advanceSetup (Onboarding _ _ _ _ (path,state)) expected next selected = modifyMVar_ state $ \(current,previous) -> do
- require (current==expected) 409 "Setup changed. Check again before continuing."
+ require (current==expected || current==SetupComplete && next==SetupComplete && selected==previous) 409 "Setup changed. Check again before continuing."
  let starting=case selected of Just _ -> selected; Nothing -> previous
  require (next/=SetupComplete || isJust starting) 409 "Choose your starting Corpora before continuing."
  writeJSON path (obj [("schema",num (2::Int)),("step",str (stepName next)),("selected_corpora",maybe Null (str . UUID.toText) starting)])
@@ -159,8 +135,8 @@ onboardingView onboarding@(Onboarding root _ progress _ _) = do
      step=if not complete && not ready then "provider" else at saved "step"
  pure (obj [("schema",num (2::Int)),("step",str step),("completed",Bool complete),("provider",str provider),("login",login),("computer_permission",str computer),("computer_available",Bool built),("ready",Bool ready),("hold",str hold),("selected_corpora",get saved "selected_corpora")])
 
-onboardingAction :: Onboarding -> Value -> IO Value
-onboardingAction onboarding@(Onboarding root worker progress _ _) value = do
+onboardingAction :: Onboarding -> (UUID.UUID -> IO ()) -> Value -> IO Value
+onboardingAction onboarding@(Onboarding root worker progress _ _) validateSelected value = do
  case at value "action" of
   "provider-next" -> do
    status <- checkedProviderStatus onboarding
@@ -174,17 +150,26 @@ onboardingAction onboarding@(Onboarding root worker progress _ _) value = do
    status <- checkedProviderStatus onboarding
    require (status=="signed_in") 409 "Connect Codex before continuing."
    selected <- maybe (failure 400 "Choose a local Corpora before continuing.") pure (UUID.fromText (at value "selected_corpora"))
+   validateSelected selected
    advanceSetup onboarding ComputerAccess (if boolean (get value "choose_corpora") then CorporaChoice else SetupReady) (Just selected)
   "corpora-done" -> do
    selected <- maybe (failure 400 "Choose a local Corpora before continuing.") pure (UUID.fromText (at value "selected_corpora"))
+   validateSelected selected
    advanceSetup onboarding CorporaChoice SetupReady (Just selected)
-  "finish" -> do
-   status <- checkedProviderStatus onboarding
-   require (status=="signed_in") 409 "Connect Codex before entering Sapiens."
-   hold <- P.profileHold
-   require (T.null hold) 409 "Finish connecting your ChatGPT account before continuing."
-   selected <- maybe (failure 400 "Choose a local Corpora before continuing.") pure (UUID.fromText (at value "selected_corpora"))
-   advanceSetup onboarding SetupReady SetupComplete (Just selected)
+  -- Initial completion holds admissions until the atomic save has returned.
+  "finish" -> bracket
+   (do
+    saved <- setupState onboarding
+    P.profileLock (if boolean (get saved "completed") then Shared else Exclusive)
+     >>= maybe (failure 409 "AI work or sign-in is still running. Try again when it finishes.") pure)
+   unlockFile $ \_ -> do
+    status <- checkedProviderStatus onboarding
+    require (status=="signed_in") 409 "Connect Codex before entering Sapiens."
+    hold <- P.profileHold
+    require (T.null hold) 409 "Finish connecting your ChatGPT account before continuing."
+    selected <- maybe (failure 400 "Choose a local Corpora before continuing.") pure (UUID.fromText (at value "selected_corpora"))
+    validateSelected selected
+    advanceSetup onboarding SetupReady SetupComplete (Just selected)
   action | action `elem` ["login","device-login","change-account","sign-out"] -> startAuth onboarding action
   "resume" -> bracket
    (P.profileLock Exclusive >>= maybe (failure 409 "AI work or sign-in is still running. Try again when it finishes.") pure)

@@ -107,6 +107,11 @@ registryRecords registry = registryLock registry $ do
  pure $ obj [("local_available",Bool localAvailable),("corpora",arr (localRecords ++ remoteRecords))]
 
 
+validateSetupCorpora :: Registry -> Text -> IO ()
+validateSetupCorpora registry identity = do
+ records <- registryRecords registry
+ require (any (\row -> at row "id"==identity && at row "location"=="Local" && at row "status"/="archived") (items records "corpora")) 409 "Choose a registered, available local Corpora before continuing."
+
 -- Completed setup resumes the saved active local services once. Choice-list
 -- reads during setup remain passive; local reuses each already-opened service.
 resumeRegistry :: Registry -> IO ()

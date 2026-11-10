@@ -349,7 +349,7 @@ onboardingView m d value = V.div "setup-screen" $
         _ -> "Not enabled")]
       ,V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "Corpora",V.span [] (D.s "name" $ M.activeRecord m)]
       ,V.div "setup-summary-divider" []
-      ,V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "Remote Control",V.span [V.cls "setup-muted"] "Coming soon"]
+      ,V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "Remote Control",V.span [V.cls "setup-muted"] "Available in Settings"]
       ,V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "Analytics",V.span [V.cls "setup-muted"] "Coming soon"]]
     ,V.div "setup-footer" [V.control [V.cls "button primary",V.disabled $ M.dialogBusy d || m.busy || not (onboardingConnected m)] (if M.dialogBusy d then "Opening Sapiens…" else "Open Sapiens") $ DialogCommand "setup" (D.text "finish")]]
   _ ->

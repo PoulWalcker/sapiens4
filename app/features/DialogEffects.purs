@@ -1,7 +1,7 @@
 module Sapiens.DialogEffects where
 
 import Prelude
-import Control.Promise (toAffE)
+import Control.Promise (Promise, toAffE)
 import Data.Argonaut.Core (Json)
 import Data.Array as A
 import Data.Either (Either(..))
@@ -13,7 +13,6 @@ import Data.Tuple (Tuple(..))
 import Effect.Aff (try, throwError)
 import Effect.Class (liftEffect)
 import Effect (Effect)
-import Control.Promise (Promise)
 import Effect.Exception (error, message)
 import Effect.Ref as Ref
 import Foreign.Object as O
@@ -29,9 +28,6 @@ import Sapiens.Navigation as N
 import Sapiens.Remote as R
 
 foreign import afterRender :: Effect (Promise Unit)
-
-setupPath :: M.Dialog -> String
-setupPath _ = "/api/host/onboarding"
 
 handle :: C.Runtime -> E.Dispatch -> Action -> E.UI Unit
 handle runtime dispatch action = case action of
@@ -64,7 +60,7 @@ handle runtime dispatch action = case action of
       when (A.elem d.kind [M.AIProviders,M.Onboarding] && d.providerPage == M.CodexAuth && D.s "provider" value == "signed_in") $ focusSetup id "#resume-ai-work"
       when (D.s "provider" value == "signing_in" && D.s "provider" d.content /= "signing_in") $ focusSetup id "#cancel-codex-login"
       if d.kind == M.Onboarding && D.b "completed" value then dispatch CloseDialog else E.sync
-      when (A.elem (D.s "provider" value) ["signing_in","signing_out"]) $ E.later 1000.0 $ dispatch $ OnboardingPoll id) $ C.json (setupPath d) "GET" D.null
+      when (A.elem (D.s "provider" value) ["signing_in","signing_out"]) $ E.later 1000.0 $ dispatch $ OnboardingPoll id) $ C.json "/api/host/onboarding" "GET" D.null
   CloseDialog -> do
     m <- H.get
     case m.dialog of

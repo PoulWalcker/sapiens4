@@ -8,7 +8,7 @@ import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
 import Data.Aeson hiding (pairs)
-import Data.Aeson.Types (Parser)
+import Data.Aeson.Types (Parser, parseEither)
 import Text.Read (readMaybe)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
@@ -20,6 +20,7 @@ import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import qualified Data.UUID as UUID
 import Data.Time.Clock.POSIX
 import GHC.Clock (getMonotonicTimeNSec)
 import System.Directory
@@ -29,6 +30,7 @@ import System.FileLock
 import System.FilePath
 import System.Info
 import System.IO
+import System.IO.Error (isDoesNotExistError)
 import System.Process hiding (runProcess)
 import System.Timeout
 #ifndef mingw32_HOST_OS
@@ -107,18 +109,53 @@ holdProfile hold = profileFile "account-state.json" >>= \path -> writeJSON path 
 profileLock :: SharedExclusive -> IO (Maybe FileLock)
 profileLock mode = profileFile "account.lock" >>= flip tryLockFile mode
 
+-- Setup and account safety are independent. Login can clear an account hold,
+-- but only the durable setup decision authorizes the first execution.
+data SetupStep = AIProvider | ComputerAccess | CorporaChoice | SetupReady | SetupComplete deriving (Eq)
+
+stepName :: SetupStep -> Text
+stepName step = case step of
+ AIProvider -> "provider"
+ ComputerAccess -> "permissions"
+ CorporaChoice -> "corpora"
+ SetupReady -> "ready"
+ SetupComplete -> "complete"
+
+readSetup :: IO (SetupStep,Maybe UUID.UUID)
+readSetup = do
+ path <- profileFile "onboarding.json"
+ saved <- (Just <$> BS.readFile path) `catch` (\(e::IOException) -> if isDoesNotExistError e then pure Nothing else invalid)
+ case saved of
+  Nothing -> pure (AIProvider,Nothing)
+  Just bytes -> either (const invalid) pure (eitherDecodeStrict' bytes >>= parseEither parseSetup)
+ where
+ invalid :: IO a
+ invalid = failure 503 "Could not read onboarding.json. Restore valid setup settings from backup and restart Sapiens; saved decisions have been preserved."
+ parseSetup = withObject "setup" $ \o -> do
+  schema <- o .: "schema" :: Parser Int
+  unless (schema==2) (fail "Unsupported setup schema")
+  name <- o .: "step"
+  step <- maybe (fail "Invalid setup step") pure (lookup name [(stepName step,step) | step <- [AIProvider,ComputerAccess,CorporaChoice,SetupReady,SetupComplete]])
+  selected <- o .:? "selected_corpora" >>= traverse (maybe (fail "Invalid Corpora identity") pure . UUID.fromText)
+  when (step `elem` [SetupReady,SetupComplete] && isNothing selected) (fail "Missing starting Corpora")
+  pure (step,selected)
+
 runLease :: IO (Maybe FileLock)
 runLease = mask_ $ do
  lease <- profileLock Shared
  case lease of
   Nothing -> pure Nothing
   Just lock -> do
-   hold <- profileHold `onException` unlockFile lock
-   if T.null hold then pure lease else unlockFile lock >> pure Nothing
+   ready <- (do
+    (step,_) <- readSetup
+    hold <- profileHold
+    pure (step==SetupComplete && T.null hold)) `catch` (\(_::APIError) -> pure False)
+    `onException` unlockFile lock
+   if ready then pure lease else unlockFile lock >> pure Nothing
 
 withReadyProfile :: IO a -> IO a
 withReadyProfile action = bracket
- (runLease >>= maybe (failure 409 "Connect ChatGPT in Settings and resume AI work before starting a task.") pure)
+ (runLease >>= maybe (failure 409 "Complete setup, connect ChatGPT in Settings and resume AI work before starting a task.") pure)
  unlockFile (const action)
 
 codexBinary :: IO (Maybe FilePath)

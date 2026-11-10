@@ -4,6 +4,9 @@ Native startup shows **Welcome → Your data** before launching the backend.
 Choose **Start new** or **Open existing data**; the selected directory is saved in
 `storage.json` under `SAPIENS_CONFIG_DIR`. Existing data must pass compatibility
 and ownership checks. No automatic search, copy or migration is performed.
+**Start new** requires an empty directory. **Open existing data** requires a
+complete installation and never initializes missing data. Source launch reopens
+its existing selected directory unless an explicit storage mode is supplied.
 After storage selection: **AI → Computer access → Corpora (if needed) → Ready**.
 The completed setup and selected Corpora survive restart; AI connections remain
 available from **AI Connections**.
@@ -28,6 +31,15 @@ when configured. Inherited CODEX_* and OPENAI_* authentication variables are
 removed. Disconnect and account replacement take an exclusive profile lock;
 running AI work retains a shared lease. Queued work remains paused after account
 replacement until **Resume AI work**. Chats and settings are retained.
+Initial setup completion is a separate execution requirement: authentication
+alone cannot release queued, scheduled or delegated AI work in any local Corpora.
+Finishing setup validates the local selection and saves completion before
+resuming saved services. If resuming fails, retry Finish or reload the Corpora
+list; already-open services are reused. Account-safety holds remain independent.
+
+Only the current setup schema is supported. Missing `onboarding.json` starts
+setup; unreadable, corrupt or incompatible settings stop startup with a recovery
+error and preserve the file. Restore valid settings from backup before restarting.
 
 AI connection and computer permission actions share `/api/host/onboarding`.
 Permission checks remain separate from the action that requests Accessibility access.

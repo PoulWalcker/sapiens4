@@ -1,6 +1,200 @@
 require_relative 'spec_helper'
+require 'sqlite3'
+require 'time'
 
 RSpec.describe 'Local Codex setup' do
+  it 'blocks AI with existing authentication until setup is durably complete' do
+    host = Host.new(start: false)
+    setup = File.join(host.environment.fetch('SAPIENS_CONFIG_DIR'), 'onboarding.json')
+    File.delete(setup)
+    host.start
+    chief = host.state.fetch('main_agent_id')
+    host.api('POST', "/api/agents/#{chief}/messages", {text: 'Before setup'}, status: 409)
+    selected = host.api('GET', '/api/corpora').fetch('id')
+    host.api('POST', '/api/host/onboarding', action: 'provider-next')
+    host.api('POST', '/api/host/onboarding', action: 'permissions-done', selected_corpora: selected)
+    File.rename(setup, setup + '.saved')
+    Dir.mkdir(setup)
+    host.api('POST', '/api/host/onboarding', {action: 'finish', selected_corpora: selected}, status: 503)
+    expect(host.calls).to be_empty
+    host.api('POST', "/api/agents/#{chief}/messages", {text: 'After failed finish'}, status: 409)
+    Dir.rmdir(setup)
+    File.rename(setup + '.saved', setup)
+    host.restart
+    expect(host.api('GET', '/api/host/onboarding')).to include('step' => 'ready', 'completed' => false)
+    2.times { host.api('POST', '/api/host/onboarding', action: 'finish', selected_corpora: selected) }
+    host.turn(host.submit(chief, 'After setup'))
+    expect(host.calls.size).to eq(1)
+  ensure
+    host&.close
+  end
+
+  it 'rejects unregistered and archived Corpora choices and revalidates finish' do
+    host = Host.new
+    setup = File.join(host.environment.fetch('SAPIENS_CONFIG_DIR'), 'onboarding.json')
+    host.stop
+    Contract.atomic_json(setup, schema: 2, step: 'permissions')
+    host.start
+    unknown = SecureRandom.uuid
+    host.api('POST', '/api/host/onboarding', {action: 'permissions-done', selected_corpora: unknown}, status: 409)
+    selected = host.api('GET', '/api/corpora').fetch('id')
+    host.api('POST', '/api/host/onboarding', action: 'permissions-done', selected_corpora: selected)
+    host.api('POST', '/api/host/onboarding', {action: 'finish', selected_corpora: unknown}, status: 409)
+    expect(host.api('GET', '/api/host/onboarding').fetch('completed')).to eq(false)
+    metadata = host.control(host.state.fetch('main_agent_id'), 'corpora_get')
+    host.control(host.state.fetch('main_agent_id'), 'corpora_update', archived: true, revision: metadata.fetch('revision'))
+    host.api('POST', '/api/host/onboarding', {action: 'finish', selected_corpora: selected}, status: 409)
+    expect(host.api('GET', '/api/host/onboarding').fetch('completed')).to eq(false)
+  ensure
+    host&.close
+  end
+
+  it 'persists finish before opening saved services and recovers an interrupted resume idempotently' do
+    host = Host.new
+    selected = host.api('GET', '/api/corpora').fetch('id')
+    child = host.api('POST', '/api/host/local', {name: 'Saved Corpora', scope: ''}, status: 201)
+    route = "/api/host/corpora/#{child.fetch('id')}"
+    host.api('PUT', route + '/api/corpora/lifecycle', action: 'activate', revision: child.fetch('revision'), operation: SecureRandom.uuid)
+    folder = File.join(host.root, 'corporas', child.fetch('id'))
+    control = File.join(folder, 'workspaces', child.fetch('chief_id'), 'host-control.json')
+    setup = File.join(host.environment.fetch('SAPIENS_CONFIG_DIR'), 'onboarding.json')
+    host.stop
+    Contract.atomic_json(setup, schema: 2, step: 'ready', selected_corpora: selected)
+    host.start
+    previous_control = File.binread(control)
+    File.rename(setup, setup + '.saved')
+    Dir.mkdir(setup)
+    host.api('POST', '/api/host/onboarding', {action: 'finish', selected_corpora: selected}, status: 503)
+    expect(File.binread(control)).to eq(previous_control)
+    expect(host.api('GET', '/api/host/onboarding').fetch('completed')).to eq(false)
+    Dir.rmdir(setup)
+    File.rename(setup + '.saved', setup)
+    blocker = Contract::Child.new(Contract::BINARY, '--port', '0', '--data-dir', folder, '--desktop', env: host.environment)
+    Contract.wait { blocker.stdout.include?('Sapiens4: http://') }
+    # Completion commits successfully; the saved child's lease prevents resume.
+    host.api('POST', '/api/host/onboarding', {action: 'finish', selected_corpora: selected}, status: 409)
+    expect(JSON.parse(File.read(setup)).fetch('step')).to eq('complete')
+    expect(host.api('GET', '/api/host/onboarding').fetch('completed')).to eq(true)
+    blocker.input.close
+    expect(blocker.finish.last).to eq(0)
+    blocker.close
+    blocker = nil
+    host.api('POST', '/api/host/onboarding', action: 'finish', selected_corpora: selected)
+    reopened_control = File.binread(control)
+    2.times { host.api('GET', '/api/host') }
+    expect(File.binread(control)).to eq(reopened_control)
+    expect(host.api('GET', route + '/api/state').fetch('corpora').fetch('status')).to eq('active')
+  ensure
+    blocker&.close
+    host&.close
+  end
+
+  it 'keeps saved main and child queues blocked throughout first-run setup and restart' do
+    host = Host.new
+    host.configure(block: true)
+    child = host.api('POST', '/api/host/local', {name: 'Queued Corpora', scope: ''}, status: 201)
+    route = "/api/host/corpora/#{child.fetch('id')}"
+    host.api('PUT', route + '/api/corpora/lifecycle', action: 'activate', revision: child.fetch('revision'), operation: SecureRandom.uuid)
+    queued = ['', route].map do |prefix|
+      state = host.api('GET', prefix + '/api/state')
+      agents = [state.fetch('main_agent_id')] + 4.times.map do |i|
+        host.api('POST', prefix + '/api/agents', {name: "Worker#{i}", role: 'Research'}, status: 201).fetch('id')
+      end
+      agents.each { |owner| host.api('POST', prefix + "/api/agents/#{owner}/messages", {text: "Saved work for #{owner}"}, status: 202) }
+      Contract.wait { host.calls.count { |call| agents.include?(call.fetch('owner')) } == 4 }
+      queued_turn = host.api('GET', prefix + '/api/state').fetch('turns').find { |t| t['status'] == 'queued' }.fetch('id')
+      metadata = host.api('GET', prefix + '/api/corpora')
+      host.api('PUT', prefix + '/api/corpora/lifecycle', action: 'pause', revision: metadata.fetch('revision'), operation: SecureRandom.uuid)
+      Contract.wait { !host.api('GET', prefix + '/api/corpora').fetch('stopping') }
+      [prefix, queued_turn]
+    end
+    host.stop
+    config = host.environment.fetch('SAPIENS_CONFIG_DIR')
+    File.delete(File.join(config, 'onboarding.json'))
+    host.configure(block: false)
+    host.start
+    queued.each do |prefix, _|
+      metadata = host.api('GET', prefix + '/api/corpora')
+      host.api('PUT', prefix + '/api/corpora/lifecycle', action: 'activate', revision: metadata.fetch('revision'), operation: SecureRandom.uuid)
+    end
+    host.restart
+    host.api('GET', route + '/api/state') # Opening a child must use the same gate.
+    sleep 2.2
+    expect(host.calls.size).to eq(8)
+    queued.each do |prefix, id|
+      expect(host.api('GET', prefix + '/api/state').fetch('turns').find { |t| t['id'] == id }.fetch('status')).to eq('queued')
+    end
+    selected = host.api('GET', '/api/corpora').fetch('id')
+    host.api('POST', '/api/host/onboarding', action: 'provider-next')
+    host.api('POST', '/api/host/onboarding', action: 'permissions-done', selected_corpora: selected)
+    expect(host.calls.size).to eq(8)
+    host.api('POST', '/api/host/onboarding', action: 'finish', selected_corpora: selected)
+    queued.each do |prefix, id|
+      Contract.wait { host.api('GET', prefix + '/api/state').fetch('turns').any? { |t| t['id'] == id && t['status'] == 'done' } }
+    end
+    expect(host.calls.size).to eq(10)
+  ensure
+    host&.close
+  end
+
+  it 'keeps an overdue scheduled execution blocked until setup finishes', :slow do
+    host = Host.new
+    chief = host.state.fetch('main_agent_id')
+    host.submit(chief, "Add New Scheduled Routine:\nFrequency: every 1 minutes\nExecute: Return a sourced comparison.")
+    routine = host.state.fetch('routines').last
+    selected = host.api('GET', '/api/corpora').fetch('id')
+    setup = File.join(host.environment.fetch('SAPIENS_CONFIG_DIR'), 'onboarding.json')
+    host.stop
+    routine['nextDue'] = (Time.now.utc - 600).iso8601(6).sub('Z', '+00:00')
+    SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+      db.execute('UPDATE scheduled_routines SET value=? WHERE sequence=?', [JSON.generate(routine), routine.fetch('id').split('_').last.to_i])
+    end
+    Contract.atomic_json(setup, schema: 2, step: 'ready', selected_corpora: selected)
+    host.start
+    scheduled = Contract.wait(timeout: 85, description: 'real minute pulse during incomplete setup') do
+      host.state.fetch('turns').find { |t| (t['origin'] || {})['routine'] == routine.fetch('id') }
+    end
+    sleep 2.2
+    expect(host.calls).to be_empty
+    expect(scheduled.fetch('status')).to eq('queued')
+    host.control(chief, 'routine_pause', id: routine.fetch('id'))
+    # Finishing setup must not clear an independent safety hold.
+    hold = File.join(host.environment.fetch('SAPIENS_CONFIG_DIR'), 'account-state.json')
+    Contract.atomic_json(hold, hold: 'review')
+    host.api('POST', '/api/host/onboarding', {action: 'finish', selected_corpora: selected}, status: 409)
+    expect(JSON.parse(File.read(hold)).fetch('hold')).to eq('review')
+    host.api('POST', '/api/host/onboarding', action: 'resume')
+    expect(host.calls).to be_empty
+    host.api('POST', '/api/host/onboarding', action: 'finish', selected_corpora: selected)
+    Contract.wait(timeout: 85, description: 'scheduled AI execution after setup') { !host.calls.empty? }
+    turn = host.state.fetch('turns').find { |t| t['id'] == scheduled.fetch('id') }
+    expect(%w[running output_pending done]).to include(turn.fetch('status'))
+  ensure
+    host&.close
+  end
+
+  it 'rejects corrupt, unreadable and unsupported setup without replacing it' do
+    host = Host.new(start: false)
+    setup = File.join(host.environment.fetch('SAPIENS_CONFIG_DIR'), 'onboarding.json')
+    ['{broken', JSON.generate(schema: 1, completed: true), JSON.generate(schema: 2, step: 'typo'),
+     JSON.generate(schema: 2, step: 'complete', selected_corpora: 'invalid')].each do |saved|
+      File.write(setup, saved)
+      _, error, code = Contract.capture(Contract::BINARY, '--port', '0', '--data-dir', host.root, '--desktop',
+        env: host.environment, input: "\n")
+      expect(code).not_to eq(0)
+      expect(error).to include('onboarding.json')
+      expect(File.read(setup)).to eq(saved)
+    end
+    File.delete(setup)
+    Dir.mkdir(setup)
+    _, error, code = Contract.capture(Contract::BINARY, '--port', '0', '--data-dir', host.root, '--desktop',
+      env: host.environment, input: "\n")
+    expect(code).not_to eq(0)
+    expect(error).to include('onboarding.json')
+  ensure
+    host&.close
+  end
+
   it 'isolates ChatGPT sign-in and safely replaces accounts across restart' do
     skip 'The fixture executable uses a POSIX script; native Windows acceptance uses the packaged CLI' if Gem.win_platform?
     host = Host.new(start: false)
