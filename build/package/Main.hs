@@ -84,16 +84,17 @@ relocate input = do
           Nothing -> [expand app source dependency]
      resolved <- firstFile candidates >>= maybe (fail $ "Unresolved non-system dependency "++dependency++" in "++source) canonicalizePath
      if source==binary && P.inside app resolved && any (`isPrefixOf` dependency) ["@rpath/","@loader_path/","@executable_path/"] then pure (known,queued) else do
-      let target=if P.inside app resolved then resolved else frameworks</>takeFileName resolved
+      let internal=P.inside app resolved
+          target=if internal then resolved else frameworks</>takeFileName resolved
       present <- P.exists target
       -- A copied library's identity is its original canonical path, even after
       -- install_name_tool changes its bytes. Equal basenames are insufficient.
-      when present $ do
+      when (present && not internal) $ do
        identity <- maybe (canonicalizePath target) pure (Map.lookup target known)
        unless (identity==resolved) $ fail ("Library filename collision at "++target++": "++identity++" and "++resolved)
       unless present $ createDirectoryIfMissing True frameworks >> copyFile resolved target
       P.run "install_name_tool" ["-change",dependency,"@loader_path/"++relativeBetween (takeDirectory binary) target,binary]
-      pure (Map.insert target resolved known,[(target,resolved) | not present]++queued)) (origins,[]) edges
+      pure (if internal then known else Map.insert target resolved known,[(target,resolved) | not present]++queued)) (origins,[]) edges
    when (takeDirectory binary==frameworks) $ P.run "install_name_tool" ["-id","@rpath/"++takeFileName binary,binary]
    loop app (Set.insert binary seen) nextOrigins (added++pending)
  strip prefix value = T.unpack <$> T.stripPrefix (T.pack prefix) (T.pack value)

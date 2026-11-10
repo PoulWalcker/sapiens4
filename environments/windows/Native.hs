@@ -220,7 +220,8 @@ newView arena parent profile done = do
   (withWide profile $ \path -> createEnvironment entry nullPtr path nullPtr environment >>= check) `finally` release environment
 
 closeView :: View -> IO ()
-closeView view = call0 (controller view) 24 `finally` (release (core view) >> release (controller view) >> void (destroyWindow $ container view))
+closeView view = call0 (controller view) 24 `finally`
+  (release (core view) `finally` (release (controller view) `finally` void (destroyWindow $ container view)))
 
 bounds :: View -> Int -> Int -> Int -> Int -> IO ()
 bounds view x y width height = do

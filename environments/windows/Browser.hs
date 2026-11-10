@@ -259,4 +259,4 @@ closeBrowser :: Browser -> IO ()
 closeBrowser browser = do
   writeIORef (disposed browser) True
   current <- atomicModifyIORef' (tabs browser) (\value -> (M.empty, value))
-  forM_ current $ \tab -> writeIORef (tabAlive tab) False >> closeView (tabView tab)
+  foldr finally (pure ()) [writeIORef (tabAlive tab) False >> closeView (tabView tab) | tab <- M.elems current]

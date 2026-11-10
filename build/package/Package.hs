@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE ForeignFunctionInterface #-}
 module Package (module Package, module Format) where
 
 import Control.Exception
@@ -16,6 +17,16 @@ import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Word (Word64)
+import Foreign.C.Types (CInt(..), CUInt(..))
+#ifdef mingw32_HOST_OS
+import Control.Concurrent (runInBoundThread)
+import Foreign.Ptr (Ptr, castPtr)
+#else
+import Foreign.C.Error (throwErrnoIfMinus1_)
+import Foreign.C.String (CString)
+import GHC.Foreign (withCString)
+import GHC.IO.Encoding (getFileSystemEncoding)
+#endif
 import System.Directory
 import System.FilePath
 import System.IO.Error (isAlreadyExistsError)
@@ -43,6 +54,44 @@ inside :: FilePath -> FilePath -> Bool
 inside root path = let relative=makeRelative root path in not (isAbsolute relative) && ".." `notElem` splitDirectories relative
 portable :: FilePath -> FilePath
 portable = map (\c -> if isPathSeparator c then '/' else c)
+
+-- Publish on the same filesystem without replacing even a concurrently created
+-- destination. Checking exists before an ordinary rename cannot guarantee this.
+renameNew :: FilePath -> FilePath -> IO ()
+#ifdef mingw32_HOST_OS
+foreign import ccall unsafe "MoveFileExW" moveFileNew :: Ptr () -> Ptr () -> CUInt -> IO CInt
+foreign import ccall unsafe "GetLastError" lastFileError :: IO CUInt
+renameNew source destination = runInBoundThread $ wide source $ \from -> wide destination $ \to -> do
+ result <- moveFileNew from to 0 -- No replacement or cross-volume copy fallback.
+ when (result==0) $ do
+  code <- lastFileError
+  fail ("Cannot publish "++source++" to "++destination++" (Windows error "++show code++")")
+ where
+ wide path action = do
+  -- Keep directory's long-path support without following a destination symlink.
+  parent <- canonicalizePath (takeDirectory path)
+  let absolute=parent</>takeFileName path
+      extended | "\\\\?\\" `isPrefixOf` absolute = absolute
+               | "\\\\" `isPrefixOf` absolute = "\\\\?\\UNC\\"++drop 2 absolute
+               | otherwise = "\\\\?\\"++absolute
+  B.useAsCString (TE.encodeUtf16LE (T.pack extended)<>B.pack [0,0]) (action . castPtr)
+#else
+#ifdef darwin_HOST_OS
+foreign import ccall unsafe "renamex_np" renameExclusive :: CString -> CString -> CUInt -> IO CInt
+#elif defined(linux_HOST_OS)
+foreign import ccall unsafe "renameat2" renameExclusiveAt :: CInt -> CString -> CInt -> CString -> CUInt -> IO CInt
+#endif
+renameNew source destination = do
+ encoding <- getFileSystemEncoding
+ withCString encoding source $ \from -> withCString encoding destination $ \to ->
+#ifdef darwin_HOST_OS
+  throwErrnoIfMinus1_ ("publish "++destination) (renameExclusive from to 4) -- RENAME_EXCL
+#elif defined(linux_HOST_OS)
+  throwErrnoIfMinus1_ ("publish "++destination) (renameExclusiveAt (-100) from (-100) to 1) -- AT_FDCWD, RENAME_NOREPLACE
+#else
+  fail "Exclusive package publication is unsupported on this platform"
+#endif
+#endif
 
 files :: FilePath -> IO [FilePath]
 files root = do
@@ -132,8 +181,7 @@ stage channel rootInput destinationInput version platform providerInput allowMis
    pure (T.pack name,first)
   let manifest=newManifest channel source (hash $ L.concat tree) platform version provider versions
   writeJSON (destination</>"package-manifest.json") manifest
-  exists output >>= flip when (fail "Runtime destination already exists")
-  renameDirectory destination output
+  renameNew destination output
   printJSON $ obj [("runtime",toJSON output),("manifest",toJSON $ output</>"package-manifest.json"),("buildId",toJSON $ packageBuildId $ manifestIdentity manifest),("status",toJSON (if isJust provider then "provider-complete" else "validation-provider-incomplete" :: String))]
   pure manifest
  where
@@ -213,8 +261,7 @@ release repository directory commit versionInput mode output = do
  withTemporary (takeDirectory output) ".release-list" $ \temporary -> do
   let staged=temporary</>"assets"
   writeFile staged (unlines $ concatMap snd verified)
-  exists output >>= flip when (fail "Release list output already exists; choose a new output file")
-  renameFile staged output
+  renameNew staged output
 
 
 withTemporary :: FilePath -> String -> (FilePath -> IO a) -> IO a
