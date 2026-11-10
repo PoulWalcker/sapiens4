@@ -97,6 +97,46 @@ with a cached client without fetching production assets or using live credential
 during the test. Record the archive's URL, date and hashes alongside test results.
 This is WebKit coverage of the `/ios` entrypoint, not a physical iOS installation.
 
+## D1 native distribution acceptance
+
+This opt-in suite builds the current checkout once, then packages Development and
+Stable from those binaries. It needs the distribution toolchain and an unlocked
+desktop, not a prebuilt package. Dependencies and compiler outputs are cached;
+each run creates fresh packages. On macOS arm64, grant Blindly4 accessibility
+permission and run:
+
+```sh
+SAPIENS_TEST_D1=1 ruby submodules/libs4/ruby/bundle.rb exec rspec spec/d1_distribution_spec.rb
+```
+
+On Windows x64, use a **disposable account/VM** with WebView2 installed. Inno Setup
+changes the current user's registration and Start menu even when the installation
+directory is temporary. The suite refuses existing Sapiens4 registrations or
+shortcuts and requires this explicit disposable-account marker:
+
+```powershell
+$env:SAPIENS_TEST_D1 = '1'
+$env:SAPIENS_TEST_D1_WINDOWS_DISPOSABLE = '1'
+ruby submodules/libs4/ruby/bundle.rb exec rspec spec/d1_distribution_spec.rb
+```
+
+The suite installs a copy from a mounted DMG on macOS, or runs the Windows
+installer. It checks standalone launch, owned backend shutdown, channel/profile
+isolation, independent data/config overrides, runtime integrity and artifact
+receipts. Replacement/removal must preserve external data; Windows also checks
+registration, shortcuts, refusal of active changes and preservation of unowned
+installed files. It does not repeat chat, remote, picker, source-distribution or
+Linux package scenarios. No model calls or real user data are needed.
+
+Commands and installer logs remain under `.build/d1-acceptance-*`. Temporary
+packages and profiles are removed after the run; failed Windows installations
+are retained if still registered. Build/package durations are printed separately
+from RSpec's total. Readiness uses bounded condition waits, not minute-long sleeps
+or changes to the system clock. macOS uses ad-hoc signing and Windows unsigned
+local packages; publisher trust, notarization, macOS 13 hardware acceptance and
+release publication are separate checks. Unsupported platforms are reported as
+pending, not successful native acceptance.
+
 ## Coverage limits
 
 The macOS and Linux fixtures run WebKit with the production browser adapter;
