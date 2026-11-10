@@ -18,8 +18,8 @@ MemoNode a stable, descriptive anchor. Cross-link related knowledge instead of
 copying it. Prefer natural link labels, readable prose, small lists and tables.
 Use numbered references for supporting recorded sources when useful. Distinguish
 observations, hypotheses, intentions and verified outcomes. Preserve uncertainty
-and the date/context of historical observations. Link actual artifacts and embed
-useful local images with relative paths. Do not invent facts from missing fields.
+and the date/context of historical observations. Keep media in separate files. Reference them only through descriptive
+HTML links, such as <a href="media/chart.png">Chart</a>. Never embed media or data URLs. Do not invent facts from missing fields.
 
 Use topic categories where they fit the content: artifacts, ontology, organization,
 social knowledge, experience, anticipation, epistemics, capability, agency,

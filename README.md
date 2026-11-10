@@ -11,6 +11,7 @@ independent judgment with human oversight.
 | --- | --- |
 | macOS | [Build and run the desktop app](environments/macos/README.md) |
 | Windows | [Install and build](environments/windows/README.md) |
+| Ubuntu 22.04 / 24.04, x86-64 X11 (development adapter) | [Linux host and desktop setup](environments/linux/README.md) |
 | Remote browser or mobile app | [Pairing and relay setup](docs/remote.md) |
 
 For source CLI execution, install the [distribution toolchain](docs/release-development.md)
@@ -47,9 +48,6 @@ Dependencies retain their own layout under `submodules/`.
 - [UI architecture](docs/ui.md)
 - [Running behavior tests](docs/testing.md)
 - [Contributing](docs/contributing.md)
-
-Windows support was contributed through the
-[fatmahalqaisi-code/sapiens4 fork](https://github.com/fatmahalqaisi-code/sapiens4).
 
 ## License
 

@@ -1,4 +1,10 @@
+require 'securerandom'
+require_relative 'support/voice'
+require_relative 'support/whisper'
+
 RSpec.describe 'Local service contracts' do
+  include VoiceAudio
+
   it 'persists identity, replies, drafts and execution mode without replaying completed work' do
     agent = host.agent
     original = host.state
@@ -17,6 +23,15 @@ RSpec.describe 'Local service contracts' do
       expect(host.calls.size).to eq(1)
       expect(host.calls.first['args']).to include('model_reasoning_effort="xhigh"')
     end
+  end
+
+  it 'requires a trusted origin and a known local corpora for update subscriptions' do
+    id = host.api('GET', '/api/corpora').fetch('id')
+    path = "/api/host/corpora/#{id}/api/updates"
+    expect(host.request('GET', path).first).to eq(403)
+    expect(host.request('GET', path, nil, {'Origin' => 'https://example.org'}).first).to eq(403)
+    expect(host.request('GET', path + '?token=x', nil, {'Origin' => host.url}).first).to eq(403)
+    expect(host.request('GET', path.sub(id, 'missing'), nil, {'Origin' => host.url}).first).to eq(404)
   end
 
   it 'reports health, serves the complete UI and refuses a second host for the same workspace' do
@@ -297,6 +312,163 @@ RSpec.describe 'Local service contracts' do
     end
   end
 
+
+  it 'orders streamed voice pieces, rejects gaps, and replays completed cuts without duplicates' do
+    recording = SecureRandom.uuid
+    path = "/api/agents/#{chief}/voice"
+    piece = ->(index) { {recording: recording, index: index, final: index == 30, data: voice_piece(2)} }
+    expect(host.request('POST', path, piece.call(1)).first).to eq(409)
+    first = host.api('POST', path, piece.call(0), status: 200)
+    expect(first['duplicate']).to be(false)
+    expect(host.api('POST', path, piece.call(0), status: 200)['duplicate']).to be(true)
+    expect(host.request('POST', path, piece.call(2)).first).to eq(409)
+    replies = [first] + (1..30).map { |i| host.api('POST', path, piece.call(i), status: 200) }
+    resent = host.api('POST', path, piece.call(30), status: 200)
+    expect(resent).to include('duplicate' => true, 'messages' => replies.last['messages'])
+    messages = replies.flat_map { |reply| reply['messages'] }
+    expect(messages.map { |m| [m['kind'], m['part'], m['duration_ms']] }).to eq([['voice', 0, 60000], ['voice', 1, 2000]])
+    expect(replies[29]['messages'].size).to eq(1)
+    expect(messages.map { |m| m['transcript_status'] }).to all(eq('pending'))
+    audio = File.binread(messages.first['value'])
+    expect([audio.byteslice(0, 4), audio.bytesize]).to eq(['RIFF', 44 + 60 * 32000])
+  end
+
+  [false, true].each do |interrupt_transcription|
+    it "recovers voice transcription #{interrupt_transcription ? 'after shutdown during a request' : 'after restart'}, notifies clients, and sends without restoring stale drafts" do
+      ready, release, whisper = Queue.new, Queue.new, nil
+      owner = chief
+      voice = host.api('POST', "/api/agents/#{owner}/voice", {recording: SecureRandom.uuid, index: 0, final: true, data: voice_piece(2)})['messages'].first
+      save_drafts = -> { host.api('PUT', '/api/preferences', attachment_drafts: {owner => [voice['id']]}) }
+      save_drafts.call
+      expect(host.request('POST', "/api/agents/#{owner}/messages", {text: '', attachments: [voice['id']]}).first).to eq(409)
+
+      host.stop
+      hold_response = -> { ready << true; release.pop }
+      in_body = -> { interrupt_transcription && whisper.requests == 2 }
+      # Both an HTTP error and a malformed successful response must be retryable.
+      whisper = WhisperStub.new(nil, status: interrupt_transcription ? 500 : 200,
+        before_reply: -> { hold_response.call unless in_body.call },
+        before_body: -> { hold_response.call if in_body.call })
+      host.environment['SAPIENS_WHISPER_URL'] = whisper.url
+      host.start
+      wait_for_request = -> { Contract.wait(description: 'Whisper request') { !ready.empty? }; ready.pop }
+      state_with_status = lambda do |status|
+        Contract.wait(description: "voice transcript #{status}") do
+          state = host.state
+          state if state.dig('attachment_drafts', owner).first&.dig('transcript_status') == status
+        end
+      end
+      wait_for_request.call
+      pending = state_with_status.call('pending')
+      if interrupt_transcription
+        # Interrupt both headers and body reads without losing or failing the draft.
+        2.times do
+          host.stop
+          release << true
+          host.start
+          wait_for_request.call
+          pending = state_with_status.call('pending')
+        end
+      end
+      release << true
+      failed = state_with_status.call('failed')
+      expect(failed['updates_revision']).to be > pending['updates_revision']
+      expect(host.request('POST', "/api/agents/#{owner}/messages", {text: '', attachments: [voice['id']]}).first).to eq(409)
+
+      whisper.respond_with(' Please compare the two offers. ')
+      retried = host.api('POST', "/api/agents/#{owner}/attachments/#{voice['id']}/transcribe", {})
+      expect(retried['transcript_status']).to eq('pending')
+      wait_for_request.call
+      pending = state_with_status.call('pending')
+      release << true
+      completed = state_with_status.call('done')
+      expect(completed['updates_revision']).to be > pending['updates_revision']
+      expect(completed.dig('attachment_drafts', owner).first['transcript']).to eq('Please compare the two offers.')
+      expect(whisper.audio_received).to be(true)
+      expect(whisper.requests).to eq(interrupt_transcription ? 4 : 2)
+      host.turn(host.submit(owner, '', attachments: [voice['id']]))
+      expect(host.request('POST', "/api/agents/#{owner}/messages", {text: '', attachments: [voice['id']]}).first).to eq(409)
+      expect(host.calls.map { |call| call['prompt'] }.join("\n")).to include('Please compare the two offers.')
+      expect(Array(host.state.dig('attachment_drafts', owner))).to be_empty
+      host.restart
+      save_drafts.call
+      expect(Array(host.state.dig('attachment_drafts', owner))).to be_empty
+    ensure
+      release << true if release
+      whisper&.close
+    end
+  end
+
+  it 'restores a long voice draft in composer order and keeps the per-message attachment limit' do
+    owner = chief
+    ids = Array.new(9) do
+      piece = {recording: SecureRandom.uuid, index: 0, final: true, data: voice_piece(1)}
+      host.api('POST', "/api/agents/#{owner}/voice", piece).fetch('messages').first.fetch('id')
+    end.reverse
+    host.api('PUT', '/api/preferences', attachment_drafts: {owner => ids})
+    host.restart
+    expect(host.state.fetch('attachment_drafts').fetch(owner).map { |row| row.fetch('id') }).to eq(ids)
+    expect(host.request('POST', "/api/agents/#{owner}/messages", {text: '', attachments: ids}).first).to eq(400)
+  end
+
+  it 'saves each voice message once when the host stops halfway through a piece' do
+    recording = SecureRandom.uuid
+    path = "/api/agents/#{chief}/voice"
+    dir = File.join(host.root, 'uploads', chief, 'voice', recording)
+    piece = ->(index) { {recording: recording, index: index, final: false, data: voice_piece(2)} }
+    (0..28).each { |i| host.api('POST', path, piece.(i)) }
+    before = Dir.children(dir).to_h { |name| [name, File.binread(File.join(dir, name))] }
+    first = host.api('POST', path, piece.(29))['messages']
+    # A crash after the voice message was saved but before progress was: the recording state is
+    # still the old one, so the phone's resend is applied again from the start.
+    Dir.children(dir).each { |name| File.delete(File.join(dir, name)) }
+    before.each { |name, bytes| File.binwrite(File.join(dir, name), bytes) }
+    again = host.api('POST', path, piece.(29))
+    expect(again['duplicate']).to be(false)
+    expect(again['messages'].map { |m| m['id'] }).to eq(first.map { |m| m['id'] })
+  end
+
+  it 'refuses to continue a recording whose saved progress is damaged' do
+    recording = SecureRandom.uuid
+    path = "/api/agents/#{chief}/voice"
+    host.api('POST', path, {recording: recording, index: 0, final: false, data: voice_piece(2)})
+    progress = File.join(host.root, 'uploads', chief, 'voice', recording, 'progress.json')
+    File.write(progress, JSON.generate(next_piece: 1.5, next_part: 0, buffered: 64000, finished: false))
+    expect(host.request('POST', path, {recording: recording, index: 1, final: false, data: voice_piece(2)}).first).to eq(500)
+  end
+
+  it 'removes a cancelled recording from the host and refuses its late pieces' do
+    recording = SecureRandom.uuid
+    path = "/api/agents/#{chief}/voice"
+    messages = (0..29).flat_map { |i| host.api('POST', path, {recording: recording, index: i, final: false, data: voice_piece(2)})['messages'] }
+    ids = messages.map { |m| m['id'] }
+    host.api('PUT', '/api/preferences', attachment_drafts: {chief => ids})
+    host.api('POST', "#{path}/#{recording}/cancel", {})
+    expect(Array(host.state.dig('attachment_drafts', chief))).to be_empty
+    expect(messages.map { |m| File.exist?(m['value']) }).to all(be(false))
+    expect(host.request('POST', path, {recording: recording, index: 30, final: true, data: voice_piece(2)}).first).to eq(409)
+    expect(host.request('POST', "/api/agents/#{chief}/messages", {text: '', attachments: ids}).first).to eq(409)
+    # A device that has not caught up yet cannot bring the cancelled voice message back.
+    host.api('PUT', '/api/preferences', attachment_drafts: {chief => ids})
+    expect(Array(host.state.dig('attachment_drafts', chief))).to be_empty
+  end
+
+  {
+    'a malformed recording id' => {recording: 'not-a-uuid'},
+    'a negative index' => {index: -1},
+    'a fractional index' => {index: 0.5},
+    'stereo audio' => {data: -> { voice_piece(2, channels: 2) }},
+    'the wrong sample rate' => {data: -> { voice_piece(2, rate: 8000) }},
+    'more than 5 seconds of audio' => {data: -> { voice_piece(6) }},
+    'data that is not base64' => {data: '***'}
+  }.each do |label, change|
+    it "rejects a voice piece with #{label}" do
+      body = {recording: SecureRandom.uuid, index: 0, final: false, data: voice_piece(2)}
+      change.each { |key, value| body[key] = value.respond_to?(:call) ? instance_exec(&value) : value }
+      expect(host.request('POST', "/api/agents/#{chief}/voice", body).first).to eq(400)
+    end
+  end
+
   %w[jobs workspaces execution].each do |field|
     it "refuses to grant runtime authority through the #{field} preference" do
       expect(host.request('PUT', '/api/preferences', {field => {}}).first).to eq(400)
@@ -323,6 +495,39 @@ RSpec.describe 'Local service contracts' do
     host.restart
     expect(read_run.call(completed)).to eq(saved)
     expect(read_run.call(failed)).to eq(rejected)
+  end
+
+  it 'keeps the designated Chief after identity edits, creation and restart' do
+    original = chief
+    member = host.agent('Researcher')
+    host.api('PUT', "/api/agents/#{original}", {name: 'Director', role: 'Coordinate work'})
+    host.restart
+    expect(chief).to eq(original)
+    expect(host.api('GET', '/api/corpora')['chief_id']).to eq(original)
+    expect(host.state['orchestration'][member]['manager']).to eq(original)
+    expect(host.request('POST', "/api/agents/#{original}/control", {op: 'manager', manager: member}).first).to eq(400)
+    expect(host.request('POST', "/api/agents/#{original}/control", {op: 'retire_agent', target: original}).first).to eq(400)
+  end
+
+  it 'rejects an invalid batch before executing its valid prefix' do
+    before = host.state['agents']
+    result = host.request('POST', "/api/agents/#{chief}/control", {op: 'batch', operations: [
+      {op: 'create_agent', name: 'Uncreated', role: 'Research'}, {op: 'workspace_focus', unexpected: true}]})
+    expect(result.first).to eq(400)
+    expect(host.state['agents']).to eq(before)
+    expect(host.request('POST', "/api/agents/#{chief}/control", {op: 'batch', operations: [{op: 'batch', operations: [{op: 'status'}]}]}).first).to eq(400)
+  end
+
+  it 'requires active reports to be reassigned before retirement and repairs a retired manager on restore' do
+    manager = host.agent('Manager')
+    report = host.control(chief, 'create_agent', name: 'Reporter', role: 'Research', manager: manager)['agent']['id']
+    expect(host.request('POST', "/api/agents/#{chief}/control", {op: 'retire_agent', target: manager}).first).to eq(409)
+    host.control(chief, 'retire_agent', target: report)
+    host.control(chief, 'retire_agent', target: manager)
+    host.control(chief, 'rehire_agent', target: report)
+    host.restart
+    expect(host.state['orchestration'][report]['manager']).to eq(chief)
+    expect(host.state['agents'].find { |a| a['id'] == manager }['retired']).to eq(true)
   end
 
 end

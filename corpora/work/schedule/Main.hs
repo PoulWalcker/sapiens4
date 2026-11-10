@@ -9,12 +9,13 @@ import Wire (response)
 
 main :: IO ()
 main = do
-    args <- getArgs
-    attached <- case args of
-        ["routine", "0"] -> pure False
-        ["routine", "1"] -> pure True
-        _ -> die "Usage: sapiens-domain routine 0|1"
+    attached <- getArgs >>= either die pure . attachmentOption
     hSetEncoding stdin utf8
     hSetNewlineMode stdin noNewlineTranslation
     text <- getContents
     Bytes.putStrLn (encode (response attached text))
+
+attachmentOption :: [String] -> Either String Bool
+attachmentOption ["routine", "0"] = Right False
+attachmentOption ["routine", "1"] = Right True
+attachmentOption _ = Left "Usage: sapiens-domain routine 0|1"

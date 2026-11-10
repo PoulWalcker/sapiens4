@@ -35,6 +35,19 @@ control path payload = do
  pure (statusCode (H.responseStatus result),value)
 blindlyBinary :: FilePath -> IO FilePath
 blindlyBinary root = fromMaybe (root</>if os=="mingw32" then "submodules/blindly4/.build/windows/blindly4.exe" else "submodules/blindly4/.build/release/blindly4") <$> lookupEnv "SAPIENS_BLINDLY_BINARY"
+computerStatus :: FilePath -> IO Value
+computerStatus root = do
+ require (os=="linux") 400 "Computer diagnostics are available on Linux"
+ session <- fromMaybe "" <$> lookupEnv "XDG_SESSION_TYPE"
+ binary <- blindlyBinary root
+ built <- doesFileExist binary
+ let base=obj [("backend",str "native"),("session",str (T.pack session)),("built",Bool built)]
+ if not built then pure (put "error" (str "Computer backend is not built") base) else do
+  result <- try (invoke binary ["request-permission"] 5)
+  pure $ case result of
+   Right (ExitSuccess,out,_) | Object _ <- parseJSONText (T.pack out) -> merge (parseJSONText (T.pack out)) base
+   Right (_,out,err) -> put "error" (str (T.take 500 (T.pack (out<>err)))) base
+   Left (err::SomeException) -> put "error" (str (T.take 500 (T.pack (displayException err)))) base
 invoke :: FilePath -> [String] -> Int -> IO (ExitCode,String,String)
 invoke binary args duration = timeout (duration*1000000) (readCreateProcessWithExitCode (proc binary args) {use_process_jobs=True,detach_console=os=="mingw32"} "") >>= maybe (failure 504 "Computer operation timed out") pure
 compact :: Value -> Value
@@ -84,7 +97,10 @@ readComputer binary supplied maximumSize = do
    let totalDepth=(if T.null path then 0 else length (T.splitOn "." path))+depth
    require (totalDepth<=64) 400 "Total depth exceeds 64"
    (code,out,err) <- invoke binary ["tree","--pid",show pid,"--depth",show totalDepth,"--max-nodes","5000"] 30
-   require (code==ExitSuccess) 400 ("Blindly read failed: "<>T.take 300 (T.pack err))
+   let diagnostic = case get (parseJSONText (T.pack out)) "error" of
+        String message | not (T.null message) -> message
+        _ -> T.strip (T.pack (if null err then out else err))
+   require (code==ExitSuccess) 400 ("Blindly read failed: "<>T.take 300 diagnostic)
    let value=parseJSONText (T.pack out)
        allRows=filter (\v -> T.null path || at v "path"==path || (path<>".") `T.isPrefixOf` at v "path") (flatten "" (get value "tree"))
        rows=filter (\v -> at v "path"==path || any (\k -> get v k `notElem` [Null,str "",arr []]) ["title","description","value","identifier","actions"]) allRows
@@ -98,8 +114,12 @@ readComputer binary supplied maximumSize = do
    mapM_ (removeFile . snd) (drop 4 (reverse (sortOn fst dated)))
    writeJSON (cache</>T.unpack ident<.>"json") snapshot
    pure snapshot
+ validated (snapshotPage maximumSize offset snapshot)
+
+snapshotPage :: Int -> Int -> Value -> Validation Value
+snapshotPage maximumSize offset snapshot = do
  let rows=items snapshot "nodes"
- require (offset>=0 && offset<=length rows) 400 "Offset outside snapshot"
+ check (offset>=0 && offset<=length rows) 400 "Offset outside snapshot"
  let base=merge (remove ["nodes"] snapshot) (obj [("nodes",arr []),("offset",num offset),("total",num (length rows)),("next_offset",Null)])
      add acc []=acc
      add acc (row:rest)=let updated=put "nodes" (arr (items acc "nodes"++[row])) acc in
@@ -112,10 +132,10 @@ computerMain root args = do
  let valid=case args of
       "blindly":_->True
       "read":_->True
-      ["launch",name]->not (T.null (T.strip (T.pack name))) && head name/='-' && length name<=120
+      ["launch",name@(first:_)]->first/='-' && not (T.null (T.strip (T.pack name))) && length name<=120
       _->False
  require valid 400 "Usage: sapiens4 computer launch Application"
- when (case args of "launch":_->True; _->False) $ require (os `elem` ["darwin","mingw32"]) 400 "App launch requires macOS or Windows"
+ when (case args of "launch":_->True; _->False) $ require (os `elem` ["darwin","mingw32","linux"]) 400 "App launch is unavailable on this platform"
  managed <- doesFileExist "host-control.json"
  when managed $ do
   (code,result) <- control "host-control.json" (obj [("op",str "computer_acquire")])
@@ -129,16 +149,16 @@ computerMain root args = do
    unless (null err) (hPutStrLn stderr (take 2000 err))
    pure code
   "read":rest -> readComputer binary rest 48000 >>= BL.putStrLn . encode >> pure ExitSuccess
-  ["launch",name] | not (null name) && head name/='-' && length name<=120 -> do
-   if os=="mingw32" then do
-    executable <- findExecutable name >>= maybe (failure 400 "Use a Windows .exe path or executable name, such as notepad.exe") pure
-    require (map toLower (takeExtension executable)==".exe") 400 "Use a Windows .exe path or executable name, such as notepad.exe"
-    (_,_,_,ph) <- createProcess (proc executable [])
+  ["launch",name] -> do
+   if os `elem` ["mingw32","linux"] then do
+    applicationPath <- findExecutable name >>= maybe (failure 400 "Use an executable path or name available on PATH") pure
+    when (os=="mingw32") $ require (map toLower (takeExtension applicationPath)==".exe") 400 "Use a Windows .exe path or executable name, such as notepad.exe"
+    (_,_,_,ph) <- withFile (if os=="mingw32" then "NUL" else "/dev/null") ReadWriteMode $ \sink ->
+     createProcess (proc applicationPath []) {std_in=UseHandle sink,std_out=UseHandle sink,std_err=UseHandle sink}
     pid <- getPid ph
     BL.putStrLn (encode (obj [("launched",Bool True),("app",str (T.pack name)),("pid",maybe Null (num . fromIntegral) pid),("error",Null)]))
     pure ExitSuccess
    else do
-    require (os=="darwin") 400 "App launch requires macOS or Windows"
     (code,_,err) <- invoke "/usr/bin/open" ["-a",name] 15
     BL.putStrLn (encode (obj [("launched",Bool (code==ExitSuccess)),("app",str (T.pack name)),("error",if null err then Null else str (T.strip (T.pack err)))]))
     pure code
@@ -154,11 +174,14 @@ captureForeground root workdir = do
    (code,out,_) <- invoke "osascript" ["-l","JavaScript","-e","ObjC.import('AppKit'); $.NSWorkspace.sharedWorkspace.frontmostApplication.bundleIdentifier.js"] 5
    let bundle=T.strip (T.pack out)
    pure (if code==ExitSuccess && bundle `elem` ["com.sapiens4.desktop","com.openai.codex","com.google.Chrome","com.apple.Safari","com.microsoft.edgemac","org.mozilla.firefox"] then Just bundle else Nothing)
-  else if os=="mingw32" then do
+  else if os `elem` ["mingw32","linux"] then do
    expected <- lookupEnv "SAPIENS_DESKTOP_PID"
-   binary <- blindlyBinary root
-   (_,out,_) <- invoke binary ["apps"] 5
-   pure (listToMaybe [T.pack (show (int (get app "pid"))) | app<-items (parseJSONText (T.pack out)) "apps",boolean (get app "frontmost"), Just (show (int (get app "pid")))==expected])
+   case expected of
+    Nothing -> pure Nothing
+    Just desktopPid -> do
+     binary <- blindlyBinary root
+     (_,out,_) <- invoke binary ["apps"] 5
+     pure (listToMaybe [T.pack desktopPid | app<-items (parseJSONText (T.pack out)) "apps",boolean (get app "frontmost"), show (int (get app "pid"))==desktopPid])
   else pure Nothing
  pure (Foreground marker (either (const Nothing) Just (before::Either IOException UTCTime)) (either (const Nothing) id (captured::Either SomeException (Maybe Text))))
 restoreForeground :: FilePath -> Foreground -> IO (Maybe Text)
@@ -168,6 +191,6 @@ restoreForeground root (Foreground marker before target) = (do
  if after==before || after==Nothing then pure Nothing else case target of
   Nothing -> pure Nothing
   Just value -> do
-   binary <- if os=="mingw32" then blindlyBinary root else pure "/usr/bin/open"
-   (code,_,_) <- invoke binary (if os=="mingw32" then ["activate","--pid",T.unpack value] else ["-b",T.unpack value]) 5
+   binary <- if os `elem` ["mingw32","linux"] then blindlyBinary root else pure "/usr/bin/open"
+   (code,_,_) <- invoke binary (if os `elem` ["mingw32","linux"] then ["activate","--pid",T.unpack value] else ["-b",T.unpack value]) 5
    pure (if code==ExitSuccess then Nothing else Just "Could not bring CORPORA back to the foreground.")) `catch` \(_::SomeException) -> pure (Just "Could not bring CORPORA back to the foreground.")

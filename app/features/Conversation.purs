@@ -1,7 +1,7 @@
 module Sapiens.Conversation where
 
+import Sapiens.Form as F
 import Prelude
-import Data.Argonaut.Core (Json)
 import Data.Array as A
 import Data.Int as I
 import Data.Maybe (Maybe(..), fromMaybe)
@@ -12,108 +12,119 @@ import Foreign.Object as O
 import Libs4.Browser as B
 import Sapiens.Action (Action(..), Success(..))
 import Sapiens.Data as D
+import Sapiens.Domain as X
 import Sapiens.Html as V
 import Sapiens.Model as M
 import Sapiens.Navigation as N
 import Sapiens.Text as T
 
-statusName :: String -> String
-statusName = case _ of
-  "output_pending" -> "Awaiting output pulse"
-  "queued" -> "Queued"
-  "running" -> "Running"
-  "done" -> "Completed"
-  "warning" -> "Warning"
-  "failed" -> "Failed"
-  "interrupted" -> "Interrupted"
-  "conflict" -> "Needs review"
-  "cancelled" -> "Dismissed"
-  value -> value
+statusName :: X.CallState -> String
+statusName = X.callName
 
-attention :: Json -> Boolean
-attention t = A.elem (D.s "status" t) ["failed","interrupted","conflict"]
+attention :: X.Turn -> Boolean
+attention t = A.elem t.status [X.Failed,X.Interrupted,X.Conflict]
 
-turnActions :: M.Model -> Json -> V.Html
-turnActions m turn = V.div "actions" $ case D.s "status" turn of
-  "running" -> [V.control [V.cls "button",V.disabled $ not m.online || D.b "stopping" (activity m turn)] "Stop" (command "cancel"),V.textNode "small" [] "Already completed actions are not undone."]
-  "queued" -> [V.button "button" "Cancel queued turn" $ command "cancel"]
+turnActions :: M.Model -> X.Turn -> V.Html
+turnActions m turn = V.div "actions" $ case turn.status of
+  X.Running -> [V.control [V.cls "button",V.disabled $ not (M.online m) || (activity m turn).stopping] "Stop" (command "cancel"),V.textNode "small" [] "Already completed actions are not undone."]
+  X.Queued -> [V.button "button" "Cancel queued turn" $ command "cancel"]
   _ | attention turn -> [V.button "button" "Retry" $ command "retry",V.button "button" "Dismiss" $ command "cancel"]
   _ -> []
   where
-  command action = Mutate ("/api/agents/" <> B.encodeURI (D.s "agent" turn) <> "/turns/" <> B.encodeURI (D.s "id" turn) <> "/" <> action) "POST" D.empty Refresh
+  command action = Mutate ("/api/agents/" <> B.encodeURI (turn.agent) <> "/turns/" <> B.encodeURI (turn.id) <> "/" <> action) "POST" D.empty Refresh
 
-activity :: M.Model -> Json -> Json
+activity :: M.Model -> X.Turn -> X.Activity
 activity m turn =
-  let current = D.at ["run_activity",D.fallback (D.s "id" turn) $ D.s "batch_id" turn] m.snapshot
-      fallback = D.at ["activity",D.s "agent" turn] m.snapshot
-      a = if D.valid current then current else fallback
-  in if D.s "turn" a == D.s "id" turn then a else D.empty
+  let current = O.lookup (D.fallback turn.id turn.batch_id) m.snapshot.run_activity
+      fallback = fromMaybe (X.activity D.empty) $ O.lookup turn.agent m.snapshot.activity
+      a = fromMaybe fallback current
+  in if a.turn == turn.id then a else X.activity D.empty
 
-progress :: M.Model -> Json -> V.Html
+progress :: M.Model -> X.Turn -> V.Html
 progress m turn = V.div "" [V.textNode "strong" [] (phase <> " · " <> show elapsed <> "s"),V.p "" detail,V.when (quiet >= 60) $ V.textNode "small" [] ("No recent update · " <> show quiet <> "s since last activity")]
   where
   a = activity m turn
-  started = if D.n "started" a == 0.0 then B.parseTime $ D.s "created" turn else D.n "started" a
-  updated = if D.n "updated" a /= 0.0 then D.n "updated" a else if D.n "started" a /= 0.0 then D.n "started" a else m.now
+  started = if a.started == 0.0 then B.parseTime $ turn.created else a.started
+  updated = if a.updated /= 0.0 then a.updated else if a.started /= 0.0 then a.started else m.now
   elapsed = max 0 $ I.floor $ (m.now-started)/1000.0
   quiet = max 0 $ I.floor $ (m.now-updated)/1000.0
-  phase = if not m.online then "Disconnected" else if D.b "stopping" a then "Stopping…" else if A.elem (D.s "status" turn) ["output_pending","queued"] then statusName $ D.s "status" turn else D.fallback "Starting model" $ D.s "phase" a
-  detail = if D.s "tool" a /= "" then "Current tool: " <> D.s "tool" a else if D.s "last_action" a /= "" then "Last completed action: " <> D.s "last_action" a else ""
+  phase = if not (M.online m) then "Disconnected" else if a.stopping then "Stopping…" else if A.elem (turn.status) [X.OutputPending,X.Queued] then statusName $ turn.status else D.fallback "Starting model" $ a.phase
+  detail = if a.tool /= "" then "Current tool: " <> a.tool else if a.last_action /= "" then "Last completed action: " <> a.last_action else ""
 
-groupCallControls :: Json -> Json -> V.Html
-groupCallControls group request = V.div "actions" $ if not (A.elem state ["queued","running","failed","interrupted"]) then [] else
-  (if A.elem state ["failed","interrupted"] && not (D.valid $ D.get "task" request) && not (D.b "archived" group) then [V.button "button" "Retry" $ command "retry"] else []) <> [V.button "button" (if state == "running" then "Stop" else if state == "queued" then "Cancel" else "Dismiss") $ command "cancel"]
+groupCallControls :: X.Entity -> X.GroupRequest -> V.Html
+groupCallControls group request = V.div "actions" $ if not (A.elem state [X.Queued,X.Running,X.Failed,X.Interrupted]) then [] else
+  (if A.elem state [X.Failed,X.Interrupted] && not (request.hasTask) && not (group.archived) then [V.button "button" "Retry" $ command "retry"] else []) <> [V.button "button" (if state == X.Running then "Stop" else if state == X.Queued then "Cancel" else "Dismiss") $ command "cancel"]
   where
-  state = D.s "status" request
-  command action = Mutate ("/api/groups/" <> D.s "id" group <> "/calls/" <> D.s "id" request <> "/" <> action) "POST" D.empty Refresh
+  state = request.status
+  command action = Mutate ("/api/groups/" <> group.id <> "/calls/" <> request.id <> "/" <> action) "POST" D.empty Refresh
 
-message :: M.Model -> Json -> V.Html
-message m msg = V.node "div" [V.attr "data-chat-key" $ D.s "chatKey" msg,V.cls $ "message " <> (if user then "user " else "") <> if D.s "warning" msg /= "" then "warning-message" else ""]
-  [ V.div "message-meta" ([if user then V.span [] "↗" else T.avatar (if M.isGroup a then M.agent m (D.s "author" msg) else a) "mini" false,V.node "strong" [] [author],V.textNode "time" [] (T.time $ D.s "created" msg)] <> map _.badge warnings)
-  , V.div "message-bubble" (map _.detail warnings <> T.paragraphs m (D.s "text" msg) <> [V.when (not $ A.null $ D.rows "attachments" msg) $ V.div "message-attachments" $ map T.attachment $ D.rows "attachments" msg,V.when (D.b "stale" msg) $ V.textNode "small" [V.cls "group-banner"] "Result from an earlier task revision · current work was preserved.",V.when (D.valid (D.get "delegation" msg) && M.blocksChat request) $ turnActions m request])
+message :: M.Model -> X.Message -> V.Html
+message m msg = V.node "div" [V.attr "data-chat-key" $ msg.chatKey,V.cls $ "message " <> (if user then "user " else "") <> if msg.warning /= "" then "warning-message" else ""]
+  [ V.div "message-meta" ([if user then V.span [] "↗" else T.avatar (if M.isGroup a then M.agent m (msg.author) else a) "mini" false,V.node "strong" [] [author],V.textNode "time" [] (T.time $ msg.created)] <> map _.badge warnings)
+  , V.div "message-bubble" (map _.detail warnings <> T.paragraphs m (msg.text) <> [V.when (not $ A.null $ msg.attachments) $ V.div "message-attachments" $ map T.attachment $ msg.attachments,V.when (msg.stale) $ V.textNode "small" [V.cls "group-banner"] "Result from an earlier task revision · current work was preserved.",V.when (msg.delegated && M.blocksChat request) $ turnActions m request])
   ]
   where
   a = M.selected m
-  user = D.s "role" msg == "user"
-  request = D.get "requestTurn" msg
-  author = if D.s "author" msg /= "" then if M.isGroup a then T.mention m (D.s "author" msg) else V.text $ D.s "name" $ M.agent m $ D.s "author" msg else if user then V.text "Admin" else T.mention m m.selected
+  user = msg.user
+  request = fromMaybe (X.turn D.empty) msg.request
+  author = if msg.author /= "" then if M.isGroup a then T.mention m (msg.author) else V.text $ (M.agent m msg.author).name else if user then V.text "Admin" else T.mention m m.selected
   warning key caption body = let open = Set.member ("warning:" <> key) m.expanded in
     { badge: V.control [V.cls "warning-badge",V.attr "aria-expanded" $ show open,V.attr "aria-controls" $ "warning-" <> key] (caption) (ToggleExpanded $ "warning:" <> key)
     , detail: V.node "div" [V.cls "warning-details",V.id $ "warning-" <> key,V.hidden $ not open] body }
-  error = D.s "error" request
+  error = request.error
   reason = if D.matches "(timeouterror|time limit|exceeded [0-9]+(?:\\.[0-9]+)?s)" (S.toLower error) then "Timed out" else if D.matches "(tool-step limit|tool limit)" (S.toLower error) then "Tool limit reached" else ""
-  label = if reason == "" then statusName $ D.s "status" request else reason <> if D.s "status" request == "cancelled" then " · Dismissed" else ""
-  warnings = (if attention request || D.s "status" request == "cancelled" then [warning ("request-" <> D.s "id" request) label [V.p "" $ D.fallback (if D.s "status" request == "cancelled" then "This request was dismissed." else "This request needs attention.") $ fromMaybe "" $ A.head $ S.split (S.Pattern "\n") error,V.p "" "No final reply was saved for this request.",turnActions m request]] else []) <> (if D.s "warning" msg /= "" then [warning (D.s "turnId" msg) "Warning" [V.text $ D.s "warning" msg]] else [])
+  label = if reason == "" then statusName $ request.status else reason <> if request.status == X.Cancelled then " · Dismissed" else ""
+  warnings = (if attention request || request.status == X.Cancelled then [warning ("request-" <> request.id) label [V.p "" $ D.fallback (if request.status == X.Cancelled then "This request was dismissed." else "This request needs attention.") $ fromMaybe "" $ A.head $ S.split (S.Pattern "\n") error,V.p "" "No final reply was saved for this request.",turnActions m request]] else []) <> (if msg.warning /= "" then [warning (msg.turnId) "Warning" [V.text $ msg.warning]] else [])
 
 rows :: M.Model -> Array (Tuple String V.Html)
 rows m =
-  [Tuple "banner" $ V.when (M.isGroup a && D.b "archived" a) $ V.p "group-banner" "Archived · history is preserved. Restore this Group from settings to continue."
+  [Tuple "banner" $ V.when (M.isGroup a && a.archived) $ V.p "group-banner" "Archived · history is preserved. Restore this Group from settings to continue."
   ,Tuple "divider" $ V.div "day-divider" [V.text $ (if M.isGroup a then "GROUP " else "") <> "CONVERSATION"]]
-  <> map (\msg -> Tuple (D.s "chatKey" msg) $ message m msg) messages
-  <> [Tuple "empty" $ V.when (A.null messages) $ V.div "empty" [V.text $ if M.isGroup a then "Message the Group to reach " <> D.s "name" (M.agent m $ D.s "lead" a) <> ", or @mention a member." else "Start a conversation."]]
-  <> (if M.isGroup a then map groupProgress (A.filter (\r -> A.elem (D.s "status" r) ["queued","running","failed","interrupted"]) $ D.rows "requests" a) else map personalProgress (A.filter (\t -> D.s "agent" t == m.selected && M.blocksChat t && (D.s "batch_id" t == "" || D.s "batch_id" t == D.s "id" t)) $ D.rows "turns" m.snapshot))
-  <> map (\w -> Tuple ("clarify:" <> D.s "id" w) $ V.button "button" "Answer Chief" $ Clarify w) (A.filter (\w -> D.s "state" w == "WaitingForAdmin" && A.elem m.selected [D.s "owner" w,D.str $ D.at ["origin","agent"] w]) $ D.rows "workloads" m.snapshot)
+  <> map (\msg -> Tuple (msg.chatKey) $ message m msg) messages
+  <> [Tuple "empty" $ V.when (A.null messages) $ V.div "empty" [V.text $ if M.isGroup a then "Message the Group to reach " <> (M.agent m a.lead).name <> ", or @mention a member." else "Start a conversation."]]
+  <> (if M.isGroup a then map groupProgress (A.filter (\r -> A.elem (r.status) [X.Queued,X.Running,X.Failed,X.Interrupted]) $ a.requests) else map personalProgress (A.filter (\t -> t.agent == m.selected && M.blocksChat t && (t.batch_id == "" || t.batch_id == t.id)) $ m.snapshot.turns))
   where
   a = M.selected m
   messages = fromMaybe [] $ O.lookup m.selected m.messages
-  groupProgress r = let turn = D.find (D.s "id" r) $ D.rows "turns" m.snapshot in Tuple ("request:" <> D.s "id" r) $ V.node "section" [V.cls "live-status",V.attr "data-chat-key" $ "request:" <> D.s "id" r]
-    [V.textNode "strong" [] (D.s "name" (M.agent m $ D.s "target" r) <> " · " <> statusName (D.s "status" r)),V.when (M.blocksChat turn) $ progress m turn,V.when (D.s "error" r /= "") $ V.p "" $ D.s "error" r,groupCallControls a r]
-  personalProgress t = Tuple ("progress:" <> D.s "id" t) $ V.node "section" [V.cls "live-status",V.attr "data-chat-key" $ "progress:" <> D.s "id" t] [progress m t,turnActions m t]
+  groupProgress r = let turn = fromMaybe (X.turn D.empty) $ A.find ((r.id == _) <<< _.id) m.snapshot.turns in Tuple ("request:" <> r.id) $ V.node "section" [V.cls "live-status",V.attr "data-chat-key" $ "request:" <> r.id]
+    [V.textNode "strong" [] ((M.agent m r.target).name <> " · " <> statusName (r.status)),V.when (M.blocksChat turn) $ progress m turn,V.when (r.error /= "") $ V.p "" $ r.error,groupCallControls a r]
+  personalProgress t = Tuple ("progress:" <> t.id) $ V.node "section" [V.cls "live-status",V.attr "data-chat-key" $ "progress:" <> t.id] [progress m t,turnActions m t]
 
 composer :: M.Model -> V.Html
-composer m = V.node "div" [V.cls "composer-area",V.id "composer-area",V.hidden $ m.activity /= N.Chat N.Conversation || D.b "archived" a]
-  [ V.node "div" [V.id "attachment-chip"] $ map (\item -> V.div "attachment-chip" [T.attachment item,V.icon ("Remove " <> D.s "name" item) "×" $ RemoveAttachment $ D.s "id" item]) $ M.attachments m
+composer m = V.node "div" [V.cls "composer-area",V.id "composer-area",V.hidden $ m.activity /= N.Chat N.Conversation || a.archived]
+  [ case O.lookup m.selected m.outboxes of
+      Just o -> V.p "voice-outbox" ("Sending voice messages in order as each transcript is ready · " <> show (A.length o.voices) <> " left")
+      Nothing -> V.empty
+  , V.node "div" [V.id "attachment-chip"] $ map chip $ M.attachments m
   , V.node "form" [V.cls "composer",V.id "chat-form",V.submit Send]
-      [V.node "textarea" [V.attr "rows" "2",V.id "message-input",V.attr "maxlength" "16000",V.attr "placeholder" placeholder,V.label $ "Message " <> D.s "name" a,V.value $ M.draft m,V.input Draft,V.on "keydown" MessageKey,V.click MentionCursor,V.attr "aria-expanded" $ show $ m.mention /= Nothing] []
-      ,V.div "composer-bottom" [V.icon "Add attachment" "＋" $ OpenDialog M.Attach D.empty,V.textNode "button" [V.attr "type" "submit",V.cls "send-button",V.label "Send message",V.disabled blocked] "↑"]
+      [V.node "textarea" [V.attr "rows" "2",V.id "message-input",V.attr "maxlength" "16000",V.attr "placeholder" placeholder,V.label $ "Message " <> a.name,V.value $ M.draft m,V.input Draft,V.on "keydown" MessageKey,V.click MentionCursor,V.attr "aria-expanded" $ show $ m.mention /= Nothing] []
+      ,case m.voice of
+        -- While recording here: red dot, live timer, Cancel (discard), Stop (finish and review) and Send (finish and send).
+        Just v | v.owner == m.selected -> V.node "div" [V.cls "voice-bar",V.attr "role" "status",V.attr "aria-live" "polite"]
+          [V.span [V.cls "voice-dot",V.attr "aria-hidden" "true"] ""
+          ,V.textNode "strong" [V.cls "voice-clock"] (T.clock v.elapsed)
+          ,V.span [V.cls "voice-hint"] (case v.phase of
+              M.Stopping M.SendAfter -> "Sending…"
+              M.Stopping M.Review -> "Finishing…"
+              _ -> "Recording")
+          ,V.button "button voice-cancel" "Cancel" VoiceCancel
+          ,V.when (not (M.isStopping v.phase)) $ V.button "button voice-stop" "Stop" VoiceStop
+          ,V.when (not (M.isStopping v.phase)) $ V.button "button primary voice-send" "Send" VoiceStopSend]
+        _ -> V.div "composer-bottom" [V.icon "Add attachment" "＋" $ OpenDialog M.Attach F.NoRecord,voiceButton,V.textNode "button" [V.attr "type" "submit",V.cls "send-button",V.label "Send message",V.disabled blocked] "↑"]
       ,case m.mention of
         Nothing -> V.empty
-        Just menu -> V.node "div" [V.cls "mention-suggestions",V.id "mention-suggestions",V.attr "role" "listbox",V.label "Sapis"] $ if A.null menu.choices then [V.div "empty" [V.text "No matching Sapis."]] else A.mapWithIndex (\i entity -> V.node "button" [V.attr "type" "button",V.attr "role" "option",V.id $ "mention-option-" <> show i,V.attr "aria-selected" $ show $ i == menu.index,V.click $ MentionChoice i] [V.textNode "strong" [] ("@" <> D.s "name" entity),V.textNode "small" [] "Sapi"]) menu.choices
+        Just menu -> V.node "div" [V.cls "mention-suggestions",V.id "mention-suggestions",V.attr "role" "listbox",V.label "Sapis"] $ if A.null menu.choices then [V.div "empty" [V.text "No matching Sapis."]] else A.mapWithIndex (\i entity -> V.node "button" [V.attr "type" "button",V.attr "role" "option",V.id $ "mention-option-" <> show i,V.attr "aria-selected" $ show $ i == menu.index,V.click $ MentionChoice i] [V.textNode "strong" [] ("@" <> entity.name),V.textNode "small" [] "Sapi"]) menu.choices
       ]
   ]
   where
   a = M.selected m
-  placeholder = case m.clarification of
-    Just work | D.s "owner" work == m.selected -> "Clarify " <> D.s "taskId" work <> " for Chief…"
-    _ -> if N.limit m.env < 3 then "Message…" else "Message " <> D.s "name" a <> "…"
-  blocked = not m.online || m.busy || D.b "retired" a || D.b "archived" a || A.elem (D.str $ D.at ["corpora","status"] m.snapshot) ["paused","archived"] || Set.member m.selected m.sending || m.uploading > 0
+  -- While recording here the voice bar replaces this button; in another chat it explains why it can't start.
+  voiceButton = V.icon "Record voice message" "🎤" VoiceStart
+  -- A voice chip whose transcription failed offers Retry next to ×; it is never sent as it is.
+  chip item = V.div "attachment-chip" $ [T.attachment item]
+    <> (case map _.transcription (X.voiceOf item) of
+          Just (X.TranscriptFailed _) -> [V.button "button voice-retry" "Retry" (VoiceRetry item.id)]
+          _ -> [])
+    <> [V.icon ("Remove " <> item.name) "×" $ RemoveAttachment $ item.id]
+  placeholder = if N.limit m.env < 3 then "Message…" else "Message " <> a.name <> "…"
+  blocked = not (M.online m) || (M.busy m) || a.retired || a.archived || A.elem (m.snapshot.corpora.status) [X.Paused,X.Archived] || Set.member m.selected m.sending || m.uploading > 0 || M.voiceBusy m

@@ -34,7 +34,7 @@ module PackageExamples
             raise "Installed runtime exited before readiness: #{process.status.inspect}" if process.status
             process.stdout[/Sapiens4: (http:\/\/127\.0\.0\.1:\d+)/, 1]
           end
-          %w[/api/health /workspace/ /workspace/app.js /workspace/guest.js /remote-vendor.js /workspace/styles.css].each do |route|
+          %w[/api/health /workspace/ /workspace/app.js /workspace/guest.js /remote-vendor.js /voice-worklet.js /workspace/styles.css].each do |route|
             status, body = Contract.http(address + route, 'GET')
             expect(status).to eq(200), route
             expect(body).not_to be_empty

@@ -98,6 +98,7 @@ stopServer (ServerProcess process input reader) = stop `finally` (cancel reader 
                 confirmed <- timeout 5000000 (waitForProcess process)
                 when (isNothing confirmed) (ioError (userError "The application server could not be stopped."))
 
+alert :: Text -> IO ()
 alert message = do
     panel <- new "NSAlert"
     setText panel "setMessageText:" "Sapiens4 could not open"
@@ -109,6 +110,7 @@ reload application = if fixture application then readIORef (shell (browser appli
 showWindow :: Application -> IO ()
 showWindow application = do win <- readIORef (windowRef application); void (obj1 win "makeKeyAndOrderFront:" nullPtr); void (obj1 (native application) "activateIgnoringOtherApps:" (int 1))
 
+installMethods :: Application -> IO Obj
 installMethods application = do
     c <- subclass "SapiensHaskellDesktop"
     let b = browser application
@@ -160,16 +162,19 @@ installMethods application = do
     writeIORef (delegate b) target
     pure target
 
+menuItem :: Obj -> Obj -> Text -> String -> Text -> IO ()
 menuItem menu target title action keyEquivalent = do
     titleObject <- str title; actionSelector <- sel action; keyObject <- str keyEquivalent
     item <- allocated "NSMenuItem" >>= \o -> obj3 o "initWithTitle:action:keyEquivalent:" titleObject actionSelector keyObject
     void (obj1 item "setTarget:" target); void (obj1 menu "addItem:" item)
 
+subMenu :: Obj -> Text -> IO Obj
 subMenu root title = do
     item <- new "NSMenuItem"; menu <- allocated "NSMenu" >>= \o -> str title >>= obj1 o "initWithTitle:"
     void (obj1 root "addItem:" item); void (obj1 item "setSubmenu:" menu)
     pure menu
 
+menus :: Application -> Obj -> IO ()
 menus application target = do
     root <- new "NSMenu"
     appMenu <- subMenu root "Sapiens4"
@@ -188,6 +193,7 @@ menus application target = do
         forM_ [("Reload Tab","reloadTab","r"),("Reload App","reloadWorkspace",""),("Zoom In","zoomIn","="),("Zoom Out","zoomOut","-"),("Actual Size","resetZoom","0")] $ \(title,action,key) -> menuItem view target title action key
     void (obj1 (native application) "setMainMenu:" root)
 
+initialize :: Application -> Obj -> Text -> IO ()
 initialize application target address = do
     void (obj1 (native application) "setActivationPolicy:" (int 0))
     void (obj1 (native application) "setDelegate:" target)
@@ -198,8 +204,9 @@ initialize application target address = do
     void (obj2 user "addScriptMessageHandler:name:" target channel)
     view <- allocated "WKWebView" >>= \o -> rectObj o "initWithFrame:configuration:" (0,0,1180,820) configuration
     writeIORef (shell (browser application)) view
-    unless (fixture application) $ do
-        void (obj1 view "setNavigationDelegate:" target); void (obj1 view "setUIDelegate:" target)
+    -- Fixtures keep native navigation off but need the UI delegate for file pickers.
+    void (obj1 view "setUIDelegate:" target)
+    unless (fixture application) $ void (obj1 view "setNavigationDelegate:" target)
     void (obj1 view "setAutoresizingMask:" (int 18))
     container <- allocated "NSView" >>= \o -> rect o "initWithFrame:" (0,0,1180,820)
     void (obj1 container "addSubview:" view)
@@ -229,9 +236,10 @@ initialize application target address = do
         void (obj2 view "loadHTMLString:baseURL:" html nullPtr)
         check application
 
+runApplication :: Bool -> Text -> IO ()
 runApplication isFixture address = do
     loadFrameworks
-    bracket (new "NSAutoreleasePool") (\pool -> void (obj0 pool "drain")) $ \_ -> (runSession isFixture address `catch` (\(e :: SomeException) -> alert (T.pack (displayException e))))
+    withAutoreleasePool $ (runSession isFixture address `catch` (\(e :: SomeException) -> alert (T.pack (displayException e))))
 
 runSession :: Bool -> Text -> IO ()
 runSession isFixture initialAddress = bracket acquire (mapM_ (stopServer . fst)) $ \started -> do

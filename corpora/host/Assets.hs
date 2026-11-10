@@ -3,11 +3,15 @@ module Assets where
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.ByteString.Lazy as BL
+import Data.List (find)
 import System.FilePath
+
+data Asset = Asset { assetRoute :: Text, assetMime :: Text, assetFile :: FilePath }
 
 publicAssets :: [(Text,Text,FilePath)]
 publicAssets =
  [("/remote-vendor.js","text/javascript","submodules/libs4/web/remote-vendor.js"),
+  ("/voice-worklet.js","text/javascript","submodules/libs4/web/voice-worklet.js"),
   ("/corpora.css","text/css","app/theme/corpora.css"),
   ("/remote-install.css","text/css","app/theme/remote-install.css"),
   ("/manifest.webmanifest","application/manifest+json","app/shell/remote.webmanifest"),
@@ -19,7 +23,13 @@ publicAssets =
  ++ [("/app-icon-"<>T.pack (show n)<>".png","image/png","app/shell/app-icon-"++show n++".png") | n <- [180,192,512::Int]]
  ++ [("/"<>n<>".svg","image/svg+xml","app/shell/"++T.unpack n++".svg") | n <- ["favicon","favicon-dark"]]
 asset :: FilePath -> Text -> IO (Maybe (Text,BL.ByteString))
-asset root path = case [(mime,file) | (p,mime,file) <- allAssets, p == path] of
- [] -> pure Nothing
- (mime,file):_ -> Just . (mime,) <$> BL.readFile (root </> file)
- where allAssets = [(p,"text/html","app/shell/index.html") | p <- ["/","/workspace/","/workspace/index.html"]] ++ [("/workspace/app.js","text/javascript",".build/web/app.js")] ++ publicAssets
+asset root path = traverse readAsset (lookupAsset path)
+ where readAsset entry = (assetMime entry,) <$> BL.readFile (root </> assetFile entry)
+
+lookupAsset :: Text -> Maybe Asset
+lookupAsset path = find ((==path) . assetRoute) allAssets
+
+allAssets :: [Asset]
+allAssets = [Asset p "text/html" "app/shell/index.html" | p <- ["/","/workspace/","/workspace/index.html"]]
+ ++ [Asset "/workspace/app.js" "text/javascript" ".build/web/app.js"]
+ ++ [Asset route mime file | (route,mime,file) <- publicAssets]

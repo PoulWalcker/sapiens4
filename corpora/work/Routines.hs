@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Routines
  ( Minutes, Routine(..), readRoutines, storeRoutine, initializeRoutines
- , save, setPaused, command, receipt, acknowledge, dispatch
+ , RoutineEdit(..), save, setPaused, command, receipt, acknowledge, dispatch
  ) where
 
 import Control.Monad
@@ -60,39 +60,59 @@ initializeRoutines s = do
   let group=findId (at r "owner") groups
       count=case group of Just g->length [t | t<-items g "tasks",get t "routine"==get r "id"]; Nothing->length [w | w<-works,get (get w "origin") "routine"==get r "id"]
   void (DB.saveRoutine s (merge r (obj [("runCount",num count),("paused",Bool (count>=1000))])))
-save :: Service -> Text -> Value -> Value -> Maybe Text -> Maybe Int -> Maybe Text -> IO Value
-save s owner minutes execution identity previous source = do
- body <- textField (obj [("prompt",execution)]) "prompt" 16000
- interval <- decodeValue 400 minutes
- require (body `notElem` ["PROMPT","TODO"]) 400 "Replace PROMPT with the work to execute"
+data RoutineEdit = AddRoutine (Maybe Text) | EditRoutine Text (Maybe Int)
+data RoutineWrite = NewRoutine (Maybe Text) | ReviseRoutine Value
+data RoutineSelection = RoutineReplay Value | RoutineChange RoutineWrite
+
+routineInput :: Value -> Value -> Validation (Text,Minutes)
+routineInput minutes execution = do
+ body <- validateValue 400 (textFieldP "prompt" 16000) (obj [("prompt",execution)])
+ interval <- validateValue 400 parseJSON minutes
+ check (body `notElem` ["PROMPT","TODO"]) 400 "Replace PROMPT with the work to execute"
+ pure (body,interval)
+selectRoutine :: RoutineEdit -> Value -> Text -> [Value] -> Validation RoutineSelection
+selectRoutine edit minutes body routines = case edit of
+ EditRoutine identity previous -> do
+  existing <- maybe (Left (APIError 404 "Unknown Scheduled Routine in this conversation")) Right (findId identity routines)
+  forM_ previous $ \old -> check (int (get existing "minutes")==old) 409 "Frequency changed; open Edit again for the current routine"
+  pure (RoutineChange (ReviseRoutine existing))
+ AddRoutine source -> case source >>= \call -> find (\r -> get r "sourceCall" == str call && get r "minutes" == minutes && at r "prompt" == body) routines of
+  Just existing -> Right (RoutineReplay existing)
+  Nothing -> Right (RoutineChange (NewRoutine source))
+routineValue :: UTCTime -> Text -> Minutes -> Text -> RoutineWrite -> Value
+routineValue time owner interval body change = merge initial (obj
+ [("owner",str owner),("title",str (T.unwords (take 7 (T.words body)))),("minutes",toJSON interval)
+ ,("prompt",str body),("updated",str (timestamp time)),("nextDue",str (timestamp (addUTCTime (intervalSeconds interval) time)))])
+ where
+ initial = case change of
+  ReviseRoutine existing -> existing
+  NewRoutine source -> obj ([("created",str (timestamp time)),("runCount",num 0),("paused",Bool False)] ++ [("sourceCall",str call) | call <- maybeToList source])
+
+save :: Service -> Text -> Value -> Value -> RoutineEdit -> IO Value
+save s owner minutes execution edit = do
+ (body,interval) <- validated (routineInput minutes execution)
  if "group_" `T.isPrefixOf` owner then do
   groups <- DB.values s DB.Groups
   g <- maybe (failure 404 "Unknown Group") pure (findId owner groups)
   require (not (boolean (get g "archived"))) 409 "Restore this Group before changing its work"
  else requireActive s owner
  routines <- filter ((==owner) . (`at` "owner")) <$> DB.values s DB.ScheduledRoutines
- let existing = identity >>= (`findId` routines)
- when (isJust identity) $ require (isJust existing) 404 "Unknown Scheduled Routine in this conversation"
- case (existing,previous) of
-  (Just r,Just old) -> require (int (get r "minutes")==old) 409 "Frequency changed; open Edit again for the current routine"
-  _ -> pure ()
- let prior = if isNothing identity && isJust source then find (\r -> get r "sourceCall" == maybe Null str source && get r "minutes" == minutes && at r "prompt" == body) routines else Nothing
- case prior of
-  Just r -> pure r
-  Nothing -> do
-   t <- getCurrentTime
-   let initial = fromMaybe (obj ([("created",str (timestamp t)),("runCount",num 0),("paused",Bool False)]++[("sourceCall",str c) | c <- maybeToList source])) existing
-       value=merge initial (obj [("owner",str owner),("title",str (T.unwords (take 7 (T.words body)))),("minutes",minutes),("prompt",str body),("updated",str (timestamp t)),("nextDue",str (timestamp (addUTCTime (intervalSeconds interval) t)))])
-   r <- DB.saveRoutine s value
-   DB.record s [owner] (at r "id") (if isJust identity then "routine.updated" else "routine.created") r "admin" Nothing
-   pure r
+ selected <- validated (selectRoutine edit minutes body routines)
+ case selected of
+  RoutineReplay existing -> pure existing
+  RoutineChange change -> do
+   time <- getCurrentTime
+   result <- DB.saveRoutine s (routineValue time owner interval body change)
+   let action = case change of NewRoutine _ -> "routine.created"; ReviseRoutine _ -> "routine.updated"
+   DB.record s [owner] (at result "id") action result "admin" Nothing
+   pure result
 setPaused :: Service -> Text -> Text -> Bool -> IO Value
 setPaused s owner identity paused = do
  routines <- readRoutines s
  r <- maybe (failure 404 "Unknown Scheduled Routine in this conversation") pure (find (\r -> routineOwner r==owner && routineId r==identity) routines)
  if routinePaused r==paused then pure (toJSON r) else do
   t <- getCurrentTime
-  let updated=r { routinePaused=paused, routineDue=if paused then routineDue r else addUTCTime (intervalSeconds (routineMinutes r)) t, routineCount=if not paused && routineCount r>=1000 then 0 else routineCount r, routineFields=KM.insert "updated" (str (timestamp t)) (routineFields r) }
+  let updated=pauseRoutine t paused r
   result <- storeRoutine s updated
   DB.record s [owner] identity (if paused then "routine.paused" else "routine.resumed") result "admin" Nothing
   pure result
@@ -101,8 +121,8 @@ command s owner input attached = case C.interpret attached (T.unpack input) of
  Left error -> failure 400 (T.pack error)
  Right Nothing -> pure Nothing
  Right (Just c) -> Just <$> case c of
-  C.Create interval body -> save s owner (toJSON interval) (str (T.pack body)) Nothing Nothing Nothing
-  C.Edit i old interval body -> save s owner (toJSON interval) (str (T.pack body)) (Just (T.pack i)) (Just (fromIntegral old)) Nothing
+  C.Create interval body -> save s owner (toJSON interval) (str (T.pack body)) (AddRoutine Nothing)
+  C.Edit i old interval body -> save s owner (toJSON interval) (str (T.pack body)) (EditRoutine (T.pack i) (Just (fromIntegral old)))
   C.SetPaused i paused -> setPaused s owner (T.pack i) paused
 receipt :: Value -> Text -> Text
 receipt r input = action <> " @"<>at r "id"<>" ( "<>at r "title"<>" )\nStatus: "<>status<>" · "<>jsonText (get r "runCount")<>"/1000 runs\nFrequency: every "<>jsonText (get r "minutes")<>" minutes\nExecute: "<>at r "prompt"
@@ -118,17 +138,42 @@ acknowledge s owner input r = do
  modifyState s owner $ \state -> merge state (obj [("turns",arr (items state "turns"++[toJSON turn])),("chat",arr (items state "chat"++messages))])
  DB.project s owner
  pure (obj [("id",str i),("agent",str owner),("status",str "done"),("flow",str "chat")])
+data RoutineDecision = WaitForRoutine | PauseAtLimit | RunOccurrence deriving (Eq, Show)
+routineDecision :: UTCTime -> Routine -> RoutineDecision
+routineDecision time routine
+ | routinePaused routine = WaitForRoutine
+ | routineCount routine>=1000 = PauseAtLimit
+ | routineDue routine<=time = RunOccurrence
+ | otherwise = WaitForRoutine
+
+advanceRoutine :: UTCTime -> Routine -> Routine
+advanceRoutine time routine = routine
+ { routineDue=addUTCTime (interval*fromIntegral jumps) (routineDue routine)
+ , routineCount=count, routinePaused=count>=1000 }
+ where
+ interval=intervalSeconds (routineMinutes routine)
+ jumps=floor (diffUTCTime time (routineDue routine) / interval)+1 :: Integer
+ count=routineCount routine+1
+
+pauseRoutine :: UTCTime -> Bool -> Routine -> Routine
+pauseRoutine time paused routine = routine
+ { routinePaused=paused
+ , routineDue=if paused then routineDue routine else addUTCTime (intervalSeconds (routineMinutes routine)) time
+ , routineCount=if not paused && routineCount routine>=1000 then 0 else routineCount routine
+ , routineFields=KM.insert "updated" (str (timestamp time)) (routineFields routine) }
+
 dispatch :: Service -> Pulse -> IO ()
 dispatch s tick = when (pulseFrequency tick == Bph60) $ do
  t <- getCurrentTime
  routines <- readRoutines s
- forM_ routines $ \routine -> unless (routinePaused routine) $ do
+ forM_ routines $ \routine -> do
   let owner=routineOwner routine; count=routineCount routine; r=toJSON routine
-  if count>=1000 then do
-   void (storeRoutine s routine { routinePaused=True })
-   DB.record s [owner] (at r "id") "routine.paused" (obj [("reason",str "run limit"),("runCount",num count)]) "system" Nothing
-  else when (routineDue routine<=t) $ do
-    let due=routineDue routine
+  case routineDecision t routine of
+   WaitForRoutine -> pure ()
+   PauseAtLimit -> do
+    void (storeRoutine s routine { routinePaused=True })
+    DB.record s [owner] (at r "id") "routine.paused" (obj [("reason",str "run limit"),("runCount",num count)]) "system" Nothing
+   RunOccurrence -> do
     groups <- DB.values s DB.Groups
     let group=findId owner groups; a=maybe owner (`at` "lead") group
     inactive <- retired s a
@@ -144,14 +189,15 @@ dispatch s tick = when (pulseFrequency tick == Bph60) $ do
         DB.project s a
        D.begin s (AgentId a) turn
        (w,c) <- D.getWork s (RunId identity)
-       when (D.callState c==D.CallRunning && null (D.workItems w "decisions")) $ D.saveWork s (D.withCall w c { D.callState=D.CallQueued })
+       when (D.callState c==D.CallRunning && null (D.workItems w "decisions")) $ D.saveWork s (D.withCall w c { D.callProgress=D.QueuedAt (D.callNode c) })
       Just g -> when (isNothing (findId identity (items g "requests"))) $ do
        let taskId="gtask_"<>identity; groupOrigin=merge origin (obj [("group",str owner),("author",str "admin")])
            message=obj [("id",str identity),("author",str "admin"),("text",get r "prompt"),("created",str (timestamp t)),("routine",get r "id")]
            task=obj [("id",str taskId),("title",get r "title"),("body",get r "prompt"),("assignee",str a),("state",str "in_progress"),("deleted",Bool False),("revision",num 1),("created",str (timestamp t)),("author",str "admin"),("updated_by",str "admin"),("history",arr []),("results",arr []),("taskType",str "automated"),("routine",get r "id")]
            request=obj [("id",str identity),("message",str identity),("target",str a),("root",str identity),("created",str (timestamp t)),("status",str "queued"),("settled",Bool False),("task",str taskId),("task_revision",num 1),("origin",groupOrigin)]
        DB.putValue s DB.Groups owner (merge g (obj [("messages",arr (items g "messages"++[message])),("tasks",arr (items g "tasks"++[task])),("requests",arr (items g "requests"++[request])),("revision",num (int (get g "revision")+1)),("updated",str (timestamp t))]))
-     let interval=intervalSeconds (routineMinutes routine); jumps=floor (diffUTCTime t due / interval)+1 :: Integer; next=addUTCTime (interval*fromIntegral jumps) due
-     void $ storeRoutine s routine { routineDue=next, routineCount=count+1, routinePaused=count+1>=1000 }
+     let advanced=advanceRoutine t routine
+         next=routineDue advanced
+     void (storeRoutine s advanced)
      DB.record s [owner] (at r "id") "routine.triggered" (obj [("turn",str identity),("runCount",num (count+1)),("nextDue",str (timestamp next))]) "system" Nothing
      when (count+1>=1000) $ DB.record s [owner] (at r "id") "routine.paused" (obj [("reason",str "run limit"),("runCount",num (count+1))]) "system" Nothing

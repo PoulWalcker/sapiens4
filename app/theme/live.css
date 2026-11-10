@@ -214,33 +214,7 @@
 :root[data-theme] body.sapi-workspace .search-field input:is(:hover,:focus,:focus-visible) { outline:none;box-shadow:none; }
 
 .conversation-tabs button:disabled,.settings-tabs button:disabled { opacity:.35; cursor:not-allowed; }
-:root body.sapi-workspace .conversation-body.notes-view { padding:0;overflow:hidden; }
-.notes-wiki { --wash:#f8f9fa;--memo-link:#365b91;--ink:#202122;--muted:#62676d;--line:#c8ccd1;height:100%;overflow:auto;overscroll-behavior:contain;padding:20px 24px 32px;background:#fff;color:var(--ink);font:12px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--code-key:#6f359f;--code-string:#246841;--code-literal:#995015;--code-comment:#707070; }
-.notes-wiki>* { max-width:920px;margin-left:auto;margin-right:auto; }
-body.sapi-workspace .notes-wiki :is(h1,h2) { font-family:Georgia,"Times New Roman",serif;font-weight:400;letter-spacing:normal;text-transform:none;color:inherit; }
-.notes-wiki h1 { font-size:24px;line-height:1.2;margin:0;padding-bottom:7px;border-bottom:1px solid var(--line); }
-.notes-wiki h2 { font-size:19px;line-height:1.3;margin:24px 0 9px;padding-bottom:4px;border-bottom:1px solid var(--line); }
-.notes-wiki h3 { font-size:13px;line-height:1.4;margin:16px 0 5px; }
-.notes-wiki p { margin:8px 0; }.notes-wiki .memo-meta { font-size:10px;color:var(--muted);margin:5px 0 12px;line-height:1.7; }.memo-meta .memo-actor{color:var(--ink)}.memo-meta time{white-space:nowrap}.memo-meta>span { display:block; }
-.notes-wiki .memo-lead { display:flow-root; }.notes-wiki .memo-lead>p:first-of-type { margin-top:0; }
-.notes-wiki .memo-infobox { float:right;width:190px;margin:0 0 12px 20px;padding:9px 10px;border:1px solid var(--line);background:var(--wash);font-size:10px; }
-.memo-identity { display:flex;align-items:center;gap:8px;margin-bottom:9px; }.memo-identity>strong { font-size:12px;overflow-wrap:anywhere; }
-.memo-avatar { display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;min-width:45px;height:34px;border-radius:6px;padding:0 6px;color:#202122;font:14px/1 ui-monospace,SFMono-Regular,Menlo,monospace; }
-.notes-wiki table { border-collapse:collapse;width:100%;font-size:11px;margin:10px 0; }.notes-wiki :is(th,td) { padding:7px 9px;border:1px solid var(--line);text-align:left;vertical-align:top; }.notes-wiki th { background:var(--wash); }
-.notes-wiki .memo-infobox table { margin:0;font-size:10px; }.notes-wiki .memo-infobox :is(th,td) { border:0;padding:4px 0;overflow-wrap:anywhere; }.notes-wiki .memo-infobox th { width:65px;padding-right:7px;background:none; }
-.memo-id { font:9px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; }.memo-workspace { margin-top:6px;padding-top:7px;border-top:1px solid var(--line); }.memo-workspace strong { display:block;margin-bottom:3px; }.notes-wiki .memo-workspace code { display:block;background:none;padding:0;font-size:9px;overflow-wrap:anywhere; }
-.notes-wiki .memo-toc { padding:10px 13px;border:1px solid var(--line);background:var(--wash);margin-top:12px;margin-bottom:20px; }.memo-toc>strong { font-size:11px; }.memo-toc ol { margin:6px 0 0;padding-left:18px;columns:2;column-gap:30px;font-size:11px; }.memo-toc li { padding:2px 0;break-inside:avoid; }
-.notes-wiki a { color:var(--memo-link);text-decoration:none;cursor:pointer; }.notes-wiki a:hover { text-decoration:underline; }.notes-wiki a:focus-visible { outline:2px solid var(--sapi-accent);outline-offset:3px; }
-.notes-wiki :is(article,[id]) { scroll-margin-top:16px; }.notes-wiki article { margin-bottom:16px; }
-.notes-wiki pre { position:relative;white-space:pre-wrap;overflow-wrap:anywhere;margin:10px 0;padding:22px 12px 12px;border:1px solid var(--line);background:var(--wash);font:11px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace; }
-.notes-wiki pre::before { content:attr(data-language);position:absolute;top:5px;right:10px;font:9px/1.3 system-ui;color:var(--muted); }.notes-wiki pre code { font:inherit;background:none;padding:0; }
-.notes-wiki code { font:10px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere;background:var(--wash);padding:1px 3px; }.memo-facts p { white-space:pre-line; }.memo-facts strong { font-weight:600; }
-.notes-wiki blockquote { margin:10px 18px;border-left:2px solid var(--line);padding-left:12px; }.notes-wiki img { max-width:100%;height:auto; }.notes-wiki figure { margin:12px 0;padding:10px;border:1px solid var(--line);background:var(--wash); }.notes-wiki figcaption,.memo-unrecorded,.memo-stub { font-size:10px;color:var(--muted); }
-.memo-unrecorded { clear:both;margin-top:20px;padding-top:8px;border-top:1px solid var(--line); }.notes-wiki sup { font-size:9px; }
-.notes-wiki :is(.syntax-key,.syntax-keyword) { color:var(--code-key); }.notes-wiki .syntax-string { color:var(--code-string); }.notes-wiki .syntax-literal { color:var(--code-literal); }.notes-wiki .syntax-comment { color:var(--code-comment);font-style:italic; }
-[data-theme=dark] .notes-wiki { background:#000;--ink:#ececec;--muted:#a0a0a0;--line:#333;--wash:#151515;--memo-link:#a7c7ff;--code-key:#d5abff;--code-string:#a1d8af;--code-literal:#efba81;--code-comment:#969696; }
-@container (max-width:480px) { .notes-wiki { padding:16px; }.notes-wiki .memo-infobox { float:none;width:100%;margin:10px 0; }.memo-toc ol { columns:1; } }
-:root body.sapi-workspace .conversation-body.notes-view { container-type:inline-size; }
+
 
 
 .browser-menu { position:absolute;right:7px;top:45px;z-index:20;width:min(340px,calc(100% - 14px));max-height:calc(100% - 65px);overflow:auto;padding:8px;background:var(--sapi-white);border:1px solid var(--line);border-radius:9px;box-shadow:0 8px 24px #0003; }
@@ -254,8 +228,7 @@ body.sapi-workspace .notes-wiki :is(h1,h2) { font-family:Georgia,"Times New Roma
 :root body.sapi-workspace #browser-all-tabs .tab-select { white-space:normal;overflow-wrap:anywhere;max-width:none; }
 #browser-overflow { flex-shrink:0;white-space:nowrap;padding:6px;font-size:12px; }
 .tab-star { flex-shrink:0;font-size:15px; }.tab-star[aria-pressed=true] { color:var(--sapi-accent); }.tab-star:disabled { opacity:.35; }
-#workspace-content { color:var(--sapi-muted); }
-[data-theme="dark"] #workspace-content { background:#000; }
+#workspace-content { color:var(--sapi-muted);background:var(--sapi-bg); }
 
 .task-browser { min-width:0;color:var(--ink); }
 .task-row { border-bottom:1px solid var(--line); }
@@ -295,7 +268,6 @@ body.sapi-workspace .notes-wiki :is(h1,h2) { font-family:Georgia,"Times New Roma
 .task-summary:focus-visible,.task-copy:focus-visible { outline:2px solid var(--sapi-accent);outline-offset:3px; }
 :root[data-theme] body.sapi-workspace summary.task-summary:hover { background:var(--panel);color:var(--ink); }
 
-.notes-wiki .citation{font-size:9px;vertical-align:super;white-space:nowrap;margin-left:2px}.notes-wiki .permalink{font-family:system-ui,sans-serif;font-size:10px;margin-left:7px;color:var(--muted);opacity:0}.notes-wiki :is(h2:hover .permalink,h3:hover .permalink),.notes-wiki .permalink:focus {opacity:1}.notes-wiki .references{font-size:10px;padding-left:19px}.notes-wiki .references li{margin:7px 0}.notes-wiki .references .origin{display:block;color:var(--muted);font-size:9px}.notes-wiki .backref{margin-right:4px}.notes-wiki .file-list{font-size:10px;line-height:1.9}.notes-wiki .draft-note{font-size:10px;color:var(--muted)}
 .agent-entry{min-width:0}.agent-entry>.agent-row{width:100%;cursor:pointer}
 .group-labels{display:inline-flex;gap:4px;flex-wrap:wrap;min-width:0}
 .group-chip{display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:4px;background:color-mix(in srgb,var(--group-color,#888) 40%,var(--sapi-bg));color:var(--ink);font-size:10px;padding:3px 5px;cursor:pointer}
@@ -315,7 +287,7 @@ body.sapi-workspace .notes-wiki :is(h1,h2) { font-family:Georgia,"Times New Roma
 :root[data-theme] body.sapi-workspace .scope-switch button.group-open{background:var(--sapi-hover);color:var(--sapi-accent)}
 .group-avatar{position:relative;color:#20252a;overflow:hidden}.group-avatar>span{padding:2px 3px;border-radius:6px;background:#ffffffb0;font-size:inherit}
 .group-members{border:1px solid var(--border,#7775);border-radius:10px;padding:12px;max-height:240px;overflow:auto}.group-members legend{font-size:12px}.group-members label{display:flex;align-items:center;gap:9px;padding:6px}.group-members input{width:auto}.group-banner{display:block;padding:10px;background:#bda05522;border-radius:8px;font-size:12px}.group-task{border:0;border-bottom:1px solid var(--line);border-radius:0;padding:0;margin:0}.group-task-body{white-space:pre-wrap;font-size:13px;margin:10px 0}.group-task .actions{margin:12px 0;display:flex;gap:8px;flex-wrap:wrap}.group-task details{font-size:12px;margin-top:10px}.group-task-result{border-top:1px solid #8883;padding:10px 0;white-space:pre-wrap}.group-task-result strong{font-size:11px}.group-work{padding:4px 2px}
-.agent-heading:has(.group-labels){height:auto;min-height:69px}.conversation-body.notes-view:has(#work-content){display:flex;flex-direction:column}.notes-view #work-content{flex:1;min-height:0;overflow:auto}
+.agent-heading:has(.group-labels){height:auto;min-height:69px}
 @media(max-width:600px){.agent-list>.agent-entry{flex:0 0 180px;width:180px}}
 
 :root[data-theme] body.sapi-workspace .scope-switch button:disabled{opacity:.4;cursor:default;background:transparent;color:var(--muted)}
@@ -449,9 +421,6 @@ body.sapi-workspace .notes-wiki :is(h1,h2) { font-family:Georgia,"Times New Roma
 :root body.sapi-workspace[data-mobile-ui] .browser-address-bar input { font-size:16px;min-height:44px;min-width:0; }
 :root body.sapi-workspace[data-mobile-ui] .workspace-content { padding:0;font-size:12.6px; }
 :root body.sapi-workspace[data-mobile-ui] .workspace-text { padding:20px 16px;font-size:12.6px; }
-:root body.sapi-workspace[data-mobile-ui] .notes-wiki { padding:18px 16px;font-size:12.6px; }
-:root body.sapi-workspace[data-mobile-ui] .notes-wiki h1 { font-size:23.4px; }
-:root body.sapi-workspace[data-mobile-ui] .notes-wiki h2 { font-size:17.1px; }
 :root body.sapi-workspace[data-mobile-ui] dialog { max-height:calc(var(--mobile-viewport-height,100dvh) - 24px);width:calc(100% - 24px);padding:18px;border-radius:20px; }
 :root body.sapi-workspace[data-mobile-ui] dialog.app-menu-sheet { inset:auto 0 0;margin:0;width:100%;max-width:none;border-radius:24px 24px 0 0;padding:12px 20px max(20px,env(safe-area-inset-bottom)); }
 :root body.sapi-workspace[data-mobile-ui] #modal-content h2 { font-size:18px; }
@@ -466,3 +435,5 @@ body.sapi-workspace .notes-wiki :is(h1,h2) { font-family:Georgia,"Times New Roma
 .connection-status { display:inline-flex;align-items:center;gap:6px;white-space:nowrap;font-size:11px;color:var(--muted); }
 .connection-dot { width:6px;height:6px;flex:none;border-radius:50%;background:#888; }
 .connection-status[data-online="true"] .connection-dot { background:#3b9b69; }
+
+.workspace-document { flex:1;min-width:0;overflow:auto;padding:1rem;color:var(--ink);overflow-wrap:anywhere; }

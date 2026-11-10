@@ -26,8 +26,13 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 
 runDesktop :: Bool -> IO ()
-runDesktop probe = runInBoundThread $ bracket newArena freeArena $ \memory ->
- bracket_ (check =<< coInitialize nullPtr 2) coUninitialize $ do
+runDesktop probe = runInBoundThread $
+  -- COM may release callback references while its apartment is shutting down.
+  bracket newArena freeArena $ \memory ->
+    bracket_ (check =<< coInitialize nullPtr 2) coUninitialize (desktopSession memory probe)
+
+desktopSession :: Arena -> Bool -> IO ()
+desktopSession memory probe = do
   void $ setDpiAwareness (-4)
   args <- getArgs
   host <- prepareHost args
@@ -172,7 +177,7 @@ runDesktop probe = runInBoundThread $ bracket newArena freeArena $ \memory ->
               callInt (controller view) 12 0
               when probe $ do
                 putStrLn "TITLE: Sapiens4"
-                readIORef (origin host) >>= putStrLn . ("Sapiens4: " ++)
+                readIORef (origin host) >>= mapM_ (putStrLn . ("Sapiens4: " ++) . show)
                 void $ forkIO $ probeInput post hwnd top resize
           launch = do
             available <- try webViewRuntimeAvailable
@@ -221,25 +226,31 @@ loadIconFile path = withWide path $ \file -> loadImage nullPtr file 1 0 0 0x10
 setIcon :: Window -> Object -> IO ()
 setIcon hwnd icon = when (icon /= nullPtr) $ mapM_ (\kind -> void $ sendMessage hwnd 0x80 kind (ptrToIntPtr icon)) [0, 1]
 
-applyWindowTheme :: Window -> Object -> Object -> IORef (Maybe (Bool, String, String)) -> Value -> IO ()
-applyWindowTheme hwnd light dark previous message = case field "dark" message of
-  Bool mode -> do
-    let background = palette "captionBackground" (if mode then "#171717" else "#f6f6f6") message
-        foreground = palette "foreground" (if mode then "#ececec" else "#202020") message
-        current = (mode, background, foreground)
+data WindowTheme = WindowTheme { darkMode :: Bool, captionColor :: Int32, textColor :: Int32 } deriving Eq
+
+decodeWindowTheme :: Value -> Maybe WindowTheme
+decodeWindowTheme message = case field "dark" message of
+  Bool mode -> Just $ WindowTheme mode
+    (color $ palette "captionBackground" (if mode then "#171717" else "#f6f6f6") message)
+    (color $ palette "foreground" (if mode then "#ececec" else "#202020") message)
+  _ -> Nothing
+  where
+    color value = case readHex (drop 1 value) of
+      [(rgb, "")] -> (rgb .&. 255) `shiftL` 16 .|. (rgb .&. 0xff00) .|. ((rgb `shiftR` 16) .&. 255)
+      _ -> 0
+
+applyWindowTheme :: Window -> Object -> Object -> IORef (Maybe WindowTheme) -> Value -> IO ()
+applyWindowTheme hwnd light dark previous message = forM_ (decodeWindowTheme message) $ \current -> do
+    let mode = darkMode current
         attribute index value = with value $ \p -> dwmAttribute hwnd index p 4
-        color value = case readHex (drop 1 value) of
-          [(rgb, "")] -> (rgb .&. 255) `shiftL` 16 .|. (rgb .&. 0xff00) .|. ((rgb `shiftR` 16) .&. 255)
-          _ -> 0 :: Int32
     old <- readIORef previous
     when (old /= Just current) $ do
       setIcon hwnd (if mode then dark else light)
       result <- attribute 20 (if mode then 1 else 0)
       when (result < 0) $ void $ attribute 19 (if mode then 1 else 0)
-      void $ attribute 35 (color background)
-      void $ attribute 36 (color foreground)
+      void $ attribute 35 (captionColor current)
+      void $ attribute 36 (textColor current)
       writeIORef previous (Just current)
-  _ -> pure ()
 
 probeInput :: (IO () -> IO ()) -> Window -> IORef Int -> (Window -> IO ()) -> IO ()
 probeInput post hwnd top resize = loop `catch` \(_ :: IOException) -> post (void $ destroyWindow hwnd)

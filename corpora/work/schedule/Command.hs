@@ -10,19 +10,31 @@ data Command = Create Integer String | Edit String Integer Integer String | SetP
     deriving (Eq, Show)
 
 interpret :: Bool -> String -> Either String (Maybe Command)
-interpret attached text
-    | not recognized = Right Nothing
-    | attached = Left "Put the execution instructions in the routine prompt"
-    | otherwise = case readP_to_S (parser <* eof) text of
-        [] -> Left failure
-        results -> Right (Just (fst (last results)))
-  where
-    creating = "Add New Scheduled Routine:" `isPrefixOf` text
-    changing = any (`isPrefixOf` text) ["Pause Schedule Riutine", "Pause Scheduled Routine", "Resume Scheduled Routine"]
-    recognized = creating || changing || "Edit @routine_sch_" `isPrefixOf` text
-    parser = if changing then pause else if creating then create else edit
-    failure = if changing then "Put the Scheduled Routine ID on the next line"
-              else "Use the Scheduled Routine template with a whole number of minutes and an execution prompt"
+interpret attached text = case template text of
+    Nothing -> Right Nothing
+    Just kind
+        | attached -> Left "Put the execution instructions in the routine prompt"
+        | otherwise -> case reverse (readP_to_S (templateParser kind <* eof) text) of
+            (command,_) : _ -> Right (Just command)
+            [] -> Left (templateError kind)
+
+data Template = Creation | Editing | Pausing
+
+template :: String -> Maybe Template
+template text
+    | "Add New Scheduled Routine:" `isPrefixOf` text = Just Creation
+    | any (`isPrefixOf` text) ["Pause Schedule Riutine", "Pause Scheduled Routine", "Resume Scheduled Routine"] = Just Pausing
+    | "Edit @routine_sch_" `isPrefixOf` text = Just Editing
+    | otherwise = Nothing
+
+templateParser :: Template -> ReadP Command
+templateParser Creation = create
+templateParser Editing = edit
+templateParser Pausing = pause
+
+templateError :: Template -> String
+templateError Pausing = "Put the Scheduled Routine ID on the next line"
+templateError _ = "Use the Scheduled Routine template with a whole number of minutes and an execution prompt"
 
 space :: Char -> Bool
 space c = c `elem` "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0\x1680\x2028\x2029\x202f\x205f\x3000" || c >= '\x2000' && c <= '\x200a'

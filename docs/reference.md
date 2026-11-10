@@ -6,7 +6,8 @@ See the [README](../README.md) for startup and platform requirements.
 
 ChiefSapi manages the team and can delegate to specialists. Specialists can refer
 work to Chief; accepted handoffs retain task identity and return the responsible
-Sapi's result to the original chat. **Answer Chief** continues a clarification.
+Sapi's result to the original chat. When Chief needs clarification, it asks in the
+chat; answer there like any other message.
 Creating a Sapi or Group does not itself start work.
 
 Personal Tasks offers Upcoming and Past, with read-only YAML specifications and
@@ -28,13 +29,17 @@ outcomes before retrying. The shared computer allows one owner at a time.
 
 Memo reads `workspaces/<id>/Notes.html`. Its wiki has `about`, `map` and `content`
 sections; about/map enter model context and the model reads relevant content as
-needed. Scripts and deliverables remain ordinary linked files. The renderer
-allows inert markup and local images while removing executable content.
+needed. Store media as separate files. Link to them from Notes.html with a relative workspace
+path or an HTTP(S) URL. Inline images and data URLs are unsupported.
+
+A restored tab loads its native browser view the first time it becomes visible. After an uninterrupted hour in the background, Workspace can release a local read-only text preview with an existing file and no back or forward history. Its tab, bookmark and zoom remain in the owning Sapi's workspace. Selecting it reloads the file from disk and can reset its scroll position. Websites, HTML documents, media and pages of unknown type keep their views.
 
 Native desktop tabs open websites, local files and bookmarks. Text/source files
 render literally; HTML, PDF and media use the native browser. Closing a tab does
 not delete its file. Remote clients can preview text files and control the host's
 tabs, but do not stream native browser views.
+
+Local Workspace windows receive change notifications over a same-origin WebSocket and fetch a snapshot when needed. A hidden window disconnects and catches up when shown. While the socket is unavailable, unchanged snapshots double the HTTP polling interval up to 10 seconds. Changed content, clicks and keystrokes reset it to 750 ms. Socket retries start at 2 seconds and double up to 30 seconds. Remote relay connections keep their existing refresh behavior.
 
 ## Configuration
 
@@ -98,6 +103,7 @@ a supplied Origin must match the loopback Host. Common entrypoints:
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/api/health`, `/api/state` | Readiness and current state |
+| WebSocket | `/api/host/corpora/<id>/api/updates` | Current revision on subscribe and after local changes. Compare with `updates_revision` in the state response. |
 | POST / PUT | `/api/agents`, `/api/agents/<id>` | Create/update Sapis |
 | POST | `/api/agents/<id>/messages`, `/api/agents/<id>/attachments` | Submit chat or attachments |
 | GET | `/api/agents/<id>/notes` | Memo and file metadata |

@@ -10,6 +10,7 @@ import System.Process
 
 main :: IO ()
 main = do
+ args <- getArgs
  root <- getCurrentDirectory >>= buildPath
  -- Environment changes alone do not invalidate Cabal's cached executables.
  -- Keep the declared target fixed for both direct source and package builds.
@@ -22,7 +23,9 @@ main = do
      cache = project </> ".cabal"
      build = project </> (if os=="darwin" then ".build/macos-13.0" else ".build")
      suffix = if os=="mingw32" then ".exe" else ""
-     targets = ["sapiens4","sapiens-domain"] ++ map fst helpers ++ if os=="darwin" then ["sapiens-macos"] else if os=="mingw32" then ["sapiens-windows"] else []
+     desktop = os=="linux" && "--desktop" `elem` args
+     buildFlags = ["--flags=" ++ if desktop then "linux-desktop" else "-linux-desktop"]
+     targets = ["sapiens4","sapiens-domain"] ++ map fst helpers ++ if os=="darwin" then ["sapiens-macos"] else if os=="mingw32" then ["sapiens-windows"] else ["sapiens-linux" | desktop]
  setEnv "CABAL_DIR" cache
  createDirectoryIfMissing True cache
  index <- doesFileExist (cache </> "packages/hackage.haskell.org/01-index.tar")
@@ -49,15 +52,15 @@ main = do
  when (os=="mingw32") $ do
   createDirectoryIfMissing True build
   callProcess "windres" ["-I",root</>"environments/windows",root</>"environments/windows/resources.rc","-O","coff","-o",build</>"windows-resources.o"]
- let cabal args = callProcess "cabal" (["--project-file="<>project</>"cabal.project","--builddir="<>build]++args)
- cabal (["build"]++map ("exe:"++) (filter (/="sapiens-windows") targets)++
+ let cabal options = callProcess "cabal" (["--project-file="<>project</>"cabal.project","--builddir="<>build]++options)
+ cabal (["build"]++buildFlags++map ("exe:"++) (filter (/="sapiens-windows") targets)++
   ["--ghc-options=-optc-mmacosx-version-min=13.0 -optl-mmacosx-version-min=13.0" | os=="darwin"])
  -- The desktop resource already contains the application's DPI/UAC manifest.
- when (os=="mingw32") $ cabal ["build","exe:sapiens-windows","--ghc-options=-fno-gen-manifest"]
+ when (os=="mingw32") $ cabal (["build","exe:sapiens-windows","--ghc-options=-fno-gen-manifest"]++buildFlags)
  createDirectoryIfMissing True (root </> ".build/bin")
  createDirectoryIfMissing True (root </> ".build/domain")
  forM_ targets $ \name -> do
-  source <- trim <$> readProcess "cabal" ["--project-file="<>project</>"cabal.project","--builddir="<>build,"list-bin","exe:"<>name] ""
+  source <- trim <$> readProcess "cabal" (["--project-file="<>project</>"cabal.project","--builddir="<>build,"list-bin","exe:"<>name]++buildFlags) ""
   let destination = root </> (if name=="sapiens-domain" then ".build/domain" else ".build/bin") </> name<>suffix
   copyFile source (destination<>".installing")
   renameFile (destination<>".installing") destination

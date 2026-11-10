@@ -1,8 +1,10 @@
 require_relative 'support/relay'
+require_relative 'support/voice'
 require 'sqlite3'
 require 'digest'
 
 RSpec.describe 'Encrypted remote service contracts' do
+  include VoiceAudio
   before do
     @relay = Relay.new
     @host = Host.new
@@ -43,6 +45,19 @@ RSpec.describe 'Encrypted remote service contracts' do
     expect(receive).to include('paired' => true)
   end
 
+  def legacy_receipt_digest(frame)
+    saved = JSON.parse(File.read(File.join(host.root, 'remote-device.json')))
+    plaintext = @peer.call('unpack', private: saved['private'], public: @keys['public'], frame: frame)
+    canonical = lambda do |value|
+      case value
+      when Hash then '{' + value.keys.sort.map { |key| key.to_json(ascii_only: true) + ': ' + canonical.call(value[key]) }.join(', ') + '}'
+      when Array then '[' + value.map { |item| canonical.call(item) }.join(', ') + ']'
+      else value.to_json(ascii_only: true)
+      end
+    end
+    Digest::SHA256.hexdigest(canonical.call(plaintext))
+  end
+
   it 'requires the invitation secret and explicit approval of the full phone identity' do
     invite
     @peer.call('connect', name: 'phone', url: @relay.url, room: @invitation['room'], token: @invitation['token'])
@@ -57,6 +72,19 @@ RSpec.describe 'Encrypted remote service contracts' do
     host.api('POST', '/api/remote/approve', {peer: @keys['public']})
     expect(receive).to include('paired' => true)
     expect(host.api('GET', '/api/remote')['invitation']).to be_nil
+  end
+
+  it 'sends complete empty workspace arrays over the encrypted relay for older clients' do
+    pair
+    send_frame(pack(op: 'api', method: 'GET', path: '/api/state',
+      device_info: {name: 'iPhone', platform: 'iOS', client: 'Sapiens4 Home Screen app'}))
+    result = receive
+    expect(result['status']).to eq(200)
+    snapshot = result.fetch('body')
+    workspace = snapshot.fetch('preferences').fetch('workspaces').fetch(snapshot.fetch('main_agent_id'))
+    expect(workspace.fetch('tabs')).to eq([])
+    expect(workspace.fetch('bookmarks').map { |bookmark| bookmark['title'] }).to eq(['Notes.html'])
+    expect(host.state['turns']).to be_empty
   end
 
   it 'keeps older pairings usable without inventing missing device details or dates' do
@@ -119,6 +147,126 @@ RSpec.describe 'Encrypted remote service contracts' do
     state = receive['body']
     expect(state['turns'].first).to include('input' => 'Encrypted phone message', 'output' => 'Contract test reply')
     expect(state['corpora']).to eq(host.state['corpora'])
+  end
+
+  it 'uploads a large attachment through the encrypted channel without stalling the host' do
+    pair
+    bytes = 'x' * 1_048_576
+    send_frame(pack(op: 'api', method: 'POST', path: "/api/agents/#{chief}/attachments",
+      data: {kind: 'document', name: 'large.txt', data: [bytes].pack('m0')}))
+    upload = receive
+    expect(upload['status']).to eq(201)
+    expect(upload['body']).to include('name' => 'large.txt', 'size' => bytes.bytesize)
+    send_frame(pack(op: 'api', method: 'GET', path: '/api/state'))
+    expect(receive['body']).to have_key('turns')
+  end
+
+  it 'rejects a large changed command reusing a request ID without stalling the host' do
+    pair
+    upload = lambda do |content|
+      pack(id: 'large-reused', op: 'api', method: 'POST', path: "/api/agents/#{chief}/attachments",
+        data: {kind: 'document', name: 'large.txt', data: [content].pack('m0')})
+    end
+    send_frame(upload.call('a' * 1_048_576))
+    expect(receive['status']).to eq(201)
+    send_frame(upload.call('b' * 1_048_576))
+    send_frame(pack(op: 'api', method: 'GET', path: '/api/state'))
+    expect(receive['body']).to have_key('turns')
+    stored = Dir.glob(File.join(host.root, 'uploads', '**', 'large.txt'))
+    expect(stored.map { |path| File.read(path, 1) }).to eq(['a'])
+  end
+
+  %w[canonical python].each do |format|
+    it "rejects oversized mismatched retries of a pre-v2 #{format} receipt without stalling" do
+      pair
+      upload = lambda do |content|
+        pack(id: 'pre-v2-large', op: 'api', method: 'POST', path: "/api/agents/#{chief}/attachments",
+          data: {kind: 'document', name: 'legacy-large.txt', data: [content].pack('m0')})
+      end
+      original = upload.call('a' * 1_048_576)
+      changed = upload.call('b' * 1_048_576)
+      send_frame(original)
+      receipt = receive
+      expect(receipt['status']).to eq(201)
+      host.stop
+      database = File.join(host.root, 'remote-receipts.sqlite3')
+      python_digest = legacy_receipt_digest(original) if format == 'python'
+      before = SQLite3::Database.open(database) do |db|
+        digest = python_digest || db.get_first_value('SELECT hash FROM receipts WHERE id=?', ['pre-v2-large']).delete_prefix('v2:')
+        db.execute('UPDATE receipts SET hash=? WHERE id=?', [digest, 'pre-v2-large'])
+        db.get_first_row('SELECT hash,reply FROM receipts WHERE id=?', ['pre-v2-large'])
+      end
+      host.start
+      send_frame(changed)
+      send_frame(pack(op: 'api', method: 'GET', path: '/api/state'))
+      expect(receive['body']).to have_key('turns')
+      send_frame(original)
+      if format == 'canonical'
+        expect(receive).to eq(receipt)
+      else
+        # An oversized Python-format retry also stays bounded, even if unchanged.
+        send_frame(pack(op: 'api', method: 'GET', path: '/api/state'))
+        expect(receive['body']).to have_key('turns')
+      end
+      stored = Dir.glob(File.join(host.root, 'uploads', '**', 'legacy-large.txt'))
+      expect(stored.size).to eq(1)
+      expect(File.binread(stored.first)).to eq('a' * 1_048_576)
+      SQLite3::Database.open(database) do |db|
+        expect(db.get_first_row('SELECT hash,reply FROM receipts WHERE id=?', ['pre-v2-large'])).to eq(before)
+      end
+    end
+  end
+
+  it 'streams voice pieces through the encrypted channel into one-minute voice messages' do
+    pair
+    recording = SecureRandom.uuid
+    piece = ->(index) { {recording: recording, index: index, final: index == 30, data: voice_piece(2)} }
+    replies = (0..30).map do |index|
+      send_frame(pack(op: 'api', method: 'POST', path: "/api/agents/#{chief}/voice", data: piece.(index)))
+      receive
+    end
+    expect(replies.map { |reply| reply['status'] }).to all(eq(200))
+    messages = replies.flat_map { |reply| reply['body']['messages'] }
+    expect(messages.map { |m| [m['kind'], m['part'], m['duration_ms']] }).to eq([['voice', 0, 60000], ['voice', 1, 2000]])
+    # The phone resends the last piece after a reconnect, with a new request id.
+    send_frame(pack(op: 'api', method: 'POST', path: "/api/agents/#{chief}/voice", data: piece.(30)))
+    expect(receive['body']).to include('duplicate' => true, 'messages' => replies.last['body']['messages'])
+  end
+
+  it 'keeps voice audio and its request unreadable on the relay' do
+    pair
+    audio = voice_piece(2)
+    send_frame(pack(op: 'api', method: 'POST', path: "/api/agents/#{chief}/voice", data: {recording: SecureRandom.uuid, index: 0, final: false, data: audio}))
+    expect(receive['status']).to eq(200)
+    stored = Dir[File.join(@relay.root, 'relay.sqlite3*')].map { |file| File.binread(file) }.join
+    aggregate_failures do
+      expect(stored).not_to include(audio[0, 64])
+      expect(stored).not_to include([0, 1000, 0, -1000].pack('s<*') * 8)
+      expect(stored).not_to include("/api/agents/#{chief}/voice")
+    end
+  end
+
+  it 'uploads an attachment through the encrypted channel and sends it with a message' do
+    pair
+    data = ['Total: 42'].pack('m0')
+    frame = pack(op: 'api', method: 'POST', path: "/api/agents/#{chief}/attachments", data: {kind: 'document', name: 'notes.txt', data: data})
+    expect(JSON.generate(frame)).not_to include('notes.txt', data)
+    send_frame(frame)
+    upload = receive
+    expect(upload['status']).to eq(201)
+    doc = upload['body']
+    expect(doc).to include('kind' => 'document', 'name' => 'notes.txt', 'size' => 9)
+    expect(File.read(doc['value'])).to eq('Total: 42')
+    send_frame(pack(op: 'api', method: 'POST', path: "/api/agents/#{chief}/messages", data: {text: 'Summarize', attachments: [doc['id']]}))
+    reply = receive
+    expect(reply['status']).to eq(202)
+    turn = host.turn(reply['body']['id'])
+    expect(turn['attachments'].map { |item| item['id'] }).to eq([doc['id']])
+    context = JSON.parse(host.calls.last['prompt'].split("\nContext:\n", 2).fetch(1))
+    request = context.fetch('currentCall').fetch('request')
+    marker = 'Attached references (JSON data; read the files/links when needed for this message):'
+    references = JSON.parse(request.split(marker, 2).fetch(1))
+    expect(references).to include('kind' => 'document', 'name' => 'notes.txt', 'value' => doc.fetch('value'))
   end
 
   it 'restores an unapproved QR, hides discovery on approval, and reuses saved relay setup after revocation' do
@@ -186,21 +334,12 @@ RSpec.describe 'Encrypted remote service contracts' do
     pair
     frame = pack(id: 'legacy-receipt', expires: Time.now.to_i + 120, op: 'api', method: 'POST',
       path: "/api/agents/#{chief}/messages", data: {text: 'Résumé 中文 😎'},
-      metadata: {z: [1.25, -0.0], a: {second: true, first: 'é'}})
+      metadata: {z: [1.25, -0.0, 1, 1.0, 12345678901234567890, nil, false], a: {second: true, first: "é\n\"quoted\"\\"}})
     send_frame(frame)
     receipt = receive
     host.turn(receipt['body']['id'])
     host.stop
-    saved = JSON.parse(File.read(File.join(host.root, 'remote-device.json')))
-    plaintext = @peer.call('unpack', private: saved['private'], public: @keys['public'], frame: frame)
-    canonical = lambda do |value|
-      case value
-      when Hash then '{' + value.keys.sort.map { |key| key.to_json(ascii_only: true) + ': ' + canonical.call(value[key]) }.join(', ') + '}'
-      when Array then '[' + value.map { |item| canonical.call(item) }.join(', ') + ']'
-      else value.to_json(ascii_only: true)
-      end
-    end
-    digest = Digest::SHA256.hexdigest(canonical.call(plaintext))
+    digest = legacy_receipt_digest(frame)
     SQLite3::Database.open(File.join(host.root, 'remote-receipts.sqlite3')) do |db|
       db.execute('UPDATE receipts SET hash=? WHERE id=?', [digest, 'legacy-receipt'])
     end

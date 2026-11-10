@@ -17,6 +17,7 @@ import Database.SQLite.Simple hiding (withTransaction)
 import qualified Database.SQLite.Simple as SQLite
 import System.FilePath
 import Text.Read (readMaybe)
+import qualified Data.List.NonEmpty as NE
 import Types
 
 -- Only these tables contain JSON documents; callers cannot interpolate SQL names.
@@ -69,7 +70,9 @@ recentPulses s = queryRows s "SELECT value FROM pulse_calls ORDER BY sequence DE
 decodeStored :: FromJSON a => Text -> IO a
 decodeStored raw = either (failure 500 . T.pack) pure (eitherDecodeStrict (Data.Text.Encoding.encodeUtf8 raw))
 putValue :: Service -> Collection -> Text -> Value -> IO ()
-putValue s table i v = connection s $ \db -> putValueOn db table i v
+putValue s table i v = do
+ changed <- connection s $ \db -> putValueOn db table i v >> changes db
+ when (changed > 0) (notifyChange s)
 putValueOn :: Connection -> Collection -> Text -> Value -> IO ()
 putValueOn db table i v = executeOn db ("INSERT INTO " <> tableName table <> " VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value WHERE value IS NOT excluded.value") [SQLText i,SQLText (jsonText v)]
 singleton :: Service -> Collection -> IO Value
@@ -100,11 +103,17 @@ initialize s = connection s $ \db -> do
  when (version `elem` [1,2]) $ execute_ db "INSERT OR IGNORE INTO turns SELECT * FROM jobs WHERE flow IN ('chat','computer')"
  execute_ db "PRAGMA user_version=8"
 agents :: Service -> IO [Value]
-agents s = queryRows s "SELECT * FROM agents ORDER BY created,id" ["id","name","role","color","face","created"] []
+agents s = map toJSON <$> agentProfiles s
+agentProfiles :: Service -> IO [AgentProfile]
+agentProfiles s = queryRows s "SELECT * FROM agents ORDER BY created,id" ["id","name","role","color","face","created"] [] >>= traverse (decodeValue 500)
 agent :: Service -> Text -> IO Value
 agent s i = agents s >>= maybe (failure 404 "Unknown Sapi") pure . findId i
 mainAgent :: Service -> IO Text
-mainAgent s = maybe "" (`at` "id") . listToMaybe <$> agents s
+mainAgent s = do
+ roster <- population s >>= maybe (failure 500 "CORPORA has no Chief Sapi") pure
+ pure (agentIdText (populationChief roster))
+population :: Service -> IO (Maybe Population)
+population s = fmap populationRoster . NE.nonEmpty . map profileId <$> agentProfiles s
 addAgent :: Service -> Value -> IO ()
 addAgent s v = executeSQL s "INSERT INTO agents VALUES (?,?,?,?,?,?)" [sql (get v k) | k <- ["id","name","role","color","face","created"]]
 attachments :: Service -> Text -> IO [Value]
@@ -113,10 +122,26 @@ attachmentTable :: Text -> Text
 attachmentTable a = if "group_" `T.isPrefixOf` a then "group_attachments" else "attachments"
 saveAttachment :: Service -> Value -> IO ()
 saveAttachment s v = executeSQL s ("INSERT INTO " <> attachmentTable (at v "agent") <> " VALUES (?,?,?)") [sql (get v "id"),sql (get v "agent"),SQLText (jsonText v)]
+
+-- | The next voice message waiting for a transcript, across Sapis and groups (at most one).
+-- SQLite filters the rows, so the worker no longer reads and decodes every attachment each
+-- time it polls. A cancelled recording's voice messages are skipped: their audio is gone.
+pendingVoices :: Service -> IO [Value]
+pendingVoices s = map (parseJSONText . (`at` "value")) <$> queryRows s (T.unlines
+ [ "SELECT value FROM (SELECT value FROM attachments UNION ALL SELECT value FROM group_attachments)"
+ , "WHERE json_extract(value,'$.kind')='voice' AND json_extract(value,'$.transcript_status')='pending'"
+ , "AND json_extract(value,'$.cancelled') IS NOT 1 LIMIT 1" ]) ["value"] []
+-- | Replace a saved attachment's JSON (used to store a voice transcript).
+updateAttachment :: Service -> Value -> IO ()
+updateAttachment s v = do
+ executeSQL s ("UPDATE " <> attachmentTable (at v "agent") <> " SET value=? WHERE id=?") [SQLText (jsonText v), sql (get v "id")]
+ notifyChange s
 message :: Service -> Text -> Text -> [Value] -> IO ()
 message s i t as = executeSQL s "INSERT OR IGNORE INTO message_inputs VALUES (?,?,?)" [SQLText i,SQLText t,SQLText (jsonText (arr as))]
 record :: Service -> [Text] -> Text -> Text -> Value -> Text -> Maybe Text -> IO ()
-record s owners entity event details suppliedActor suppliedAgency = connection s $ \db -> SQLite.withTransaction db $ recordOn s db owners entity event details suppliedActor suppliedAgency
+record s owners entity event details suppliedActor suppliedAgency = do
+ connection s $ \db -> SQLite.withTransaction db $ recordOn s db owners entity event details suppliedActor suppliedAgency
+ notifyChange s
 recordOn :: Service -> Connection -> [Text] -> Text -> Text -> Value -> Text -> Maybe Text -> IO ()
 recordOn s db owners entity event details suppliedActor suppliedAgency = do
  (source,kind) <- currentActor s
@@ -130,23 +155,54 @@ events :: Service -> IO Value
 events s = do
  rows <- queryRows s "SELECT * FROM activity_events ORDER BY id DESC" ["id","owner","timestamp","actor","entity","event","agency","details"] []
  pure $ obj [(k,arr vs) | (k,vs) <- M.toList (M.fromListWith (flip (++)) [(at v "owner",[remove ["owner"] (put "details" (parseJSONText (at v "details")) v)]) | v <- rows])]
+data TurnProjection = TurnProjection
+ { projectionStatus :: TurnStatus, projectionOrigin :: Value, projectionOwners :: [Text]
+ , projectionActor :: Text, projectionOutput :: Maybe Value }
+
+projectTurn :: Text -> AgentState -> Turn -> TurnProjection
+projectTurn owner state turn = TurnProjection status origin owners actor output
+ where
+ status=if turnStatus turn==Done && turnField turn "warning"/=Null then Warning else turnStatus turn
+ origin=turnField turn "origin" `fallback` empty
+ owners=owner:[at origin "group" | has origin "group"]
+ actor=if status==Queued then if has origin "routine" then "system" else text (get origin "author" `fallback` str "admin") else owner
+ output=listToMaybe [get m "content" | m<-items (stateJSON state) "chat",get m "turn"==toJSON (turnId turn),at m "role"=="agent"]
+
 project :: Service -> Text -> IO ()
-project s a = do
- state <- agentState s a
- connection s $ \db -> SQLite.withTransaction db $ forM_ (agentTurns state) $ \typed -> do
-  let turn=toJSON typed
-  previous <- queryRowsOn db "SELECT status FROM turns WHERE id=?" ["status"] [sql (get turn "id")]
-  let status = wireName (if turnStatus typed == Done && get turn "warning" /= Null then Warning else turnStatus typed)
-      origin = get turn "origin" `fallback` empty
-      owners = a : [at origin "group" | has origin "group"]
-      old = maybe Null (get `flip` "status") (listToMaybe previous)
-      actor = if status == "queued" then if has origin "routine" then "system" else at (put "author" (get origin "author" `fallback` str "admin") origin) "author" else a
-  when (old /= str status) $ recordOn s db owners (at turn "id") ("call." <> status) (obj [("previous",old),("origin",origin),("error",get turn "error"),("warning",get turn "warning")]) actor (Just (if has turn "output_order" then "chatOutput" else at turn "agency_kind"))
-  let details = selectPresent ["origin","batch_id","batch_members","agency_kind","slot","pulseId","output_at","output_order"] turn
-  putValueOn db TurnDetails (at turn "id") details
-  let output = listToMaybe [get m "content" | m <- items (stateJSON state) "chat",get m "turn" == get turn "id",at m "role" == "agent"]
-  archived <- if isNothing output && status `elem` ["done","warning"] && batchLeader typed == turnId typed then readJSON (archivePath s a ("runs/" <> at turn "id")) empty else pure empty
-  executeOn db "INSERT INTO turns VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,output=COALESCE(excluded.output,turns.output),error=excluded.error WHERE turns.status IS NOT excluded.status OR turns.output IS NOT COALESCE(excluded.output,turns.output) OR turns.error IS NOT excluded.error" [sql (get turn "id"),SQLText a,sql (get turn "flow"),sql (get turn "input"),SQLText status,sql (fromMaybe (get archived "output") output),sql (get turn "error" `fallback` get turn "warning"),SQLInteger 0,sql (get turn "created")]
+project s a = void (projectArchives s a)
+
+-- The update subscription needs the archive inputs even if a large state cannot
+-- be retained in the bounded projection cache.
+projectArchives :: Service -> Text -> IO [Turn]
+projectArchives s a = do
+ input <- agentStateInput s a
+ case cachedProjection input of
+  ProjectionCommitted [] -> pure []
+  cached -> do
+   let state = cachedState input
+       pending = case cached of
+        ProjectionPending -> agentTurns state
+        ProjectionCommitted archived -> archived
+   archiveTurns <- catMaybes <$> connection s (\db -> SQLite.withTransaction db $ forM pending $ \typed -> do
+     let turn=toJSON typed
+     previous <- queryRowsOn db "SELECT status FROM turns WHERE id=?" ["status"] [sql (get turn "id")]
+     let projection=projectTurn a state typed
+         status=wireName (projectionStatus projection)
+         origin=projectionOrigin projection
+         owners=projectionOwners projection
+         actor=projectionActor projection
+         old=maybe Null (get `flip` "status") (listToMaybe previous)
+     when (old /= str status) $ recordOn s db owners (at turn "id") ("call." <> status) (obj [("previous",old),("origin",origin),("error",get turn "error"),("warning",get turn "warning")]) actor (Just (if has turn "output_order" then "chatOutput" else at turn "agency_kind"))
+     let details = selectPresent ["origin","batch_id","batch_members","agency_kind","slot","pulseId","output_at","output_order"] turn
+     putValueOn db TurnDetails (at turn "id") details
+     let output=projectionOutput projection
+         archiveNeeded = isNothing output && status `elem` ["done","warning"] && batchLeader typed == turnId typed
+     archived <- if archiveNeeded then readJSON (archivePath s a ("runs/" <> at turn "id")) empty else pure empty
+     executeOn db "INSERT INTO turns VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,output=COALESCE(excluded.output,turns.output),error=excluded.error WHERE turns.status IS NOT excluded.status OR turns.output IS NOT COALESCE(excluded.output,turns.output) OR turns.error IS NOT excluded.error" [sql (get turn "id"),SQLText a,sql (get turn "flow"),sql (get turn "input"),SQLText status,sql (fromMaybe (get archived "output") output),sql (get turn "error" `fallback` get turn "warning"),SQLInteger 0,sql (get turn "created")]
+     pure (if archiveNeeded then Just typed else Nothing))
+   -- Promote only after commit; archive files remain authoritative on cache hits.
+   modifyMVar_ (serviceStates s) $ pure . M.adjust (\entry -> if cachedBytes entry == cachedBytes input then entry {cachedProjection=ProjectionCommitted archiveTurns} else entry) a
+   pure archiveTurns
 turns :: Service -> IO [Value]
 turns s = do
  rows <- queryRows s "SELECT id,agent,flow,input,status,output,error,created FROM turns ORDER BY created,id" ["id","agent","flow","input","status","output","error","created"] []
@@ -168,3 +224,19 @@ pulseCall s tick a kind slot groups = do
  let v = merge (toJSON tick) (obj [("agent",str a),("agencyKind",str kind),("slot",num slot),("timestamp",str t)])
  executeSQL s "INSERT INTO pulse_calls(value) VALUES (?)" [SQLText (jsonText v)]
  record s (a:groups) a "pulse.dispatched" v "system" (Just kind)
+-- A sent attachment is marked "sent" and leaves the composer drafts on the host itself,
+-- so a device that is a few seconds behind can never put it back.
+forgetDrafts :: Service -> Text -> [Value] -> IO ()
+forgetDrafts _ _ [] = pure ()
+forgetDrafts s owner rows = do
+ forM_ rows $ \row -> updateAttachment s (put "sent" (Bool True) row)
+ dropDrafts s owner rows
+
+-- | Take these attachments out of the owner's composer drafts (sent or cancelled ones).
+dropDrafts :: Service -> Text -> [Value] -> IO ()
+dropDrafts _ _ [] = pure ()
+dropDrafts s owner rows = do
+ prefs <- singleton s Preferences
+ let drafts = get prefs "attachment_drafts"
+     ids = map (`get` "id") rows
+ when (has drafts owner) $ saveSingleton s Preferences (put "attachment_drafts" (put owner (arr (filter (`notElem` ids) (list (get drafts owner)))) drafts) prefs)

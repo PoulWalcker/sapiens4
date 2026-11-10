@@ -44,11 +44,13 @@ seconds = realToFrac <$> getPOSIXTime
 b64 :: B.ByteString -> Text
 b64 = TE.decodeUtf8 . Base64.encode
 unb64 :: Value -> Maybe Int -> IO B.ByteString
-unb64 value size = case value of
+unb64 value = validated . decodeBase64 value
+decodeBase64 :: Value -> Maybe Int -> Validation B.ByteString
+decodeBase64 value size = case value of
  String s | T.length s <= maxFrame -> case Base64.decode (TE.encodeUtf8 s) of
   Right b | maybe True (== B.length b) size -> pure b
-  _ -> failure 400 "Invalid key, nonce or encoded value"
- _ -> failure 400 "Invalid encoded value"
+  _ -> Left . APIError 400 $ "Invalid key, nonce or encoded value"
+ _ -> Left . APIError 400 $ "Invalid encoded value"
 withBytes :: B.ByteString -> (Ptr Word8 -> IO a) -> IO a
 withBytes b f = B.useAsCString b (f . castPtr)
 randomData :: Int -> IO B.ByteString
@@ -84,8 +86,10 @@ confirmationCode desktop phone room = do
      code = T.pack (digits (8 :: Int) value)
  pure (T.take 4 code <> " · " <> T.drop 4 code)
 publicId :: Text -> IO Text
-publicId identity = case UUID.fromText identity of
- Nothing -> failure 400 "Invalid CORPORA ID"
+publicId = validated . corporaPublicId
+corporaPublicId :: Text -> Validation Text
+corporaPublicId identity = case UUID.fromText identity of
+ Nothing -> Left . APIError 400 $ "Invalid CORPORA ID"
  Just u -> do
   let value = B.foldl' (\n b -> n*256+fromIntegral b) 0 (SHA.hash (BL.toStrict (UUID.toByteString u))) `mod` (26^(6::Int)*1000)
       digits (-1) _ = ""
@@ -96,7 +100,9 @@ publicId identity = case UUID.fromText identity of
 origin :: Value -> IO Text
 origin = fmap relayURL . parseRelayOrigin
 parseRelayOrigin :: Value -> IO RelayOrigin
-parseRelayOrigin (String value) = case parseURI (T.unpack value) of
+parseRelayOrigin = validated . decodeRelayOrigin
+decodeRelayOrigin :: Value -> Validation RelayOrigin
+decodeRelayOrigin (String value) = case parseURI (T.unpack value) of
  Just u | Just auth <- uriAuthority u, uriScheme u `elem` ["http:","https:"], null (uriUserInfo auth),
           not (null (uriRegName auth)), uriPath u `elem` ["","/"], null (uriQuery u), null (uriFragment u),
           uriScheme u == "https:" || uriRegName auth `elem` ["localhost","127.0.0.1","[::1]"] -> do
@@ -104,10 +110,10 @@ parseRelayOrigin (String value) = case parseURI (T.unpack value) of
    port <- case uriPort auth of
     "" -> pure (if secure then 443 else 80)
     ':':raw | [(n,"")] <- reads raw, n >= 1 && n <= 65535 -> pure n
-    _ -> failure 400 "Invalid relay port"
+    _ -> Left . APIError 400 $ "Invalid relay port"
    pure (RelayOrigin (T.dropWhileEnd (=='/') value) (filter (`notElem` ("[]" :: String)) (uriRegName auth)) port secure)
- _ -> failure 400 "Use an HTTPS relay origin (HTTP is allowed only on loopback for testing)"
-parseRelayOrigin _ = failure 400 "Relay must be an HTTPS origin"
+ _ -> Left . APIError 400 $ "Use an HTTPS relay origin (HTTP is allowed only on loopback for testing)"
+decodeRelayOrigin _ = Left . APIError 400 $ "Relay must be an HTTPS origin"
 constantEqual :: Text -> Text -> IO Bool
 constantEqual a b = let x = TE.encodeUtf8 a; y = TE.encodeUtf8 b in
  if B.length x /= B.length y then pure False else withBytes x $ \px -> withBytes y $ \py -> (==0) <$> sodiumCompare px py (fromIntegral (B.length x))
@@ -142,8 +148,12 @@ unpackWithPlaintext secret peer room direction frame = do
    require (code == 0) 400 "Invalid encrypted message"
    B.packCStringLen (castPtr pm,B.length cipher-16)))))
  body <- either (const (failure 400 "Invalid JSON")) pure (eitherDecodeStrict raw)
- require (get body "v" == str protocol && at body "room" == room && get body "direction" == toJSON direction) 400 "Wrong message context"
  time <- seconds
- let expiry = case get body "expires" of Number n -> realToFrac n; _ -> 0
- require (not (T.null (at body "id")) && T.length (at body "id") <= 80 && expiry > time && expiry <= time + fromIntegral (if at body "kind" == "pair" then pairingTTL else 86400)) 400 "Expired or invalid message"
+ validated (validateEnvelope time room direction body)
  pure (body,raw)
+
+validateEnvelope :: Double -> Text -> Direction -> Value -> Validation ()
+validateEnvelope time room direction body = do
+ check (get body "v" == str protocol && at body "room" == room && get body "direction" == toJSON direction) 400 "Wrong message context"
+ let expiry = case get body "expires" of Number n -> realToFrac n; _ -> 0
+ check (not (T.null (at body "id")) && T.length (at body "id") <= 80 && expiry > time && expiry <= time + fromIntegral (if at body "kind" == "pair" then pairingTTL else 86400)) 400 "Expired or invalid message"

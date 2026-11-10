@@ -6,6 +6,7 @@ if it is missing, create it. Older chat is available through group_get.
 Save the Admin's decisions, useful member findings and verified outcomes in the
 Group workspace's Notes.html. Preserve unrelated knowledge, stable anchors and
 uncertainty. Do not turn failed calls or suggestions into confirmed outcomes.
+Link to media files by path or URL. Keep media bytes out of the Memo.
 Review and update the Memo with durable changes; leave it intact when there is
 nothing durable to change. Follow the wiki structure below, adapting identity
 and purpose to the Group rather than your personal identity.

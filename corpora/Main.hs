@@ -75,38 +75,53 @@ repository = do
 hostMain :: FilePath -> [String] -> IO ()
 hostMain root args = do
  when ("--help" `elem` args || "-h" `elem` args) $ putStrLn "Usage: sapiens4 [--port PORT] [--data-dir DIRECTORY] [--open]" >> exitSuccess
- validateOptions ["--port","--data-dir"] ["--open","--desktop"] args
- port <- integerOption "--port" 4174 args
- require (port>=0 && port<=65535) 400 "Port must be between 0 and 65535"
+ settings <- validated (hostOptions root args)
  packaged <- doesFileExist (root</>"package-manifest.json")
  defaultData <- if packaged then Paths.defaultDataDirectory root else
   lookupEnv "SAPIENS_DATA_DIR" >>= maybe (pure (root</>".sapiens4")) makeAbsolute
  let directory=option "--data-dir" defaultData args
  void (asset root "/")
  void (asset root "/workspace/app.js")
- bracket (startHost directory port False) hostStop $ \host -> do
+ bracket (startHost directory (requestedPort settings) False) hostStop $ \host -> do
   let url="http://127.0.0.1:"<>show (hostPort host)<>"/workspace/"
   putStrLn ("Sapiens4: "<>url<>"\nUI database: "<>directory</>"corpora.sqlite3")
   finished <- newEmptyMVar
   let shutdown=void (tryPutMVar finished ())
   installShutdown shutdown
-  when ("--desktop" `elem` args) (void (forkIO ((void getLine `catch` \(_::IOException)->pure ()) >> shutdown)))
-  when ("--open" `elem` args) (void (createProcess (proc (if os=="darwin" then "open" else if os=="mingw32" then "explorer" else "xdg-open") [url])))
+  when (desktopMode settings) (void (forkIO ((void getLine `catch` \(_::IOException)->pure ()) >> shutdown)))
+  when (openWindow settings) (void (createProcess (proc (if os=="darwin" then "open" else if os=="mingw32" then "explorer" else "xdg-open") [url])))
   takeMVar finished
+
+data HostOptions = HostOptions
+ { requestedPort :: Int, hostDirectory :: FilePath, desktopMode :: Bool, openWindow :: Bool }
+
+hostOptions :: FilePath -> [String] -> Validation HostOptions
+hostOptions root args = do
+ validateOptions ["--port","--data-dir"] ["--open","--desktop"] args
+ port <- parseIntegerOption "--port" "4174" args
+ check (port>=0 && port<=65535) 400 "Port must be between 0 and 65535"
+ pure (HostOptions port (option "--data-dir" (root</>".sapiens4") args) ("--desktop" `elem` args) ("--open" `elem` args))
+
+parseIntegerOption :: String -> String -> [String] -> Validation Int
+parseIntegerOption key def args = case reads (option key def args) of
+ [(port,"")] -> Right port
+ _ -> Left (APIError 400 ("Invalid "<>T.pack key))
+
 relayMain :: FilePath -> [String] -> IO ()
 relayMain root args = do
  when ("--help" `elem` args || "-h" `elem` args) $ putStrLn "Usage: sapiens4 relay --origin ORIGIN [--bind ADDRESS] [--port PORT] [--db FILE] [--connection-file FILE] [--beta]" >> exitSuccess
- validateOptions ["--origin","--bind","--port","--db","--connection-file"] ["--beta"] args
+ validated (validateOptions ["--origin","--bind","--port","--db","--connection-file"] ["--beta"] args)
  bind <- option "--bind" <$> (fromMaybe "127.0.0.1" <$> lookupEnv "SAPIENS_RELAY_BIND") <*> pure args
  portDefault <- fromMaybe "4180" <$> lookupEnv "PORT"
- port <- integerOption "--port" (read portDefault) args
+ port <- validated (parseIntegerOption "--port" portDefault args)
  dbDefault <- fromMaybe ".sapiens4/relay.sqlite3" <$> lookupEnv "SAPIENS_RELAY_DB"
  urlEnv <- lookupEnv "SAPIENS_RELAY_ORIGIN"
  railway <- lookupEnv "RAILWAY_PUBLIC_DOMAIN"
  let database=option "--db" dbDefault args
-     public=option "--origin" (fromMaybe (maybe "" ("https://"<>) railway) urlEnv) args
+     suppliedOrigin = listToMaybe [value | (key,value)<-zip args (drop 1 args),key=="--origin"]
+     public = suppliedOrigin `mplus` urlEnv `mplus` (("https://"<>) <$> railway)
      connectionPath=option "--connection-file" (replaceExtension database "connection.json") args
- require (not (null public)) 400 "Relay --origin is required"
+ publicOrigin <- maybe (failure 400 "Relay --origin is required") pure (public >>= \value -> if null value then Nothing else Just value)
  railwayEnv <- lookupEnv "RAILWAY_ENVIRONMENT_ID"
  forM_ railwayEnv $ \_ -> do
   mount <- lookupEnv "RAILWAY_VOLUME_MOUNT_PATH"
@@ -114,7 +129,7 @@ relayMain root args = do
   mountPath <- traverse makeAbsolute mount
   require (maybe False (\p -> addTrailingPathSeparator p `isPrefixOfPath` dbPath) mountPath) 400 "Attach a persistent Railway volume at /data before deploying the relay"
  admin <- maybe "" T.pack <$> lookupEnv "SAPIENS_RELAY_ADMIN_TOKEN"
- config <- provision connectionPath (T.pack public) admin
+ config <- provision connectionPath (T.pack publicOrigin) admin
  betaEnv <- lookupEnv "SAPIENS_RELAY_BETA"
  relay <- newRelay root database (at config "token") (at config "relay") ("--beta" `elem` args || betaEnv==Just "1")
  let settings=setPort port $ setHost (fromStringHost bind) $ setGracefulCloseTimeout1 1000 $ setInstallShutdownHandler installShutdown $ setBeforeMainLoop (putStrLn ("Relay connection file: "<>connectionPath<>"\nRemote relay ready.")) defaultSettings
@@ -132,10 +147,10 @@ installShutdown action = do
 
 normalized :: [String] -> [String]
 normalized = concatMap (\arg -> case break (=='=') arg of (key,'=':value) | take 2 key=="--" -> [key,value]; _ -> [arg])
-validateOptions :: [String] -> [String] -> [String] -> IO ()
+validateOptions :: [String] -> [String] -> [String] -> Validation ()
 validateOptions values flags = check
  where
  check [] = pure ()
  check (key:rest) | key `elem` flags = check rest
  check (key:value:rest) | key `elem` values = check rest
- check (key:_) = failure 400 ("Unknown option or missing argument: "<>T.pack key)
+ check (key:_) = Left (APIError 400 ("Unknown option or missing argument: "<>T.pack key))

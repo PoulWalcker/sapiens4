@@ -218,7 +218,7 @@ packageMac root options = do
   P.run (root</>".build/bin/sapiens-macos") ["--icon",iconset,root</>"app/shell/favicon.svg"]
   P.run "iconutil" ["-c","icns",iconset,"-o",resources</>"AppIcon.icns"]
   let bundleVersion=takeWhile (`notElem` ['-','+']) (versionText $ version options)
-      info=P.obj [("CFBundleIdentifier",toJSON $ appId (channel options)),("CFBundleName",toJSON name),("CFBundleDisplayName",toJSON name),("CFBundleExecutable",String "Sapiens4"),("CFBundlePackageType",String "APPL"),("CFBundleVersion",toJSON bundleVersion),("CFBundleShortVersionString",toJSON bundleVersion),("CFBundleIconFile",String "AppIcon"),("NSHighResolutionCapable",Bool True),("LSMinimumSystemVersion",String "13.0"),("NSAppTransportSecurity",P.obj [("NSAllowsLocalNetworking",Bool True),("NSAllowsArbitraryLoadsInWebContent",Bool True)])]
+      info=P.obj [("CFBundleIdentifier",toJSON $ appId (channel options)),("CFBundleName",toJSON name),("CFBundleDisplayName",toJSON name),("CFBundleExecutable",String "Sapiens4"),("CFBundlePackageType",String "APPL"),("CFBundleVersion",toJSON bundleVersion),("CFBundleShortVersionString",toJSON bundleVersion),("CFBundleIconFile",String "AppIcon"),("NSHighResolutionCapable",Bool True),("NSMicrophoneUsageDescription",String "Sapiens4 uses the microphone to record voice messages."),("LSMinimumSystemVersion",String "13.0"),("NSAppTransportSecurity",P.obj [("NSAllowsLocalNetworking",Bool True),("NSAllowsArbitraryLoadsInWebContent",Bool True)])]
   let infoJSON=temporary</>"Info.json"
   P.writeJSON infoJSON info
   P.run "plutil" ["-convert","xml1","-o",app</>"Contents/Info.plist",infoJSON]

@@ -31,6 +31,19 @@ RSpec.describe 'Corpora lifecycle and device registry', :host do
     expect(host.request('PUT', '/api/corpora/lifecycle', {action: 'activate', revision: metadata['revision'], operation: SecureRandom.uuid}).first).to eq(409)
   end
 
+  it 'replays an old pause receipt after activation and restart without pausing again' do
+    original = host.api('GET', '/api/corpora')
+    operation = SecureRandom.uuid
+    transition('pause', original, operation: operation)
+    active = transition('activate')
+    host.restart
+    replayed = transition('pause', original, operation: operation)
+    expect(replayed).to include('status' => 'active', 'revision' => active['revision'])
+    expect(host.state['pulse']['running']).to eq(true)
+    expect(host.request('PUT', '/api/corpora/lifecycle', {action: 'activate', revision: original['revision'], operation: operation}).first).to eq(409)
+    expect(host.api('GET', '/api/corpora')['revision']).to eq(active['revision'])
+  end
+
   it 'lets only ChiefSapi update names, scope and archive state with revision checks' do
     other = host.agent
     initial = host.control(chief, 'corpora_get')
@@ -64,6 +77,7 @@ RSpec.describe 'Corpora lifecycle and device registry', :host do
 
   it 'creates isolated local corpora without moving or renaming the existing workspace' do
     capabilities = host.api('GET', '/api/host')
+    expect(capabilities['local_available']).to eq(true) if RUBY_PLATFORM.match?(/linux|darwin/) || Gem.win_platform?
     unless capabilities['local_available']
       expect(capabilities['corpora']).to be_empty
       expect(host.request('POST', '/api/host/local', {name: 'Studio', scope: 'Design'}).first).to eq(403)
@@ -93,6 +107,8 @@ RSpec.describe 'Corpora lifecycle and device registry', :host do
     other.api('POST', '/api/remote/approve', {peer: pending['peer']})
     result = Contract.wait { status = host.api('GET', "/api/host/pair/#{pairing['id']}"); status if status['state'] != 'waiting' }
     expect(result['state']).to eq('approved'), result.inspect
+    cancelled_receipt = host.api('POST', "/api/host/pair/#{pairing['id']}", {})
+    expect(cancelled_receipt).to eq(result.merge('state' => 'cancelled'))
     identity = other.state['corpora']['id']
     route = "/api/host/corpora/#{identity}"
     expect(host.api('GET', route + '/api/state')['corpora']['id']).to eq(identity)
@@ -111,4 +127,23 @@ RSpec.describe 'Corpora lifecycle and device registry', :host do
     other.close if other
     relay.close if relay
   end
+  it 'keeps cancelled pairing terminal when the other device subsequently approves' do
+    relay = Relay.new
+    other = Host.new
+    invitation = other.api('POST', '/api/remote/pair', {relay: relay.url, token: relay.token}, status: 201)['qr']
+    pairing = host.api('POST', '/api/host/pair', invitation, status: 202)
+    pending = Contract.wait { other.api('GET', '/api/remote')['pending'] }
+    path = "/api/host/pair/#{pairing['id']}"
+    cancelled = host.api('POST', path, {})
+    expect(cancelled).to include('state' => 'cancelled', 'id' => pairing['id'], 'code' => pairing['code'])
+    other.api('POST', '/api/remote/approve', {peer: pending['peer']})
+    expect(host.api('POST', path, {})).to eq(cancelled)
+    expect(host.api('GET', path)).to eq(cancelled)
+    host.restart
+    expect(host.api('GET', '/api/host')['corpora'].none? { |c| c['location'] == 'Remote' }).to eq(true)
+  ensure
+    other.close if other
+    relay.close if relay
+  end
+
 end

@@ -1,4 +1,5 @@
 require 'sqlite3'
+require 'yaml'
 
 RSpec.describe 'Domain validation through saved installation fixtures', :host do
   before do
@@ -39,10 +40,81 @@ RSpec.describe 'Domain validation through saved installation fixtures', :host do
     expect(host.calls).to be_empty
   end
 
+  it 'archives settled history before trimming it and retains the current cancelled turn' do
+    settled = 110.times.map { |n| @turn.merge(id: "past-#{n}", status: 'done') }
+    chat = settled.map { |turn| {role: 'agent', turn: turn[:id], content: "Saved #{turn[:id]}"} }
+    Contract.atomic_json(@file, @state.merge('turns' => settled + [@turn], 'chat' => chat))
+    host.api('PUT', '/api/corpora/lifecycle', {action: 'activate', operation: 'fixture-resume', revision: host.state['corpora']['revision']})
+    host.api('POST', "/api/agents/#{@owner}/turns/fixture-call/cancel", {})
+    saved = JSON.parse(File.read(@file))
+    expect(saved['turns'].length).to eq(100)
+    expect(saved['turns'].last).to include('id' => 'fixture-call', 'status' => 'cancelled', 'extension' => {'kept' => true})
+    expect(saved['chat'].length).to eq(100)
+    archive = File.join(host.root, 'agentpy/corpora/archive', @owner)
+    archived_turns = Dir[File.join(archive, 'turns/*.json')].flat_map { |file| JSON.parse(File.read(file)) }
+    archived_chat = Dir[File.join(archive, 'chat/*.json')].flat_map { |file| JSON.parse(File.read(file)) }
+    expect(archived_turns.map { |turn| turn['id'] }).to eq(11.times.map { |n| "past-#{n}" })
+    expect(archived_chat.map { |message| message['turn'] }).to eq(10.times.map { |n| "past-#{n}" })
+    expect(host.calls).to be_empty
+    host.restart
+    expect(JSON.parse(File.read(@file))['turns'].last['id']).to eq('fixture-call')
+  end
+
   it 'reports an unknown saved execution mode instead of silently choosing normal mode' do
     Contract.atomic_json(File.join(File.dirname(@file), 'run-settings.json'), {mode: 'deeep'})
     expect(host.request('GET', '/api/state').first).to eq(500)
     expect(host.calls).to be_empty
+  end
+
+  def saved_workload(**fields)
+    call = {callId: 'saved-call', addressedTo: @owner, node: 'Outcome', state: 'Completed',
+      request: 'Saved request', causedBy: nil, output: 'Saved answer', extension: {kept: true}}.merge(fields)
+    work = {workloadId: 'saved-work', tracked: true, calls: [call], originalIntent: 'Saved request', extension: {kept: true}}
+    SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+      db.execute('INSERT INTO workloads VALUES (?, ?)', ['saved-work', JSON.generate(work)])
+    end
+    JSON.parse(JSON.generate(work))
+  end
+
+  {
+    'completed without output' => {output: nil},
+    'unresolved without output' => {state: 'Unresolved', output: nil},
+    'waiting without a question' => {state: 'WaitingForAdmin', node: 'WaitingForAdmin', output: nil},
+    'delegated without a reply' => {state: 'Delegated', node: 'Delegation', output: nil},
+    'queued with output' => {state: 'Queued', node: 'Assessing'},
+    'running with output' => {state: 'Running', node: 'Execution'},
+    'completed at the wrong node' => {node: 'Execution'},
+    'waiting at the wrong node' => {state: 'WaitingForAdmin'}
+  }.each do |behavior, fields|
+    it "reports an inconsistent saved call: #{behavior}" do
+      saved_workload(**fields)
+      code, body = host.request('GET', '/api/state')
+      expect(code).to eq(500)
+      expect(body['error']).not_to be_empty
+      expect(host.request('GET', '/api/health').first).to eq(200)
+      expect(host.calls).to be_empty
+    end
+  end
+
+  {
+    'completed' => {state: 'Completed', node: 'Outcome'},
+    'unresolved' => {state: 'Unresolved', node: 'Outcome'},
+    'delegated' => {state: 'Delegated', node: 'Delegation'},
+    'waiting' => {state: 'WaitingForAdmin', node: 'WaitingForAdmin'},
+    'queued' => {state: 'Queued', node: 'Assessing', output: nil},
+    'failed' => {state: 'Failed', node: 'Execution', output: nil},
+    'interrupted' => {state: 'Interrupted', node: 'Execution', output: nil},
+    'cancelled' => {state: 'Cancelled', node: 'Execution', output: nil}
+  }.each do |behavior, fields|
+    it "reads an existing #{behavior} workload without changing its identity or metadata" do
+      work = saved_workload(**fields)
+      expected = work['calls'].first.reject { |key, value| key == 'output' && value.nil? }
+      read = -> { YAML.safe_load(host.api('GET', "/api/agents/#{@owner}/tasks"))['tasks'].first }
+      expect(read.call['calls']).to eq([expected])
+      host.restart
+      expect(read.call['calls']).to eq([expected])
+      expect(host.calls).to be_empty
+    end
   end
 
   it 'rejects an empty saved workload history and keeps the health endpoint available' do
@@ -54,4 +126,22 @@ RSpec.describe 'Domain validation through saved installation fixtures', :host do
     expect(body['error']).not_to be_empty
     expect(host.request('GET', '/api/health').first).to eq(200)
   end
+  it 'migrates schema two before recovery and retains the original backup across restarts' do
+    host.stop
+    old = @state.merge('schema_version' => 2, 'turns' => [@turn.merge(status: 'budget_blocked')],
+      'chat' => [{'role' => 'user', 'content' => 'Saved request', 'job' => 'fixture-call'}])
+    Contract.atomic_json(@file, old)
+    host.start
+    saved = JSON.parse(File.read(@file))
+    expect(saved['schema_version']).to eq(3)
+    expect(saved['turns'].first).to include('id' => 'fixture-call', 'status' => 'interrupted')
+    expect(saved['chat'].first).to include('turn' => 'fixture-call')
+    expect(saved['chat'].first).not_to have_key('job')
+    backup = File.join(File.dirname(@file), 'legacy-state-v2.json')
+    expect(JSON.parse(File.read(backup))).to eq(JSON.parse(JSON.generate(old)))
+    host.restart
+    expect(JSON.parse(File.read(backup))).to eq(JSON.parse(JSON.generate(old)))
+    expect(host.calls).to be_empty
+  end
+
 end

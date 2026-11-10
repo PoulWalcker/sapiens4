@@ -13,7 +13,7 @@ RSpec.describe 'Workspace and memory contracts' do
     tab = host.control(owner, 'workspace_open', path: file)['workspace']['tabs'].first
     host.control(owner, 'workspace_zoom', factor: 1.5)
     2.times { host.control(owner, 'workspace_bookmark') }
-    expect(host.control(owner, 'workspace')['bookmarks'].size).to eq(1)
+    expect(host.control(owner, 'workspace')['bookmarks'].map { |b| b['title'] }).to contain_exactly('Notes.html', File.basename(file))
     host.control(owner, 'workspace_open', url: 'https://example.com')
     host.control(owner, 'workspace_focus', id: tab['id'])
     host.control(owner, 'workspace_reload')
@@ -22,10 +22,95 @@ RSpec.describe 'Workspace and memory contracts' do
     expect(workspace['active_tab']).to eq(tab['id'])
     expect(workspace['tabs'].first).to include('zoom' => 1.5)
     expect(File.identical?(workspace['tabs'].first['path'], file)).to eq(true)
-    expect(File.identical?(workspace['bookmarks'].first['path'], file)).to eq(true)
+    expect(File.identical?(workspace['bookmarks'].find { |b| b['title'] == File.basename(file) }.fetch('path'), file)).to eq(true)
     host.control(owner, 'workspace_close', id: tab['id'])
     expect(File.read(file)).to eq("# Notes\n<script>literal</script>")
     expect(host.control(owner, 'workspace')['tabs'].size).to eq(1)
+  end
+
+  it 'seeds one Memo bookmark per Sapi without opening tabs and reuses an existing Notes tab' do
+    researcher = host.agent('Researcher')
+    [chief, researcher].each do |owner|
+      workspace = host.control(owner, 'workspace')
+      expect(workspace['tabs']).to be_empty
+      expect(host.state.fetch('preferences').fetch('workspaces').fetch(owner).fetch('tabs')).to eq([])
+      expect(workspace['bookmarks'].length).to eq(1)
+      expect(File.identical?(workspace['bookmarks'].first['path'], File.join(host.workspace(owner), 'Notes.html'))).to be(true)
+    end
+    tab = host.control(researcher, 'workspace_open', path: 'Notes.html')['workspace']['tabs'].first
+    host.control(researcher, 'workspace_open', url: 'about:blank')
+    2.times do
+      workspace = host.control(researcher, 'workspace_memo')['workspace']
+      expect(workspace['active_tab']).to eq(tab['id'])
+      expect(workspace['tabs'].find { |t| t['id'] == tab['id'] }).to eq(tab)
+      expect(workspace['tabs'].size).to eq(2)
+    end
+    host.control(researcher, 'workspace_close', id: tab['id'])
+    host.restart
+    reopened = host.control(researcher, 'workspace_memo')['workspace']
+    expect(reopened['active_tab']).not_to eq(tab['id'])
+    expect(reopened['bookmarks'].length).to eq(1)
+    expect(host.control(chief, 'workspace')['tabs']).to be_empty
+  end
+
+  it 'repairs bookmark-only saved workspaces without reopening tabs or changing bookmarks' do
+    owner = chief
+    researcher = host.agent('Researcher')
+    host.control(researcher, 'workspace_open', url: 'https://example.com')
+    prefs = host.state.fetch('preferences')
+    original = prefs.fetch('workspaces')
+    prefs['workspaces'][owner].delete('tabs')
+    host.stop
+    SQLite3::Database.open(File.join(host.root, 'corpora.sqlite3')) do |db|
+      db.execute('UPDATE preferences SET value=? WHERE id=1', [JSON.generate(prefs)])
+    end
+    host.start
+    repaired = host.state.fetch('preferences')
+    expect(repaired.fetch('workspaces').fetch(owner)).to eq(original.fetch(owner).merge('tabs' => []))
+    expect(repaired.fetch('workspaces').fetch(researcher)).to eq(original.fetch(researcher))
+    expect(repaired.fetch('workspace_revision')).to be > prefs.fetch('workspace_revision')
+    host.restart
+    expect(host.state.fetch('preferences')).to eq(repaired)
+  end
+
+  it 'accepts media links and rejects embedded media in Notes' do
+    root = host.workspace(chief)
+    path = File.join(root, 'Notes.html')
+    tab = host.control(chief, 'workspace_memo')['workspace']['active_tab']
+    preview = "/api/agents/#{chief}/browser/#{tab}/content"
+    notes = "/api/agents/#{chief}/notes"
+    source = memo('<a href="chart%20one.png">Chart</a>')
+    File.write(path, source)
+    File.binwrite(File.join(root, 'chart one.png'), "media stays in its file")
+    expect(host.api('GET', preview)['content']).to eq(source)
+    linked = host.control(chief, 'workspace_open', href: 'chart%20one.png')['workspace']
+    expect(File.identical?(linked['tabs'].last['path'], File.join(root, 'chart one.png'))).to be(true)
+    expect(host.request('POST', "/api/agents/#{chief}/control", {op: 'workspace_open', href: '%2e%2e/secret'}).first).to eq(403)
+    embedded_media = ['<img src="chart.png">', '<img src="data:image/png;base64,AAAA">',
+      '<a href="data:image/png;base64,AAAA">Chart</a>', '<style>p {background: url(data:image/png;base64,AAAA)}</style>']
+    embedded_media.each do |embedded|
+      File.write(path, memo(embedded))
+      [notes, preview].each do |endpoint|
+        status, body = host.request('GET', endpoint)
+        expect(status).to eq(409)
+        expect(body.fetch('error')).to include('link')
+      end
+    end
+  end
+
+  it 'rejects invalid edits atomically and selects the last remaining tab on close' do
+    owner = chief
+    first = host.control(owner, 'workspace_open', url: 'https://example.com')['workspace']['tabs'].first
+    second = host.control(owner, 'workspace_open', url: 'about:blank')['workspace']['tabs'].last
+    before = host.control(owner, 'workspace')
+    expect(host.request('POST', "/api/agents/#{owner}/control", {op: 'workspace_zoom', id: second['id'], factor: 0.1}).first).to eq(400)
+    expect(host.request('POST', "/api/agents/#{owner}/control", {op: 'workspace_open', id: 'absent', url: 'https://example.org'}).first).to eq(404)
+    expect(host.control(owner, 'workspace')).to eq(before)
+    host.control(owner, 'workspace_close', id: second['id'])
+    expect(host.control(owner, 'workspace')['active_tab']).to eq(first['id'])
+    host.control(owner, 'workspace_close', id: first['id'])
+    host.restart
+    expect(host.control(owner, 'workspace')).to include('active_tab' => nil, 'tabs' => [])
   end
 
   it 'accepts current browser observations but ignores stale navigation and closed tabs' do
@@ -132,7 +217,7 @@ RSpec.describe 'Workspace and memory contracts' do
   it 'rejects traversal and symlink escapes without preventing ordinary chat' do
     owner = chief
     path = "/api/agents/#{owner}/notes"
-    expect(host.request('GET', path + '?image=../private.png').first).to eq(409)
+    expect(host.request('GET', path + '?image=../private.png').first).to eq(404)
     file = File.join(host.workspace(owner), 'Notes.html')
     File.binwrite(file, "\xff\x00")
     host.turn(host.submit(owner, 'Continue despite invalid notes'))

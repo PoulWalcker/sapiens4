@@ -21,7 +21,8 @@ type Object = Ptr ()
 type Window = Ptr ()
 type Wide = Ptr Word16
 type HRESULT = Int32
-type Arena = IORef [(IO Bool, IO ())]
+data ArenaEntry = ArenaEntry { readyToDispose :: IO Bool, disposeEntry :: IO () }
+newtype Arena = Arena (IORef [ArenaEntry])
 type WindowProc = Window -> Word32 -> WordPtr -> IntPtr -> IO IntPtr
 
 foreign import ccall safe "CoInitializeEx" coInitialize :: Ptr () -> Word32 -> IO HRESULT
@@ -125,26 +126,28 @@ query :: Object -> String -> IO Object
 query object guid = withGuid guid $ \idPtr -> alloca $ \out -> call2 object 0 idPtr out >> peek out
 
 newArena :: IO Arena
-newArena = newIORef []
+newArena = Arena <$> newIORef []
 
 retain :: Arena -> IO () -> IO ()
-retain arena dispose = modifyIORef' arena ((pure False, dispose) :)
+retain (Arena entries) dispose = modifyIORef' entries (ArenaEntry (pure False) dispose :)
 
 freeArena :: Arena -> IO ()
-freeArena arena = do
-  entries <- atomicModifyIORef' arena (\entries -> ([], entries))
-  let dispose [] = pure ()
-      dispose ((_,action):rest) = action `finally` dispose rest
-  dispose entries
+freeArena (Arena entries) = atomicModifyIORef' entries (\owned -> ([], owned)) >>= disposeAll
+
+disposeAll :: [ArenaEntry] -> IO ()
+disposeAll [] = pure ()
+disposeAll (entry:rest) = disposeEntry entry `finally` disposeAll rest
 
 sweepArena :: Arena -> IO ()
-sweepArena arena = do
+sweepArena (Arena arena) = do
   entries <- atomicModifyIORef' arena (\entries -> ([], entries))
-  alive <- filterM (\(ready, dispose) -> ready >>= \dead -> if dead then dispose >> pure False else pure True) entries
+  alive <- filterM keep entries
   modifyIORef' arena (alive ++)
+  where
+    keep entry = readyToDispose entry >>= \ready -> if ready then disposeEntry entry >> pure False else pure True
 
 callback :: Arena -> String -> FunPtr a -> IO Object
-callback arena guid invoke = do
+callback (Arena arena) guid invoke = do
   count <- newIORef (1 :: Word32)
   object <- mallocBytes (sizeOf (nullPtr :: Ptr ()))
   table <- mallocArray 4
@@ -160,7 +163,7 @@ callback arena guid invoke = do
   pokeArray table [castFunPtr identify, castFunPtr add, castFunPtr dropRef, castFunPtr invoke]
   poke (castPtr object) table
   let dispose = mapM_ freeHaskellFunPtr [castFunPtr identify, castFunPtr add, castFunPtr dropRef, castFunPtr invoke] >> free table >> free object
-  modifyIORef' arena (((== 0) <$> readIORef count, dispose) :)
+  modifyIORef' arena (ArenaEntry ((== 0) <$> readIORef count) dispose :)
   pure object
 
 guardCallback :: IO () -> IO HRESULT
@@ -242,6 +245,17 @@ execute arena view script done = do
   handler <- completion arena "{49511172-CC67-4BCA-9923-137112F4C4CC}" $ \result output ->
     when (result >= 0) $ readWide (castPtr output) >>= done
   (withWide script $ \source -> call2 (core view) 29 source handler) `finally` release handler
+
+-- Ask the engine for the committed frame's URL and MIME type. Guest script
+-- cannot override this result. An unsupported or failed query leaves the tab live.
+frameTree :: Arena -> View -> (String -> IO ()) -> IO ()
+frameTree arena view done =
+  bracket (completion arena "{5C4889F0-5EF6-4C5A-952C-D8F1B92D0574}" receive) release $ \handler ->
+    withWide "Page.getFrameTree" $ \name -> withWide "{}" $ \params -> do
+      f <- method (core view) 36
+      void $ invoke3 f (core view) name params handler
+  where
+    receive result output = when (result >= 0) $ readWide (castPtr output) >>= done
 
 navigate :: View -> String -> IO ()
 navigate view = putString (core view) 5

@@ -42,6 +42,35 @@ RSpec.describe 'Haskell command-line contracts', :host do
     expect(host.state['computer']['owner']).to be_nil
   end
 
+  it 'launches a Linux executable with isolated streams without waiting for it to exit' do
+    skip 'Linux launch contract' unless RUBY_PLATFORM.include?('linux')
+    Dir.mktmpdir do |directory|
+      application = File.join(directory, 'app;literal')
+      marker = File.join(directory, 'started')
+      release, finished = File.join(directory, 'release'), File.join(directory, 'finished')
+      File.write(application, <<~RUBY)
+        #!#{RbConfig.ruby}
+        STDOUT.puts 'application output'
+        STDERR.puts 'application diagnostics'
+        File.write(#{marker.inspect}, STDIN.read.empty? ? 'launched' : 'unexpected input')
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
+        sleep 0.01 until File.exist?(#{release.inspect}) || Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        File.write(#{finished.inspect}, '')
+      RUBY
+      File.chmod(0755, application)
+      output, error, status = Contract.capture(Contract::BINARY, 'computer', 'launch', application, chdir: directory)
+      expect(status).to eq(0), output + error
+      expect(JSON.parse(output)).to include('launched' => true, 'pid' => a_kind_of(Integer))
+      expect(error).to eq('')
+      Contract.wait(description: 'launched application') { File.exist?(marker) }
+      expect(File.read(marker)).to eq('launched')
+      expect(File).not_to exist(finished)
+    ensure
+      File.write(release, '') if release
+      Contract.wait(description: 'application exit') { File.exist?(finished) } if finished
+    end
+  end
+
   it 'validates read options and preserves unrelated cache files while paginating exact paths' do
     skip 'Executable fixture uses a Unix shebang' if Gem.win_platform?
     Dir.mktmpdir('sapiens-reader-') do |folder|
@@ -68,6 +97,10 @@ RSpec.describe 'Haskell command-line contracts', :host do
       out, _, code = Contract.capture(Contract::BINARY, 'computer', 'read', '--pid', '123', chdir: folder, env: env)
       expect(code).to eq(1)
       expect(JSON.parse(out)['error']).to include('invalid accessibility tree')
+      File.write(binary, "#!#{RbConfig.ruby}\nputs #{JSON.generate(code: 'accessibility_error', error: 'Application returned a null accessibility element').inspect}\nexit 77\n")
+      out, _, code = Contract.capture(Contract::BINARY, 'computer', 'read', '--pid', '123', chdir: folder, env: env)
+      expect(code).to eq(1)
+      expect(JSON.parse(out)['error']).to include('Blindly read failed: Application returned a null accessibility element')
     end
   end
 end

@@ -24,7 +24,7 @@ data Host = Host
   , configDirectory :: FilePath
   , runtimeDirectory :: FilePath
   , serverProcess :: IORef (Maybe ServerProcess)
-  , origin :: IORef String
+  , origin :: IORef (Maybe URI)
   }
 
 data ServerProcess = ServerProcess
@@ -51,7 +51,7 @@ prepareHost args = do
   defaultData <- Paths.defaultDataDirectory runtime
   directory <- makeAbsolute $ fromMaybe defaultData (option "--data-dir")
   config <- Paths.configDirectory runtime
-  Host directory config runtime <$> newIORef Nothing <*> newIORef ""
+  Host directory config runtime <$> newIORef Nothing <*> newIORef Nothing
 
 startHost :: Host -> IO String
 startHost host = mask $ \restore -> do
@@ -96,12 +96,12 @@ awaitHost host output errors = do
   result <- timeout 35000000 (awaitAddress output errors)
   uri <- maybe (ioError $ userError "Sapiens4 did not become ready within 35 seconds") pure result
   let base = uri { uriPath = "", uriQuery = "", uriFragment = "" }
-  writeIORef (origin host) (show base)
+  writeIORef (origin host) (Just base)
   pure (show uri)
 
 closeHost :: Host -> IO ()
 closeHost host = mask_ $ do
-  writeIORef (origin host) ""
+  writeIORef (origin host) Nothing
   current <- readIORef (serverProcess host)
   forM_ current $ \server -> do
     stopServer server

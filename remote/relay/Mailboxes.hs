@@ -89,10 +89,7 @@ transact path method parts bearer body admin beta = withDB path $ \db -> withImm
     pure (obj [("deleted",Bool True)])
    (["messages"],"GET",_) -> do
     messages <- query db "SELECT id,body FROM messages WHERE room=? AND recipient=? ORDER BY id LIMIT 20" (room,roleName role) :: IO [(Int64,Text)]
-    let bounded _ [] = []
-        bounded size ((i,raw):rest) | size > 0 && size + T.length raw > maxFrame = []
-                                  | otherwise = obj [("id",toJSON i),("frame",parseJSONText raw)] : bounded (size+T.length raw) rest
-    pure (obj [("messages",arr (bounded 0 messages))])
+    pure (obj [("messages",arr (mailboxBatch messages))])
    (["messages"],"POST",_) -> do
     require (sort (keys body) == ["ciphertext","nonce","sender"]) 400 "Expected an encrypted frame"
     void (unb64 (get body "sender") (Just 32))
@@ -110,6 +107,14 @@ transact path method parts bearer body admin beta = withDB path $ \db -> withImm
     execute db "DELETE FROM messages WHERE id=? AND room=? AND recipient=?" (ident,room,roleName role)
     pure (obj [("deleted",Bool True)])
    _ -> failure 404 "Not found"
+mailboxBatch :: [(Int64,Text)] -> [Value]
+mailboxBatch = bounded 0
+ where
+ bounded _ [] = []
+ bounded size ((identity,raw):rest)
+  | size>0 && size+T.length raw>maxFrame = []
+  | otherwise = obj [("id",toJSON identity),("frame",parseJSONText raw)] : bounded (size+T.length raw) rest
+
 hashText :: Text -> Text
 hashText = hash . Data.Text.Encoding.encodeUtf8
 lookupAddress :: FilePath -> Text -> IO Value

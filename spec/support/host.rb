@@ -19,7 +19,7 @@ class Host
     end
     @environment = {'SAPIENS_CODEX_BINARY' => binary, 'SAPIENS_CONTRACT_ENV' => root,
       'SAPIENS_CONTRACT_RUBY' => RbConfig.ruby, 'SAPIENS_CONTRACT_PROVIDER' => File.join(__dir__, 'provider.rb'),
-      'NO_COLOR' => '1', 'SAPIENS_CODEX_MODEL' => 'gpt-6-sol',
+      'NO_COLOR' => '1', 'SAPIENS_WHISPER_URL' => 'http://127.0.0.1:9', 'SAPIENS_CODEX_MODEL' => 'gpt-6-sol',
       'SAPIENS_CODEX_REASONING_EFFORT' => 'high'}.merge(environment)
     self.start if start
   rescue Exception

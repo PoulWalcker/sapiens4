@@ -5,14 +5,16 @@ import Data.Argonaut.Core (Json, jsonNull, fromString, fromBoolean, fromNumber, 
 import Data.Argonaut.Parser (jsonParser)
 import Data.Argonaut.Encode (class EncodeJson, encodeJson)
 import Data.Array as A
+import Data.Array.NonEmpty as NEA
+import Data.String.CodeUnits as CU
 import Data.Either (Either(..))
 import Data.Foldable (foldl)
 import Data.Int as I
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.String as S
 import Data.String.Regex as R
-import Data.String.Regex.Flags (global, noFlags)
-import Data.Tuple (Tuple(..))
+import Data.String.Regex.Flags (RegexFlags, global, noFlags)
+import Data.Tuple (Tuple)
 import Foreign.Object as O
 
 get :: String -> Json -> Json
@@ -125,3 +127,21 @@ cut = S.take
 
 encode :: Json -> String
 encode = stringify
+
+objectStrings :: Json -> O.Object String
+objectStrings = map str <<< fromMaybe O.empty <<< toObject
+
+type Match = { before :: String, full :: String, groups :: Array String, after :: String }
+
+match :: String -> String -> Maybe Match
+match = matchWith noFlags
+
+matchWith :: RegexFlags -> String -> String -> Maybe Match
+matchWith flags pattern value = case R.regex pattern flags of
+  Left _ -> Nothing
+  Right regex -> do
+    index <- R.search regex value
+    groups <- R.match regex value
+    let values = map (fromMaybe "") (NEA.toArray groups)
+        full = fromMaybe "" $ A.head values
+    if full == "" then Nothing else Just {before:CU.take index value,full,groups:values,after:CU.drop (index+CU.length full) value}
