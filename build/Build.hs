@@ -42,7 +42,7 @@ main = do
     compiler <- mapM (\key -> maybe (ioError $ userError $ "GHC did not report "<>key) pure (lookup key settings)) ["C compiler command","C compiler flags"]
     setEnv "CC" (map (\c -> if c=='\\' then '/' else c) (unwords compiler))
    callProcess "sh" ["configure","--disable-shared","--enable-static","--disable-dependency-tracking"]
-   callProcess "make" ["-j4"]
+   callProcess "make" (["-j4"] ++ if os=="mingw32" then ["SHELL=sh","LIBTOOL=sh $(top_builddir)/libtool"] else [])
  when (os=="mingw32") $ do
   createDirectoryIfMissing True build
   callProcess "windres" ["-I",root</>"environments/windows",root</>"environments/windows/resources.rc","-O","coff","-o",build</>"windows-resources.o"]

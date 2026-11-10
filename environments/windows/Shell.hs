@@ -20,6 +20,7 @@ import qualified Navigation as Navigation
 import System.Environment
 import System.FilePath
 import System.IO
+import System.Process (createProcess, proc)
 import qualified Data.ByteString.Char8 as B
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -38,6 +39,9 @@ runDesktop probe = runInBoundThread $ do
   statusRef <- newIORef nullPtr
   focusRef <- newIORef nullPtr
   closing <- newIORef False
+  retrySetup <- newIORef (pure ())
+  workerRef <- newIORef Nothing
+  starting <- newIORef False
   let resize hwnd = do
         (width, height) <- rectangle hwnd
         offset <- readIORef top
@@ -69,6 +73,11 @@ runDesktop probe = runInBoundThread $ do
           resize hwnd
           defaultProc hwnd message wparam lparam
         0x02 -> (stop `finally` quitMessage 0) >> pure 0
+        0x0111 -> case wparam .&. 0xffff of
+          101 -> void (createProcess (proc "rundll32.exe" ["url.dll,FileProtocolHandler", "https://go.microsoft.com/fwlink/p/?LinkId=2124703"])) >> pure 0
+          102 -> readIORef retrySetup >>= id >> pure 0
+          103 -> void (destroyWindow hwnd) >> pure 0
+          _ -> defaultProc hwnd message wparam lparam
         0x802A -> runPending >> pure 0
         _ -> defaultProc hwnd message wparam lparam
   proc <- wrapWindowProc $ \hwnd message wparam lparam -> procedure hwnd message wparam lparam `catch` \(e :: SomeException) -> reportException e >> defaultProc hwnd message wparam lparam
@@ -90,6 +99,9 @@ runDesktop probe = runInBoundThread $ do
   when (hwnd == nullPtr) $ ioError $ userError "Cannot create desktop window"
   label <- withWide "STATIC" $ \className -> withWide "Starting Sapiens4…" $ \title ->
     createWindow 0 className title 0x50000201 0 0 1440 960 hwnd nullPtr instanceHandle nullPtr
+  setupButtons <- forM [(101,"Install WebView2"),(102,"Retry"),(103,"Cancel")] $ \(ident,title) ->
+    withWide "BUTTON" $ \className -> withWide title $ \caption ->
+      createWindow 0 className caption 0x40010000 (360 + (ident-101)*170) 230 160 38 hwnd (intPtrToPtr (fromIntegral ident)) instanceHandle nullPtr
   writeIORef statusRef label
   resize hwnd
   light <- loadIconFile $ runtimeDirectory host </> "environments/windows/AppIcon.ico"
@@ -101,8 +113,16 @@ runDesktop probe = runInBoundThread $ do
         dead <- readIORef closing
         unless dead $ atomicModifyIORef' pending (\xs -> (action:xs, ())) >> void (postMessage hwnd 0x802A 0 0)
       failStart message = do
-        windowTitle label $ "Sapiens4 could not start.\n\n" ++ message ++ "\n\nRequires Microsoft Edge WebView2 Runtime.\nData: " ++ dataDirectory host
+        cleanup <- try $
+          (atomicModifyIORef' browserRef (\value -> (Nothing, value)) >>= mapM_ closeBrowser) `finally`
+            ((atomicModifyIORef' shellRef (\value -> (Nothing, value)) >>= mapM_ closeView) `finally` closeHost host)
+        let detail = case cleanup of
+              Left (e :: SomeException) -> message ++ "\n\nStartup cleanup failed: " ++ displayException e
+              Right () -> message
+        writeIORef starting False
+        windowTitle label $ "Sapiens4 could not start.\n\n" ++ detail ++ "\n\nChoose Retry or Cancel.\nData: " ++ dataDirectory host
         void $ showWindow label 5
+        mapM_ (\button -> void (showWindow button 5)) (drop 1 setupButtons)
       loaded url result = do
         view <- either (ioError . userError) pure result
         dead <- readIORef closing
@@ -152,23 +172,62 @@ runDesktop probe = runInBoundThread $ do
             readIORef (origin host) >>= putStrLn . ("Sapiens4: " ++)
             void $ forkIO $ probeInput post hwnd top resize
       launch = do
-        result <- try $ startHost host
-        post $ case result of
-          Left (e :: SomeException) -> failStart (displayException e)
-          Right url -> newView memory hwnd (dataDirectory host </> "WebView2/Shell") (\created -> loaded url created `catch` \(e :: SomeException) -> failStart (displayException e)) `catch` \(e :: SomeException) -> failStart (displayException e)
+        available <- try webViewRuntimeAvailable
+        case available of
+          Left (e :: SomeException) -> post (failStart (displayException e))
+          Right False -> post $ do
+            windowTitle label "Microsoft Edge WebView2 is required.\n\nChoose Install WebView2 to open Microsoft's official installer.\nRun the downloaded installer, then choose Retry.\nCancel closes Sapiens4 without starting its server."
+            mapM_ (\button -> void (showWindow button 5)) setupButtons
+            writeIORef starting False
+          Right True -> do
+            result <- try $ startHost host
+            post $ case result of
+              Left (e :: SomeException) -> failStart (displayException e)
+              Right url -> newView memory hwnd (dataDirectory host </> "WebView2/Shell") (\created -> loaded url created `catch` \(e :: SomeException) -> failStart (displayException e)) `catch` \(e :: SomeException) -> failStart (displayException e)
+      begin = do
+        dead <- readIORef closing
+        unless dead $ do
+          busy <- atomicModifyIORef' starting (\value -> (True,value))
+          unless busy $ do
+            mapM_ (\button -> void (showWindow button 0)) setupButtons
+            windowTitle label "Starting Sapiens4…"
+            async launch >>= writeIORef workerRef . Just
   hSetBuffering stdout LineBuffering
-  worker <- async launch
+  writeIORef retrySetup begin
+  begin
   void $ showWindow hwnd 5
   void $ updateWindow hwnd
   void $ foregroundWindow hwnd
-  let pump = allocaBytes 48 $ \message -> do
+  pumpMessages memory `finally` ((readIORef workerRef >>= mapM_ cancel) `finally` closeHost host)
+
+createMainWindow :: Object -> FunPtr WindowProc -> IO Window
+createMainWindow instanceHandle procedure = do
+  hwnd <- withWide "Sapiens4HaskellWindow" $ \className -> withWide "Sapiens4" $ \title -> allocaBytes 80 $ \klass -> do
+    fillBytes klass 0 80
+    pokeByteOff klass 0 (80 :: Word32)
+    pokeByteOff klass 4 (3 :: Word32)
+    pokeByteOff klass 8 procedure
+    pokeByteOff klass 24 instanceHandle
+    pokeByteOff klass 48 (intPtrToPtr 6 :: Object)
+    pokeByteOff klass 64 className
+    registered <- registerClass klass
+    when (registered == 0) $ ioError $ userError "Cannot register desktop window"
+    screenWidth <- systemMetric 0
+    screenHeight <- systemMetric 1
+    createWindow 0 className title 0x00CF0000 ((screenWidth - 1440) `div` 2) ((screenHeight - 960) `div` 2) 1440 960 nullPtr nullPtr instanceHandle nullPtr
+  when (hwnd == nullPtr) $ ioError $ userError "Cannot create desktop window"
+  pure hwnd
+
+pumpMessages :: Arena -> IO ()
+pumpMessages memory = allocaBytes 48 $ \message -> do
+  let step = do
         result <- getMessage message nullPtr 0 0
         when (result > 0) $ do
           void $ translateMessage message
           void $ dispatchMessage message
           sweepArena memory
-          pump
-  pump `finally` (cancel worker >> closeHost host >> coUninitialize >> freeArena memory)
+          step
+  step
 
 loadIconFile :: FilePath -> IO Object
 loadIconFile path = withWide path $ \file -> loadImage nullPtr file 1 0 0 0x10

@@ -21,7 +21,7 @@ filesUnder root = do
 buildUI :: FilePath -> IO ()
 buildUI root = do
  let libs=root</>"submodules/libs4"; work=libs</>"purescript"; output=root</>".build/web"; stamp=output</>"source.sha256"
- source <- filter ((==".purs").takeExtension) <$> filesUnder (root</>"app")
+ source <- filter ((`elem` [".purs",".js"]).takeExtension) <$> filesUnder (root</>"app")
  support <- filesUnder (work</>"src")
  let inputs = sort source ++ sort support ++ [work</>"spago.yaml",work</>"spago.lock",libs</>"package-lock.json",root</>"build/BuildUI.hs"]
  raw <- B.concat <$> mapM (\p -> (TE.encodeUtf8 (T.pack (makeRelative root p)) <>) <$> B.readFile p) inputs
@@ -33,7 +33,9 @@ buildUI root = do
   let components = map (reads . T.unpack) (T.splitOn "." (T.drop 1 (T.strip (T.pack version)))) :: [[(Int,String)]]
   require (case components of [(major,"")]:[(minor,"")]:_ -> (major,minor)>=(22,5); _ -> False) 500 "Building the UI requires Node.js 22.5 or newer on PATH."
   path <- getEnv "PATH"
-  setEnv "PATH" ((libs</>"node_modules/.bin")++[searchPathSeparator]++path)
+  -- Spago prefers purs.cmd even when purs.exe precedes it. Keep npm shims out
+  -- of its Windows PATH so later shell-free compiler calls use the native exe.
+  setEnv "PATH" (if os=="mingw32" then path else (libs</>"node_modules/.bin")++[searchPathSeparator]++path)
   setEnv "XDG_CACHE_HOME" (libs</>".cache")
   setEnv "npm_config_cache" (libs</>".cache/npm")
   when (os=="mingw32") (setEnv "LOCALAPPDATA" (libs</>".cache"))
@@ -61,7 +63,9 @@ buildUI root = do
  tool name args = command name args >>= \(program,arguments) -> callProcess program arguments
  readTool name args = command name args >>= \(program,arguments) -> readProcess program arguments ""
  command name args
-  | os=="mingw32" && name `elem` ["spago","npm","esbuild"] = do
+  | os=="mingw32", Just entry <- lookup name [("spago","spago/bin/bundle.js"),("esbuild","esbuild/bin/esbuild")] =
+     pure ("node",(root</>"submodules/libs4/node_modules"</>entry):args)
+  | os=="mingw32" && name=="npm" = do
      script <- findExecutable (name<>".cmd") >>= maybe (ioError $ userError $ "Missing build tool: "<>name) pure
      pure ("cmd",["/d","/c",script]++args)
   | otherwise = pure (name,args)
