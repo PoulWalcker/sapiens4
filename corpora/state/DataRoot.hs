@@ -10,6 +10,7 @@ import qualified Data.Aeson.KeyMap as K
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
 import Data.Char (isAscii, isAlphaNum)
+import Data.List (isInfixOf)
 import qualified Data.Text as T
 import qualified Data.UUID as UUID
 import Database.SQLite.Simple
@@ -73,6 +74,12 @@ storageLock root = tryLockFile (root </> "host.lock") Exclusive >>= maybe
 storageMessage :: Exception e => e -> String
 storageMessage errorValue = maybe (displayException errorValue) ioeGetErrorString (fromException (toException errorValue))
 
+-- Startup diagnostics belong in the log, rather than the storage picker.
+startupMessage :: String -> String
+startupMessage diagnostic
+ | "Could not read onboarding.json." `isInfixOf` diagnostic = "We couldn't load your saved setup settings. Your agents and conversations are unchanged. Restore your setup settings from a backup, then reopen Sapiens4."
+ | otherwise = "Sapiens4 couldn't start. Please reopen the app and try again."
+
 storageError :: String -> IO a
 storageError = ioError . userError
 
@@ -92,7 +99,7 @@ validateDataRoot choice = validate []
   names <- listDirectory root
   let meaningful=filter (`notElem` ["host.lock","desktop-server.log"]) names
   when (null ancestors && choice==StartNew && not (null meaningful)) $
-   storageError "Start new requires an empty data directory. Use Open existing data to attach this installation."
+   storageError "Start fresh requires an empty data directory. Choose Use another folder to open your existing data."
   let initializing = null ancestors && (null meaningful && choice==StartNew || choice==CreateCorpora && all (`elem` ["corpora-identity.json","corpora-settings.json"]) meaningful)
   if initializing && choice==CreateCorpora then do
    identity <- readDataJSON (root </> "corpora-identity.json")

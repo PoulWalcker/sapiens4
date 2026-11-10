@@ -71,15 +71,20 @@ startServer choice runtime destination = mask $ \restore -> do
     let close h = hClose h `catch` (\(_ :: IOException) -> pure ())
         cleanup = terminateProcess process `finally` mapM_ close [input, output, errors]
     mapM_ (\h -> hSetEncoding h utf8 >> hSetNewlineMode h universalNewlineMode) [input,output,errors] `onException` cleanup
+    errorText <- newIORef ""
     reader <- async $ withFile (destination </> "desktop-server.log") AppendMode $ \logFile ->
-        (forever (hGetLine errors >>= hPutStrLn logFile >> hFlush logFile)) `catch` (\(_ :: IOException) -> pure ())
+        (forever $ do
+            line <- hGetLine errors
+            modifyIORef' errorText (T.takeEnd 12000 . (<> T.pack (line ++ "\n")))
+            hPutStrLn logFile line
+            hFlush logFile) `catch` (\(_ :: IOException) -> pure ())
     let server = ServerProcess process input reader destination choice
         await = do
             ended <- hIsEOF output
             when ended $ do
                 threadDelay 100000
-                detail <- TIO.readFile (destination </> "desktop-server.log") `catch` (\(_ :: IOException) -> pure "")
-                ioError (userError ("Sapiens4 could not open this data. " ++ T.unpack (T.takeEnd 3000 detail)))
+                detail <- readIORef errorText
+                ioError (userError (startupMessage (T.unpack detail)))
             line <- hGetLine output
             case stripPrefix "Sapiens4: " line >>= parseURI of
                 Just uri | uriScheme uri == "http:", Just auth <- uriAuthority uri,

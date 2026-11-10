@@ -10,7 +10,7 @@ import Data.Char (toUpper)
 import Data.IORef
 import Data.List (stripPrefix, isPrefixOf)
 import Data.Maybe
-import DataRoot (configDirectory, StorageChoice(..))
+import DataRoot (configDirectory, StorageChoice(..), startupMessage)
 import Network.HTTP.Client
 import Network.URI
 import Native (processId)
@@ -110,7 +110,7 @@ readyAddress line = do
 awaitAddress :: Handle -> IORef String -> IO URI
 awaitAddress output errors = do
   ended <- hIsEOF output
-  when ended $ readIORef errors >>= ioError . userError . ("Sapiens4 server stopped. " ++)
+  when ended $ readIORef errors >>= ioError . userError . startupMessage
   line <- hGetLine output
   maybe (awaitAddress output errors) pure (readyAddress line)
 
