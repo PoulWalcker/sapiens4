@@ -64,12 +64,12 @@ codexBinary :: IO FilePath
 codexBinary = do
  override <- lookupEnv "SAPIENS_CODEX_BINARY"
  candidate <- case override of
-  Just path -> pure path
-  Nothing -> do
+  Just path | not (null path) -> pure path
+  _ -> do
    root <- lookupEnv "SAPIENS_REPOSITORY" >>= maybe getCurrentDirectory pure
    packaged <- doesFileExist (root </> "package-manifest.json")
    pure $ root </> (if packaged then "codex" else ".build/codex") </> "bin" </> (if os=="mingw32" then "codex.exe" else "codex")
- binary <- if null candidate then pure Nothing else findExecutable candidate
+ binary <- findExecutable candidate
  maybe (failure 503 "Codex is missing or not executable. Restore the complete Sapiens4 package, acquire the pinned .build/codex payload for source execution, or set SAPIENS_CODEX_BINARY to a valid executable.") pure binary
 killTree :: ProcessHandle -> IO ()
 killTree ph = do

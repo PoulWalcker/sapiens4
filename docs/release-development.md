@@ -2,9 +2,10 @@
 
 `PoulWalcker/sapiens4`: Dev uses `development` / `Sapiens4 Development` /
 `com.poulwalcker.sapiens4.development`; Prod uses `stable` / `Sapiens4` /
-`com.poulwalcker.sapiens4`. Both channels, source CLI and native GUI share the
-`Sapiens4` data/config root. Explicit data/config overrides are independent;
-there is no migration or update discovery.
+`com.poulwalcker.sapiens4`. Desktop and packaged CLI use separate Development
+and Stable data/config roots selected by the runtime's package manifest.
+The source CLI keeps `<repository>/.sapiens4`. Explicit data/config overrides
+are independent; there is no migration or update discovery.
 macOS `--local prod` selects Stable with publisher signing. On Windows, select
 `-Channel stable` and supply `-CertificateThumbprint` for publisher signing.
 Low-level `--channel stable` / `-Channel stable` allows unsigned acceptance builds,

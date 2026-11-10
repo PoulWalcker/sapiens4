@@ -51,9 +51,9 @@ prepareHost args = do
   runtimeEnv <- lookupEnv "SAPIENS_RUNTIME_DIR"
   let option name = listToMaybe [value | (key,value) <- zip args (drop 1 args), key == name]
   runtime <- makeAbsolute $ fromMaybe (takeDirectory executable </> "runtime") (option "--runtime-dir" `mplus` runtimeEnv)
-  defaultData <- Paths.defaultDataDirectory
+  defaultData <- Paths.defaultDataDirectory runtime
   directory <- makeAbsolute $ fromMaybe defaultData (option "--data-dir")
-  config <- Paths.configDirectory
+  config <- Paths.configDirectory runtime
   Host directory config runtime <$> newIORef Nothing <*> newIORef ""
 
 startHost :: Host -> IO String

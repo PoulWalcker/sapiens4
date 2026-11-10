@@ -64,8 +64,10 @@ instead of MSVC. The WebView2 loader is checksum-pinned. Publisher signing uses
 
 ## State and verification
 
-CLI and GUI, Development and Stable all default to `%LOCALAPPDATA%\Sapiens4\data`,
-with configuration in the adjacent `config` directory. `SAPIENS_DATA_DIR` and
+GUI and packaged CLI default to `%LOCALAPPDATA%\Sapiens4 Development\data` for
+Development and `%LOCALAPPDATA%\Sapiens4\data` for Stable, selected by the runtime's
+package manifest. Configuration is in the adjacent `config` directory.
+The source CLI keeps `<repository>/.sapiens4`. `SAPIENS_DATA_DIR` and
 `SAPIENS_CONFIG_DIR` override these independently; a config override does not
 move default data. Use isolated overrides for manual checks.
 The app owns its host, uses a dynamic loopback port,

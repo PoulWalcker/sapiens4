@@ -50,11 +50,12 @@ Default model: `gpt-6-sol`, reasoning `high`; Deep work uses `xhigh`. A call's
 | `SAPIENS_CODEX_REASONING_EFFORT` | Reasoning effort |
 | `SAPIENS_BLINDLY_BINARY` | Blindly4 executable |
 
-Codex resolution uses an explicit `SAPIENS_CODEX_BINARY`, otherwise the pinned
+Codex resolution uses a nonempty `SAPIENS_CODEX_BINARY`, otherwise the pinned
 bundled provider (`.build/codex/bin/codex` in source checkouts, `codex/bin/codex`
 inside a packaged runtime; Windows uses `codex.exe`). There is no automatic PATH,
 application or npm installation discovery. An invalid explicit override fails
-instead of falling back to another installation.
+instead of falling back to another installation. An empty override selects the
+bundled provider.
 
 Decision templates live in `corpora/prompts/`. **Edit decision prompts** saves local
 `decision-prompts/*.md` overrides for subsequent invocations; past decision
@@ -63,10 +64,11 @@ are inactive. Global Codex configuration is unchanged.
 
 ## Data and updates
 
-CLI and GUI, Development and Stable share one default root:
-`~/Library/Application Support/Sapiens4` on macOS, `%LOCALAPPDATA%\Sapiens4` on
-Windows, and `$XDG_DATA_HOME/Sapiens4` (normally `~/.local/share/Sapiens4`) on
-other source platforms. Data is in `data`, configuration in `config`.
+Desktop and packaged CLI defaults follow the runtime's package manifest:
+Development uses `Sapiens4 Development`, Stable uses `Sapiens4`, under
+`~/Library/Application Support` on macOS and `%LOCALAPPDATA%` on Windows.
+Data is in `data`, configuration in `config`; the profiles remain separate.
+The source CLI preserves `<repository>/.sapiens4` as its default data directory.
 `--data-dir` takes precedence over `SAPIENS_DATA_DIR`; `SAPIENS_CONFIG_DIR` is
 independent. Existing directories are not migrated automatically.
 Back up the complete data directory while the host is stopped, including:

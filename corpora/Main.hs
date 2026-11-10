@@ -78,7 +78,9 @@ hostMain root args = do
  validateOptions ["--port","--data-dir"] ["--open","--desktop"] args
  port <- integerOption "--port" 4174 args
  require (port>=0 && port<=65535) 400 "Port must be between 0 and 65535"
- defaultData <- Paths.defaultDataDirectory
+ packaged <- doesFileExist (root</>"package-manifest.json")
+ defaultData <- if packaged then Paths.defaultDataDirectory root else
+  lookupEnv "SAPIENS_DATA_DIR" >>= maybe (pure (root</>".sapiens4")) makeAbsolute
  let directory=option "--data-dir" defaultData args
  void (asset root "/")
  void (asset root "/workspace/app.js")

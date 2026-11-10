@@ -52,8 +52,8 @@ startServer = mask $ \restore -> do
     executable <- getExecutablePath
     let resources = takeDirectory executable </> "../Resources"
     runtime <- canonicalizePath (resources </> "runtime")
-    configRoot <- Paths.configDirectory
-    destination <- Paths.defaultDataDirectory
+    configRoot <- Paths.configDirectory runtime
+    destination <- Paths.defaultDataDirectory runtime
     let binary = runtime </> ".build/bin/sapiens4"
     present <- doesFileExist binary
     unless present $ ioError (userError "The application is incomplete. Extract the complete Sapiens4 package.")

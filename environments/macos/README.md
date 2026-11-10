@@ -58,8 +58,9 @@ Actual macOS 13 launch/login/exec acceptance remains open.
 
 ## Run and verify
 
-CLI and GUI, Development and Stable all use
-`~/Library/Application Support/Sapiens4/{data,config}` by default.
+GUI and packaged CLI use `~/Library/Application Support/Sapiens4 Development/{data,config}`
+for Development and `~/Library/Application Support/Sapiens4/{data,config}` for Stable,
+selected by the runtime's package manifest. The source CLI keeps `<repository>/.sapiens4`.
 `SAPIENS_DATA_DIR` and `SAPIENS_CONFIG_DIR` override these independently; a config
 override does not move default data. Use isolated overrides for manual checks.
 The app starts its own host on a dynamic loopback port;
