@@ -2,65 +2,45 @@
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$ROOT"
-if [ ! -f "$ROOT/submodules/libs4/web/remote-vendor.js" ]; then
-  git -C "$ROOT" submodule update --init --recursive -- submodules/libs4
-  test -f "$ROOT/submodules/libs4/web/remote-vendor.js"
-fi
-runghc build/Build.hs
-BUILD="$ROOT/.build/macos"
-APP="$BUILD/Sapiens4.app"
-rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$BUILD/AppIcon.iconset"
-cp "$ROOT/.build/bin/sapiens-macos" "$APP/Contents/MacOS/Sapiens4"
-RUNTIME="$ROOT/submodules/libs4/haskell/.runtime"
-if [ ! -d "$RUNTIME" ]; then RUNTIME="$ROOT/.build/bin/.libs"; fi
-if [ -d "$RUNTIME" ]; then
-  mkdir -p "$APP/Contents/Frameworks"
-  for library in "$RUNTIME"/*.dylib; do
-    [ -f "$library" ] || continue
-    cp "$library" "$APP/Contents/Frameworks/"
-  done
-  for binary in "$APP/Contents/MacOS/Sapiens4" "$APP/Contents/Frameworks/"*.dylib; do
-    [ -f "$binary" ] || continue
-    otool -L "$binary" | awk 'NR > 1 { print $1 }' | while IFS= read -r dependency; do
-      name=$(basename "$dependency")
-      if [ -f "$APP/Contents/Frameworks/$name" ]; then
-        install_name_tool -change "$dependency" "@executable_path/../Frameworks/$name" "$binary"
-      fi
+# Optional local release preparation; ordinary build/skip-build callers are unchanged.
+if [ "${1:-}" = --local ]; then
+    [ "$#" -ge 4 ] && [ "$#" -le 5 ] || { echo 'Usage: build.sh --local dev|prod COMMIT VERSION [OUTPUT_DIRECTORY]' >&2; exit 64; }
+    mode=$2
+    commit=$3
+    version=$4
+    output=${5:-.build/local-$version-$mode}
+    case "$mode" in dev|prod) ;; *) echo 'Expected dev or prod' >&2; exit 64 ;; esac
+    [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ] || { echo 'Local packages require macOS ARM64' >&2; exit 1; }
+    # Prefer the pinned GHC without changing the user's global ghcup selection.
+    export PATH="$HOME/.ghcup/ghc/9.14.1/bin:$HOME/.ghcup/bin:$HOME/.cargo/bin:$PATH"
+    for tool in git runghc ghc cabal node cargo rustc curl tar make xcrun codesign hdiutil; do
+        command -v "$tool" >/dev/null || { echo "Missing prerequisite: $tool (see environments/macos/README.md)" >&2; exit 1; }
     done
-    codesign --force --sign - "$binary"
-  done
+    [ "$(ghc --numeric-version)" = 9.14.1 ] && [ "$(cabal --numeric-version)" = 3.18.2.0 ] &&
+        [ "$(node --version)" = v22.23.2 ] && case "$(rustc --version)" in 'rustc 1.99.0 '*) true ;; *) false ;; esac ||
+        { echo 'Use GHC9.14.1, Cabal3.18.2.0, Node22.23.2 and Rust1.99.0' >&2; exit 1; }
+    xcrun --find clang >/dev/null
+    [ "$(git rev-parse HEAD)" = "$commit" ] || { echo 'Checkout HEAD must equal the full Windows workflow commit SHA' >&2; exit 1; }
+    [ -z "$(git status --porcelain --untracked-files=normal --ignore-submodules=untracked)" ] ||
+        { echo 'Local release preparation requires a clean checkout' >&2; exit 1; }
+    case "$mode" in
+        dev) export SAPIENS_MAC_SIGN_IDENTITY=- SAPIENS_MAC_NOTARY_PROFILE= ;;
+        prod)
+            : "${SAPIENS_MAC_SIGN_IDENTITY:?Set a Developer ID Application identity}"
+            : "${SAPIENS_MAC_NOTARY_PROFILE:?Set an existing notarytool keychain profile}"
+            case "$SAPIENS_MAC_SIGN_IDENTITY" in 'Developer ID Application: '*) ;; *) echo 'Production requires Developer ID Application signing' >&2; exit 1 ;; esac
+            ;;
+    esac
+    git submodule sync --recursive
+    git submodule update --init --recursive
+    cache=submodules/libs4/haskell/.cabal
+    mkdir -p "$cache"
+    if [ ! -f "$cache/config" ]; then
+        printf 'repository hackage.haskell.org\n  url: https://hackage.haskell.org/\n  secure: True\n' > "$cache/config"
+    fi
+    # No clean/removal: Cabal, UI, Rust, provider and packaging caches stay in place.
+    channel=development
+    [ "$mode" != prod ] || channel=stable
+    set -- --channel "$channel" --version "$version" --output-directory "$output"
 fi
-"$ROOT/.build/bin/sapiens-macos" --icon "$BUILD/AppIcon.iconset" "$ROOT/app/shell/favicon.svg"
-iconutil -c icns "$BUILD/AppIcon.iconset" -o "$APP/Contents/Resources/AppIcon.icns"
-INFO="$APP/Contents/Info.plist"
-plutil -create xml1 "$INFO"
-plutil -insert CFBundleIdentifier -string com.sapiens4.desktop "$INFO"
-plutil -insert CFBundleName -string Sapiens4 "$INFO"
-plutil -insert CFBundleDisplayName -string Sapiens4 "$INFO"
-plutil -insert CFBundleExecutable -string Sapiens4 "$INFO"
-plutil -insert CFBundlePackageType -string APPL "$INFO"
-plutil -insert CFBundleVersion -string 1 "$INFO"
-plutil -insert CFBundleShortVersionString -string 1.0 "$INFO"
-plutil -insert CFBundleIconFile -string AppIcon "$INFO"
-plutil -insert NSHighResolutionCapable -bool YES "$INFO"
-plutil -insert LSMinimumSystemVersion -string 13.0 "$INFO"
-plutil -insert NSAppTransportSecurity -xml '<dict><key>NSAllowsLocalNetworking</key><true/><key>NSAllowsArbitraryLoadsInWebContent</key><true/></dict>' "$INFO"
-plutil -insert NSHumanReadableCopyright -string 'Sapiens4 local desktop launcher' "$INFO"
-CONFIG="$APP/Contents/Resources/Launcher.plist"
-plutil -create xml1 "$CONFIG"
-plutil -insert Repository -string "$ROOT" "$CONFIG"
-plutil -insert Executable -string "$ROOT/.build/bin/sapiens4" "$CONFIG"
-plutil -insert Path -string "$PATH" "$CONFIG"
-DATA=${SAPIENS_DATA_DIR:-$ROOT/.sapiens4}
-case "$DATA" in '~/'*) DATA="$HOME/${DATA#\~/}" ;; esac
-case "$DATA" in /*) ;; *) DATA="$ROOT/$DATA" ;; esac
-plutil -insert DataDirectory -string "$DATA" "$CONFIG"
-mkdir -p "$APP/Contents/Resources/Licenses/Blindly4" "$APP/Contents/Resources/Licenses/Libs4"
-cp "$ROOT/license/LICENSE.md" "$ROOT/license/LICENSING.md" "$APP/Contents/Resources/Licenses/"
-cp "$ROOT/README.md" "$APP/Contents/Resources/README.md"
-cp "$ROOT/submodules/blindly4/license/LICENSE.md" "$APP/Contents/Resources/Licenses/Blindly4/"
-cp "$ROOT/submodules/blindly4/README.md" "$APP/Contents/Resources/Licenses/Blindly4/README.md"
-cp "$ROOT/submodules/libs4/license/"* "$APP/Contents/Resources/Licenses/Libs4/"
-codesign --force --sign - "$APP"
-printf 'Built: %s\n' "$APP"
+exec runghc -ibuild/package build/Package.hs macos "$@"

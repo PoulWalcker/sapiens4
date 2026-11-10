@@ -1,17 +1,193 @@
 name: Native verification and test packages
 on:
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       version:
-        description: Test artifact SemVer (select dev/distribution-integration)
+        description: Package SemVer (must match the local macOS build)
         default: 0.1.0-dev
         required: true
+      mode:
+        description: Dev test packages or publisher-signed production packages (no publication)
+        type: choice
+        options: [dev, prod]
+        default: dev
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      release:
+        default: false
+        type: boolean
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.event_name == 'workflow_dispatch' && format('native-manual-{0}', github.run_id) || format('native-{0}-{1}', github.ref, github.event_name) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  select-build-branch:
-    runs-on: ubuntu-24.04
+  native:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    env:
+      PACKAGE_VERSION: ${{ inputs.version || '0.1.0-dev' }}
+      BUNDLE_FROZEN: 'true'
+      PACKAGE_CHANNEL: ${{ (inputs.release || inputs.mode == 'prod') && 'stable' || 'development' }}
     steps:
-      - run: |
-          echo '::error::Select dev/distribution-integration in Run workflow to build test installers. Main contains only this launcher; it has no application changes.'
-          exit 1
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Check release signing prerequisites before expensive builds
+        if: inputs.release || inputs.mode == 'prod'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if ($env:GITHUB_REPOSITORY -ne 'PoulWalcker/sapiens4') { throw 'Production signing is restricted to the release repository' }
+          if ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF -ne "refs/tags/v$env:PACKAGE_VERSION") { throw 'Expected matching version tag' }
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) { throw 'Production builds require main ancestry' }
+          if (-not $env:WINDOWS_CERTIFICATE_PFX -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) { throw 'Windows signing configuration required' }
+      - name: Resolve exact dependency pins from committed URLs
+        shell: bash
+        run: |
+          git submodule sync --recursive
+          git submodule update --init --recursive
+          git submodule status --recursive
+      - uses: haskell-actions/setup@82e8b5066385702e477d9dc98f287070493e8abd # v2.8.2, peeled commit
+        with:
+          ghc-version: '9.14.1'
+          cabal-version: '3.18.2.0'
+          cabal-update: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.23.2'
+      - name: Verify Windows UI tools before application compilation
+        timeout-minutes: 10
+        shell: pwsh
+        run: ./build/windows-ui-preflight.ps1
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal
+          rustup override set 1.99.0
+      - name: Configure isolated HTTPS Hackage index
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force submodules/libs4/haskell/.cabal | Out-Null
+          Set-Content submodules/libs4/haskell/.cabal/config "repository hackage.haskell.org`n  url: https://hackage.haskell.org/`n  secure: True`n"
+      - name: Key isolated Cabal dependencies
+        id: cabal-key
+        if: github.repository == 'PoulWalcker/sapiens4' && github.event_name != 'pull_request'
+        shell: pwsh
+        run: ./build/package/cabal-cache.ps1 key
+      - name: Restore trusted Cabal dependencies
+        id: cabal-restore
+        if: github.repository == 'PoulWalcker/sapiens4' && github.event_name != 'pull_request'
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          key: ${{ steps.cabal-key.outputs.key }}
+          path: |
+            submodules/libs4/haskell/.cabal/store
+            submodules/libs4/haskell/.cabal/packages
+      - name: Compile installer script before the expensive Windows application build
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path .build/installer-script-input -Force | Out-Null
+          Set-Content -LiteralPath .build/installer-script-input/Sapiens4.exe -Value 'compiler fixture only'
+          $identity = if ($env:PACKAGE_CHANNEL -eq 'stable') { 'com.poulwalcker.sapiens4' } else { 'com.poulwalcker.sapiens4.development' }
+          Set-Content -LiteralPath .build/installer-script-input/sapiens-installation.id -Value $identity
+          ./build/package/windows-installer.ps1 -PackageDirectory .build/installer-script-input -OutputDirectory .build/installer-script-output -Version $env:PACKAGE_VERSION -Channel $env:PACKAGE_CHANNEL -CertificateThumbprint ([string]::Empty)
+          if ($LASTEXITCODE -ne 0) { throw 'Installer script/compiler preflight failed' }
+      - name: Compile host, native application, UI and existing fixture helpers once
+        id: compile
+        shell: bash
+        run: pwsh -NoProfile -File ./environments/windows/build.ps1 -BuildOnly
+      - name: Check completed dependencies even if UI compilation failed
+        id: cabal-ready
+        if: ${{ !cancelled() && github.repository == 'PoulWalcker/sapiens4' && github.event_name != 'pull_request' && steps.compile.outcome != 'skipped' && steps.cabal-restore.outputs.cache-hit != 'true' }}
+        shell: pwsh
+        run: ./build/package/cabal-cache.ps1 check
+      - name: Save verified Cabal dependencies before packaging
+        if: ${{ !cancelled() && steps.cabal-ready.outputs.ready == 'true' }}
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          key: ${{ steps.cabal-key.outputs.key }}
+          path: |
+            submodules/libs4/haskell/.cabal/store
+            submodules/libs4/haskell/.cabal/packages
+      # Pull requests stop at compilation: no provider download, package or upload.
+      # Ruby prepends MSYS2/pkg-config paths; install it after native compilation
+      # so Cabal does not link the backend against Ruby's external zlib1.dll.
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1 snapshot, 2026-11-08
+        if: github.event_name != 'pull_request'
+        with:
+          ruby-version: '3.4.11'
+      - name: Install package-scenario dependencies
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: ruby submodules/libs4/ruby/bundle.rb install
+      - name: Configure Windows release signing
+        if: (inputs.release || inputs.mode == 'prod')
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE_PFX -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) { throw 'Windows signing secrets required' }
+          $pfx = Join-Path $env:RUNNER_TEMP 'sapiens-release.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificates = @(Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password | Where-Object HasPrivateKey)
+          if ($certificates.Count -ne 1) { throw 'Expected one signing certificate with a private key' }
+          "SAPIENS_WINDOWS_CERT_THUMBPRINT=$($certificates[0].Thumbprint)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object { [Version]$_.Directory.Parent.Name } -Descending | Select-Object -First 1
+          if (-not $signTool) { throw 'Windows SDK SignTool required' }
+          $signTool.DirectoryName | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Diagnose checkout changes before packaging
+        if: github.event_name != 'pull_request' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git status --short --untracked-files=normal --ignore-submodules=untracked
+          git diff --stat
+          git submodule foreach --recursive 'git status --short --untracked-files=no'
+          git submodule foreach --recursive 'git diff --stat'
+      - name: Package and verify Windows without recompiling
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: |
+          $thumbprint = if ('${{ inputs.release || inputs.mode == 'prod' }}' -eq 'true') { $env:SAPIENS_WINDOWS_CERT_THUMBPRINT } else { [string]::Empty }
+          ./environments/windows/build.ps1 -SkipBuild -Runtime win-x64 -Version $env:PACKAGE_VERSION -Channel $env:PACKAGE_CHANNEL -OutputDirectory .build/distribution -CertificateThumbprint $thumbprint
+          if ($LASTEXITCODE -ne 0) { throw 'Package build failed' }
+          $packageName = if ($env:PACKAGE_CHANNEL -eq 'stable') { 'Sapiens4-win-x64' } else { 'Sapiens4-Development-win-x64' }
+          $env:SAPIENS_TEST_PACKAGE_RUNTIME = (Resolve-Path ".build/distribution/$packageName/runtime").Path
+          ruby submodules/libs4/ruby/bundle.rb exec rspec spec/native_package_spec.rb
+          if ($LASTEXITCODE -ne 0) { throw 'Package scenario failed' }
+      - name: Verify per-user Windows install, native launch and uninstall
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: |
+          $env:SAPIENS_TEST_INSTALLER = (Resolve-Path .build/distribution/Sapiens-Setup.exe).Path
+          $env:SAPIENS_TEST_INSTALLER_EVIDENCE = [IO.Path]::GetFullPath('.build/distribution/installer-check')
+          ruby submodules/libs4/ruby/bundle.rb exec rspec spec/windows_package_spec.rb
+          if ($LASTEXITCODE -ne 0) { throw 'Installer scenario failed' }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && github.event_name != 'pull_request'
+        with:
+          name: sapiens4-${{ env.PACKAGE_CHANNEL }}-windows-x64
+          path: |
+            .build/distribution/Sapiens-Setup.exe
+            .build/distribution/*.zip
+            .build/distribution/*.release.json
+            .build/distribution/installer-check/*
+          if-no-files-found: error
+      - name: Remove temporary Windows signing material
+        if: always() && (inputs.release || inputs.mode == 'prod')
+        shell: pwsh
+        run: |
+          if ($env:SAPIENS_WINDOWS_CERT_THUMBPRINT) { Remove-Item "Cert:\CurrentUser\My\$env:SAPIENS_WINDOWS_CERT_THUMBPRINT" -ErrorAction SilentlyContinue }
+          Remove-Item (Join-Path $env:RUNNER_TEMP 'sapiens-release.pfx') -ErrorAction SilentlyContinue
