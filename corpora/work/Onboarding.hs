@@ -315,7 +315,16 @@ signIn binary environment progress device = do
            writeIORef progress (loginState "signing_in" line)
          else when (validLoginURL line) $ writeIORef progress (loginView "signing_in" "" line)
          consume ("Enter this one-time code" `T.isInfixOf` line)
-   result <- timeout (16*60*1000000) (consume False >> waitForProcess process)
+       -- A browser descendant can keep the diagnostic pipe or Windows job
+       -- alive after credentials have been saved. Check the same CLI/profile
+       -- independently; pipe EOF is not an authentication completion signal.
+       signedIn = do
+        threadDelay 1000000
+        status <- quietCommand binary environment ["login","status"] 10000000
+        if status==Just ExitSuccess then pure ExitSuccess else signedIn
+   result <- timeout (16*60*1000000) $ withAsync (consume False) $ \reader -> do
+    link reader
+    either id id <$> race (waitForProcess process) signedIn
    pure (case result of Just ExitSuccess -> "complete"; Nothing -> "expired"; _ -> "failed"))
 
 stripANSI :: String -> String
