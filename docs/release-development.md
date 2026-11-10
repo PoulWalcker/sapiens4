@@ -83,7 +83,7 @@ For development and isolated validation, the direct platform builds also support
 
 Each platform produces its application directory, installer (`Sapiens.dmg` or
 `Sapiens-Setup.exe`), versioned ZIP and `.release.json` receipt. Follow
-[package and installer checks](testing.md#package-checks), then manually verify
+[package and installer checks](testing.md#d1-native-distribution-acceptance), then manually verify
 GUI startup, backend health, quit/close, absence of orphan processes/ports and
 reopening the same synthetic state. Never use real user data for acceptance.
 
@@ -93,6 +93,9 @@ commit/version, complete providers, final sizes/hashes and appropriate channel
 and signing. Native build hosts establish signature trust; use only their trusted
 receipts. `buildId` fingerprints source/dependency/provider/toolchain inputs;
 prebuilt compiler flags and binary bytes are identified by final artifact hashes.
+Each receipt carries one package identity, signing mode and manifest hash for
+both artifacts. Its installer and ZIP entries contain only kind, name, size and
+SHA-256; regenerate receipts with the current packager before release verification.
 
 Run verification and draft creation together so failure cannot reuse an old list:
 

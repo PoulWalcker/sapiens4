@@ -210,9 +210,9 @@ finalize runtime signing = do
  writeJSON manifestPath (sealManifest signing manifest)
  entries <- inventory runtime ["package-inventory.json"]
  writeJSON (runtime</>"package-inventory.json") (Inventory entries)
- verify runtime
+ void $ verify runtime
 
-verify :: FilePath -> IO ()
+verify :: FilePath -> IO FinalizedManifest
 verify runtime = do
  finalized <- readJSON (runtime</>"package-manifest.json")
  let manifest=finalizedManifest finalized
@@ -222,17 +222,17 @@ verify runtime = do
   metadata <- readJSON (runtime</>"codex/sapiens-provider.json")
   unless (providerSummary metadata==summary && identityPlatform (providerIdentity metadata)==packagePlatform (manifestIdentity manifest)) $ fail "Provider identity differs from package manifest"
  printJSON $ obj [("runtime",toJSON runtime),("inventory",String "verified"),("files",toJSON $ length entries)]
+ pure finalized
 
 receipt :: FilePath -> FilePath -> FilePath -> FilePath -> IO ()
 receipt artifact installer manifestPath output = do
  unless (takeFileName manifestPath=="package-manifest.json") $ fail "Receipt must use the verified runtime package-manifest.json"
- finalized <- readJSON manifestPath
+ finalized <- verify (takeDirectory manifestPath)
  let manifest=finalizedManifest finalized;signing=finalizedSigning finalized
- verify (takeDirectory manifestPath)
  let identity=manifestIdentity manifest
  manifestHash <- digest manifestPath
- let artifactRecord path = Artifact path <$> getFileSize path <*> digest path <*> pure manifestHash
- records <- Receipt identity signing <$> artifactRecord installer <*> artifactRecord artifact
+ let artifactRecord path = Artifact path <$> getFileSize path <*> digest path
+ records <- Receipt identity signing manifestHash <$> artifactRecord installer <*> artifactRecord artifact
  writeJSON output records
 
 -- Receipts bind trusted build-host outputs; this checks consistency and bytes,
@@ -247,14 +247,14 @@ release directory commit versionInput mode output = do
  receipts <- filter (".release.json" `isSuffixOf`) <$> files root
  unless (length receipts==2) $ fail "Exactly two platform receipts required"
  verified <- forM receipts $ \path -> do
-  Receipt identity signing installer portable <- readJSON path
+  Receipt identity signing _ installer portable <- readJSON path
   let platform=packagePlatform identity
       expectedSigning=if platform==MacOS then [DeveloperID] else [Authenticode]
       allowed=if mode=="prod" then expectedSigning else if platform==MacOS then [Unsigned,AdHoc] else [Unsigned]
   unless (packageChannel identity==(if mode=="prod" then Stable else Development) && packageComplete identity && not (packageDirty identity) && packageCommit identity==T.pack commit && packageVersion identity==version && signing `elem` allowed) $ fail "Incomplete, dirty, wrong-channel/source/version or incorrectly signed release"
   let installerName=if platform==MacOS then "Sapiens.dmg" else "Sapiens-Setup.exe"
       portableName=artifactPrefix (packageChannel identity)++versionText version++"-"++platformName platform++"-"++architecture platform++".zip"
-  assets <- forM [(installerName,installer),(portableName,portable)] $ \(wanted,Artifact name size checksum _) -> do
+  assets <- forM [(installerName,installer),(portableName,portable)] $ \(wanted,Artifact name size checksum) -> do
    let artifact=takeDirectory path</>name
    unless (name==wanted) $ fail "Unexpected release artifact name"
    actualSize<-getFileSize artifact;actualHash<-digest artifact
@@ -308,7 +308,7 @@ cachedDownload asset destination = do
 validateProvider :: FilePath -> Provider -> FilePath -> IO Provider
 validateProvider payload expected directory = do
  actual <- readJSON (directory</>"sapiens-provider.json")
- unless (toJSON actual==toJSON expected) $ fail "Provider metadata does not match the complete pinned release"
+ unless (actual==toJSON expected) $ fail "Provider metadata does not match the complete pinned release"
  verifyInventory directory (providerEntries expected) ["sapiens-provider.json"]
  -- Byte hashes do not capture executable permissions. Use the pinned archive,
  -- not caller-supplied metadata, to identify every required macOS executable.
@@ -320,7 +320,7 @@ validateProvider payload expected directory = do
    when (requiredExec || path `elem` providerExecutables MacOS layout) $ do
     runnable <- executable <$> getPermissions (directory</>path)
     unless runnable $ fail ("Provider executable permission missing: "++path)
- pure actual
+ pure expected
 
 acquireProvider :: FilePath -> Platform -> FilePath -> IO ()
 acquireProvider root platform destinationInput = do
@@ -378,8 +378,9 @@ withPinnedProvider root platform action = do
     cachedDownload notice cachedNotice
     copy cachedNotice (payload</>path)
    records <- inventory payload ["sapiens-provider.json"]
-   writeJSON (payload</>"sapiens-provider.json") (newProvider identity layout records)
-   action payload (newProvider identity layout records)
+   let metadata=newProvider identity layout records
+   writeJSON (payload</>"sapiens-provider.json") metadata
+   action payload metadata
 
 command :: FilePath -> [String] -> IO ()
 command root args = case args of
@@ -391,7 +392,7 @@ command root args = case args of
  "finalize":rest -> do
   runtime<-required "runtime" rest;signing<-required "signing" rest >>= either fail pure . parseSigning
   finalize runtime signing
- "verify":rest -> required "runtime" rest >>= verify
+ "verify":rest -> void $ required "runtime" rest >>= verify
  "receipt":rest -> do artifact<-required "artifact" rest;manifest<-required "manifest" rest;output<-required "output" rest;required "installer" rest >>= \installer -> receipt artifact installer manifest output
  "release":rest -> do
   directory<-required "directory" rest;commit<-required "source-commit" rest;version<-required "version" rest;output<-required "output" rest

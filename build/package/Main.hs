@@ -195,7 +195,7 @@ diskImage app temporary plan = do
   let installed=temporary</>"installed copy"</>takeFileName app
   P.run "ditto" [mount</>takeFileName app,installed]
   P.run "codesign" ["--verify","--deep","--strict",installed]
-  P.verify (installed</>"Contents/Resources/runtime")
+  void $ P.verify (installed</>"Contents/Resources/runtime")
  pure image
 
 packageMac :: FilePath -> MacOptions -> IO ()

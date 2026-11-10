@@ -169,11 +169,20 @@ instance FromJSON PackageIdentity where
   version<-o .: "version"
   PackageIdentity channel version platform <$> (o .: "buildId" >>= checksum 64) <*> (o .: "sourceCommit" >>= checksum 40) <*> o .: "sourceDirty" <*> pure complete
 
+identityFields :: PackageIdentity -> Object
+identityFields i = KM.fromList
+ [("appId",toJSON $ appId $ packageChannel i),("repository",toJSON releaseRepository)
+ ,("channel",toJSON $ channelName $ packageChannel i),("version",toJSON $ packageVersion i)
+ ,("platform",toJSON $ platformName $ packagePlatform i),("architecture",toJSON $ architecture $ packagePlatform i)
+ ,("minimumOS",if packagePlatform i==MacOS then String "13.0" else Null),("supportStatus",String "declared-target")
+ ,("buildId",String $ packageBuildId i),("sourceCommit",String $ packageCommit i),("sourceDirty",Bool $ packageDirty i)
+ ,("packageStatus",String $ if packageComplete i then "provider-complete" else "validation-provider-incomplete")]
+
 data Manifest = Manifest { manifestIdentity :: PackageIdentity, manifestProvider :: Maybe ProviderSummary, manifestSigning :: Maybe Signing, manifestWire :: Object }
 instance FromJSON Manifest where
  parseJSON value = withObject "package manifest" (\o -> do
   schema<-o .: "schemaVersion";check (schema==(1::Int)) "Unsupported package manifest schema"
-  identity<-parseJSON value;provider<-o .: "provider";check (packageComplete identity==maybe False (const True) provider) "Provider status mismatch"
+  identity<-parseJSON value;provider<-o .: "provider";check (packageComplete identity==isJust provider) "Provider status mismatch"
   void (o .: "submodules" >>= traverse (checksum 40) :: Parser (M.Map T.Text T.Text))
   void (o .: "sourceTreeSha256" >>= checksum 64)
   void (o .: "toolchain" :: Parser (M.Map T.Text String))
@@ -215,11 +224,8 @@ newManifest channel source tree platform version provider tools = Manifest ident
   ,("submodules",toJSON $ sourceSubmodules source)]
  buildId = hash $ canonical $ Object inputs
  identity = PackageIdentity channel version platform buildId (sourceCommit source) (sourceDirty source) (isJust provider)
- document = KM.union (KM.fromList
+ document = KM.union (identityFields identity) $ KM.union (KM.fromList
   [("schemaVersion",toJSON (1::Int))
-  ,("appId",toJSON $ appId channel)
-  ,("buildId",String buildId)
-  ,("packageStatus",String $ if isJust provider then "provider-complete" else "validation-provider-incomplete")
   ,("updateDiscovery",Bool False)]) inputs
 
 sealManifest :: Signing -> Manifest -> Manifest
@@ -229,60 +235,37 @@ sealManifest signing m = m
 compatibilityManifest :: CompatibilityAudit -> Manifest -> Manifest
 compatibilityManifest report m = m {manifestWire=KM.insert "macOSCompatibility" (toJSON report) (manifestWire m)}
 
-data Artifact = Artifact FilePath Integer T.Text T.Text
-data Receipt = Receipt PackageIdentity Signing Artifact Artifact
+data Artifact = Artifact FilePath Integer T.Text
+data Receipt = Receipt PackageIdentity Signing T.Text Artifact Artifact
 instance ToJSON Receipt where
- toJSON (Receipt i signing installer portable) = obj
+ toJSON (Receipt i signing manifestHash installer portable) = Object $ KM.union (identityFields i) $ KM.fromList
   [("schemaVersion",toJSON (1::Int))
-  ,("appId",toJSON $ appId channel)
-  ,("version",toJSON $ packageVersion i)
-  ,("repository",toJSON releaseRepository)
-  ,("channel",toJSON $ channelName channel)
-  ,("sourceCommit",toJSON $ packageCommit i)
-  ,("sourceDirty",Bool $ packageDirty i)
-  ,("packageStatus",String $ if packageComplete i then "provider-complete" else "validation-provider-incomplete")
+  ,("signing",toJSON $ signingName signing)
+  ,("packageManifestSha256",String manifestHash)
   ,("artifacts",toJSON [item "installer" installer, item "portable-zip" portable])]
   where
-  channel = packageChannel i
-  item kind (Artifact path size digest manifestHash) = obj
-   [("platform",toJSON $ platformName $ packagePlatform i)
-   ,("architecture",toJSON $ architecture $ packagePlatform i)
-   ,("buildId",toJSON $ packageBuildId i)
-   ,("minimumOS",if packagePlatform i==MacOS then String "13.0" else Null)
-   ,("supportStatus",String "declared-target")
-   ,("signing",toJSON $ signingName signing)
-   ,("kind",String kind)
-   ,("assetName",toJSON $ takeFileName path)
-   ,("size",toJSON size)
-   ,("sha256",String digest)
-   ,("packageManifestSha256",String manifestHash)]
+  item kind (Artifact path size digest) = obj
+   [("kind",String kind),("assetName",toJSON $ takeFileName path),("size",toJSON size),("sha256",String digest)]
 
 instance FromJSON Receipt where
- parseJSON = withObject "release receipt" $ \o -> do
+ parseJSON value = withObject "release receipt" (\o -> do
   schema<-o .: "schemaVersion";check (schema==(1::Int)) "Unsupported receipt schema"
-  let keys=["appId","version","repository","channel","sourceCommit","sourceDirty","packageStatus"]
-  check (all (`KM.member` o) keys) "Missing receipt identity fields"
+  identity<-parseJSON value
+  signing<-o .: "signing" >>= signingJSON
+  either fail pure $ validateSigning (packagePlatform identity) signing
+  manifestHash<-o .: "packageManifestSha256" >>= checksum 64
   values<-o .: "artifacts"
   parsed<-mapM (withObject "release artifact" $ \a -> do
+   check (KM.size a==4) "Artifact requires exactly kind, assetName, size and sha256"
    kind<-a .: "kind" :: Parser String
-   -- Top-level identity fields cannot be overridden by artifact fields.
-   let header=KM.filterWithKey (\key _ -> key `elem` keys) o
-   identity<-parseJSON (Object $ KM.union header a)
-   signing<-a .: "signing" >>= signingJSON
-   either fail pure $ validateSigning (packagePlatform identity) signing
    path<-a .: "assetName" >>= relative;check (takeFileName path==path) "Artifact must be a basename"
    size<-a .: "size";check (size>=0) "Negative artifact size"
    digest<-a .: "sha256" >>= checksum 64
-   manifestHash<-a .: "packageManifestSha256" >>= checksum 64
-   pure (kind,(identity,signing,Artifact path size digest manifestHash))) values
+   pure (kind,Artifact path size digest)) values
   case parsed of
-   [("installer",a),("portable-zip",b)] -> pair a b
-   [("portable-zip",a),("installer",b)] -> pair b a
-   _ -> fail "Exactly one installer and one portable ZIP required"
-  where
-  pair (i,s,a@(Artifact _ _ _ h)) (j,t,b@(Artifact _ _ _ k)) = do
-   check (i==j && s==t && h==k) "Contradictory release artifact bindings"
-   pure (Receipt i s a b)
+   [("installer",a),("portable-zip",b)] -> pure (Receipt identity signing manifestHash a b)
+   [("portable-zip",a),("installer",b)] -> pure (Receipt identity signing manifestHash b a)
+   _ -> fail "Exactly one installer and one portable ZIP required") value
 
 data CompatibilityRule = CompatibilityRule
  { ruleIdentity :: ProviderIdentity, ruleFingerprint :: T.Text, ruleRoot :: FilePath, ruleMaximum :: String, ruleId :: String, ruleSelected :: [String] }

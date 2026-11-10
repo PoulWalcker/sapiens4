@@ -37,7 +37,7 @@ cmd.exe /d /c "powershell.exe -NoProfile -File environments\windows\build.ps1 -O
 if ($LASTEXITCODE) { throw 'Windows build failed; see .build/windows-build.log' }
 ```
 
-[Package/installer checks](../../docs/testing.md#package-checks) use synthetic state
+[Package/installer checks](../../docs/testing.md#d1-native-distribution-acceptance) use synthetic state
 and a disposable Windows account. Unsigned builds may show Windows trust warnings.
 
 Quit the app and backend before reinstall/uninstall: Setup refuses active owned

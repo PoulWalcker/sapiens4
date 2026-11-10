@@ -29,4 +29,4 @@ old Cabal binaries. Packaging audits the resulting binaries before signing.
 
 The DMG build verifies the image, mounts it read-only, copies the app into a
 private temporary installation and verifies its signature and runtime inventory.
-See [package checks](../../docs/testing.md#package-checks) for further validation.
+See [package checks](../../docs/testing.md#d1-native-distribution-acceptance) for further validation.

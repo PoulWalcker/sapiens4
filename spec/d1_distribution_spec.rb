@@ -127,12 +127,12 @@ RSpec.describe 'D1 native distribution' do
         'channel' => channel, 'packageStatus' => 'provider-complete'}
       expect(manifest).to include(expected)
       expect(receipt).to include(expected)
+      expect(receipt.fetch('packageManifestSha256')).to eq(Digest::SHA256.file(File.join(runtime, 'package-manifest.json')).hexdigest)
       expect(manifest.fetch('appId')).to eq(channel == 'stable' ? 'com.poulwalcker.sapiens4' : 'com.poulwalcker.sapiens4.development')
       receipt.fetch('artifacts').each do |artifact|
         file = File.join(@suite.output(channel), artifact.fetch('assetName'))
         expect(File.size(file)).to eq(artifact.fetch('size'))
         expect(Digest::SHA256.file(file).hexdigest).to eq(artifact.fetch('sha256'))
-        expect(artifact.fetch('packageManifestSha256')).to eq(Digest::SHA256.file(File.join(runtime, 'package-manifest.json')).hexdigest)
       end
       @suite.run(@suite.packager, 'verify', '--runtime', runtime)
     end
