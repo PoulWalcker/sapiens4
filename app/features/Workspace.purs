@@ -83,4 +83,4 @@ sync m = when (m.env.native) do
   background <- B.cssProperty ".workspace" "--sapi-white"
   foreground <- B.cssProperty ".workspace" "--sapi-ink"
   caption <- B.cssProperty ".workspace" "--sapi-bg"
-  B.nativeMessage $ D.json {workspaces: if native m then m.workspaces else O.empty, owner: if native m then m.selected else "", active: D.json (M.activeTab m).id, visible: native m && A.elem N.Workspace (M.visiblePanes m) && m.dialog == Nothing && m.menu == Nothing, dark: m.theme == "dark", background, foreground, captionBackground: caption, rect:{x:box.x,y:box.y,width:box.width,height:box.height}}
+  B.nativeMessage $ D.json {onboarding: M.setupRequired m, onboardingStep: D.s "step" m.account, workspaces: if native m then m.workspaces else O.empty, owner: if native m then m.selected else "", active: D.json (M.activeTab m).id, visible: not (M.setupRequired m) && native m && A.elem N.Workspace (M.visiblePanes m) && m.dialog == Nothing && m.menu == Nothing, dark: m.theme == "dark", background, foreground, captionBackground: caption, rect:{x:box.x,y:box.y,width:box.width,height:box.height}}

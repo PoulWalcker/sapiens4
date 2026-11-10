@@ -296,4 +296,7 @@ decodeDocument r = X.decodeDocument (S.take 5 r.key == "tasks")
 
 
 accountBlocked :: Model -> Boolean
-accountBlocked m = not (remote m) && (activeRecord m).location == X.Local && D.n "schema" m.account > 0.0 && (not (D.b "ready" m.account) || D.s "hold" m.account /= "")
+accountBlocked m = setupRequired m || not (remote m) && (activeRecord m).location == X.Local && D.n "schema" m.account > 0.0 && (not (D.b "ready" m.account) || D.s "hold" m.account /= "")
+
+setupRequired :: Model -> Boolean
+setupRequired m = not (remote m) && (not m.setupChecked || not (D.b "completed" m.account))

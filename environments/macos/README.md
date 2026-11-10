@@ -39,7 +39,11 @@ Actual macOS 13 launch/login/exec acceptance remains open.
 
 Data and configuration default to `~/Library/Application Support/Sapiens4 Development/data`
 and the adjacent `config` directory. Use `SAPIENS_DATA_DIR` and `SAPIENS_CONFIG_DIR`
-for synthetic validation. The app starts its own host on a dynamic loopback port;
+for disposable validation. Welcome and storage selection load locally before any
+Corpora is initialized. Open existing data attaches the selected complete Data
+Root without copying it. The selection is saved in `config/storage.json`, outside
+the Data Root; later launches reopen it automatically. Missing, locked or
+incompatible data returns to storage selection. The app starts its own host on a dynamic loopback port;
 `desktop-server.log` is in the data directory. Closing the window leaves the app
 running; Quit stops its host. No login item is installed.
 

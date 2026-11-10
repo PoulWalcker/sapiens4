@@ -141,7 +141,10 @@ update action m = case action of
             Just record -> [Dispatch $ Shell.OpenDialog M.HostPairing $ F.CorporaRecord record false]) else []
       in Changed (if localPair then next {env=m.env {search=""}} else next) ([SaveRegistry registry.records] <> connect <> pairing <> [Sync])
   Entered record cached ->
-    let current = m {active=record.key,connection=M.Offline,polling=true,saving=false,nativeReporting=false,nativeReports=[],epoch=m.epoch+1,dialog=Nothing,scrollPosition=Nothing}
+    let current = m {active=record.key,connection=M.Offline,polling=true,feedback="",saving=false,nativeReporting=false,nativeReports=[],epoch=m.epoch+1,dialog=case m.dialog of
+          Just d | d.kind == M.Onboarding -> Just d
+          _ -> Nothing
+        ,scrollPosition=Nothing}
         updated = case cached of
           Just snapshot -> M.resetSnapshot snapshot current
           Nothing -> current {snapshot=X.emptySnapshot,agents=[],documents=O.empty}
@@ -195,7 +198,7 @@ update action m = case action of
     | epoch /= m.epoch || active /= m.active -> Unchanged
     | otherwise -> case result of
         Left failure ->
-          let updated = m {polling=false,connection=M.connectionResult false m.connection,feedback=if D.matches "revoked|another window|^Invalid snapshot response:" failure then failure else m.feedback}
+          let updated = m {polling=false,connection=M.connectionResult false m.connection,feedback=if M.setupRequired m || D.matches "revoked|another window|^Invalid snapshot response:" failure then failure else m.feedback}
           in Changed updated (schedulePoll updated)
         Right {snapshot,now} ->
           let same = m.snapshot.corpora.id == snapshot.corpora.id

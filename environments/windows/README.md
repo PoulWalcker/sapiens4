@@ -43,7 +43,11 @@ instead of MSVC. The WebView2 loader is checksum-pinned. Publisher signing uses
 
 Data defaults to `%LOCALAPPDATA%\Sapiens4 Development\data`, with configuration
 in the adjacent `config` directory. `SAPIENS_DATA_DIR` and `SAPIENS_CONFIG_DIR`
-allow synthetic validation. The app owns its host, uses a dynamic loopback port,
+allow disposable validation. Welcome and storage selection open in the same
+window before the backend starts. Open existing data attaches a complete Data
+Root in place. Its location is saved in `config/storage.json`; missing, locked or
+incompatible data returns to storage selection without creating replacement data.
+The app owns its host, uses a dynamic loopback port,
 and stops the host on close. Production update discovery is disabled.
 
 ```powershell

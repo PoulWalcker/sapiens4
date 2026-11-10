@@ -2,6 +2,7 @@
 module Main where
 
 import Types
+import DataRoot
 import HostServer
 import Assets
 import BuildUI
@@ -31,7 +32,7 @@ import System.Posix.Signals
 #endif
 
 main :: IO ()
-main = run `catches` [Handler (\(code::ExitCode) -> throwIO code), Handler (\(e::SomeException) -> hPutStrLn stderr (displayException e) >> exitFailure)]
+main = run `catches` [Handler (\(code::ExitCode) -> throwIO code), Handler (\(e::SomeException) -> hPutStrLn stderr (case fromException e of Just (APIError _ message) -> T.unpack message; Nothing -> storageMessage e) >> exitFailure)]
 run :: IO ()
 run = do
  setLocaleEncoding utf8
@@ -42,6 +43,9 @@ run = do
  setEnv "SAPIENS_REPOSITORY" root
  case args of
   ["build-ui"] -> buildUI root
+  ["check-data",directory,"new"] -> checkDataRoot StartNew directory
+  ["check-data",directory,"existing"] -> checkDataRoot AttachExisting directory
+  "check-data":_ -> failure 400 "Usage: sapiens4 check-data DIRECTORY new|existing"
   ["control",config,payload] -> jsonCommand $ do
    value <- either (failure 400 . T.pack) pure (eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack payload))))
    require (case value of Object _ -> True; _ -> False) 400 "Expected a JSON object"

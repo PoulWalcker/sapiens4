@@ -28,9 +28,14 @@ http://127.0.0.1:4174/workspace/. Existing checkouts initialize dependencies wit
 `git submodule update --init --recursive`.
 
 Source startup and package assembly download the pinned Codex payload to
-`.build/codex` and verify it on subsequent runs. First launch opens Welcome → ChatGPT sign-in → optional
-computer permissions → workspace. Authentication belongs to Sapiens; no separate
-terminal login is needed. Completed setup is retained across restarts.
+`.build/codex` and verify it on subsequent runs. Desktop first launch opens Welcome → Your data →
+AI connection → optional computer access → Ready, inside one application window.
+Choose the standard data directory or attach an existing complete Sapiens Data
+Root in place. The saved location is reused on later launches; unavailable, locked
+or incompatible data returns to storage selection without creating a replacement.
+If several local Corpora exist, setup lets you choose which to open first.
+Authentication belongs to Sapiens; no separate terminal login is needed.
+Setup completes only when you choose Open Sapiens on the Ready screen.
 `runghc build/Build.hs` compiles the backend, native shell and UI without acquiring
 Codex. Platform `--build-only`/`-BuildOnly` commands also build Blindly.
 

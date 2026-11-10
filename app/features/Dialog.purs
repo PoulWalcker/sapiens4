@@ -66,9 +66,9 @@ make kind record m = {providerPage:M.Providers,kind,title,record,fields,content:
 view :: M.Model -> V.Html
 view m = case m.dialog of
   Nothing -> V.node "dialog" [V.id "modal"] []
-  Just d -> V.node "dialog" [V.id $ if M.corporaDialog d.kind then "corpora-dialog" else "modal",V.cls $ if d.kind == M.AppMenu then "app-menu-sheet" else "",V.attr "aria-labelledby" "dialog-title",V.on "cancel" \e -> Link e CloseDialog]
+  Just d -> V.node "dialog" [V.id $ if M.corporaDialog d.kind then "corpora-dialog" else "modal",V.cls $ if d.kind == M.AppMenu then "app-menu-sheet" else if d.kind == M.Onboarding then "onboarding" else "",V.attr "aria-labelledby" "dialog-title",V.on "cancel" \e -> Link e CloseDialog]
     [V.div (if M.corporaDialog d.kind then "corpora-menu-heading" else "modal-top") [V.span [V.cls "tiny-label"] "SAPIENS4",V.when (dismissible d) $ V.icon (if M.corporaDialog d.kind then "Close" else "Close dialog") "×" CloseDialog]
-    ,V.node "div" [V.id $ if M.corporaDialog d.kind then "corpora-dialog-body" else "modal-content"] [V.when (d.kind == M.AIProviders && d.providerPage /= M.Providers && not (authenticating d)) $ V.control [V.cls "ai-provider-back"] "‹  AI Connections" $ ProviderNavigate M.Providers,V.node "h2" [V.id "dialog-title",V.attr "tabindex" "-1",V.cls (if d.kind == M.AIProviders then "provider-title" else "")] ((if d.kind == M.AIProviders && d.providerPage /= M.Providers then [providerIcon "codex"] else []) <> [V.text $ dialogTitle d]),body m d,V.textNode "p" [V.cls "corpora-feedback",V.attr "role" "status"] ((M.dialogError d))
+    ,V.node "div" [V.id $ if M.corporaDialog d.kind then "corpora-dialog-body" else "modal-content"] [V.when (A.elem d.kind [M.AIProviders,M.Onboarding] && d.providerPage /= M.Providers && not (authenticating d)) $ V.control [V.cls "ai-provider-back"] "‹  AI Connections" $ ProviderNavigate M.Providers,V.node "h2" [V.id "dialog-title",V.attr "tabindex" "-1",V.cls (if A.elem d.kind [M.AIProviders,M.Onboarding] then "provider-title" else "")] ((if A.elem d.kind [M.AIProviders,M.Onboarding] && d.providerPage /= M.Providers then [providerIcon "codex"] else []) <> [V.text $ dialogTitle d]),body m d,V.textNode "p" [V.cls "corpora-feedback",V.attr "role" "status"] ((M.dialogError d))
       ,V.when (A.elem d.kind [M.Onboarding,M.AIProviders,M.Computer] && M.dialogError d /= "") $ V.button "button" "Check again" $ OnboardingPoll d.identity]]
 
 authenticating :: M.Dialog -> Boolean
@@ -96,8 +96,15 @@ dialogTitle d
         _ -> "Connecting Codex"
       _ -> "Codex"
   | d.kind == M.Onboarding = case d.content of
-      F.Setup value -> if D.s "step" value == "welcome" then "Choose your AI" else connectionTitle value
-      _ -> "Choose your AI"
+      F.Setup value -> case D.s "step" value of
+        "permissions" -> "Computer access"
+        "corpora" -> "Your Corpora"
+        "ready" -> "You're ready"
+        _ -> case d.providerPage of
+          M.Providers -> "Your AI lineup"
+          M.CodexAuth -> connectionTitle value
+          _ -> "Codex"
+      _ -> "Your AI lineup"
   | otherwise = d.title
 
 connectionTitle :: Json -> String
@@ -127,10 +134,10 @@ body m d = case d.kind of
       ,V.span [V.cls "tag"] (if owner == "" then "Available" else "In use · " <> (M.agent m owner).name)]
     ,V.p "" (if windows then "Windows UI Automation works with accessible apps. Elevated apps and secure system dialogs cannot be controlled." else "Computer control is optional. Chat does not need Accessibility access.")
     ,case d.content of
-      F.Setup value -> computerAccess d value
+      F.Setup value -> computerAccess m d value
       _ -> V.p "" "Checking computer access…"]
   M.Onboarding -> case d.content of
-    F.Setup value -> providersView d value
+    F.Setup value -> onboardingView m d value
     _ -> V.p "" "Checking connections…"
   M.AgentSettings -> form "Save"
     [V.node "div" [V.cls "settings-tabs",V.attr "role" "tablist",V.label "Sapi settings"] $ map (\caption -> V.textNode "button" [V.attr "type" "button",V.attr "role" "tab",V.attr "aria-selected" $ show $ caption == "Profile",V.disabled $ caption /= "Profile"] (caption)) ["Profile","Context","Usage","Limits"]
@@ -369,43 +376,55 @@ aiProvidersView d value =
     ,V.div "ai-provider-list" $ [codex] <> comingSoonProviders]
 
 
-providersView :: M.Dialog -> Json -> V.Html
-providersView d value =
-  let permission = D.s "computer_permission" value
-      setup = setupButton d
-      signing = D.s "provider" value == "signing_in"
-      alreadyConnected = D.s "provider" value == "signed_in"
-  in V.div "setup-screen" $ case D.s "step" value of
-    "welcome" ->
-      [V.p "form-hint" "Start with Codex. More AI tools are on the way."
-      ,V.div "ai-provider-list" $ [providerRow "codex" "Codex" (if alreadyConnected then "Already connected" else "OpenAI")
-          (V.control [V.cls "button primary",V.disabled $ M.dialogBusy d] (if alreadyConnected then "Continue" else "Connect") $ DialogCommand $ Intent.Setup "connect")] <> comingSoonProviders]
-    "sign_in" ->
-      [signInView value
-      ,V.when (not signing) $ setup "choose" "Back to providers"]
-    "permissions" -> [V.p "form-hint" "Codex connected. Finishing setup…"]
-    _ ->
-      [V.p "form-hint" "Optional · Configure computer access only when you need it."
-      ,V.p "" $ case permission of
-        "missing" -> "The computer helper is missing. Reinstall Sapiens to repair it."
-        "granted" -> "Computer control is enabled."
-        "denied" -> "To interact with apps on your Mac, Sapiens needs Accessibility permission."
-        "unavailable" -> "Couldn't check Accessibility. Check again or open System Settings."
-        "not_required" -> "Computer control works with accessible Windows apps."
-        _ -> "Computer control needs macOS Accessibility permission."
-      ,V.when (A.elem permission ["not_requested","denied","unavailable"]) $ setup "permission" "Enable Accessibility"
-      ,V.when (permission == "granted" || permission == "unavailable") $ setup "refresh" "Check again"
-      ,V.button "button" (if A.elem permission ["not_requested","denied","unavailable"] then "Not now" else "Done") CloseDialog]
+onboardingCorpora :: M.Model -> Array X.Corpora
+onboardingCorpora m = A.filter (\r -> r.location == X.Local && r.status /= X.Archived) m.records
 
-computerAccess :: M.Dialog -> Json -> V.Html
-computerAccess d value = V.div "setup-screen"
+startingCorpora :: M.Model -> Json -> Maybe X.Corpora
+startingCorpora m value = A.find (( _ == D.s "selected_corpora" value) <<< _.id) (onboardingCorpora m)
+
+onboardingConnected :: M.Model -> Boolean
+onboardingConnected m = M.online m && m.snapshot.corpora.id == (M.activeRecord m).id && A.any (( _ == m.active) <<< _.key) (onboardingCorpora m)
+
+onboardingView :: M.Model -> M.Dialog -> Json -> V.Html
+onboardingView m d value = V.div "setup-screen" $
+  [V.when (not (onboardingConnected m) && A.elem step ["permissions","corpora","ready"]) $ V.textNode "p" [V.attr "role" "status"] (D.fallback "Opening your Corpora…" m.feedback)] <> case step of
+  "permissions" ->
+    [V.p "form-hint" "Computer control is optional. Chat works without it."
+    ,computerAccess m d value]
+  "corpora" ->
+    [V.p "form-hint" "Choose the Corpora you'd like to open first."
+    ,V.div "form-stack" $ map (\r -> V.control [V.cls "button",V.disabled $ M.busy m,V.attr "aria-pressed" $ show $ r.key == m.active] r.name (EnterCorpora r.key)) (onboardingCorpora m)
+    ,V.control [V.cls "button primary",V.disabled $ M.dialogBusy d || M.busy m || not (onboardingConnected m)] "Continue" $ DialogCommand $ Intent.Setup "corpora-done"]
+  "ready" ->
+    [V.p "" ("AI connection · " <> if D.s "provider" value == "signed_in" then "Codex connected" else "Not connected")
+    ,V.p "" ("Computer access · " <> case permission of
+      "granted" -> "Enabled"
+      "not_required" -> "Available for accessible apps"
+      "missing" -> "Helper unavailable"
+      _ -> "Not enabled")
+    ,V.p "" ("Corpora · " <> (M.activeRecord m).name)
+    ,V.p "form-hint" "Remote Control — Coming soon"
+    ,V.p "form-hint" "Analytics — Coming soon"
+    ,V.control [V.cls "button primary",V.disabled $ M.dialogBusy d || M.busy m || not (onboardingConnected m)] (if M.dialogBusy d then "Opening Sapiens…" else "Open Sapiens") $ DialogCommand $ Intent.Setup "finish"]
+  _ ->
+    [aiProvidersView d value
+    ,V.when (A.elem d.providerPage [M.Providers,M.CodexDetails] && D.b "ready" value) $ setupButton d "provider-next" "Continue"]
+  where
+  permission = D.s "computer_permission" value
+  step = D.s "step" value
+
+computerAccess :: M.Model -> M.Dialog -> Json -> V.Html
+computerAccess m d value = V.div "setup-screen"
   [V.p "" $ case permission of
     "missing" -> "Computer helper missing. Reinstall Sapiens to repair it."
     "granted" -> "Computer control enabled."
     "denied" -> "To interact with apps on your Mac, Sapiens needs Accessibility permission."
     "not_required" -> "Computer control works with accessible Windows apps."
     _ -> "Couldn't check Accessibility. Check again or open System Settings."
-  ,V.when (A.elem permission ["not_requested","denied","unavailable"]) $ setupButton d "permission" "Enable Accessibility"
-  ,V.when (permission /= "missing" && permission /= "not_required") $ setupButton d "refresh" "Check again"
-  ,V.button "button" (if A.elem permission ["not_requested","denied","unavailable"] then "Not now" else "Done") CloseDialog]
+  ,V.node "div" [V.cls "actions",V.style "margin-top:24px"]
+    [V.when (A.elem permission ["not_requested","denied","unavailable"]) $ setupButton d "permission" "Enable access"
+    ,V.when (permission /= "missing" && permission /= "not_required") $ setupButton d "refresh" "Check again"
+    ,if d.kind == M.Onboarding then
+      V.control [V.cls "button primary",V.style "margin-left:auto",V.disabled $ M.dialogBusy d || A.length (onboardingCorpora m) <= 1 && not (onboardingConnected m)] (if A.elem permission ["granted","not_required"] then "Continue" else "Not now") $ DialogCommand $ Intent.Setup "permissions-done"
+     else V.control [V.cls "button",V.style "margin-left:auto"] (if A.elem permission ["not_requested","denied","unavailable"] then "Not now" else "Done") CloseDialog]]
   where permission = D.s "computer_permission" value
