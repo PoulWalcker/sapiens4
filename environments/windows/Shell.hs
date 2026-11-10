@@ -116,7 +116,8 @@ desktopSession memory probe = do
   hwnd <- createMainWindow instanceHandle proc
   resizeContent hwnd 560 600
   label <- withWide "STATIC" $ \className -> withWide "Starting Sapiens4…" $ \title ->
-    createWindow 0 className title 0x50000201 0 0 1440 960 hwnd nullPtr instanceHandle nullPtr
+    -- SS_CENTER wraps startup diagnostics; SS_CENTERIMAGE forces one line.
+    createWindow 0 className title 0x50000001 0 0 1440 960 hwnd nullPtr instanceHandle nullPtr
   setupButtons <- forM [(101,"Install WebView2"),(102,"Retry"),(103,"Cancel")] $ \(ident,title) ->
     withWide "BUTTON" $ \className -> withWide title $ \caption ->
       createWindow 0 className caption 0x40010000 (20 + (ident-101)*160) 230 150 38 hwnd (intPtrToPtr (fromIntegral ident)) instanceHandle nullPtr
