@@ -53,7 +53,7 @@ foreign import ccall unsafe "PostQuitMessage" quitMessage :: Int32 -> IO ()
 foreign import ccall unsafe "GetClientRect" clientRect :: Window -> Ptr Int32 -> IO Int32
 foreign import ccall unsafe "GetWindowRect" windowRect :: Window -> Ptr Int32 -> IO Int32
 foreign import ccall safe "SetWindowPos" setWindowPos :: Window -> Window -> Int32 -> Int32 -> Int32 -> Int32 -> Word32 -> IO Int32
-foreign import ccall unsafe "GetSystemMetrics" systemMetric :: Int32 -> IO Int32
+foreign import ccall unsafe "SystemParametersInfoW" systemParametersInfo :: Word32 -> Word32 -> Ptr Int32 -> Word32 -> IO Int32
 foreign import ccall safe "SetForegroundWindow" foregroundWindow :: Window -> IO Int32
 foreign import ccall unsafe "GetFocus" focusedWindow :: IO Window
 foreign import ccall unsafe "IsChild" childWindow :: Window -> Window -> IO Int32
@@ -252,6 +252,13 @@ rectangle window = allocaArray 4 $ \rect -> do
   width <- peekElemOff rect 2
   height <- peekElemOff rect 3
   pure (fromIntegral width, fromIntegral height)
+
+workArea :: IO (Int32, Int32, Int32, Int32)
+workArea = allocaArray 4 $ \rect -> do
+  result <- systemParametersInfo 0x0030 0 rect 0 -- SPI_GETWORKAREA excludes the taskbar.
+  when (result == 0) $ ioError $ userError "Cannot get desktop work area"
+  [left, upper, right, lower] <- peekArray 4 rect
+  pure (left, upper, right - left, lower - upper)
 
 windowTitle :: Window -> String -> IO ()
 windowTitle window title = withWide title $ void . setWindowText window

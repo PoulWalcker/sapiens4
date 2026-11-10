@@ -96,11 +96,10 @@ runDesktop probe = runInBoundThread $ bracket newArena freeArena $ \memory ->
       registered <- registerClass klass
       when (registered == 0) $ ioError $ userError "Cannot register desktop window"
       retain memory (withWide "Sapiens4HaskellWindow" $ \name -> void $ unregisterClass name instanceHandle)
-      screenWidth <- systemMetric 0
-      screenHeight <- systemMetric 1
+      (left, upper, screenWidth, screenHeight) <- workArea
       let width = min 1440 screenWidth
           height = min 960 screenHeight
-      createWindow 0 className title 0x00CF0000 ((screenWidth - width) `div` 2) ((screenHeight - height) `div` 2) width height nullPtr nullPtr instanceHandle nullPtr
+      createWindow 0 className title 0x00CF0000 (left + (screenWidth - width) `div` 2) (upper + (screenHeight - height) `div` 2) width height nullPtr nullPtr instanceHandle nullPtr
     when (hwnd == nullPtr) $ ioError $ userError "Cannot create desktop window"
     flip finally (void $ destroyWindow hwnd) $ do
       label <- withWide "STATIC" $ \className -> withWide "Starting Sapiens4…" $ \title ->
