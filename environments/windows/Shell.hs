@@ -157,46 +157,97 @@ desktopSession memory probe = do
         Just input -> do
           available <- hostRunning host
           storageReply input (object ["kind" .= ("error" :: String),"error" .= storageMessage e,"available" .= available])
-      startSelected choice directory request = do
+      installStorage selected url selection = do
+        view <- readIORef shellRef >>= maybe (ioError $ userError "The application window closed.") pure
+        atomicModifyIORef' browserRef (\value -> (Nothing,value)) >>= mapM_ closeBrowser
+        browser <- newBrowser memory hwnd view selected top
+        writeIORef browserRef (Just browser)
+        (do
+          writeIORef onboardingStep ""
+          resizeContent hwnd 560 600
+          navigate view url
+          when probe $ do
+            putStrLn "TITLE: Sapiens4"
+            putStrLn $ "Sapiens4: " ++ url
+          -- Publish only after the replacement browser has been installed.
+          mapM_ saveDataDirectory selection) `onException`
+            (atomicModifyIORef' browserRef (\value -> (Nothing,value)) >>= mapM_ closeBrowser)
+      disconnectStorage = do
+        current <- readIORef (serverProcess host)
+        alive <- serverRunning current
+        unless alive $ writeIORef (serverProcess host) Nothing
+        writeIORef (origin host) Nothing
+        atomicModifyIORef' browserRef (\value -> (Nothing,value)) >>= mapM_ closeBrowser
+        writeIORef initialStorage False
+        writeIORef recoveryError $ Just "We couldn't open the selected storage or restart your previous storage. Sapiens4 is disconnected. Your saved storage selection and data are unchanged. Choose a folder to try again."
+        writeIORef onboarding True
+        writeIORef onboardingStep ""
+        writeIORef starting False
+        resizeContent hwnd 560 600
+        readIORef shellRef >>= mapM_ (\view -> navigate view bootstrapURL)
+      startSelected choice directory request = mask $ \unmask -> do
         busy <- atomicModifyIORef' starting (\value -> (True,value))
         unless busy $ do
           storageScript "window.storageLoading?.()"
           previous <- readIORef (serverProcess host)
           previousOrigin <- readIORef (origin host)
-          task <- async $ do
+          let report e = post $ writeIORef starting False >> storageFailure request e
+              work action = mask_ $ async (unmask action) >>= writeIORef workerRef . Just
+              abandon = do
+                stopped <- try (closeHost host)
+                case stopped of
+                  Left (e :: SomeException) | Just (_ :: SomeAsyncException) <- fromException e -> throwIO e
+                  _ -> post disconnectStorage
+              recover failure = do
+                alive <- serverRunning previous
+                if alive then report failure else case previous of
+                  Nothing -> abandon
+                  Just original -> do
+                    restored <- try (restartHost original host)
+                    case restored of
+                      Left (e :: SomeException) -> case fromException e :: Maybe SomeAsyncException of
+                        Just _ -> throwIO e
+                        Nothing -> abandon
+                      Right (selected,url) -> post $ do
+                        installed <- try (installStorage selected url Nothing)
+                        case installed of
+                          Left (_ :: SomeException) -> work abandon
+                          Right () -> do
+                            writeIORef starting False
+                            withWide "We couldn't switch storage. Your previous storage has been reopened. Your saved storage selection and data are unchanged." $ \message ->
+                              withWide "Sapiens4 storage" $ \title -> void $ messageBox hwnd message title 0x30
+          task <- async $ unmask $ do
             result <- try $ do
               selectedDirectory <- canonicalizePath directory
               current <- activeDataDirectory host
               available <- hostRunning host
               startedAs <- activeStorageChoice host
-              if available && current==Just selectedDirectory && (choice==AttachExisting || choice==StartNew && startedAs==Just StartNew) then pure Nothing else do
+              if available && not (isNothing previousOrigin) && current==Just selectedDirectory && (choice==AttachExisting || choice==StartNew && startedAs==Just StartNew) then
+                post $ do
+                  writeIORef starting False
+                  mapM_ (\input -> storageReply input (object ["kind" .= ("unchanged" :: String)])) request
+              else do
                 let selected = host {dataDirectory=selectedDirectory}
                 checkStorage selected choice
-                closeHost host
-                -- Keep the previous directory available for explicit recovery
-                -- if the replacement process cannot start.
-                started <- try (startHost choice selected)
-                url <- case started of
-                  Left (e :: SomeException) -> writeIORef (serverProcess host) previous >> writeIORef (origin host) previousOrigin >> throwIO e
-                  Right address -> pure address
-                saveDataDirectory selectedDirectory `onException` (closeHost host >> writeIORef (serverProcess host) previous >> writeIORef (origin host) previousOrigin)
-                pure (Just (selected,url))
-            post $ do
-              writeIORef starting False
-              case result of
-                Left (e :: SomeException) -> storageFailure request e
-                Right Nothing -> mapM_ (\input -> storageReply input (object ["kind" .= ("unchanged" :: String)])) request
-                Right (Just (selected,url)) -> flip catch (\(e :: SomeException) -> storageFailure request e) $ do
-                  view <- readIORef shellRef >>= maybe (ioError $ userError "The application window closed.") pure
-                  atomicModifyIORef' browserRef (\value -> (Nothing,value)) >>= mapM_ closeBrowser
-                  browser <- newBrowser memory hwnd view selected top
-                  writeIORef browserRef (Just browser)
-                  writeIORef onboardingStep ""
-                  resizeContent hwnd 560 600
-                  navigate view url
-                  when probe $ do
-                    putStrLn "TITLE: Sapiens4"
-                    putStrLn $ "Sapiens4: " ++ url
+                -- Read the UI asset before stopping the current backend too.
+                void (B.readFile $ runtimeDirectory host </> ".build/web/guest.js")
+                switched <- try $ do
+                  url <- startHost choice selected
+                  post $ do
+                    installed <- try (installStorage selected url (Just selectedDirectory))
+                    case installed of
+                      Left (e :: SomeException) -> work (recover e)
+                      Right () -> writeIORef starting False
+                case switched of
+                  Left (e :: SomeException) -> case fromException e :: Maybe SomeAsyncException of
+                    Just _ -> throwIO e
+                    Nothing -> recover e
+                  Right () -> pure ()
+            case result of
+              Left (e :: SomeException) -> case fromException e :: Maybe SomeAsyncException of
+                Just _ -> throwIO e
+                Nothing -> report e
+              Right () -> pure ()
           writeIORef workerRef (Just task)
       storageMessageReceived request = do
         step <- readIORef onboardingStep
@@ -284,7 +335,9 @@ desktopSession memory probe = do
               when (bootstrapSource current) $ do
                 recovered <- atomicModifyIORef' recoveryError (\value -> (Nothing,value))
                 case recovered of
-                  Just message -> storageError message
+                  Just message -> do
+                    writeIORef starting False
+                    storageScript ("window.storageError(" ++ T.unpack (TE.decodeUtf8 $ L.toStrict $ encode message) ++ ")")
                   Nothing -> do
                     first <- atomicModifyIORef' initialStorage (\value -> (False,value))
                     when first $ do
