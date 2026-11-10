@@ -77,10 +77,10 @@ handle runtime input = session input
             H.modify_ _ {accountChecking=false}
             current <- H.get
             when (current.sequence == m.sequence) do
-              let selected = case DialogView.startingCorpora current value of
+              let selected = if D.b "completed" value then Nothing else case DialogView.startingCorpora current value of
                     Just record -> Just record
                     Nothing -> case A.uncons (DialogView.onboardingCorpora current) of
-                      Just {head,tail} | not (D.b "completed" value) && A.null tail -> Just head
+                      Just {head,tail} | A.null tail -> Just head
                       _ -> Nothing
               traverse_ (\record -> when ((D.s "key" record) /= current.active) $ dispatch $ EnterCorpora (D.s "key" record)) selected
               restored <- H.get
