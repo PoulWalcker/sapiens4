@@ -276,7 +276,9 @@ setupButton d name caption = (if name == "back" then V.navigationControl else V.
 signInView :: Json -> V.Html
 signInView value = V.div "account-sign-in" $
   [V.textNode "p" [V.attr "role" "status"] $ if signing then "Finish signing in with ChatGPT in your browser. Waiting for sign-in…" else if provider == "sign_in_required" && not (A.elem state ["failed","expired"]) then "Finish signing in with ChatGPT in your browser." else ""
-  ,V.when (provider == "missing") $ V.p "" "The Codex installation is missing or couldn't start. Reinstall Sapiens if the problem persists."
+  ,V.when (provider == "missing") $ V.div ""
+    [V.p "" "We couldn't find a working Codex installation. Install Codex, then check again."
+    ,V.div "account-actions" [V.link "https://openai.com/codex/" "Download Codex"]]
   ,V.when (provider == "unavailable") $ V.p "" "Your account may still be connected. Try checking again."
   ,V.when (state == "failed" || state == "expired" || state == "browser_busy" || state == "logout_failed" || state == "cancelled") $ V.p "" $ case state of
     "expired" -> "Sign-in expired. Try again or use a one-time code."
@@ -293,7 +295,7 @@ signInView value = V.div "account-sign-in" $
     [V.p "" "Enter this one-time code on the official OpenAI page. Only continue if you started this sign-in in Sapiens."
     ,V.textNode "strong" [] (D.s "code" login)]
   ,V.when signing $ V.control [V.cls "button",V.id "cancel-codex-login"] "Cancel" $ DialogCommand $ Intent.Setup "cancel"
-  ,V.when (not signing && provider /= "missing") $ V.button "button" "Check again" $ DialogCommand $ Intent.Setup "refresh"
+  ,V.when (not signing) $ V.button "button" "Check again" $ DialogCommand $ Intent.Setup "refresh"
   ,V.when (provider == "sign_in_required") $ V.node "details" [V.cls "account-help"]
     [V.textNode "summary" [] "Having trouble signing in?"
     ,V.p "form-hint" "You can connect the same ChatGPT account using a one-time code. Device code login must be enabled in your ChatGPT security settings."
