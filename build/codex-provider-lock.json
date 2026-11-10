@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "version": "0.167.0",
+  "upstreamCommit": "086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a",
+  "platforms": {
+    "darwin-arm64": {
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.167.0/codex-package-aarch64-apple-darwin.tar.gz",
+      "sha256": "af45ed45d940d7998809622c1c0296d3098ed7d7fad695284422c228bd454517",
+      "size": 166340155,
+      "entrypoint": "bin/codex"
+    },
+    "windows-x64": {
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.167.0/codex-package-x86_64-pc-windows-msvc.tar.gz",
+      "sha256": "60567ca940bbaf6c10501805d9909d1328179231e2d47a0deec7a1368bb21641",
+      "size": 201675464,
+      "entrypoint": "bin/codex.exe"
+    }
+  },
+  "notices": [
+    {
+      "path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/openai/codex/086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a/LICENSE",
+      "sha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc"
+    },
+    {
+      "path": "NOTICE",
+      "url": "https://raw.githubusercontent.com/openai/codex/086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a/NOTICE",
+      "sha256": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915"
+    }
+  ]
+}

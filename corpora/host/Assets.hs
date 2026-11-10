@@ -17,7 +17,8 @@ publicAssets =
   ("/workspace/styles.css","text/css","app/theme/styles.css"),
   ("/assets/sapi-theme.css","text/css","app/theme/sapi-theme.css")]
  ++ [("/app-icon-"<>T.pack (show n)<>".png","image/png","app/shell/app-icon-"++show n++".png") | n <- [180,192,512::Int]]
- ++ [("/"<>n<>".svg","image/svg+xml","app/shell/"++T.unpack n++".svg") | n <- ["favicon","favicon-dark"]]
+ ++ [("/"<>n<>".svg","image/svg+xml","app/shell/"++T.unpack n++".svg") | n <- ["favicon","favicon-dark","ai-codex","ai-claude","ai-gemini","ai-kimi"]]
+
 asset :: FilePath -> Text -> IO (Maybe (Text,BL.ByteString))
 asset root path = case [(mime,file) | (p,mime,file) <- allAssets, p == path] of
  [] -> pure Nothing

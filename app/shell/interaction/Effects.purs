@@ -67,6 +67,7 @@ refresh runtime dispatch requested operation = attempt operation \result -> do
           H.modify_ _ {lastPreview=now}
           preview runtime
         sync
+        dispatch CheckSetup
     latest <- H.get
     unless (D.b "hidden" latest.env) $
       later (if M.remote latest || not latest.online then 2000.0 else 750.0) $

@@ -61,6 +61,7 @@ handle runtime dispatch action = case action of
           H.modify_ _ {env=D.put "search" (D.text "") current.env}
           traverse_ (dispatch <<< OpenDialog M.HostPairing) $ A.find (( _ == "Local") <<< D.s "location") registry.records
         E.sync
+        unless (D.valid record) $ dispatch CheckSetup
   EnterCorpora key -> yes do
     m <- H.get
     unless (m.busy || key == m.active) $ traverse_ enter $ A.find (\r -> D.s "key" r == key && D.s "status" r /= "archived") m.records

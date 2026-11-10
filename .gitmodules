@@ -1,6 +1,6 @@
 [submodule "blindly4"]
 	path = submodules/blindly4
-	url = ../blindly4.git
+	url = https://github.com/aleski-green/blindly4.git
 [submodule "libs4"]
 	path = submodules/libs4
-	url = https://github.com/aleski-green/libs4.git
+	url = https://github.com/PoulWalcker/libs4.git

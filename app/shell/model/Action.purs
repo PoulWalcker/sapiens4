@@ -1,5 +1,6 @@
 module Sapiens.Action where
 
+import Sapiens.Model as M
 import Data.Argonaut.Core (Json)
 import Sapiens.Model (DialogKind)
 import Sapiens.Navigation (Activity, Scope, Pane, Period)
@@ -7,6 +8,7 @@ import Web.Event.Event (Event)
 
 data Action
   = Initialize
+  | CheckSetup
   | LoadRegistry
   | Finalize
   | Poll
@@ -64,6 +66,8 @@ data Action
   | ScanFrame Int
   | UploadQR
   | StopScan
+  | ProviderNavigate M.ProviderPage
+  | OnboardingPoll Int
   | HostPairPoll Int
   | Install
   | Submit Event Action

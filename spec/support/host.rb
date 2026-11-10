@@ -17,7 +17,11 @@ class Host
       File.write(binary, "#!#{RbConfig.ruby}\nload #{File.join(__dir__, 'provider.rb').inspect}\n")
       File.chmod(0755, binary)
     end
-    @environment = {'SAPIENS_CODEX_BINARY' => binary, 'SAPIENS_CONTRACT_ENV' => root,
+    config = File.join(root, 'fixture config')
+    FileUtils.mkdir_p(File.join(config, 'codex'))
+    File.write(File.join(config, 'codex/auth.json'), 'synthetic fixture authentication')
+    Contract.atomic_json(File.join(config, 'onboarding.json'), schema: 1, welcomed: true, completed: true)
+    @environment = {'SAPIENS_CONFIG_DIR' => config, 'SAPIENS_CODEX_BINARY' => binary, 'SAPIENS_CONTRACT_ENV' => root,
       'SAPIENS_CONTRACT_RUBY' => RbConfig.ruby, 'SAPIENS_CONTRACT_PROVIDER' => File.join(__dir__, 'provider.rb'),
       'NO_COLOR' => '1', 'SAPIENS_CODEX_MODEL' => 'gpt-6-sol',
       'SAPIENS_CODEX_REASONING_EFFORT' => 'high'}.merge(environment)

@@ -7,7 +7,7 @@ import Control.Promise (toAffE)
 import Data.Argonaut.Core (Json)
 import Data.Array as A
 import Data.Either (Either(..))
-import Data.Maybe (Maybe(..), fromMaybe)
+import Data.Maybe (Maybe(..), fromMaybe, maybe)
 import Data.Set as Set
 import Data.String as S
 import Data.String.CodeUnits as CU
@@ -66,6 +66,19 @@ handle runtime input = session input
         void $ H.fork $ void $ H.liftAff $ try $ toAffE $ B.registerWorker "/sw.js"
       unless required $ dispatch LoadRegistry
       E.sync
+    CheckSetup -> do
+      m <- H.get
+      now <- liftEffect B.now
+      unless (M.remote m || D.b "hidden" m.env || m.accountChecking || m.setupChecked && now - m.accountCheckedAt < 30000.0 || maybe false (\d -> A.elem d.kind [M.Onboarding,M.AIProviders,M.Computer]) m.dialog) do
+        H.modify_ _ {accountChecking=true,accountCheckedAt=now}
+        E.attempt (C.json "/api/host/onboarding" "GET" D.null) \result -> case result of
+          Right value -> do
+            H.modify_ _ {accountChecking=false}
+            current <- H.get
+            when (current.sequence == m.sequence) do
+              H.modify_ _ {account=value,setupChecked=true}
+              unless (D.b "completed" value) $ dispatch $ OpenDialog M.Onboarding D.empty
+          Left _ -> H.modify_ _ {accountChecking=false}
     Finalize -> liftEffect $ C.dispose runtime
     Poll -> do
       m <- H.get
@@ -188,7 +201,7 @@ handle runtime input = session input
       let text = S.trim $ M.draft m
           items = M.attachments m
           a = M.selected m
-      unless ((text == "" && A.null items) || Set.member m.selected m.sending || m.uploading > 0 || not m.online || m.busy || D.b "retired" a || D.b "archived" a || A.elem (D.str $ D.at ["corpora","status"] m.snapshot) ["paused","archived"]) do
+      unless (M.accountBlocked m || (text == "" && A.null items) || Set.member m.selected m.sending || m.uploading > 0 || not m.online || m.busy || D.b "retired" a || D.b "archived" a || A.elem (D.str $ D.at ["corpora","status"] m.snapshot) ["paused","archived"]) do
         H.modify_ _ {sending=Set.insert m.selected m.sending,mention=Nothing}
         let payload = D.obj $ [Tuple "text" (D.text text),Tuple "attachments" $ D.array $ map (D.get "id") items] <> case m.clarification of
               Just work | D.s "owner" work == m.selected -> [Tuple "workload" $ D.get "id" work]
@@ -386,6 +399,7 @@ handle runtime input = session input
     updateEnvironment
     dispatch StopScan
   resume _ = do
+    dispatch CheckSetup
     dispatch Resize
     E.restoreScroll
     E.later 32.0 E.restoreScroll

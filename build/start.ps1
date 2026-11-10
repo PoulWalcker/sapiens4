@@ -16,6 +16,10 @@ try {
         & runghc build/Build.hs
         if ($LASTEXITCODE -ne 0) { throw 'Haskell application build failed' }
     }
+    if (-not $env:SAPIENS_CODEX_BINARY) {
+        & python build/acquire-codex.py --platform windows-x64 --destination .build/codex --ensure
+        if ($LASTEXITCODE -ne 0) { throw 'Codex acquisition failed' }
+    }
     $arguments = @('--port', $Port, '--data-dir', $DataDir)
     if ($Open) { $arguments += '--open' }
     & ./.build/bin/sapiens4.exe @arguments

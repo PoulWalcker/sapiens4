@@ -6,6 +6,7 @@ import Assets
 import HTTP
 import Bridge
 import Registry
+import qualified Onboarding as O
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Exception
@@ -43,14 +44,16 @@ startHost root requested managed = do
         host <- startHost path 0 True
         pure (hostService host,hostBridge host,hostStop host)
    registry <- if managed then pure Nothing else Just <$> newRegistry service bridge child
+   onboarding <- if managed then pure Nothing else Just <$> O.openOnboarding (repositoryRoot service)
    shutdown <- newEmptyMVar
    ready <- newEmptyMVar
    let settings = setServerName "Sapiens4" $ setPort port $ setHost "127.0.0.1" $ setGracefulCloseTimeout1 1000 $ setGracefulShutdownTimeout (Just 5) $ setInstallShutdownHandler (putMVar shutdown) $ setBeforeMainLoop (putMVar ready ()) defaultSettings
-   worker <- async (runSettingsSocket settings socket (application service bridge registry port))
+   worker <- async (runSettingsSocket settings socket (application service bridge registry onboarding port))
    void (race (wait worker) (takeMVar ready))
    Service.startService service
    stopped <- newMVar False
    let stop = modifyMVar_ stopped $ \done -> if done then pure True else do
+        mapM_ O.closeOnboarding onboarding
         mapM_ closeRegistry registry
         closeBridge bridge
         readMVar shutdown >>= id
@@ -60,8 +63,8 @@ startHost root requested managed = do
         Socket.close socket
         pure True
    pure (Host port service bridge stop)
-application :: Service -> Bridge -> Maybe Registry -> Int -> Application
-application service bridge registry port req respond = respond =<< respondError (do
+application :: Service -> Bridge -> Maybe Registry -> Maybe O.Onboarding -> Int -> Application
+application service bridge registry onboarding port req respond = respond =<< respondError (do
  let method = TE.decodeUtf8 (requestMethod req)
      path = TE.decodeUtf8 (rawPathInfo req)
      target = requestTarget req
@@ -79,6 +82,10 @@ application service bridge registry port req respond = respond =<< respondError 
   stopping <- readIORef (serviceStopping service)
   when write (require (not stopping) 503 "Host is shutting down")
   case (method,T.splitOn "/" path) of
+   ("GET",["","api","host","computer"]) -> maybe (failure 404 "Local setup unavailable") (fmap (jsonResponse 200) . O.computerView) onboarding
+   ("POST",["","api","host","computer"]) -> maybe (failure 404 "Local setup unavailable") (fmap (jsonResponse 200) . flip O.computerAction data_) onboarding
+   ("GET",["","api","host","onboarding"]) -> maybe (failure 404 "Local setup unavailable") (fmap (jsonResponse 200) . O.onboardingView) onboarding
+   ("POST",["","api","host","onboarding"]) -> maybe (failure 404 "Local setup unavailable") (fmap (jsonResponse 200) . flip O.onboardingAction data_) onboarding
    ("GET",["","api","host"]) -> jsonResponse 200 <$> registryRecords r
    ("GET",["","api","host","relays"]) -> jsonResponse 200 <$> relayView r Nothing
    ("GET",["","api","host","relays",ident]) -> jsonResponse 200 <$> relayView r (Just ident)

@@ -466,3 +466,43 @@ body.sapi-workspace .notes-wiki :is(h1,h2) { font-family:Georgia,"Times New Roma
 .connection-status { display:inline-flex;align-items:center;gap:6px;white-space:nowrap;font-size:11px;color:var(--muted); }
 .connection-dot { width:6px;height:6px;flex:none;border-radius:50%;background:#888; }
 .connection-status[data-online="true"] .connection-dot { background:#3b9b69; }
+
+.account-card { border:1px solid var(--line);border-radius:10px;padding:20px;margin:18px 0; }
+.account-card h3 { font-size:15px;margin:0 0 12px; }
+.account-card h4 { font-size:14px;margin:0 0 10px; }
+.account-card p,.account-sign-in p { font-size:13px;line-height:1.6;margin:10px 0; }
+.account-connected { display:flex;align-items:center;gap:8px; }
+.account-connected::before { content:"";width:7px;height:7px;border-radius:50%;background:#3b9b69; }
+.account-actions { display:flex;flex-wrap:wrap;gap:8px;margin:16px 0 8px; }
+.account-sign-in>.button { margin:6px 8px 6px 0; }
+.account-help { margin-top:16px;font-size:12px; }
+.account-help summary { cursor:pointer; }
+.account-device-code strong { display:block;font:600 22px monospace;letter-spacing:2px;margin:14px 0; }
+.account-banner { display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:12px;padding:10px 16px;border-bottom:1px solid var(--line);font-size:12px; }
+
+:root body.sapi-workspace { --sapi-hover:var(--sapi-purple-tint);--sapi-accent:var(--sapi-violet); }
+
+/* D3: AI providers share one simple navigation pattern. */
+:root body.sapi-workspace .ai-provider-list { border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--sapi-white);margin:14px 0; }
+:root body.sapi-workspace .ai-provider-row { min-height:68px;display:flex;align-items:center;gap:13px;padding:12px 14px;border-top:1px solid var(--line); }
+:root body.sapi-workspace .ai-provider-row:first-child { border-top:0; }
+:root body.sapi-workspace .ai-provider-icon { width:34px;height:34px;object-fit:contain;flex:none;background:#fff;border-radius:7px;padding:4px;box-sizing:border-box; }
+:root body.sapi-workspace .ai-provider-copy { flex:1;min-width:0;display:grid;gap:2px; }
+:root body.sapi-workspace .ai-provider-copy strong { font-size:14px;font-weight:600; }
+:root body.sapi-workspace .ai-provider-status { color:var(--sapi-muted);font-size:12px;line-height:1.4; }
+:root body.sapi-workspace .ai-provider-soon { color:var(--sapi-muted);font-size:11px;white-space:nowrap; }
+:root body.sapi-workspace .ai-provider-row .button { min-width:75px;min-height:34px;border-radius:7px; }
+:root body.sapi-workspace .ai-provider-link { width:100%;border-left:0;border-right:0;border-bottom:0;background:transparent;color:var(--sapi-ink);font:inherit;text-align:left;cursor:pointer;border-radius:0; }
+:root body.sapi-workspace .ai-provider-link:hover { background:var(--sapi-hover); }
+:root body.sapi-workspace .ai-provider-arrow { color:var(--sapi-muted);font-size:23px;line-height:1; }
+:root body.sapi-workspace .ai-provider-back { padding:0;border:0;background:transparent;color:var(--sapi-muted);font-size:12px;text-align:left;cursor:pointer;margin:0 0 16px; }
+:root body.sapi-workspace .ai-provider-back:hover { color:var(--sapi-ink); }
+:root body.sapi-workspace .ai-provider-detail-body { margin-top:8px; }
+:root body.sapi-workspace .ai-provider-actions { display:grid;margin-top:12px;border-top:1px solid var(--line); }
+:root body.sapi-workspace .ai-provider-action { width:100%;min-height:44px;padding:12px 2px;text-align:left;background:transparent;border:0;border-bottom:1px solid var(--line);font:inherit;color:var(--sapi-ink);cursor:pointer; }
+:root body.sapi-workspace .ai-provider-action:hover { color:var(--sapi-accent); }
+:root body.sapi-workspace .ai-provider-action-danger { color:#b54250; }
+@media(max-width:390px){:root body.sapi-workspace .ai-provider-row { gap:9px;padding:10px; }:root body.sapi-workspace .ai-provider-icon { width:28px;height:28px; }}
+
+:root body.sapi-workspace .provider-title { display:flex;align-items:center;gap:12px; }
+:root[data-theme=dark] body.sapi-workspace .ai-provider-action-danger { color:#ff8992; }
