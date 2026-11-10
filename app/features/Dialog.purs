@@ -446,7 +446,7 @@ storageView d = V.div "setup-screen"
       [choice M.KeepStorage "Keep current storage" storage.current
       ,choice M.FreshStorage "Start fresh" storage.defaultDirectory
       ,V.node "div" [V.cls "setup-storage-option",V.attr "data-change" $ show $ storage.choice == M.ExistingStorage && storage.directory /= ""]
-        [choice M.ExistingStorage "Continue with existing data" (D.fallback "Choose a folder with your existing agents and conversations." storage.directory)
+        [choice M.ExistingStorage "Use another folder" (D.fallback "Choose a folder with your existing agents and conversations." storage.directory)
         ,V.when (storage.choice == M.ExistingStorage && storage.directory /= "") $ V.control [V.cls "setup-storage-change",V.label "Choose another folder",V.disabled busy] "Change" StoragePick]]
     ,V.p "setup-note" "Existing data stays in its original location."]
   ,V.div "setup-footer" [V.div "setup-navigation"
