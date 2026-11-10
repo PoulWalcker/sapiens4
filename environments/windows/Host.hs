@@ -48,9 +48,15 @@ prepareHost args = do
   runtimeEnv <- lookupEnv "SAPIENS_RUNTIME_DIR"
   let option name = listToMaybe [value | (key,value) <- zip args (drop 1 args), key == name]
   runtime <- makeAbsolute $ fromMaybe (takeDirectory executable </> "runtime") (option "--runtime-dir" `mplus` runtimeEnv)
-  defaultData <- Paths.defaultDataDirectory runtime
-  directory <- makeAbsolute $ fromMaybe defaultData (option "--data-dir")
-  config <- Paths.configDirectory runtime
+  packaged <- doesFileExist (runtime </> "package-manifest.json")
+  source <- doesFileExist (runtime </> "corpora/Main.hs")
+  let sourceRuntime = source && not packaged
+      sourcePath key fallback = lookupEnv key >>= maybe (pure fallback) makeAbsolute
+      defaultData = if sourceRuntime then sourcePath "SAPIENS_DATA_DIR" (runtime </> ".sapiens4")
+        else Paths.defaultDataDirectory runtime
+  directory <- maybe defaultData makeAbsolute (option "--data-dir")
+  config <- if sourceRuntime then sourcePath "SAPIENS_CONFIG_DIR" (runtime </> ".sapiens4/config")
+    else Paths.configDirectory runtime
   Host directory config runtime <$> newIORef Nothing <*> newIORef Nothing
 
 startHost :: Host -> IO String

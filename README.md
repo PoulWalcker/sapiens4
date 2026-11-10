@@ -18,7 +18,7 @@ For source CLI execution, install the [distribution toolchain](docs/release-deve
 and platform prerequisites, then compile:
 
 ```sh
-git clone --recurse-submodules https://github.com/PoulWalcker/sapiens4.git
+git clone --recurse-submodules https://github.com/aleski-green/sapiens4.git
 cd sapiens4
 runghc build/Build.hs
 ```

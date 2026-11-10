@@ -1,5 +1,5 @@
 module Options
- ( Channel(..), channelName, parseChannel, appId, displayName, artifactPrefix
+ ( Channel(..), channelName, parseChannel, releaseRepository, appId, displayName, artifactPrefix
  , Platform(..), BuildMode(..), Signing(..), MacSigning(..), MacOptions(..)
  , platformName, providerPlatform, architecture, executableSuffix, parsePlatform, parseProviderPlatform
  , signingName, parseSigning, validateSigning, signIdentity, notaryProfile, signingMode
@@ -9,6 +9,9 @@ import Control.Monad
 import Data.Char (isAscii, isAlphaNum)
 import System.Environment
 import Text.Read (readMaybe)
+
+releaseRepository :: String
+releaseRepository = "aleski-green/sapiens4"
 
 -- Channel binds package identity and prevents mixing stable and development receipts.
 data Channel = Development | Stable deriving (Eq, Show)

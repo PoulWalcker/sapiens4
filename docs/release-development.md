@@ -14,10 +14,10 @@ publication of the whole set is not crash-atomic.
 Dev selects `development` / `Sapiens4 Development`; Prod selects `stable` /
 `Sapiens4`. [Data directories and overrides](reference.md#data-and-updates) stay
 separate between channels. Production source must belong to current
-`PoulWalcker/sapiens4:main` history. Before Prod builds, refresh its local ref:
+`aleski-green/sapiens4:main` history. Before Prod builds, refresh its local ref:
 
 ```sh
-git fetch https://github.com/PoulWalcker/sapiens4.git refs/heads/main:refs/remotes/release/main
+git fetch https://github.com/aleski-green/sapiens4.git +refs/heads/main:refs/remotes/release/main
 ```
 
 Signed Stable builds and Prod receipt verification reject missing/stale refs,
@@ -108,7 +108,7 @@ bash -eu -c '
     --directory ".build/release/$1" --source-commit "$2" --version "$1" --output "$verified"
   assets=()
   while IFS= read -r asset; do assets+=("$asset"); done < "$verified"
-  gh release create "$4" "${assets[@]}" --repo PoulWalcker/sapiens4 \
+  gh release create "$4" "${assets[@]}" --repo aleski-green/sapiens4 \
     --target "$2" --draft --title "Sapiens4 $1"
 ' _ "$VERSION" "$COMMIT" "$MODE" "$TAG"
 ```

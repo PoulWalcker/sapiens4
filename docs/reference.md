@@ -55,9 +55,11 @@ Default model: `gpt-6-sol`, reasoning `high`; Deep work uses `xhigh`. A call's
 | `SAPIENS_CODEX_REASONING_EFFORT` | Reasoning effort |
 | `SAPIENS_BLINDLY_BINARY` | Blindly4 executable |
 
-Nonempty `SAPIENS_CODEX_BINARY` selects an executable; missing/empty uses the pinned
-provider (`.build/codex/bin/codex` in source, `codex/bin/codex` in packaged runtime;
-Windows uses `codex.exe`). Invalid overrides fail without automatic discovery.
+Nonempty `SAPIENS_CODEX_BINARY` selects an executable. On macOS and Windows,
+missing/empty uses the pinned provider (`.build/codex/bin/codex` in source,
+`codex/bin/codex` in packaged runtime; Windows uses `codex.exe`). The Linux
+development adapter uses `codex` on PATH because D1 does not bundle a Linux
+provider. Invalid overrides fail without automatic discovery.
 Native hosts inherit `CODEX_*` and `OPENAI_*`, including `CODEX_HOME`.
 On macOS, tool PATH uses system directories, then `/opt/homebrew/bin` and
 `/usr/local/bin`, then absolute inherited entries. No login shell is run; Finder
@@ -74,7 +76,9 @@ Desktop and packaged CLI defaults follow the runtime's package manifest:
 Development uses `Sapiens4 Development`, Stable uses `Sapiens4`, under
 `~/Library/Application Support` on macOS and `%LOCALAPPDATA%` on Windows.
 Data is in `data`, configuration in `config`; the profiles remain separate.
-The source CLI preserves `<repository>/.sapiens4` as its default data directory.
+The source CLI and Windows source/probe host preserve `<repository>/.sapiens4`
+as their default data directory. The Windows source host defaults configuration
+to `<repository>/.sapiens4/config`, independently of data overrides.
 `--data-dir` takes precedence over `SAPIENS_DATA_DIR`; `SAPIENS_CONFIG_DIR` is
 independent. Existing directories are not migrated automatically.
 Back up the complete data directory while the host is stopped, including:

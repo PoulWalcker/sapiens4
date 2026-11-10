@@ -162,7 +162,7 @@ data PackageIdentity = PackageIdentity
 instance FromJSON PackageIdentity where
  parseJSON = withObject "package identity" $ \o -> do
   app<-o .: "appId";repository<-o .: "repository";channel<-o .: "channel" >>= either fail pure . parseChannel;support<-o .: "supportStatus"
-  check (app==appId channel && repository==("PoulWalcker/sapiens4"::String) && support==("declared-target"::String)) "Unexpected package identity/support status"
+  check (app==appId channel && repository==releaseRepository && support==("declared-target"::String)) "Unexpected package identity/support status"
   platform<-o .: "platform" >>= platformJSON;arch<-o .: "architecture";floor<-o .: "minimumOS"
   check (arch==architecture platform && floor==(if platform==MacOS then Just "13.0" else Nothing :: Maybe String)) "Platform/architecture/minimumOS mismatch"
   status<-o .: "packageStatus";complete<-case status :: String of "provider-complete"->pure True;"validation-provider-incomplete"->pure False;_->fail "Invalid package status"
@@ -204,7 +204,7 @@ newManifest channel source tree platform version provider tools = Manifest ident
   ,("platform",toJSON $ platformName platform)
   ,("architecture",toJSON $ architecture platform)
   ,("version",toJSON version)
-  ,("repository",String "PoulWalcker/sapiens4")
+  ,("repository",toJSON releaseRepository)
   ,("channel",toJSON $ channelName channel)
   ,("provider",toJSON summary)
   ,("minimumOS",if platform==MacOS then String "13.0" else Null)
@@ -236,7 +236,7 @@ instance ToJSON Receipt where
   [("schemaVersion",toJSON (1::Int))
   ,("appId",toJSON $ appId channel)
   ,("version",toJSON $ packageVersion i)
-  ,("repository",String "PoulWalcker/sapiens4")
+  ,("repository",toJSON releaseRepository)
   ,("channel",toJSON $ channelName channel)
   ,("sourceCommit",toJSON $ packageCommit i)
   ,("sourceDirty",Bool $ packageDirty i)
