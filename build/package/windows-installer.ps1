@@ -17,8 +17,8 @@ New-Item -ItemType Directory -Path $cache -Force | Out-Null
 $download = Join-Path $cache 'compiler-setup.exe'
 if (-not (Test-Path -LiteralPath $download) -or (Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash -ne $pin.sha256) {
     Invoke-WebRequest -Uri $pin.url -OutFile $download
+    if ((Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash -ne $pin.sha256) { throw 'Pinned Inno Setup download failed integrity verification' }
 }
-if ((Get-Item -LiteralPath $download).Length -ne $pin.size -or (Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash -ne $pin.sha256) { throw 'Pinned Inno Setup download failed integrity verification' }
 $signature = Get-AuthenticodeSignature -LiteralPath $download
 if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Pyrsys B\.V\.') { throw 'Unexpected Inno Setup publisher signature' }
 $compilerDirectory = Join-Path $cache 'compiler'

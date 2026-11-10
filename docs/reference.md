@@ -50,12 +50,13 @@ Default model: `gpt-6-sol`, reasoning `high`; Deep work uses `xhigh`. A call's
 | `SAPIENS_CODEX_REASONING_EFFORT` | Reasoning effort |
 | `SAPIENS_BLINDLY_BINARY` | Blindly4 executable |
 
-Codex resolution uses a nonempty `SAPIENS_CODEX_BINARY`, otherwise the pinned
-bundled provider (`.build/codex/bin/codex` in source checkouts, `codex/bin/codex`
-inside a packaged runtime; Windows uses `codex.exe`). There is no automatic PATH,
-application or npm installation discovery. An invalid explicit override fails
-instead of falling back to another installation. An empty override selects the
-bundled provider.
+Nonempty `SAPIENS_CODEX_BINARY` selects an executable; missing/empty uses the pinned
+provider (`.build/codex/bin/codex` in source, `codex/bin/codex` in packaged runtime;
+Windows uses `codex.exe`). Invalid overrides fail without automatic discovery.
+Native hosts inherit `CODEX_*` and `OPENAI_*`, including `CODEX_HOME`.
+On macOS, tool PATH uses system directories, then `/opt/homebrew/bin` and
+`/usr/local/bin`, then absolute inherited entries. No login shell is run; Finder
+may not inherit pyenv/conda/nvm paths. D1 does not manage accounts.
 
 Decision templates live in `corpora/prompts/`. **Edit decision prompts** saves local
 `decision-prompts/*.md` overrides for subsequent invocations; past decision

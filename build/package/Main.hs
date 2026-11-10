@@ -205,7 +205,8 @@ packageMac root options = do
  let name=displayName (channel options);appName=name++".app";destination=output</>appName
      artifactName=artifactPrefix (channel options)++versionText (version options)++"-macos-arm64.zip"
  forM_ [appName,artifactName,"Sapiens.dmg",replaceExtension artifactName ".release.json"] $ \entry ->
-  P.exists (output</>entry) >>= flip when (fail $ "Output already exists: "++output</>entry)
+  P.exists (output</>entry) >>= flip when (fail $
+   (if entry==appName then "Output app already exists: " else "Output already exists: ")++output</>entry)
  P.withTemporary output "sapiens-package" $ \temporary -> do
   let app=temporary</>appName;resources=app</>"Contents/Resources";macos=app</>"Contents/MacOS";runtime=resources</>"runtime"
   createDirectoryIfMissing True resources

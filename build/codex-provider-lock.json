@@ -6,13 +6,11 @@
     "darwin-arm64": {
       "url": "https://github.com/openai/codex/releases/download/rust-v0.167.0/codex-package-aarch64-apple-darwin.tar.gz",
       "sha256": "af45ed45d940d7998809622c1c0296d3098ed7d7fad695284422c228bd454517",
-      "size": 166340155,
       "entrypoint": "bin/codex"
     },
     "windows-x64": {
       "url": "https://github.com/openai/codex/releases/download/rust-v0.167.0/codex-package-x86_64-pc-windows-msvc.tar.gz",
       "sha256": "60567ca940bbaf6c10501805d9909d1328179231e2d47a0deec7a1368bb21641",
-      "size": 201675464,
       "entrypoint": "bin/codex.exe"
     }
   },

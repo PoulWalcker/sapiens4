@@ -1,5 +1,4 @@
 param(
-    [ValidateSet('win-x64')][string]$Runtime = 'win-x64',
     [string]$OutputDirectory,
     [string]$Version = '0.1.0-dev',
     [ValidateSet('development','stable')][string]$Channel = 'development',
@@ -12,6 +11,7 @@ param(
     [string]$TimestampUrl = 'http://timestamp.digicert.com'
 )
 $ErrorActionPreference = 'Stop'
+$Runtime = 'win-x64'
 if ($BuildOnly -and $SkipBuild) { throw 'Choose BuildOnly or SkipBuild' }
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 & runghc ("-i"+(Join-Path $repo 'build/package')) (Join-Path $repo 'build/Package.hs') version $Version
@@ -65,7 +65,7 @@ try {
     $package = Join-Path $staging (Split-Path -Leaf $destination)
     $payload = Join-Path $package 'runtime'
     $manifest = Join-Path $payload 'package-manifest.json'
-    $stage = @('-ibuild/package','build/Package.hs','stage','--root',$repo,'--destination',$payload,
+    $stage = @('-ibuild/package','build/Package.hs','stage','--destination',$payload,
         '--version',$Version,'--platform','windows','--channel',$Channel)
     if ($ProviderDirectory) { $stage += @('--provider',$ProviderDirectory) }
     if ($AllowMissingProvider) { $stage += '--allow-missing-provider' }

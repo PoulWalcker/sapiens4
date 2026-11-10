@@ -5,12 +5,10 @@ module Host (Host(..), prepareHost, startHost, closeHost) where
 import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
-import Data.Aeson
 import Data.Char (toUpper)
 import Data.IORef
 import Data.List (stripPrefix)
 import Data.Maybe
-import Network.HTTP.Client
 import Network.URI
 import Native (processId)
 import qualified RuntimePaths as Paths
@@ -20,7 +18,6 @@ import System.FilePath
 import System.IO
 import System.Process
 import System.Timeout
-import qualified Data.Aeson.KeyMap as K
 
 data Host = Host
   { dataDirectory :: FilePath
@@ -99,12 +96,8 @@ awaitHost host output errors = do
   result <- timeout 35000000 (awaitAddress output errors)
   uri <- maybe (ioError $ userError "Sapiens4 did not become ready within 35 seconds") pure result
   let base = uri { uriPath = "", uriQuery = "", uriFragment = "" }
-  manager <- newManager defaultManagerSettings
-  request <- parseRequest (show base ++ "/api/health")
-  response <- httpLbs request { responseTimeout = responseTimeoutMicro 10000000 } manager
-  case decode (responseBody response) of
-    Just (Object fields) | K.lookup "status" fields == Just (String "ok") -> writeIORef (origin host) (show base) >> pure (show uri)
-    _ -> ioError $ userError "Server readiness check failed"
+  writeIORef (origin host) (show base)
+  pure (show uri)
 
 closeHost :: Host -> IO ()
 closeHost host = mask_ $ do

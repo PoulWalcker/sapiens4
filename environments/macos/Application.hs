@@ -30,7 +30,7 @@ import System.Posix.Process (getProcessID)
 import Data.List (stripPrefix, nub, intercalate)
 
 
-data Application = Application { native :: Obj, browser :: Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: Maybe ServerProcess, address :: Text, manager :: Manager }
+data Application = Application { native :: Obj, browser :: Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: Maybe ServerProcess, address :: Text }
 
 data ServerProcess = ServerProcess ProcessHandle Handle (Async ())
 
@@ -242,7 +242,7 @@ runSession isFixture initialAddress = bracket acquire (mapM_ (stopServer . fst))
     guestScript <- (do r <- parseRequest (T.unpack (T.dropWhileEnd (== '/') base <> "/workspace/guest.js")); response <- httpLbs r { responseTimeout = responseTimeoutMicro 2000000 } http; pure (TE.decodeUtf8With (\_ _ -> Just '\xfffd') (L.toStrict (responseBody response)))) `catch` (\(_ :: HttpException) -> pure "")
     b <- newBrowser address guestScript
     win <- newIORef nullPtr; tasks <- newIORef []
-    let state = Application application b win tasks isFixture (fst <$> started) address http
+    let state = Application application b win tasks isFixture (fst <$> started) address
     target <- installMethods state
     initialize state target address
     void (obj0 application "run")

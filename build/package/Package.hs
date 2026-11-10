@@ -158,7 +158,7 @@ stageProvider root destination platform providerInput allowMissing = do
  present <- doesDirectoryExist provider
  if not present && (isJust providerInput || allowMissing) then
   if allowMissing then pure Nothing else fail "Complete pinned Codex payload required; acquire the provider first"
- else withPinnedProvider root platform Nothing $ \payload expected -> do
+ else withPinnedProvider root platform $ \payload expected -> do
   unless present $ installProvider payload provider
   metadata <- validateProvider payload expected provider
   copyTree provider (destination</>"codex")
@@ -201,18 +201,13 @@ stage channel rootInput destinationInput version platform providerInput allowMis
 
 finalize :: FilePath -> Signing -> IO ()
 finalize runtime signing = do
- let manifestPath=runtime</>"package-manifest.json";provider=runtime</>"codex";metadataPath=provider</>"sapiens-provider.json";upstream=provider</>"sapiens-provider-upstream.json"
+ let manifestPath=runtime</>"package-manifest.json"
  manifest <- readJSON manifestPath
  either fail pure $ validateSigning (packagePlatform $ manifestIdentity manifest) signing
  when (isJust $ manifestSigning manifest) $ fail "Already finalized; assemble a fresh package before signing again"
- providerHash <- forM (manifestProvider manifest) $ \_ -> do
-  exists upstream >>= flip when (fail "Already finalized; assemble a fresh package before signing again")
-  metadata <- readJSON metadataPath
-  copyFile metadataPath upstream
-  entries <- inventory provider ["sapiens-provider.json"]
-  writeJSON metadataPath (packagedProvider signing entries metadata)
-  digest metadataPath
- writeJSON manifestPath (sealManifest signing providerHash manifest)
+ -- Keep acquired provider metadata as provenance. One final inventory covers
+ -- every runtime file, including provider bytes changed by code signing.
+ writeJSON manifestPath (sealManifest signing manifest)
  entries <- inventory runtime ["package-inventory.json"]
  writeJSON (runtime</>"package-inventory.json") (Inventory entries)
  verify runtime
@@ -224,11 +219,8 @@ verify runtime = do
  Inventory entries <- readJSON (runtime</>"package-inventory.json")
  verifyInventory runtime entries ["package-inventory.json"]
  forM_ (manifestProvider manifest) $ \summary -> do
-  let provider=runtime</>"codex";path=provider</>"sapiens-provider.json"
-  metadata <- readJSON path
-  checksum <- digest path
-  unless (manifestProviderHash manifest==Just checksum && providerSummary metadata==summary && identityPlatform (providerIdentity metadata)==packagePlatform (manifestIdentity manifest)) $ fail "Provider inventory differs from package manifest"
-  verifyInventory provider (providerEntries metadata) ["sapiens-provider.json"]
+  metadata <- readJSON (runtime</>"codex/sapiens-provider.json")
+  unless (providerSummary metadata==summary && identityPlatform (providerIdentity metadata)==packagePlatform (manifestIdentity manifest)) $ fail "Provider identity differs from package manifest"
  printJSON $ obj [("runtime",toJSON runtime),("inventory",String "verified"),("files",toJSON $ length entries)]
 
 receipt :: FilePath -> FilePath -> FilePath -> FilePath -> IO ()
@@ -240,15 +232,14 @@ receipt artifact installer manifestPath output = do
  let identity=manifestIdentity manifest
  manifestHash <- digest manifestPath
  let artifactRecord path = Artifact path <$> getFileSize path <*> digest path <*> pure manifestHash
- records <- ArtifactPair <$> artifactRecord installer <*> artifactRecord artifact
- writeJSON output (Receipt identity signing records)
+ records <- Receipt identity signing <$> artifactRecord installer <*> artifactRecord artifact
+ writeJSON output records
 
 -- Receipts bind trusted build-host outputs; this checks consistency and bytes,
 -- not publisher signatures (which the native build hosts verify).
-release :: String -> FilePath -> String -> String -> String -> FilePath -> IO ()
-release repository directory commit versionInput mode output = do
+release :: FilePath -> String -> String -> String -> FilePath -> IO ()
+release directory commit versionInput mode output = do
  exists output >>= flip when (fail "Release list output already exists; choose a new output file")
- unless (repository=="PoulWalcker/sapiens4") $ fail "Expected release repository"
  unless (mode `elem` ["dev","prod"] && length commit==40 && all (`elem` ['0'..'9']++['a'..'f']) commit) $ fail "Expected dev/prod, full source commit and SemVer"
  version <- either fail pure $ parseVersion versionInput
  when (mode=="prod") $ getCurrentDirectory >>= \source -> requireMainAncestor source commit
@@ -256,14 +247,14 @@ release repository directory commit versionInput mode output = do
  receipts <- filter (".release.json" `isSuffixOf`) <$> files root
  unless (length receipts==2) $ fail "Exactly two platform receipts required"
  verified <- forM receipts $ \path -> do
-  Receipt identity signing pair <- readJSON path
+  Receipt identity signing installer portable <- readJSON path
   let platform=packagePlatform identity
       expectedSigning=if platform==MacOS then [DeveloperID] else [Authenticode]
       allowed=if mode=="prod" then expectedSigning else if platform==MacOS then [Unsigned,AdHoc] else [Unsigned]
   unless (packageChannel identity==(if mode=="prod" then Stable else Development) && packageComplete identity && not (packageDirty identity) && packageCommit identity==T.pack commit && packageVersion identity==version && signing `elem` allowed) $ fail "Incomplete, dirty, wrong-channel/source/version or incorrectly signed release"
   let installerName=if platform==MacOS then "Sapiens.dmg" else "Sapiens-Setup.exe"
       portableName=artifactPrefix (packageChannel identity)++versionText version++"-"++platformName platform++"-"++architecture platform++".zip"
-  assets <- forM [(installerName,installerArtifact pair),(portableName,portableArtifact pair)] $ \(wanted,Artifact name size checksum _) -> do
+  assets <- forM [(installerName,installer),(portableName,portable)] $ \(wanted,Artifact name size checksum _) -> do
    let artifact=takeDirectory path</>name
    unless (name==wanted) $ fail "Unexpected release artifact name"
    actualSize<-getFileSize artifact;actualHash<-digest artifact
@@ -300,15 +291,13 @@ download asset destination = do
  run "curl" ["--fail","--location","--max-time","120","--output",destination,downloadURL asset]
  checksum <- digest destination
  unless (checksum == downloadHash asset) $ fail "Pinned provider download checksum mismatch"
- size <- getFileSize destination
- forM_ (downloadSize asset) $ \expected -> unless (size==expected) $ fail "Pinned provider download size mismatch"
 
 cachedDownload :: Download -> FilePath -> IO ()
 cachedDownload asset destination = do
  present <- doesFileExist destination
  valid <- if not present then pure False else do
-  size<-getFileSize destination;checksum<-digest destination
-  pure (checksum==downloadHash asset && maybe True (==size) (downloadSize asset))
+  checksum<-digest destination
+  pure (checksum==downloadHash asset)
  unless valid $ withTemporary (takeDirectory destination) ".download" $ \temporary -> do
   let partial=temporary</>"payload"
   download asset partial
@@ -333,15 +322,12 @@ validateProvider payload expected directory = do
     unless runnable $ fail ("Provider executable permission missing: "++path)
  pure actual
 
-acquireProvider :: FilePath -> Platform -> FilePath -> Bool -> Maybe FilePath -> IO ()
-acquireProvider root platform destinationInput ensure cacheInput = do
+acquireProvider :: FilePath -> Platform -> FilePath -> IO ()
+acquireProvider root platform destinationInput = do
  destination <- canonicalizePath destinationInput
  present <- exists destination
- if present then do
-  unless ensure $ fail "Provider destination already exists; use --ensure to verify it"
-  withPinnedProvider root platform cacheInput $ \payload expected -> void $ validateProvider payload expected destination
- else withPinnedProvider root platform cacheInput $ \payload expected -> do
-  installProvider payload destination
+ withPinnedProvider root platform $ \payload expected -> do
+  unless present $ installProvider payload destination
   void $ validateProvider payload expected destination
  printJSON $ obj [("destination",toJSON destination),("verified",Bool True)]
 
@@ -351,18 +337,18 @@ installProvider payload destination =
  withTemporary (takeDirectory destination) ".codex-copy" $ \temporary -> do
   let staged=temporary</>"payload"
   copyTree payload staged
-  renameDirectory staged destination
+  renameNew staged destination
 
 providerExecutables :: Platform -> ProviderLayout -> [FilePath]
 providerExecutables platform layout = nub $ [layoutEntry layout] ++ maybeToList (layoutExec layout) ++
  ["bin/codex-code-mode-host"++executableSuffix platform,"codex-path/rg"++executableSuffix platform]
 
-withPinnedProvider :: FilePath -> Platform -> Maybe FilePath -> (FilePath -> Provider -> IO a) -> IO a
-withPinnedProvider root platform cacheInput action = do
+withPinnedProvider :: FilePath -> Platform -> (FilePath -> Provider -> IO a) -> IO a
+withPinnedProvider root platform action = do
   lock <- readJSON (root</>"build/codex-provider-lock.json")
   let (entry,asset)=lockAsset platform lock
-      identity=ProviderIdentity (lockVersion lock) platform entry (downloadHash asset) (Just $ lockCommit lock)
-  let parent=root</>".build";cache=fromMaybe (parent</>".downloads") cacheInput
+      identity=ProviderIdentity (lockVersion lock) platform entry (downloadHash asset) (lockCommit lock)
+  let parent=root</>".build";cache=parent</>".downloads"
   createDirectoryIfMissing True cache
   let archive=cache</>T.unpack (downloadHash asset)++".tar.gz"
   cachedDownload asset archive
@@ -398,22 +384,21 @@ withPinnedProvider root platform cacheInput action = do
 command :: FilePath -> [String] -> IO ()
 command root args = case args of
  "stage":rest -> do
-  source<-required "root" rest;destination<-required "destination" rest;version<-required "version" rest >>= either fail pure . parseVersion
+  destination<-required "destination" rest;version<-required "version" rest >>= either fail pure . parseVersion
   platform<-required "platform" rest >>= either fail pure . parsePlatform
   channel<-either fail pure $ parseChannel $ fromMaybe "development" (option "channel" rest)
-  void $ stage channel source destination version platform (option "provider" rest) ("--allow-missing-provider" `elem` rest)
+  void $ stage channel root destination version platform (option "provider" rest) ("--allow-missing-provider" `elem` rest)
  "finalize":rest -> do
   runtime<-required "runtime" rest;signing<-required "signing" rest >>= either fail pure . parseSigning
   finalize runtime signing
  "verify":rest -> required "runtime" rest >>= verify
  "receipt":rest -> do artifact<-required "artifact" rest;manifest<-required "manifest" rest;output<-required "output" rest;required "installer" rest >>= \installer -> receipt artifact installer manifest output
  "release":rest -> do
-  repository<-required "repository" rest
   directory<-required "directory" rest;commit<-required "source-commit" rest;version<-required "version" rest;output<-required "output" rest
-  release repository directory commit version (fromMaybe "prod" $ option "mode" rest) output
+  release directory commit version (fromMaybe "prod" $ option "mode" rest) output
  "provenance":rest -> do output<-required "output" rest;provenance root >>= writeJSON output
  "provider":rest -> do
   platform<-required "platform" rest >>= either fail pure . parseProviderPlatform
   destination<-required "destination" rest
-  acquireProvider root platform destination ("--ensure" `elem` rest) (option "cache" rest)
+  acquireProvider root platform destination
  _ -> fail "Usage: runghc -ibuild/package build/Package.hs {macos|stage|finalize|verify|receipt|release|provenance|provider} ..."

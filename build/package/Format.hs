@@ -2,12 +2,12 @@
 module Format
  ( Inventory(..), InventoryEntry(..), ProviderIdentity(..), Provider, providerIdentity, providerEntries
  , ProviderLayout, layoutRelease, layoutPlatform, layoutEntry, layoutExec, layoutResources, layoutPath
- , ProviderLock(..), Download(..), lockAsset, newProvider, packagedProvider
+ , ProviderLock(..), Download(..), lockAsset, newProvider
  , Provenance(..), PackageIdentity(..), ProviderSummary, summaryVersion, Manifest, manifestIdentity, manifestProvider
- , manifestSigning, manifestProviderHash, FinalizedManifest, finalizedManifest, finalizedSigning, providerSummary, newManifest, sealManifest, compatibilityManifest
- , Artifact(..), ArtifactPair(..), Receipt(..)
+ , manifestSigning, FinalizedManifest, finalizedManifest, finalizedSigning, providerSummary, newManifest, sealManifest, compatibilityManifest
+ , Artifact(..), Receipt(..)
  , CompatibilityRule(..), BinaryAudit(..), CompatibilityAudit(..)
- , readJSON, writeJSON, printJSON, obj, canonical, hash, hex, safeRelativePath ) where
+ , readJSON, writeJSON, printJSON, obj, canonical, hash, safeRelativePath ) where
 
 import Control.Monad
 import Data.Aeson
@@ -41,9 +41,6 @@ writeJSON path value = L.writeFile path (encode value<>"\n")
 printJSON :: ToJSON a => a -> IO ()
 printJSON = L.putStr . (<>"\n") . encode
 
--- Optional means absent; a present null still goes through its field parser.
-optional :: FromJSON a => Object -> Key -> Parser (Maybe a)
-optional fields key = if KM.member key fields then Just <$> fields .: key else pure Nothing
 check :: Bool -> String -> Parser ()
 check condition message = unless condition (fail message)
 checksum :: Int -> T.Text -> Parser T.Text
@@ -91,12 +88,12 @@ instance ToJSON Inventory where
 
 data ProviderIdentity = ProviderIdentity
  { identityVersion :: String, identityPlatform :: Platform, identityEntry :: FilePath
- , identityArchive :: T.Text, identityCommit :: Maybe T.Text } deriving (Eq,Show)
+ , identityArchive :: T.Text, identityCommit :: T.Text } deriving (Eq,Show)
 instance FromJSON ProviderIdentity where
  parseJSON = withObject "provider identity" $ \o -> ProviderIdentity
   <$> (o .: "version" >>= nonempty) <*> (o .: "platform" >>= providerPlatformJSON)
   <*> (o .: "entrypoint" >>= relative) <*> (o .: "archiveSha256" >>= checksum 64)
-  <*> (optional o "upstreamCommit" >>= traverse (checksum 40))
+  <*> (o .: "upstreamCommit" >>= checksum 40)
 
 data ProviderLayout = ProviderLayout
  { layoutRelease :: String, layoutPlatform :: Platform, layoutEntry :: FilePath
@@ -120,9 +117,6 @@ instance FromJSON Provider where
   identity<-parseJSON value;entries<-o .: "files" >>= decodeEntries
   layout<-o .: "upstreamPackage"
   check (layoutRelease layout==identityVersion identity && layoutPlatform layout==identityPlatform identity && layoutEntry layout==identityEntry identity) "Provider identity/layout mismatch"
-  stage<-optional o "inventoryStage"
-  forM_ stage $ \s -> check (s `elem` ["packaged","signed-package"::String]) "Invalid provider inventory stage"
-  void (optional o "upstreamInventory" :: Parser (Maybe String))
   pure (Provider identity entries o)) value
 instance ToJSON Provider where toJSON = Object . providerWire
 newProvider :: ProviderIdentity -> ProviderLayout -> [InventoryEntry] -> Provider
@@ -130,18 +124,10 @@ newProvider identity layout entries = Provider identity entries $ KM.fromList
  [("schema",toJSON (1::Int)),("version",toJSON $ identityVersion identity),("upstreamCommit",toJSON $ identityCommit identity)
  ,("platform",toJSON $ providerPlatform $ identityPlatform identity),("entrypoint",toJSON $ identityEntry identity)
  ,("archiveSha256",toJSON $ identityArchive identity),("upstreamPackage",toJSON layout),("files",toJSON entries)]
-packagedProvider :: Signing -> [InventoryEntry] -> Provider -> Provider
-packagedProvider signing entries p = p
- { providerEntries=entries
- , providerWire=KM.insert "files" (toJSON entries) $
-    KM.insert "upstreamInventory" (String "sapiens-provider-upstream.json") $
-    KM.insert "inventoryStage" (String $ if signing==Unsigned then "packaged" else "signed-package") (providerWire p) }
-
-data Download = Download { downloadURL :: String, downloadHash :: T.Text, downloadSize :: Maybe Integer }
+data Download = Download { downloadURL :: String, downloadHash :: T.Text }
 instance FromJSON Download where
- parseJSON = withObject "locked download" $ \o -> do
-  size<-optional o "size";check (maybe True (>=0) size) "Negative locked download size"
-  Download <$> (o .: "url" >>= nonempty) <*> (o .: "sha256" >>= checksum 64) <*> pure size
+ parseJSON = withObject "locked download" $ \o ->
+  Download <$> (o .: "url" >>= nonempty) <*> (o .: "sha256" >>= checksum 64)
 data ProviderLock = ProviderLock
  { lockVersion :: String, lockCommit :: T.Text, lockMac :: (FilePath,Download), lockWindows :: (FilePath,Download), lockNotices :: [(FilePath,Download)] }
 instance FromJSON ProviderLock where
@@ -183,7 +169,7 @@ instance FromJSON PackageIdentity where
   version<-o .: "version"
   PackageIdentity channel version platform <$> (o .: "buildId" >>= checksum 64) <*> (o .: "sourceCommit" >>= checksum 40) <*> o .: "sourceDirty" <*> pure complete
 
-data Manifest = Manifest { manifestIdentity :: PackageIdentity, manifestProvider :: Maybe ProviderSummary, manifestSigning :: Maybe Signing, manifestProviderHash :: Maybe T.Text, manifestWire :: Object }
+data Manifest = Manifest { manifestIdentity :: PackageIdentity, manifestProvider :: Maybe ProviderSummary, manifestSigning :: Maybe Signing, manifestWire :: Object }
 instance FromJSON Manifest where
  parseJSON value = withObject "package manifest" (\o -> do
   schema<-o .: "schemaVersion";check (schema==(1::Int)) "Unsupported package manifest schema"
@@ -192,10 +178,9 @@ instance FromJSON Manifest where
   void (o .: "sourceTreeSha256" >>= checksum 64)
   void (o .: "toolchain" :: Parser (M.Map T.Text String))
   discovery<-o .: "updateDiscovery";check (not discovery) "D1 update discovery must be disabled"
-  signing<-traverse signingJSON (KM.lookup "signing" o);digest<-optional o "providerInventorySha256" >>= traverse (checksum 64)
+  signing<-traverse signingJSON (KM.lookup "signing" o)
   forM_ signing $ either fail pure . validateSigning (packagePlatform identity)
-  check (isJust digest == (isJust signing && isJust provider)) "Inconsistent provider inventory seal"
-  pure (Manifest identity provider signing digest o)) value
+  pure (Manifest identity provider signing o)) value
 instance ToJSON Manifest where toJSON = Object . manifestWire
 
 -- A receipt/verification boundary cannot accidentally accept a staged manifest.
@@ -211,7 +196,7 @@ providerSummary p = let i=providerIdentity p in ProviderSummary (identityVersion
 
 -- Build identity hashes the current deterministic input document.
 newManifest :: Channel -> Provenance -> T.Text -> Platform -> Version -> Maybe Provider -> [(T.Text,String)] -> Manifest
-newManifest channel source tree platform version provider tools = Manifest identity summary Nothing Nothing document
+newManifest channel source tree platform version provider tools = Manifest identity summary Nothing document
  where
  summary = providerSummary <$> provider
  inputs = KM.fromList
@@ -237,19 +222,17 @@ newManifest channel source tree platform version provider tools = Manifest ident
   ,("packageStatus",String $ if isJust provider then "provider-complete" else "validation-provider-incomplete")
   ,("updateDiscovery",Bool False)]) inputs
 
-sealManifest :: Signing -> Maybe T.Text -> Manifest -> Manifest
-sealManifest signing digest m = m
- { manifestSigning=Just signing, manifestProviderHash=digest
- , manifestWire=KM.insert "signing" (toJSON $ signingName signing) $
-    maybe id (KM.insert "providerInventorySha256" . String) digest (manifestWire m) }
+sealManifest :: Signing -> Manifest -> Manifest
+sealManifest signing m = m
+ { manifestSigning=Just signing
+ , manifestWire=KM.insert "signing" (toJSON $ signingName signing) (manifestWire m) }
 compatibilityManifest :: CompatibilityAudit -> Manifest -> Manifest
 compatibilityManifest report m = m {manifestWire=KM.insert "macOSCompatibility" (toJSON report) (manifestWire m)}
 
 data Artifact = Artifact FilePath Integer T.Text T.Text
-data ArtifactPair = ArtifactPair { installerArtifact :: Artifact, portableArtifact :: Artifact }
-data Receipt = Receipt PackageIdentity Signing ArtifactPair
+data Receipt = Receipt PackageIdentity Signing Artifact Artifact
 instance ToJSON Receipt where
- toJSON (Receipt i signing artifacts) = obj
+ toJSON (Receipt i signing installer portable) = obj
   [("schemaVersion",toJSON (1::Int))
   ,("appId",toJSON $ appId channel)
   ,("version",toJSON $ packageVersion i)
@@ -258,7 +241,7 @@ instance ToJSON Receipt where
   ,("sourceCommit",toJSON $ packageCommit i)
   ,("sourceDirty",Bool $ packageDirty i)
   ,("packageStatus",String $ if packageComplete i then "provider-complete" else "validation-provider-incomplete")
-  ,("artifacts",toJSON [item "installer" (installerArtifact artifacts), item "portable-zip" (portableArtifact artifacts)])]
+  ,("artifacts",toJSON [item "installer" installer, item "portable-zip" portable])]
   where
   channel = packageChannel i
   item kind (Artifact path size digest manifestHash) = obj
@@ -299,16 +282,15 @@ instance FromJSON Receipt where
   where
   pair (i,s,a@(Artifact _ _ _ h)) (j,t,b@(Artifact _ _ _ k)) = do
    check (i==j && s==t && h==k) "Contradictory release artifact bindings"
-   pure (Receipt i s $ ArtifactPair a b)
+   pure (Receipt i s a b)
 
 data CompatibilityRule = CompatibilityRule
- { ruleIdentity :: ProviderIdentity, ruleFingerprint :: T.Text, ruleRoot :: FilePath, ruleMaximum :: String, ruleId :: String, ruleSelected :: [String], ruleCommit :: T.Text }
+ { ruleIdentity :: ProviderIdentity, ruleFingerprint :: T.Text, ruleRoot :: FilePath, ruleMaximum :: String, ruleId :: String, ruleSelected :: [String] }
 instance FromJSON CompatibilityRule where
  parseJSON = withObject "optional voice rule" $ \o -> do
   schema<-o .: "schemaVersion";check (schema==(1::Int)) "Unsupported compatibility rule schema"
   identity<-o .: "providerIdentity"
-  commit<-maybe (fail "Compatibility rule requires upstreamCommit") pure (identityCommit identity)
-  CompatibilityRule identity <$> (o .: "providerFilesSha256" >>= checksum 64) <*> (o .: "optionalRoot" >>= relative) <*> (o .: "maximumMinimumOS" >>= \v -> either fail (const $ pure v) (osVersion v)) <*> o .: "ruleId" <*> o .: "selectedPaths" <*> pure commit
+  CompatibilityRule identity <$> (o .: "providerFilesSha256" >>= checksum 64) <*> (o .: "optionalRoot" >>= relative) <*> (o .: "maximumMinimumOS" >>= \v -> either fail (const $ pure v) (osVersion v)) <*> o .: "ruleId" <*> o .: "selectedPaths"
 data BinaryAudit = BinaryAudit FilePath String [FilePath]
 instance ToJSON BinaryAudit where toJSON (BinaryAudit path minimum dependencies) = obj [("path",toJSON path),("minimumOS",toJSON minimum),("dependencies",toJSON dependencies)]
 data CompatibilityAudit = CompatibilityAudit String [BinaryAudit] (Maybe (CompatibilityRule,String,[BinaryAudit]))
@@ -326,7 +308,7 @@ instance ToJSON CompatibilityAudit where
    ,("minimumOS",toJSON minimum)
    ,("notUsedBySelectedPaths",toJSON $ ruleSelected rule)
    ,("binaries",toJSON entries)
-   ,("evidenceCommit",toJSON $ ruleCommit rule)]
+   ,("evidenceCommit",toJSON $ identityCommit $ ruleIdentity rule)]
 
 hex :: B.ByteString -> T.Text
 hex = T.pack . concatMap (\byte -> let value=showHex byte "" in if length value==1 then '0':value else value) . B.unpack
