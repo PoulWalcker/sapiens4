@@ -22,6 +22,8 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Foreign hiding (void, new)
+import Foreign.C.Error (throwErrnoIfMinus1Retry)
+import Foreign.C.Types (CInt(..))
 import Network.HTTP.Client hiding (method)
 import Network.URI (parseURI, uriScheme, uriAuthority, uriRegName, uriUserInfo)
 import ObjC
@@ -31,9 +33,10 @@ import System.Environment
 import System.FilePath
 import System.IO
 import System.Process hiding (shell)
+import System.Process.Internals (withProcessHandle, ProcessHandle(waitpidLock), ProcessHandle__(..))
 import System.Timeout
 import System.Exit (ExitCode(..))
-import System.Posix.Process (getProcessID)
+import System.Posix.Process (getProcessID, getProcessGroupIDOf)
 import System.Posix.Signals (signalProcess, signalProcessGroup, sigKILL)
 import System.Posix.Types (ProcessID, CPid(..))
 import System.IO.Error (isDoesNotExistError)
@@ -57,7 +60,7 @@ check application = do
     case current of
         Nothing -> pure ()
         Just server -> do
-            alive <- isNothing <$> getProcessExitCode (serverHandle server)
+            alive <- not <$> serverExited (serverHandle server)
             if alive then do
                 b <- readIORef (browser application)
                 view <- readIORef (shell b)
@@ -84,8 +87,7 @@ launchServer application destination command = mask $ \restore -> do
     (Just input, Just output, Just errors, process) <- createProcess command {std_in=CreatePipe, std_out=CreatePipe, std_err=CreatePipe, new_session=True, create_group=False}
     let close h = hClose h `catch` (\(_ :: IOException) -> pure ())
     let cleanup = do
-            group <- getPid process
-            mapM_ (\owned -> signalProcessGroup sigKILL owned `catch` (\(e :: IOException) -> unless (isDoesNotExistError e) (throwIO e))) group
+            killServerGroup process
                 `finally` (void (waitForProcess process) `finally` mapM_ close [input,output,errors])
     group <- (getPid process >>= maybe (ioError (userError "Could not own the application server process group.")) pure) `onException` cleanup
     reader <- (async $ (do
@@ -121,13 +123,48 @@ launchServer application destination command = mask $ \restore -> do
 -- Capture its ID before reaping the root, so exited roots cannot hide orphans.
 foreign import ccall unsafe "getsid" processSession :: ProcessID -> IO ProcessID
 
+foreign import ccall unsafe "sapiens_process_exited" processExited :: ProcessID -> IO CInt
+
+-- Observe exit without reaping: the root PID pins its session identity until
+-- descendant cleanup finishes. Both locks exclude concurrent process waiters.
+withServerHandle :: ProcessHandle -> (ProcessHandle__ -> IO a) -> IO a
+withServerHandle process action = withMVar (waitpidLock process) $ \_ -> withProcessHandle process action
+
+exited :: ProcessID -> IO Bool
+exited pid = (/=0) <$> throwErrnoIfMinus1Retry "waitid" (processExited pid)
+
+serverExited :: ProcessHandle -> IO Bool
+serverExited process = withServerHandle process $ \state -> case state of
+    OpenHandle pid -> exited pid
+    _ -> pure True
+
 serverProcesses :: ServerProcess -> IO [ProcessID]
-serverProcesses server = do
-    result <- timeout 2000000 (readProcessWithExitCode "/bin/ps" ["-axo","pid="] "")
-    pids <- case result of
-        Just (ExitSuccess,output,_) -> pure (mapMaybe readMaybe (words output))
-        _ -> ioError (userError "Could not enumerate the application server session.")
-    filterM (fmap (==serverSession server) . processSession) pids
+serverProcesses server = withServerHandle (serverHandle server) $ \state -> case state of
+    OpenHandle pid | pid==serverSession server -> do
+        ended <- exited pid
+        unless ended $ do
+            session <- processSession pid
+            when (session/=pid) $ do
+                racedExit <- exited pid
+                unless racedExit (ioError (userError "The application server no longer owns its session."))
+        let session=serverSession server
+        result <- timeout 2000000 (readProcessWithExitCode "/bin/ps" ["-axo","pid=,stat="] "")
+        pids <- case result of
+            Just (ExitSuccess,output,_) -> pure [p | line <- lines output, [raw,status] <- [words line], 'Z' `notElem` status, Just p <- [readMaybe raw]]
+            _ -> ioError (userError "Could not enumerate the application server session.")
+        -- Zombies cannot execute or retain pipes; their parents reap them.
+        filterM (fmap (==session) . processSession) pids
+    _ -> pure []
+
+killServerGroup :: ProcessHandle -> IO ()
+killServerGroup process = withServerHandle process $ \state -> case state of
+    OpenHandle pid -> do
+        ended <- exited pid
+        session <- processSession pid
+        when (not ended && session==pid) $ do
+            group <- getProcessGroupIDOf pid
+            when (group==pid) (signalProcessGroup sigKILL group)
+    _ -> pure ()
 
 stopServer :: ServerProcess -> IO ()
 stopServer server = stop `finally` (do
@@ -140,20 +177,25 @@ stopServer server = stop `finally` (do
         stop = do
             void $ timeout 10000000 $ do
                 (hPutStrLn input "stop" >> hFlush input >> hClose input) `catch` (\(_ :: IOException) -> pure ())
-                void (waitForProcess process)
+                let await = do
+                        ended <- serverExited process
+                        unless ended (threadDelay 50000 >> await)
+                await
             confirmed <- timeout 5000000 $ do
-                signal (signalProcessGroup sigKILL (serverSession server))
-                void (waitForProcess process)
+                signal (killServerGroup process)
                 let sweep = do
                         owned <- serverProcesses server
                         unless (null owned) $ do
                             -- Recheck session membership before each signal.
-                            forM_ owned $ \pid -> do
-                                session <- processSession pid
-                                when (session==serverSession server) (signal (signalProcess sigKILL pid))
+                            withServerHandle process $ \state -> case state of
+                                OpenHandle root | root==serverSession server -> forM_ owned $ \pid -> do
+                                    session <- processSession pid
+                                    when (session==root) (signal (signalProcess sigKILL pid))
+                                _ -> pure ()
                             threadDelay 50000
                             sweep
                 sweep
+                void (waitForProcess process)
             when (isNothing confirmed) (ioError (userError "The application server session could not be stopped."))
 
 alert :: Text -> IO ()
@@ -507,17 +549,12 @@ installClientPreferences application view readyAddress directory = unless (fixtu
     injection <- allocated "WKUserScript" >>= \o -> obj3 o "initWithSource:injectionTime:forMainFrameOnly:" content (int 0) (int 1)
     void (obj1 user "addUserScript:" injection)
 
-serverRunning :: Maybe ServerProcess -> IO Bool
-serverRunning Nothing = pure False
-serverRunning (Just server) = not . null <$> serverProcesses server
-
 -- Clear ownership only after a confirmed exit, including failed startup cleanup.
 stopOwnedServer :: Application -> IO ()
 stopOwnedServer application = mask_ $ do
     current <- readIORef (child application)
-    mapM_ stopServer current `finally` do
-        alive <- serverRunning current
-        unless alive $ writeIORef (child application) Nothing
+    mapM_ stopServer current
+    writeIORef (child application) Nothing
 
 -- Navigation completion, rather than loadURL, commits the selected directory.
 installServer :: Application -> Text -> Text -> FilePath -> IO ()

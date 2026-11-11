@@ -25,7 +25,12 @@ profileRoot = do
      manifests = [folder </> "../Resources/runtime/package-manifest.json",folder </> "runtime/package-manifest.json",folder </> "../../package-manifest.json"]
  present <- filterM doesFileExist manifests
  Profile name <- case present of
-  [] -> pure (Profile "Sapiens4 Development")
+  [] -> do
+   portable <- or <$> mapM doesDirectoryExist [folder </> "runtime/.build/bin",folder </> "../Resources/runtime/.build/bin"]
+   embedded <- doesFileExist (folder </> "../../app/shell/bootstrap.html")
+   source <- doesFileExist (folder </> "../../build/cabal.project")
+   when (portable || embedded && not source) (fail "The portable package is missing package-manifest.json. Extract a complete package.")
+   pure (Profile "Sapiens4 Development")
   [path] -> either fail pure =<< eitherDecodeFileStrict path
   _ -> fail "Ambiguous package profile"
  home <- getHomeDirectory

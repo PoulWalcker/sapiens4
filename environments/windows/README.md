@@ -38,7 +38,11 @@ cd sapiens4
 
 `start.ps1` builds Blindly4, the Haskell host and the UI; `-SkipBuild` reuses the
 existing binaries. Packaging defaults to the GHC target and rejects a mismatched
-`-Runtime`. Native `win-arm64` packaging requires an ARM64 Windows GHC toolchain.
+`-Runtime`. Portable packages default to `-Channel stable`. Use `-Channel development`
+for isolated development storage and a separate `Sapiens4-Development-$Runtime`
+output directory. Both the launcher and embedded backend read the generated
+`runtime/package-manifest.json`; keep it with the package.
+Native `win-arm64` packaging requires an ARM64 Windows GHC toolchain.
 Use `-BlindlyToolchain gnullvm` with LLVM-MinGW. The WebView2 loader is downloaded
 with a pinned checksum and selected for the executable's architecture.
 

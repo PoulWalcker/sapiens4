@@ -98,7 +98,7 @@ executable sapiens-macos
     ObjC
   main-is: MacMain.hs
   if os(osx)
-    c-sources: ../submodules/libs4/haskell/native/cocoa.c
+    c-sources: ../submodules/libs4/haskell/native/cocoa.c, ../environments/macos/Process.c
     frameworks: Cocoa, WebKit, CoreGraphics
     extra-libraries: objc
   else
