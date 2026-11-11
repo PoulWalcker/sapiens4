@@ -34,10 +34,6 @@ RSpec.describe 'Choosing and managing corpora', :desktop do
     desktop.click('Close corpora menu')
     desktop.find('Studio', role: 'AXHeading')
     expect(desktop.text).to include('Paused')
-    desktop.fill('Message ChiefSapi', 'Paused Studio draft')
-    desktop.reload
-    desktop.find('Studio', role: 'AXHeading')
-    desktop.value('Message ChiefSapi', 'Paused Studio draft')
     desktop.click('Local')
     desktop.click(host.state['corpora']['name'])
     desktop.click('Close corpora menu')

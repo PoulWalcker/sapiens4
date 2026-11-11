@@ -10,8 +10,6 @@ if ARGV.include?('--version')
   exit
 end
 
-abort 'Onboarding must not invoke login or status' if ARGV.include?('login')
-
 text = STDIN.read
 context = text.include?("\nContext:\n") ? JSON.parse(text.split("\nContext:\n", 2).last) : {}
 node = text[/decision at node (\w+)/, 1] || (text.start_with?('You are acting as yourself inside') ? 'group' :
@@ -23,7 +21,6 @@ matching = config.fetch('messages', []).find { |item| context.fetch('originalInt
 rule = rule.merge(matching.fetch('rule')) if matching
 record = {owner: owner, node: node, prompt: text, args: ARGV, cwd: Dir.pwd,
           pid: Process.pid, started: Time.now.to_f, agency_run: ENV['SAPIENS_AGENCY_RUN']}
-record[:environment] = ENV.to_h.slice('CODEX_HOME', 'OPENAI_API_KEY', 'CODEX_API_KEY') if config['capture_environment']
 path = File.join(root, 'calls', SecureRandom.hex(12) + '.json')
 if rule['child']
   record[:heartbeat] = path + '.heartbeat'

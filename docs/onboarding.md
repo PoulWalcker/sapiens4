@@ -49,19 +49,9 @@ failed rollback disconnects into the shared picker. Saved selection changes only
 after replacement installation succeeds. Native handlers serialize requests and
 scope replies to the requesting dialog. No files are moved or deleted.
 
-## Build and verification
+## Build
 
 Application module registration is in `build/sapiens-domain.cabal` and
 `build/cabal.project`. Dependencies and native bindings still come from upstream
 libs4 at the baseline commit; no fork-only pin is needed. Build normally with
 `runghc build/Build.hs`.
-
-`spec/onboarding_spec.rb` exercises durable stages, save failures, external
-credentials and AI execution/active Corpora restoration before completion.
-`spec/storage_spec.rb` checks invalid, missing, partial, locked and unsupported
-stores, retry, and every supported SQLite version through the real initializer.
-`spec/onboarding_browser_spec.rb` contains two macOS native journeys covering
-storage selection/switching/rollback, permission request/recheck/skip, interrupted
-setup, completion save failure, selected Corpora/draft restoration and missing
-saved-folder recovery. Permission responses use a controlled external helper;
-actual OS permission grants and Windows desktop journeys require platform QA.
