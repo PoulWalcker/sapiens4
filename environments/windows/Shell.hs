@@ -29,7 +29,7 @@ runDesktop :: Bool -> IO ()
 runDesktop probe = runInBoundThread $
   -- COM may release callback references while its apartment is shutting down.
   bracket newArena freeArena $ \memory ->
-    bracket_ (check =<< coInitialize nullPtr 2) coUninitialize (desktopSession memory probe)
+    bracket_ (check =<< coInitialize nullPtr 2) (traceLifecycle "CoUninitialize begin" >> coUninitialize >> traceLifecycle "CoUninitialize end") (desktopSession memory probe)
 
 desktopSession :: Arena -> Bool -> IO ()
 desktopSession memory probe = do
@@ -56,6 +56,7 @@ desktopSession memory probe = do
         label <- readIORef statusRef
         when (label /= nullPtr) $ void $ setWindowPos label nullPtr 0 0 (fromIntegral width) (fromIntegral height) 4
       stop = do
+        traceLifecycle "stop host"
         writeIORef closing True
         readIORef workerRef >>= mapM_ cancel
         closeHost host
@@ -143,6 +144,7 @@ desktopSession memory probe = do
             dead <- readIORef closing
             unless dead $ atomicModifyIORef' pending (\xs -> (action:xs, ())) >> void (postMessage hwnd 0x802A 0 0)
           failStart message = do
+            traceLifecycle ("failStart " ++ message)
             modifyIORef' generation (+1)
             cleanup <- try (closeViews `finally` closeHost host)
             let detail = case cleanup of
