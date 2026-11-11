@@ -1,6 +1,8 @@
-module DesktopStorage (checkStorage, storageMode, preferenceScript, validPreference) where
+module DesktopStorage (WorkspaceSignal(..), saveWhenReady, checkStorage, storageMode, preferenceScript, validPreference) where
 
-import Control.Monad (unless)
+import Control.Exception (SomeException, try)
+import Control.Monad (forM_, unless)
+import Data.IORef
 import Data.Aeson (Value, encode)
 import qualified Data.ByteString.Lazy as BL
 import Data.Text (Text)
@@ -8,12 +10,29 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.IO as TIO
 import qualified Data.UUID.V4 as UUID
-import DataRoot (StorageChoice(..), storageError)
+import DataRoot (StorageChoice(..), saveDataDirectory, storageError, storageMessage)
 import System.Exit (ExitCode(..))
 import System.FilePath
 import System.Info (os)
 import System.Process
 import System.Timeout (timeout)
+
+data WorkspaceSignal = Navigated | WorkspaceReady deriving (Eq)
+
+saveWhenReady :: IORef (Maybe WorkspaceSignal) -> WorkspaceSignal -> IORef (Maybe a)
+              -> (a -> FilePath) -> (String -> IO ()) -> (a -> IO ()) -> IO ()
+saveWhenReady first signal pending directory recover opened = do
+  previous <- readIORef first
+  case previous of
+    Nothing -> writeIORef first (Just signal)
+    Just seen | seen /= signal -> do
+      selection <- readIORef pending
+      forM_ selection $ \value -> do
+        result <- try (saveDataDirectory (directory value))
+        case result of
+          Left (e :: SomeException) -> recover ("Could not save your storage selection: " ++ storageMessage e)
+          Right () -> writeIORef pending Nothing >> opened value
+    _ -> pure ()
 
 storageMode :: StorageChoice -> String
 storageMode StartNew = "new"

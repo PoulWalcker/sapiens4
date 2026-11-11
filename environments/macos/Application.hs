@@ -48,7 +48,7 @@ import Numeric (showHex)
 import Text.Read (readMaybe)
 
 
-data Application = Application { native :: Obj, browser :: IORef Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: IORef (Maybe ServerProcess), address :: IORef Text, startup :: IORef (Maybe (Async ())), starting :: IORef Bool, localLoaded :: IORef Bool, runtime :: FilePath, selectedRoot :: IORef (Maybe FilePath), recoveryError :: IORef (Maybe Text), navigationComplete :: IORef Bool, workspaceReady :: IORef Bool, attemptNumber :: IORef Integer, recovering :: IORef Bool, baselineRoot :: Maybe FilePath, clientPreferences :: Obj, quitting :: IORef Bool }
+data Application = Application { native :: Obj, browser :: IORef Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: IORef (Maybe ServerProcess), address :: IORef Text, startup :: IORef (Maybe (Async ())), starting :: IORef Bool, localLoaded :: IORef Bool, runtime :: FilePath, selectedRoot :: IORef (Maybe FilePath), recoveryError :: IORef (Maybe Text), firstSignal :: IORef (Maybe WorkspaceSignal), attemptNumber :: IORef Integer, recovering :: IORef Bool, baselineRoot :: Maybe FilePath, clientPreferences :: Obj, quitting :: IORef Bool }
 
 data ServerProcess = ServerProcess { serverHandle :: ProcessHandle, serverSession :: ProcessID, serverInput :: Handle, serverOutput :: Handle, serverErrors :: Async (), serverDrain :: Maybe (Async ()), serverDirectory :: FilePath }
 
@@ -338,8 +338,7 @@ installMethods application = do
             readyAddress <- readIORef (address application)
             trusted <- obj0 view "URL" >>= (\u -> withBrowser (sameOrigin u . origin))
             when (view==sh && trusted && path `elem` ["/workspace","/workspace/","/workspace/index.html"] && not (T.null readyAddress)) $ do
-                writeIORef (navigationComplete application) True
-                commitWorkspace application
+                commitWorkspace application Navigated
     let navigationFailed view err = withBrowser $ \b -> do
             sh <- readIORef (shell b)
             code <- long err "code"
@@ -480,7 +479,7 @@ runSession isFixture initialAddress = do
     win <- newIORef nullPtr; tasks <- newIORef []
     process <- newIORef Nothing; address <- newIORef (if isFixture then initialAddress else "")
     worker <- newIORef Nothing; busy <- newIORef False; loaded <- newIORef False; selection <- newIORef Nothing
-    navigated <- newIORef False; ready <- newIORef False; generation <- newIORef 0; recovery <- newIORef False
+    signal <- newIORef Nothing; generation <- newIORef 0; recovery <- newIORef False
     problem <- newIORef Nothing
     closing <- newIORef False
     preferences <- if isFixture then pure nullPtr else do
@@ -488,7 +487,7 @@ runSession isFixture initialAddress = do
         let hex byte = let value=showHex byte "" in replicate (2-length value) '0' ++ value
             suite="com.sapiens4.client." <> T.pack (concatMap hex (BS.unpack (SHA256.hash (TE.encodeUtf8 (T.pack config)))))
         allocated "NSUserDefaults" >>= \o -> str suite >>= obj1 o "initWithSuiteName:"
-    let state = Application application b win tasks isFixture process address worker busy loaded runtime selection problem navigated ready generation recovery baseline preferences closing
+    let state = Application application b win tasks isFixture process address worker busy loaded runtime selection problem signal generation recovery baseline preferences closing
     (do
         target <- installMethods state
         initialize state target initialAddress
@@ -540,7 +539,7 @@ receiveMessage application message = do
     if connected || fixture application then do
         current <- readIORef (child application)
         live <- maybe (pure $ fixture application) (fmap not . serverExited . serverHandle) current
-        if live then receive b message (saveClientPreferences application) (writeIORef (workspaceReady application) True >> commitWorkspace application)
+        if live then receive b message (saveClientPreferences application) (commitWorkspace application WorkspaceReady)
           else recoverStartup application "The application server stopped. Choose a folder to reopen your workspace."
       else do
         sh <- readIORef (shell b)
@@ -628,8 +627,7 @@ installServer application readyAddress guestScript directory = do
     closing <- readIORef (quitting application)
     unless closing $ do
         view <- replaceBrowser application readyAddress guestScript
-        writeIORef (workspaceReady application) False
-        writeIORef (navigationComplete application) False
+        writeIORef (firstSignal application) Nothing
         writeIORef (selectedRoot application) (Just directory)
         installClientPreferences application view readyAddress directory
         loadURL view readyAddress
@@ -700,19 +698,12 @@ postAttempt application attempt action = post application $ do
     closing <- readIORef (quitting application)
     when (current==attempt && not closing) action
 
-commitWorkspace :: Application -> IO ()
-commitWorkspace application = do
-    ready <- (&&) <$> readIORef (navigationComplete application) <*> readIORef (workspaceReady application)
-    selection <- readIORef (selectedRoot application)
-    when ready $ forM_ selection $ \directory -> do
-        committed <- try (saveDataDirectory directory)
-        case committed of
-            Left (e :: SomeException) -> recoverStartup application ("Could not save your storage selection: " <> T.pack (storageMessage e))
-            Right () -> do
-                atomicModifyIORef' (startup application) (\old -> (Nothing,old)) >>= mapM_ cancel
-                writeIORef (selectedRoot application) Nothing
-                writeIORef (starting application) False
-                workspaceWindow application
+commitWorkspace :: Application -> WorkspaceSignal -> IO ()
+commitWorkspace application signal =
+    saveWhenReady (firstSignal application) signal (selectedRoot application) id (recoverStartup application . T.pack) $ \_ -> do
+        atomicModifyIORef' (startup application) (\old -> (Nothing,old)) >>= mapM_ cancel
+        writeIORef (starting application) False
+        workspaceWindow application
 
 workspaceWindow :: Application -> IO ()
 workspaceWindow application = do

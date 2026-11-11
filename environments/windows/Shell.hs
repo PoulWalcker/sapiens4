@@ -86,8 +86,7 @@ desktopSession memory probe = do
   starting <- newIORef False
   generation <- newIORef (0 :: Integer)
   compactWindow <- newIORef True
-  navigationComplete <- newIORef False
-  workspaceReady <- newIORef False
+  firstSignal <- newIORef Nothing
   storageAttempt <- newIORef (0 :: Integer)
   selectedRoot <- newIORef Nothing
   preferenceScript <- newIORef Nothing
@@ -235,26 +234,18 @@ desktopSession memory probe = do
                 let next=KM.insert (K.fromString key) (String $ T.pack value) values
                 writeJSON (preferencesPath directory) next
                 writeIORef preferenceValues next
-          commitWorkspace = do
-            ready <- (&&) <$> readIORef navigationComplete <*> readIORef workspaceReady
-            selection <- readIORef selectedRoot
-            when ready $ forM_ selection $ \(directory,url) -> do
-              committed <- try (saveDataDirectory directory)
-              case committed of
-                Left (e :: SomeException) -> recoverStartup ("Could not save your storage selection: " ++ storageMessage e)
-                Right () -> do
-                  atomicModifyIORef' workerRef (\old -> (Nothing,old)) >>= mapM_ cancel
-                  writeIORef selectedRoot Nothing
-                  writeIORef starting False
-                  writeIORef compactWindow False
-                  resizeContent hwnd 1440 960
-                  storageScript "window.dispatchEvent(new Event('sapiens-preferences-ready'))"
-                  when probe $ putStrLn "TITLE: Sapiens4" >> putStrLn ("Sapiens4: " ++ url)
+          commitWorkspace signal =
+            DesktopStorage.saveWhenReady firstSignal signal selectedRoot fst recoverStartup $ \(_,url) -> do
+              atomicModifyIORef' workerRef (\old -> (Nothing,old)) >>= mapM_ cancel
+              writeIORef starting False
+              writeIORef compactWindow False
+              resizeContent hwnd 1440 960
+              storageScript "window.dispatchEvent(new Event('sapiens-preferences-ready'))"
+              when probe $ putStrLn "TITLE: Sapiens4" >> putStrLn ("Sapiens4: " ++ url)
           installStorage selected url = do
             attempt <- readIORef storageAttempt
             let current action = readIORef storageAttempt >>= \n -> when (n==attempt) action
-            writeIORef navigationComplete False
-            writeIORef workspaceReady False
+            writeIORef firstSignal Nothing
             writeIORef selectedRoot (Just (dataDirectory selected,url))
             watchHost selected (post $ current $ recoverStartup "The application server stopped. Choose a folder to reopen your workspace.")
             async (threadDelay 35000000 >> post (current $ do
@@ -365,7 +356,7 @@ desktopSession memory probe = do
                   Just message
                     | isNothing base && bootstrapSource source && bootstrapSource current -> chooseStorage message
                     | Navigation.trusted base source && Navigation.trusted base current -> do
-                        when (field "workspaceReady" message==Bool True) $ writeIORef workspaceReady True >> commitWorkspace
+                        when (field "workspaceReady" message==Bool True) $ commitWorkspace DesktopStorage.WorkspaceReady
                         applyWindowTheme hwnd light dark lastTheme message
                         case field "clientPreferences" message of
                           input@(JSON.Object _) -> savePreferences input
@@ -393,8 +384,7 @@ desktopSession memory probe = do
                   else do
                     selection <- readIORef selectedRoot
                     forM_ selection $ \(directory,url) -> when (current==url) $ do
-                      writeIORef navigationComplete True
-                      commitWorkspace
+                      commitWorkspace DesktopStorage.Navigated
                 else when (code/=14) $ post $ active $ do
                   base <- readIORef (origin host)
                   case base of
