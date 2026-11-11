@@ -227,7 +227,9 @@ desktopSession memory probe = do
                 mapM_ (\button -> void (showWindow button 5)) setupButtons
                 writeIORef starting False
               Right True -> do
-                result <- try $ startHost host
+                result <- try $ do
+                  prepareWebViewProfile (dataDirectory host </> "WebView2/Shell")
+                  startHost host
                 post $ active $ case result of
                   Left (e :: SomeException) -> failStart (displayException e)
                   Right url -> do
