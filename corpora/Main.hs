@@ -80,34 +80,28 @@ repository = do
 hostMain :: FilePath -> [String] -> IO ()
 hostMain root args = do
  when ("--help" `elem` args || "-h" `elem` args) $ putStrLn "Usage: sapiens4 [--port PORT] [--data-dir DIRECTORY] [--open]" >> exitSuccess
- settings <- validated (hostOptions root args)
- source <- doesFileExist (root</>"corpora/Main.hs")
- defaultData <- if source then
-  lookupEnv "SAPIENS_DATA_DIR" >>= maybe (pure (root</>".sapiens4")) (\path -> if null path then fail "SAPIENS_DATA_DIR must not be empty" else makeAbsolute path)
-  else defaultDataDirectory
- let directory=option "--data-dir" defaultData args
+ validated (validateOptions ["--port","--data-dir"] ["--open","--desktop"] args)
+ port <- validated (parseIntegerOption "--port" "4174" args)
+ require (port>=0 && port<=65535) 400 "Port must be between 0 and 65535"
+ directory <- case optionValue "--data-dir" args of
+  Just "" -> failure 400 "Data directory must not be empty"
+  Just path -> makeAbsolute path
+  Nothing -> do
+   source <- doesFileExist (root</>"corpora/Main.hs")
+   if source then
+    lookupEnv "SAPIENS_DATA_DIR" >>= maybe (pure (root</>".sapiens4")) (\path -> if null path then fail "SAPIENS_DATA_DIR must not be empty" else makeAbsolute path)
+    else defaultDataDirectory
  void (asset root "/")
  void (asset root "/workspace/app.js")
- bracket (startHost directory (requestedPort settings) False) hostStop $ \host -> do
+ bracket (startHost directory port False) hostStop $ \host -> do
   let url="http://127.0.0.1:"<>show (hostPort host)<>"/workspace/"
   putStrLn ("Sapiens4: "<>url<>"\nUI database: "<>directory</>"corpora.sqlite3")
   finished <- newEmptyMVar
   let shutdown=void (tryPutMVar finished ())
   installShutdown shutdown
-  when (desktopMode settings) (void (forkIO ((void getLine `catch` \(_::IOException)->pure ()) >> shutdown)))
-  when (openWindow settings) (void (createProcess (proc (if os=="darwin" then "open" else if os=="mingw32" then "explorer" else "xdg-open") [url])))
+  when ("--desktop" `elem` args) (void (forkIO ((void getLine `catch` \(_::IOException)->pure ()) >> shutdown)))
+  when ("--open" `elem` args) (void (createProcess (proc (if os=="darwin" then "open" else if os=="mingw32" then "explorer" else "xdg-open") [url])))
   takeMVar finished
-
-data HostOptions = HostOptions
- { requestedPort :: Int, hostDirectory :: FilePath, desktopMode :: Bool, openWindow :: Bool }
-
-hostOptions :: FilePath -> [String] -> Validation HostOptions
-hostOptions root args = do
- validateOptions ["--port","--data-dir"] ["--open","--desktop"] args
- check (not (null (option "--data-dir" "." args))) 400 "Data directory must not be empty"
- port <- parseIntegerOption "--port" "4174" args
- check (port>=0 && port<=65535) 400 "Port must be between 0 and 65535"
- pure (HostOptions port (option "--data-dir" (root</>".sapiens4") args) ("--desktop" `elem` args) ("--open" `elem` args))
 
 parseIntegerOption :: String -> String -> [String] -> Validation Int
 parseIntegerOption key def args = case reads (option key def args) of
@@ -125,7 +119,7 @@ relayMain root args = do
  urlEnv <- lookupEnv "SAPIENS_RELAY_ORIGIN"
  railway <- lookupEnv "RAILWAY_PUBLIC_DOMAIN"
  let database=option "--db" dbDefault args
-     suppliedOrigin = listToMaybe [value | (key,value)<-zip args (drop 1 args),key=="--origin"]
+     suppliedOrigin = optionValue "--origin" args
      public = suppliedOrigin `mplus` urlEnv `mplus` (("https://"<>) <$> railway)
      connectionPath=option "--connection-file" (replaceExtension database "connection.json") args
  publicOrigin <- maybe (failure 400 "Relay --origin is required") pure (public >>= \value -> if null value then Nothing else Just value)

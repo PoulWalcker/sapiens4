@@ -102,7 +102,8 @@ codexBinary = do
       if present then map (folder </>) . sort <$> listDirectory folder else pure []
      vendors scope = do
       packages <- filter (T.isPrefixOf "codex" . T.pack . takeFileName) <$> children scope
-      concat <$> forM packages (\package -> map (</> "bin/codex.exe") <$> children (package </> "vendor"))
+      targets <- concat <$> mapM (children . (</> "vendor")) packages
+      pure [target </> layout </> "codex.exe" | layout <- ["bin","codex"], target <- targets]
      npm prefix = (++) <$> vendors (prefix </> "node_modules/@openai")
        <*> vendors (prefix </> "node_modules/@openai/codex/node_modules/@openai")
      native p = os /= "mingw32" || map toLower (takeExtension p)==".exe"
@@ -122,7 +123,8 @@ codexBinary = do
     let app = [local </> "Programs/OpenAI/Codex/bin/codex.exe"]
     prefixes <- nub . ((roaming </> "npm"):) <$> getSearchPath
     packages <- concat <$> mapM npm prefixes
-    pure (app ++ packages)
+    versions <- reverse <$> children (local </> "OpenAI/Codex/bin")
+    pure (app ++ packages ++ map (</> "codex.exe") versions)
    pure $ maybeToList path ++ [home </> ".local/bin/codex" | os=="darwin"] ++ installed ++ ["/Applications/" ++ app ++ ".app/Contents/Resources/" ++ binary | os == "darwin", app <- ["Codex","ChatGPT"],binary <- ["codex","codex-cli/bin/codex"]]
  existing <- filterM doesFileExist (nub (filter native candidates))
  runnable <- filterM (fmap executable . getPermissions) existing
@@ -131,8 +133,6 @@ codexBinary = do
 killTree :: ProcessHandle -> IO ()
 killTree ph = do
 #ifdef mingw32_HOST_OS
- -- Retain the job handle until termination, even if its root already exited.
- -- getProcessExitCode can otherwise close the root and lose the job handle.
  terminateProcess ph
 #else
  result <- getProcessExitCode ph

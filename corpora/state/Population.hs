@@ -88,20 +88,13 @@ ensureAgent s row = do
  require (at v "agid" == a) 500 "Agent ID does not match saved state"
  when (int (get v "schema_version") < 3) $ do
   let version = int (get v "schema_version"); backup = root </> ("legacy-state-v" ++ show version ++ ".json")
+  migrated <- validated (migrateAgentState version v)
   backed <- doesFileExist backup
   unless backed $ copyFile p backup
-  validated (migrateAgentState version v) >>= saveState s a
+  saveState s a migrated
  d <- directory s
  unless (has d a) $ saveDirectory s (put a (obj [("parent",Null),("scope",str "")]) d)
  setManifests s row
-migrateAgentState :: Int -> Value -> Validation AgentState
-migrateAgentState version v =
- let old = items v (if version == 1 then "jobs" else "turns")
-     migrate t = let base = selectPresent ["id","flow","status","created","error","warning"] t; input = get t (if version==1 then "task" else "input") in merge (put "input" input base) (if at t "status" == "budget_blocked" then obj [("status",str "interrupted"),("error",str "Former budget block removed; retry to continue")] else empty)
-     state = select ["agid","revision","chat","events","event_sequence","last_output"] v
-     migrateMessage m = if has m "job" then put "turn" (get m "job") (remove ["job"] m) else m
- in validateValue 500 parseJSON (merge state (obj [("schema_version",num 3),("turns",arr [migrate t | t <- old,at t "flow" `elem` ["chat","computer"]]),("chat",arr (map migrateMessage (items v "chat"))),("events",arr (map migrateMessage (items v "events")))]))
-
 setManifests :: Service -> Value -> IO ()
 setManifests s row = do
  let a = at row "id"; root = agentRoot s a </> "manifests"

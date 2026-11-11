@@ -23,9 +23,6 @@ import System.Environment
 import System.FileLock
 import System.FilePath
 import System.Info
-#ifndef mingw32_HOST_OS
-import System.Posix.Files (setFileMode)
-#endif
 import Types
 import DataRoot
 import qualified Computer
@@ -44,16 +41,9 @@ import qualified GroupWork as GW
 
 openService :: StorageChoice -> FilePath -> IO Service
 openService choice path = do
- existed <- doesDirectoryExist path
- when (choice==AttachExisting && not existed) $ failure 409 "This data directory is unavailable. Reconnect the drive or choose another directory."
- when (choice/=AttachExisting) (createDirectoryIfMissing True path)
-#ifndef mingw32_HOST_OS
- unless existed (setFileMode path 0o700)
-#endif
- root <- canonicalizePath path
+ root <- selectedPath choice path
  repo <- lookupEnv "SAPIENS_REPOSITORY" >>= maybe getCurrentDirectory pure >>= canonicalizePath
- lock <- tryLockFile (root </> "host.lock") Exclusive >>= maybe (failure 409 "Another Sapiens4 server is using this data directory") pure
- validateDataRoot choice root `onException` unlockFile lock
+ lock <- acquireStorage choice root
  database <- (DB.openDatabase root >>= newMVar . Just) `onException` unlockFile lock
  let initialize = do
       guard <- newMVar ()

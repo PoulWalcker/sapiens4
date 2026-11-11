@@ -1,11 +1,15 @@
 {-# LANGUAGE OverloadedStrings #-}
-module RuntimePaths (configDirectory, defaultDataDirectory, legacyDataDirectory) where
+module RuntimePaths (configDirectory, defaultDataDirectory, legacyDataDirectory, externalStoragePath, containedPath) where
 
 import Data.Aeson
 import Control.Monad
+import Data.Char (toLower)
+import Data.List (find)
+import Data.Maybe (catMaybes)
 import System.Directory
 import System.Environment
 import System.FilePath
+import System.IO.Error (catchIOError, isDoesNotExistError)
 import System.Info
 
 newtype Profile = Profile String
@@ -18,6 +22,47 @@ instance FromJSON Profile where
    ("stable","com.poulwalcker.sapiens4") -> pure (Profile "Sapiens4")
    ("stable","com.sapiens4.desktop") -> pure (Profile "Sapiens4")
    _ -> fail "Invalid package channel/identity"
+
+ancestors :: FilePath -> [FilePath]
+ancestors path = path : if parent == path then [] else ancestors parent
+ where parent = takeDirectory path
+
+storagePath :: FilePath -> IO FilePath
+storagePath path = do
+ absolute <- makeAbsolute path
+ let check p = do
+      exists <- doesPathExist p
+      unless exists $ do
+       link <- pathIsSymbolicLink p `catchIOError` \e ->
+        if isDoesNotExistError e then pure False else ioError e
+       when link $ fail "A storage path contains a broken link. Reconnect it before starting."
+       let parent = takeDirectory p
+       unless (parent==p) (check parent)
+ check absolute
+ canonicalizePath absolute
+
+containedPath :: FilePath -> FilePath -> IO FilePath
+containedPath root path = do
+ parent <- storagePath root
+ full <- storagePath path
+ unless (any (equalFilePath parent) (drop 1 (ancestors full))) $
+  fail "A managed data path points outside its directory. Restore the complete Data Root."
+ pure full
+
+externalStoragePath :: FilePath -> IO FilePath
+externalStoragePath path = do
+ full <- storagePath path
+ bin <- takeDirectory <$> (getExecutablePath >>= canonicalizePath)
+ let bundle = find ((==".app") . map toLower . takeExtension) (ancestors bin)
+     runtime = takeDirectory (takeDirectory bin)
+ launcher <- doesDirectoryExist (bin </> "runtime")
+ let backend = takeFileName runtime == "runtime" && takeFileName (takeDirectory bin) == ".build"
+     packages = catMaybes [bundle] ++ [bin | os=="mingw32" && launcher] ++ [takeDirectory runtime | os=="mingw32" && backend]
+ let foldCase = if os `elem` ["mingw32","darwin"] then map toLower else id
+     inside package = any (equalFilePath (foldCase package) . foldCase) (ancestors full)
+ when (any inside packages) $
+  fail "Choose a data or configuration folder outside the installed Sapiens4 application."
+ pure full
 
 profileRoot :: IO FilePath
 profileRoot = do
@@ -45,16 +90,14 @@ configDirectory :: IO FilePath
 configDirectory = do
  supplied <- lookupEnv "SAPIENS_CONFIG_DIR"
  when (supplied==Just "") $ fail "SAPIENS_CONFIG_DIR must not be empty"
- maybe ((</> "config") <$> profileRoot) makeAbsolute supplied
+ maybe ((</> "config") <$> profileRoot) makeAbsolute supplied >>= externalStoragePath
 
 defaultDataDirectory :: IO FilePath
 defaultDataDirectory = do
  supplied <- lookupEnv "SAPIENS_DATA_DIR"
  when (supplied==Just "") $ fail "SAPIENS_DATA_DIR must not be empty"
- maybe ((</> "data") <$> profileRoot) makeAbsolute supplied
+ maybe ((</> "data") <$> profileRoot) makeAbsolute supplied >>= externalStoragePath
 
--- The specified Windows baseline used the stable profile root itself. It had
--- no development default; never discover stable data from a development build.
 legacyDataDirectory :: IO (Maybe FilePath)
 legacyDataDirectory = do
  root <- profileRoot

@@ -18,6 +18,10 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as B
 
+foreign import ccall unsafe "OpenProcess" openProcessForWait :: Word32 -> Int32 -> Word32 -> IO (Ptr ())
+foreign import ccall safe "WaitForSingleObject" waitProcessHandle :: Ptr () -> Word32 -> IO Word32
+foreign import ccall unsafe "CloseHandle" closeWaitHandle :: Ptr () -> IO Int32
+
 type Object = Ptr ()
 type Window = Ptr ()
 type Wide = Ptr Word16
@@ -270,7 +274,6 @@ execute arena view script done = do
     when (result >= 0) $ readWide (castPtr output) >>= done
   (withWide script $ \source -> call2 (core view) 29 source handler) `finally` release handler
 
--- The completion barrier must run before navigating the shell.
 addDocumentScript :: Arena -> View -> String -> (Either String String -> IO ()) -> IO ()
 addDocumentScript arena view source done = do
   handler <- completion arena "{B99369F3-9B11-47B5-BC6F-8E7895FCEA17}" $ \result identity ->
@@ -328,7 +331,6 @@ foreign import ccall safe "CoCreateInstance" coCreateInstance :: Ptr Word8 -> Ob
 
 foreign import ccall "dynamic" invokeIntPtr :: FunPtr (Object -> Word32 -> Ptr a -> IO HRESULT) -> Object -> Word32 -> Ptr a -> IO HRESULT
 
--- The native folder picker returns the selected Data Root without copying it.
 pickDirectory :: Window -> IO (Maybe FilePath)
 pickDirectory owner = withGuid "{DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7}" $ \classId ->
   withGuid "{D57C7288-D4AD-4768-BE02-9D969532D960}" $ \interfaceId ->

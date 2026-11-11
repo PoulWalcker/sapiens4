@@ -47,7 +47,7 @@ if(matchMedia('(prefers-color-scheme:dark)').matches) document.documentElement.d
         <span class="setup-choice-arrow" aria-hidden="true">›</span>
       </button>
       <div class="setup-storage-option" id="storage-existing" data-change="false">
-        <button type="button" class="setup-choice" aria-label="Use another folder" aria-pressed="false" onclick="selectStorage('existing')">
+        <button type="button" class="setup-choice" aria-label="Use another folder" aria-describedby="storage-directory" aria-pressed="false" onclick="selectStorage('existing')">
           <span class="setup-choice-symbol" aria-hidden="true">↗</span>
           <span class="setup-choice-copy"><strong>Use another folder</strong><small id="storage-directory">Open existing data or start in an empty folder.</small></span>
           <span class="setup-choice-arrow" aria-hidden="true">›</span>
@@ -55,7 +55,7 @@ if(matchMedia('(prefers-color-scheme:dark)').matches) document.documentElement.d
         <button type="button" class="setup-storage-change" id="storage-change" aria-label="Choose another folder" onclick="pickStorage()" hidden>Change</button>
       </div>
     </div>
-    <p class="setup-note">Existing data stays in its original location.</p>
+    <p class="setup-note">Upgrading from an earlier launcher? Choose the folder that contains corpora-identity.json.</p>
     <p id="error" role="alert"></p>
   </section>
 </div>

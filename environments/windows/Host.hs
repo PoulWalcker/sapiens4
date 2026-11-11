@@ -1,7 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module Host (Host(..), prepareHost, startHost, checkStorage, closeHost) where
+module Host (Host(..), prepareHost, startHost, closeHost, watchHost, desktopArgs) where
 
+import DesktopStorage (storageMode)
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Exception
@@ -11,13 +12,14 @@ import Data.Char (toUpper)
 import Data.IORef
 import Data.List (stripPrefix)
 import Data.Maybe
-import DataRoot (configDirectory, defaultDataDirectory, StorageChoice(..), startupMessage)
+import DataRoot (configDirectory, defaultDataDirectory, StorageChoice(..), startupMessage, containedPath)
 import Network.HTTP.Client
 import Network.URI
-import Native (processId)
+import Native (processId, openProcessForWait, waitProcessHandle, closeWaitHandle)
+import Foreign.Ptr (nullPtr)
+import qualified Data.ByteString as BS
 import System.Directory
 import System.Environment
-import System.Exit (ExitCode(..))
 import System.FilePath
 import System.IO
 import System.Process
@@ -37,10 +39,17 @@ data ServerProcess = ServerProcess
   , processOutput :: Handle
   , processErrors :: Handle
   , outputReader :: Maybe (Async ())
+  , exitWatcher :: Maybe (Async ())
   , errorReader :: Maybe (Async ())
   }
 
 data HostPaths = HostPaths { dataPath :: FilePath, runtimePath :: FilePath }
+
+desktopArgs :: [String] -> [String]
+desktopArgs = concatMap split
+ where split arg = case break (=='=') arg of
+        (key,'=':value) | key `elem` ["--data-dir","--runtime-dir"] -> [key,value]
+        _ -> [arg]
 
 hostPaths :: [String] -> FilePath -> FilePath -> Maybe FilePath -> Maybe FilePath -> HostPaths
 hostPaths args executable fallback dataEnv runtimeEnv = HostPaths
@@ -49,7 +58,6 @@ hostPaths args executable fallback dataEnv runtimeEnv = HostPaths
   where option name = listToMaybe [value | (key,value) <- zip args (drop 1 args), key == name]
 
 hostEnvironment :: [(String,String)] -> [(String,String)] -> [(String,String)]
--- Windows names are case-insensitive; leave explicit path values unchanged.
 hostEnvironment overrides inherited = overrides ++ filter keep inherited
   where
     owned = map (map toUpper . fst) overrides
@@ -58,9 +66,10 @@ hostEnvironment overrides inherited = overrides ++ filter keep inherited
 prepareHost :: [String] -> IO Host
 prepareHost args = do
   executable <- getExecutablePath
-  fallback <- defaultDataDirectory
   dataEnv <- lookupEnv "SAPIENS_DATA_DIR"
   runtimeEnv <- lookupEnv "SAPIENS_RUNTIME_DIR"
+  let explicit = lookup "--data-dir" (zip args (drop 1 args)) `mplus` dataEnv
+  fallback <- maybe defaultDataDirectory pure explicit
   let paths = hostPaths args executable fallback dataEnv runtimeEnv
   when (null (dataPath paths)) $ fail "Data directory must not be empty"
   when (null (runtimePath paths)) $ fail "Runtime directory must not be empty"
@@ -77,7 +86,7 @@ startHost choice host = do
   configRoot <- configDirectory
   createDirectoryIfMissing True configRoot
   pid <- processId
-  let overrides = [("SAPIENS_STORAGE_MODE",if choice==StartNew then "new" else "existing"),("SAPIENS_DESKTOP_PID", show pid),("SAPIENS_REPOSITORY",runtimeDirectory host),("SAPIENS_CONFIG_DIR",configRoot),("SAPIENS_DATA_DIR",dataDirectory host)]
+  let overrides = [("SAPIENS_STORAGE_MODE",storageMode choice),("SAPIENS_DESKTOP_PID", show pid),("SAPIENS_REPOSITORY",runtimeDirectory host),("SAPIENS_CONFIG_DIR",configRoot),("SAPIENS_DATA_DIR",dataDirectory host)]
   let command = (proc binary ["--port", "0", "--data-dir", dataDirectory host, "--desktop"])
         { cwd = Just (runtimeDirectory host), std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe
         , env = Just (hostEnvironment overrides environment)
@@ -88,11 +97,17 @@ launchHost :: Host -> CreateProcess -> IO String
 launchHost host command = mask $ \restore -> do
   closeHost host
   (Just input, Just output, Just errors, child) <- createProcess command
-  let owned = ServerProcess child input output errors Nothing Nothing
+  let owned = ServerProcess child input output errors Nothing Nothing Nothing
   writeIORef (serverProcess host) (Just owned)
   (do
     mapM_ (\stream -> hSetEncoding stream utf8 >> hSetNewlineMode stream universalNewlineMode) [input, output, errors]
-    collect <- async $ (forever (void $ hGetLine errors)) `catch` \(_ :: IOException) -> pure ()
+    recent <- newIORef BS.empty
+    let drainErrors = do
+          bytes <- BS.hGetSome errors 4096
+          unless (BS.null bytes) $ do
+            modifyIORef' recent $ \old -> let combined=old<>bytes in BS.drop (BS.length combined-8192) combined
+            drainErrors
+    collect <- async (drainErrors `catch` \(_ :: IOException) -> pure ())
     writeIORef (serverProcess host) (Just owned {errorReader=Just collect})
     readiness <- newEmptyMVar
     drain <- async $ do
@@ -102,17 +117,14 @@ launchHost host command = mask $ \restore -> do
         Left _ -> pure ()
         Right _ -> (forever (void $ hGetLine output)) `catch` \(_ :: IOException) -> pure ()
     writeIORef (serverProcess host) (Just owned {outputReader=Just drain,errorReader=Just collect})
-    restore (takeMVar readiness >>= either throwIO pure)) `onException` closeHost host
-
-checkStorage :: Host -> StorageChoice -> IO ()
-checkStorage host choice = do
-  let binary = runtimeDirectory host </> ".build/bin/sapiens4.exe"
-      mode = if choice == StartNew then "new" else "existing"
-  result <- timeout 35000000 $ readCreateProcessWithExitCode
-    (proc binary ["check-data",dataDirectory host,mode])
-      { cwd=Just (runtimeDirectory host), detach_console=True, use_process_jobs=True } ""
-  (code,_,errors) <- maybe (ioError $ userError "Storage validation did not finish within 35 seconds.") pure result
-  unless (code==ExitSuccess) $ ioError $ userError $ if null errors then "This data directory could not be opened." else errors
+    restore (takeMVar readiness >>= either (\e -> do
+      void (timeout 250000 (waitCatch collect))
+      bytes <- readIORef recent
+      unless (BS.null bytes) $ do
+        folder <- configDirectory
+        logPath <- containedPath folder (folder </> "desktop-server.log")
+        BS.writeFile logPath bytes
+      throwIO e) pure)) `onException` closeHost host
 
 readyAddress :: String -> Maybe URI
 readyAddress line = do
@@ -140,6 +152,19 @@ awaitHost host output = do
     Just (Object fields) | K.lookup "status" fields == Just (String "ok") -> writeIORef (origin host) (Just base) >> pure (show uri)
     _ -> ioError $ userError "Server readiness check failed"
 
+watchHost :: Host -> IO () -> IO ()
+watchHost host notify = do
+ current <- readIORef (serverProcess host)
+ forM_ current $ \server -> do
+  pid <- getPid (processHandle server)
+  handle <- maybe (pure nullPtr) (openProcessForWait 0x100000 0 . fromIntegral) pid
+  let revoked = writeIORef (origin host) Nothing >> notify
+  if handle==nullPtr then revoked else do
+   observer <- async $ flip finally (void $ closeWaitHandle handle) $ do
+    let wait = waitProcessHandle handle 250 >>= \result -> if result==258 then wait else revoked
+    wait
+   writeIORef (serverProcess host) (Just server {exitWatcher=Just observer})
+
 serverRunning :: Maybe ServerProcess -> IO Bool
 serverRunning = maybe (pure False) (fmap isNothing . getProcessExitCode . processHandle)
 
@@ -151,12 +176,11 @@ closeHost host = mask_ $ do
     Nothing -> clear
     Just server -> stopServer server `finally` (do
       alive <- serverRunning current
-      -- Retain ownership if termination failed and the process is still alive.
-      -- A stopped process must never remain the active server after an error.
       unless alive clear)
 
 stopServer :: ServerProcess -> IO ()
 stopServer server = mask_ $ do
+  mapM_ cancel (exitWatcher server)
   stop
   mapM_ cancel (catMaybes [outputReader server,errorReader server]) `finally` mapM_ closeStream streams
   where

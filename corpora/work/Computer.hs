@@ -64,7 +64,10 @@ bounded input maximumSize = case parseJSONText input of
  excerpt t = if T.length t <= maximumSize then t else jsonText (obj [("truncated",Bool True),("output_excerpt",str (T.take maximumSize t)),("hint",str "Partial observation only. Use find or inspect for the relevant element; do not repeat this full dump.")])
  trimRows field v = if T.length (jsonText v)<=maximumSize || null (items v field) then v else trimRows field (put "truncated" (Bool True) (put field (arr (init (items v field))) v))
 option :: String -> String -> [String] -> String
-option key def args = case dropWhile (/=key) args of _:value:_ -> value; _ -> def
+option key def = fromMaybe def . optionValue key
+
+optionValue :: String -> [String] -> Maybe String
+optionValue key args = case dropWhile (/=key) args of _:value:_ -> Just value; _ -> Nothing
 integerOption :: String -> Int -> [String] -> IO Int
 integerOption key def args = case reads (option key (show def) args) of [(n,"")] -> pure n; _ -> failure 400 (T.pack ("Invalid "<>key))
 readComputer :: FilePath -> [String] -> Int -> IO Value

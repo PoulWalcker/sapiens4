@@ -18,6 +18,7 @@ import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Aeson.Key as K
 import qualified Crypto.Hash.SHA256 as SHA
 import DataRoot
+import qualified DesktopStorage
 import Network.URI (URI(..), URIAuth(..), parseURI, escapeURIString, isUnreserved, unEscapeString)
 import System.Directory (canonicalizePath, doesFileExist, doesDirectoryExist)
 import Foreign hiding (void)
@@ -40,26 +41,27 @@ runDesktop :: Bool -> IO ()
 runDesktop probe = runInBoundThread $
   -- COM may release callback references while its apartment is shutting down.
   bracket newArena freeArena $ \memory ->
-    bracket_ (check =<< coInitialize nullPtr 2) coUninitialize (desktopSession memory probe)
+    let run = bracket_ (check =<< coInitialize nullPtr 2) coUninitialize (desktopSession memory probe)
+        report (e :: SomeException) = do
+          case fromException e :: Maybe SomeAsyncException of
+            Just _ -> throwIO e
+            Nothing -> pure ()
+          action <- withWide (storageMessage e) $ \message -> withWide "Sapiens4 could not start" $ \title ->
+            messageBox nullPtr message title 0x15
+          when (action==4) retry
+        retry = run `catch` report
+    in retry
 
 desktopSession :: Arena -> Bool -> IO ()
 desktopSession memory probe = do
   void $ setDpiAwareness (-4)
-  args <- getArgs
+  args <- desktopArgs <$> getArgs
   host <- prepareHost args
   configRoot <- configDirectory
-  -- Reuse the former data-root profile in place if no newer config profile
-  -- exists. Never move, overwrite or create browser files inside a fresh root.
   dataEnv <- lookupEnv "SAPIENS_DATA_DIR"
-  legacyData <- legacyDataDirectory
   let explicit = listToMaybe [value | (key,value) <- zip args (drop 1 args), key=="--data-dir"] `mplus` dataEnv
-  saved <- try (startupDataDirectory explicit legacyData) :: IO (Either IOException (Maybe FilePath))
-  let legacyRoot = either (const $ dataDirectory host) (maybe (dataDirectory host) id) saved
-      configuredProfile = configRoot </> "WebView2/Shell"
-      legacyProfile = legacyRoot </> "WebView2/Shell"
-  configured <- doesDirectoryExist configuredProfile
-  legacy <- doesDirectoryExist legacyProfile
-  let shellProfile = if not configured && legacy then legacyProfile else configuredProfile
+  saved <- try (startupDataDirectory explicit legacyDataDirectory) :: IO (Either IOException (Maybe FilePath))
+  shellProfile <- containedPath configRoot (configRoot </> "WebView2/Shell")
   activeRoot <- newIORef (dataDirectory host)
   bootstrapPath <- canonicalizePath (runtimeDirectory host </> "app/shell/bootstrap.html")
   let filePath = '/' : map (\c -> if c=='\\' then '/' else c) bootstrapPath
@@ -72,6 +74,7 @@ desktopSession memory probe = do
   recoveryError <- newIORef (Nothing :: Maybe String)
   top <- newIORef 0
   pending <- newIORef []
+  legacyView <- newIORef False
   shellRef <- newIORef Nothing
   browserRef <- newIORef Nothing
   statusRef <- newIORef nullPtr
@@ -83,6 +86,9 @@ desktopSession memory probe = do
   starting <- newIORef False
   generation <- newIORef (0 :: Integer)
   compactWindow <- newIORef True
+  navigationComplete <- newIORef False
+  workspaceReady <- newIORef False
+  storageAttempt <- newIORef (0 :: Integer)
   selectedRoot <- newIORef Nothing
   preferenceScript <- newIORef Nothing
   preferenceValues <- newIORef KM.empty
@@ -158,7 +164,6 @@ desktopSession memory probe = do
     flip finally (void $ destroyWindow hwnd) $ do
       resizeContent hwnd 560 600
       label <- withWide "STATIC" $ \className -> withWide "Starting Sapiens4…" $ \title ->
-        -- SS_CENTER wraps startup diagnostics; SS_CENTERIMAGE forces one line.
         createWindow 0 className title 0x50000001 0 0 1440 960 hwnd nullPtr instanceHandle nullPtr
       setupButtons <- forM [(101,"Install/Repair WebView2"),(102,"Retry"),(103,"Cancel")] $ \(ident,title) ->
         withWide "BUTTON" $ \className -> withWide title $ \caption ->
@@ -194,6 +199,8 @@ desktopSession memory probe = do
             writeIORef starting False
             storageScript ("window.storageError(" ++ T.unpack (TE.decodeUtf8 $ L.toStrict $ encode message) ++ ")")
           recoverStartup message = do
+            modifyIORef' storageAttempt (+1)
+            writeIORef (origin host) Nothing
             atomicModifyIORef' workerRef (\old -> (Nothing,old)) >>= mapM_ cancel
             writeIORef selectedRoot Nothing
             writeIORef starting True
@@ -209,42 +216,80 @@ desktopSession memory probe = do
                 writeIORef recoveryError (Just detail)
                 writeIORef compactWindow True
                 resizeContent hwnd 560 600
-                readIORef shellRef >>= mapM_ (\view -> navigate view bootstrapURL)
+                usedLegacy <- atomicModifyIORef' legacyView (\old -> (False,old))
+                if usedLegacy then do
+                  closeViews
+                  writeIORef starting False
+                  begin
+                else readIORef shellRef >>= mapM_ (\view -> navigate view bootstrapURL)
             writeIORef workerRef (Just worker)
           preferencesPath directory = configRoot </> "client-preferences" </> concatMap (\byte -> let h=showHex byte "" in replicate (2-length h) '0' ++ h) (BS.unpack $ SHA.hash $ TE.encodeUtf8 $ T.pack directory) <.> "json"
           savePreferences input = do
             selection <- readIORef selectedRoot
-            -- Only a committed browser may persist UI state.
             browser <- readIORef browserRef
             when (isNothing selection && not (isNothing browser)) $ do
               let key=string (field "key" input); value=string (field "value" input)
-              when ((key=="sapi-color-theme" || key=="s4.active" || take 13 key=="s4.workspace.") && length key<=128 && length value<=1000000) $ do
+              when (DesktopStorage.validPreference (T.pack key) (T.pack value)) $ do
                 directory <- readIORef activeRoot
                 values <- readIORef preferenceValues
                 let next=KM.insert (K.fromString key) (String $ T.pack value) values
                 writeJSON (preferencesPath directory) next
                 writeIORef preferenceValues next
+          commitWorkspace = do
+            ready <- (&&) <$> readIORef navigationComplete <*> readIORef workspaceReady
+            selection <- readIORef selectedRoot
+            when ready $ forM_ selection $ \(directory,url) -> do
+              committed <- try (saveDataDirectory directory)
+              case committed of
+                Left (e :: SomeException) -> recoverStartup ("Could not save your storage selection: " ++ storageMessage e)
+                Right () -> do
+                  atomicModifyIORef' workerRef (\old -> (Nothing,old)) >>= mapM_ cancel
+                  writeIORef selectedRoot Nothing
+                  writeIORef starting False
+                  writeIORef compactWindow False
+                  resizeContent hwnd 1440 960
+                  storageScript "window.dispatchEvent(new Event('sapiens-preferences-ready'))"
+                  when probe $ putStrLn "TITLE: Sapiens4" >> putStrLn ("Sapiens4: " ++ url)
           installStorage selected url = do
-            view <- readIORef shellRef >>= maybe (ioError $ userError "The application window closed.") pure
+            attempt <- readIORef storageAttempt
+            let current action = readIORef storageAttempt >>= \n -> when (n==attempt) action
+            writeIORef navigationComplete False
+            writeIORef workspaceReady False
+            writeIORef selectedRoot (Just (dataDirectory selected,url))
+            watchHost selected (post $ current $ recoverStartup "The application server stopped. Choose a folder to reopen your workspace.")
+            async (threadDelay 35000000 >> post (current $ do
+              selection <- readIORef selectedRoot
+              when (selection==Just (dataDirectory selected,url)) $ recoverStartup "Your workspace did not load within 35 seconds. Your saved storage selection is unchanged.")) >>= writeIORef workerRef . Just
+            bootstrap <- readIORef shellRef >>= maybe (ioError $ userError "The application window closed.") pure
+            let root = dataDirectory selected
+            profile <- containedPath root (root </> "WebView2/Shell")
+            canReuse <- doesDirectoryExist (profile </> "EBWebView")
+            if not canReuse || equalFilePath shellProfile profile then installWorkspace selected url current bootstrap else do
+              void (containedPath root (profile </> "EBWebView"))
+              let valid = (&&) <$> (not <$> readIORef closing) <*> ((==attempt) <$> readIORef storageAttempt)
+              gen <- readIORef generation
+              let opened result = case result of
+                    Left _ -> current (installWorkspace selected url current bootstrap)
+                    Right view -> do
+                      active <- valid
+                      if not active then closeView view else do
+                        closeView bootstrap
+                        writeIORef legacyView True
+                        loaded gen (installWorkspace selected url current) (Right view)
+                  failed (e :: SomeException) = current $ recoverStartup (storageMessage e)
+              newViewWhile valid memory hwnd profile (\result -> opened result `catch` failed)
+                `catch` \(_ :: IOException) -> current (installWorkspace selected url current bootstrap)
+          installWorkspace selected url current view = do
             browser <- newBrowser memory hwnd view selected top
             writeIORef browserRef (Just browser)
-            writeIORef selectedRoot (Just (dataDirectory selected,url))
             writeIORef activeRoot (dataDirectory selected)
             values <- (KM.map String <$> (readJSON (preferencesPath $ dataDirectory selected) KM.empty :: IO (KM.KeyMap T.Text)))
               `catch` (\(e :: IOException) -> reportException (toException e) >> pure KM.empty)
             writeIORef preferenceValues values
             oldScript <- atomicModifyIORef' preferenceScript (\old -> (Nothing,old))
             mapM_ (\identity -> withWide identity $ \name -> callPtr (core view) 28 name) oldScript
-            let source = concat
-                  ["(() => {if(window.top!==window || location.origin!==new URL(",jsonString url,").origin)return;try{"
-                  ,"const root=",jsonString (dataDirectory selected),",saved=",jsonString values,";const allowed=k=>k==='sapi-color-theme'||k==='s4.active'||k.startsWith('s4.workspace.');"
-                  ,"const previous=localStorage.getItem('s4.native.storage');if(previous&&previous!==root)for(const k of Object.keys(localStorage))if(allowed(k)||k.startsWith('s4.snapshot.'))localStorage.removeItem(k);localStorage.setItem('s4.native.storage',root);"
-                  ,"for(const [k,v] of Object.entries(saved))if(allowed(k))localStorage.setItem(k,v);"
-                  ,"const set=Storage.prototype.setItem;const notify=(key,value)=>window.chrome.webview.postMessage({clientPreferences:{key,value}});"
-                  ,"Storage.prototype.setItem=function(k,v){set.call(this,k,v);if(this===localStorage&&allowed(String(k)))notify(String(k),String(v));};"
-                  ,"addEventListener('pagehide',()=>{for(const k of Object.keys(localStorage))if(allowed(k))notify(k,localStorage.getItem(k));});"
-                  ,"}catch(_) {}})();"]
-            addDocumentScript memory view source $ \result -> do
+            source <- DesktopStorage.preferenceScript (runtimeDirectory host) (T.pack url) (dataDirectory selected) (JSON.Object values)
+            addDocumentScript memory view (T.unpack source) $ \result -> current $ do
               dead <- readIORef closing
               selection <- readIORef selectedRoot
               unless (dead || selection/=Just (dataDirectory selected,url)) $ case result of
@@ -252,13 +297,10 @@ desktopSession memory probe = do
                 Right identity -> do
                   writeIORef preferenceScript (Just identity)
                   navigate view url
-            -- Covers document-script registration and WebView navigation too.
-            async (threadDelay 35000000 >> post (do
-              selection <- readIORef selectedRoot
-              when (selection==Just (dataDirectory selected,url)) $ recoverStartup "Your workspace did not load within 35 seconds. Your saved storage selection is unchanged.")) >>= writeIORef workerRef . Just
           startSelected requestedChoice directory = mask $ \unmask -> do
             busy <- atomicModifyIORef' starting (\value -> (True,value))
             unless busy $ do
+              modifyIORef' storageAttempt (+1)
               storageScript "window.storageLoading?.()"
               worker <- async $ handle (\(e :: SomeException) -> case fromException e :: Maybe SomeAsyncException of
                 Just _ -> throwIO e
@@ -267,7 +309,7 @@ desktopSession memory probe = do
                   selectedDirectory <- canonicalizePath directory
                   choice <- maybe (storageChoiceForDirectory selectedDirectory) pure requestedChoice
                   let selected = host {dataDirectory=selectedDirectory}
-                  checkStorage selected choice
+                  DesktopStorage.checkStorage (runtimeDirectory host) selectedDirectory choice
                   guestScript <- B.readFile (runtimeDirectory host </> ".build/web/guest.js")
                   when (B.all (`elem` (" \t\r\n" :: String)) guestScript) $ ioError $ userError "The packaged guest.js is empty. Reinstall the complete Sapiens4 app."
                   url <- startHost choice selected
@@ -287,7 +329,7 @@ desktopSession memory probe = do
                 if isAbsolute directory then startSelected Nothing directory
                   else storageError "Choose a folder before continuing."
               _ -> pure ()
-          loaded attempt result = do
+          loaded attempt onLoaded result = do
             view <- either (ioError . userError) pure result
             dead <- readIORef closing
             currentAttempt <- readIORef generation
@@ -323,6 +365,7 @@ desktopSession memory probe = do
                   Just message
                     | isNothing base && bootstrapSource source && bootstrapSource current -> chooseStorage message
                     | Navigation.trusted base source && Navigation.trusted base current -> do
+                        when (field "workspaceReady" message==Bool True) $ writeIORef workspaceReady True >> commitWorkspace
                         applyWindowTheme hwnd light dark lastTheme message
                         case field "clientPreferences" message of
                           input@(JSON.Object _) -> savePreferences input
@@ -350,18 +393,8 @@ desktopSession memory probe = do
                   else do
                     selection <- readIORef selectedRoot
                     forM_ selection $ \(directory,url) -> when (current==url) $ do
-                      committed <- try (saveDataDirectory directory)
-                      case committed of
-                        Left (e :: SomeException) -> recoverStartup ("Could not save your storage selection: " ++ storageMessage e)
-                        Right () -> do
-                          atomicModifyIORef' workerRef (\old -> (Nothing,old)) >>= mapM_ cancel
-                          writeIORef selectedRoot Nothing
-                          writeIORef starting False
-                          writeIORef compactWindow False
-                          resizeContent hwnd 1440 960
-                          -- Capture values restored by the existing profile as well.
-                          storageScript "for(const k of Object.keys(localStorage))if(k==='sapi-color-theme'||k==='s4.active'||k.startsWith('s4.workspace.'))window.chrome.webview.postMessage({clientPreferences:{key:k,value:localStorage.getItem(k)}});"
-                          when probe $ putStrLn "TITLE: Sapiens4" >> putStrLn ("Sapiens4: " ++ url)
+                      writeIORef navigationComplete True
+                      commitWorkspace
                 else when (code/=14) $ post $ active $ do
                   base <- readIORef (origin host)
                   case base of
@@ -370,7 +403,7 @@ desktopSession memory probe = do
                 when probe $ do
                   identity <- getValue event 5 :: IO Word64
                   putStrLn $ "NAVIGATION END " ++ show identity ++ " " ++ (if success /= 0 then "True" else "False") ++ " " ++ show code
-              navigate view bootstrapURL
+              onLoaded view
               callInt (controller view) 12 0
               when probe $ void $ forkIO $ probeInput post hwnd top resize
           launch attempt = do
@@ -392,7 +425,7 @@ desktopSession memory probe = do
                     threadDelay 35000000
                     failed "Sapiens4 did not finish loading the storage screen within 35 seconds."
                   writeIORef workerRef (Just timer)
-                  newViewWhile valid memory hwnd shellProfile (\created -> loaded attempt created `catch` \(e :: SomeException) -> failed (storageMessage e)) `catch` \(e :: SomeException) -> failStart (storageMessage e)
+                  newViewWhile valid memory hwnd shellProfile (\created -> loaded attempt (\view -> navigate view bootstrapURL) created `catch` \(e :: SomeException) -> failed (storageMessage e)) `catch` \(e :: SomeException) -> failStart (storageMessage e)
           begin = mask_ $ do
             dead <- readIORef closing
             unless dead $ do
@@ -432,7 +465,6 @@ createMainWindow memory instanceHandle procedure = do
   when (hwnd == nullPtr) $ ioError $ userError "Cannot create desktop window"
   pure hwnd
 
--- Keep the same HWND centered as setup gives way to the workspace.
 resizeContent :: Window -> Int -> Int -> IO ()
 resizeContent hwnd width height = do
   dpi <- windowDpi hwnd

@@ -17,8 +17,8 @@ RSpec.describe 'Windows desktop startup recovery', :windows, :desktop do
         FileUtils.cp_r(File.join(Contract::ROOT, 'app/theme'), File.join(runtime, 'app'))
         FileUtils.cp(File.join(Contract::ROOT, '.build/web/guest.js'), File.join(runtime, '.build/web'))
         if scenario == 'server exiting before readiness'
-          # This real executable rejects the host arguments and exits immediately.
-          FileUtils.cp(File.join(Contract::ROOT, '.build/domain/sapiens-domain.exe'),
+          # Validation can run. Serving requires the omitted workspace app.js.
+          FileUtils.cp(File.join(Contract::ROOT, '.build/bin/sapiens4.exe'),
             File.join(runtime, '.build/bin/sapiens4.exe'))
         end
         process = Contract::Child.new(File.join(Contract::ROOT, '.build/bin/sapiens-windows.exe'),
@@ -26,7 +26,10 @@ RSpec.describe 'Windows desktop startup recovery', :windows, :desktop do
           env: {'SAPIENS_CONFIG_DIR' => File.join(directory, 'config')})
         begin
           @desktop = Desktop.new(process: process, ready: false)
-          desktop.click('Continue') if scenario == 'server exiting before readiness'
+          if scenario == 'server exiting before readiness'
+            desktop.see('This data directory is unavailable')
+            desktop.press('Continue')
+          end
           desktop.see(message)
           expect(File).not_to exist(File.join(directory, 'config/storage.json'))
           desktop.key('alt+F4')

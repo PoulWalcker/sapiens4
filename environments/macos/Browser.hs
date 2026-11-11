@@ -210,7 +210,7 @@ history browser tab predicate action = do
         let done = pending { tabAwaiting = False }
         save browser done; report browser done
 
-receive browser message onPreferences = do
+receive browser message onPreferences onReady = do
     sh <- readIORef (shell browser)
     sourceView <- obj0 message "webView"
     frame <- obj0 message "frameInfo"
@@ -224,6 +224,7 @@ receive browser message onPreferences = do
         valid <- booleanArgument raw "isKindOfClass:" dictionary
         body <- if valid then jsonObject raw else pure Nothing
         forM_ body $ \input -> do
+          when (bool (field "workspaceReady" input)) onReady
           if field "clientPreferences" input /= Null then onPreferences (field "clientPreferences" input)
           else if bool (field "pickFile" input) then do
             panel <- new "NSOpenPanel"

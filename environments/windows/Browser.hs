@@ -13,6 +13,7 @@ import Foreign hiding (void)
 import Numeric
 import Domain (BrowserCommand(..), BrowserAction(..), BrowserTransition(..), browserTransition)
 import Host
+import DataRoot (containedPath)
 import Native
 import qualified Navigation as Navigation
 import System.Directory (doesFileExist)
@@ -122,7 +123,10 @@ applyTheme browser tab = do
 createTab :: Browser -> String -> String -> (Tab -> IO ()) -> IO ()
 createTab browser owner identity done = do
   let profile = concatMap (\byte -> let hex = showHex byte "" in replicate (2 - length hex) '0' ++ hex) $ B.unpack $ SHA.hash $ TE.encodeUtf8 $ T.pack owner
-  newView (arena browser) (window browser) (dataDirectory (host browser) </> "WebView2/Guests" </> profile) $ \result -> do
+  let root = dataDirectory (host browser)
+  folder <- containedPath root (root </> "WebView2/Guests" </> profile)
+  void (containedPath root (folder </> "EBWebView"))
+  newView (arena browser) (window browser) folder $ \result -> do
     view <- either (ioError . userError) pure result
     visible view False
     dead <- readIORef (disposed browser)

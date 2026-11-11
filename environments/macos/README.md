@@ -1,5 +1,17 @@
 # Sapiens4 for macOS
 
+If you are replacing the earlier checkout-backed Mac launcher, quit Sapiens4
+and record its Data Root before replacing the app. This command reads the
+location from the old launcher. Adjust the app path if it is installed elsewhere.
+
+~~~sh
+/usr/libexec/PlistBuddy -c 'Print DataDirectory' /Applications/Sapiens4.app/Contents/Resources/Launcher.plist
+~~~
+
+On the first launch after replacement, select **Use another folder**, choose
+that directory, then select **Continue**. In the folder picker use **⌘⇧G** to
+enter a hidden path such as the checkout’s `.sapiens4`.
+
 On macOS 13+ Apple Silicon, mount `Sapiens.dmg`, copy **Sapiens4.app** to
 Applications (or your own Applications folder), and open it. No Sapiens build
 tools are needed. The app opens without Codex; model execution requires your

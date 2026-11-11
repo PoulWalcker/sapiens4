@@ -126,6 +126,33 @@ RSpec.describe 'Domain validation through saved installation fixtures', :host do
     expect(body['error']).not_to be_empty
     expect(host.request('GET', '/api/health').first).to eq(200)
   end
+  it 'rejects an incomplete v7 database without upgrading or recreating missing tables' do
+    host.stop
+    database = File.join(host.root, 'corpora.sqlite3')
+    SQLite3::Database.open(database) do |db|
+      db.execute('DROP TABLE scheduled_routines')
+      db.execute('PRAGMA user_version=7')
+    end
+    _, error, code = Contract.capture(Contract::BINARY, 'check-data', host.root, 'existing')
+    expect(code).not_to eq(0)
+    expect(error).to include('scheduled_routines')
+    SQLite3::Database.open(database, readonly: true) do |db|
+      expect(db.get_first_value('PRAGMA user_version')).to eq(7)
+      expect(db.get_first_value("SELECT name FROM sqlite_master WHERE name='scheduled_routines'")).to be_nil
+    end
+  end
+
+  it 'rejects an invalid legacy turn before creating the migration backup' do
+    host.stop
+    Contract.atomic_json(@file, @state.merge('schema_version' => 2, 'turns' => [@turn.merge(status: 'unknown')]))
+    original = File.binread(@file)
+    _, error, code = Contract.capture(Contract::BINARY, 'check-data', host.root, 'existing')
+    expect(code).not_to eq(0)
+    expect(error).to include('agent state')
+    expect(File.binread(@file)).to eq(original)
+    expect(File).not_to exist(File.join(File.dirname(@file), 'legacy-state-v2.json'))
+  end
+
   it 'migrates schema two before recovery and retains the original backup across restarts' do
     host.stop
     old = @state.merge('schema_version' => 2, 'turns' => [@turn.merge(status: 'budget_blocked')],

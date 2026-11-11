@@ -67,6 +67,14 @@ data ProjectionStatus = ProjectionPending | ProjectionCommitted [Turn]
 data CachedAgentState = CachedAgentState
  { cachedBytes :: BS.ByteString, cachedState :: AgentState, cachedProjection :: ProjectionStatus }
 
+migrateAgentState :: Int -> Value -> Validation AgentState
+migrateAgentState version v =
+ let old = items v (if version == 1 then "jobs" else "turns")
+     migrate t = let base = selectPresent ["id","flow","status","created","error","warning"] t; input = get t (if version==1 then "task" else "input") in merge (put "input" input base) (if at t "status" == "budget_blocked" then obj [("status",str "interrupted"),("error",str "Former budget block removed; retry to continue")] else empty)
+     state = select ["agid","revision","chat","events","event_sequence","last_output"] v
+     migrateMessage m = if has m "job" then put "turn" (get m "job") (remove ["job"] m) else m
+ in validateValue 500 parseJSON (merge state (obj [("schema_version",num 3),("turns",arr [migrate t | t <- old,at t "flow" `elem` ["chat","computer"]]),("chat",arr (map migrateMessage (items v "chat"))),("events",arr (map migrateMessage (items v "events")))]))
+
 -- Pure validation retains the HTTP error contract; adapters choose when to throw.
 type Validation a = Either APIError a
 check :: Bool -> Int -> Text -> Validation ()

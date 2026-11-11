@@ -7,7 +7,6 @@ class Host
     @directory = File.realpath(Dir.mktmpdir('sapiens-contract-'))
     @root, @repo = File.join(@directory, "workspace's é"), repo
     @command = command
-    # Initialize real empty data before writing synthetic provider fixtures into it.
     bootstrap = Contract::Child.new(Contract::BINARY, '--port', '0', '--data-dir', root, '--desktop',
       env: {'SAPIENS_CONFIG_DIR' => File.join(@directory, 'bootstrap config'), 'SAPIENS_CODEX_BINARY' => File.join(@directory, 'no-provider')}, chdir: @repo)
     begin

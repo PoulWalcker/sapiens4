@@ -66,7 +66,7 @@ Installed applications use `~/Library/Application Support/Sapiens4/data` on macO
 and `%LOCALAPPDATA%\Sapiens4\data` on Windows, with a sibling `config` directory.
 Source CLI execution keeps the checkout’s `.sapiens4` default. Explicit
 `--data-dir` overrides `SAPIENS_DATA_DIR`; `SAPIENS_CONFIG_DIR` is independent.
-No default depends on package metadata. Back up the complete data directory
+The installed package manifest selects the stable or development profile. Choose data and configuration folders outside the installed app. Back up the complete data directory
 while the host is stopped, including:
 
 - `corpora.sqlite3`: agents, workloads, Groups, preferences and attachments.

@@ -46,8 +46,6 @@ startHost :: FilePath -> Int -> Bool -> IO Host
 startHost root requested managed = do
  mode <- lookupEnv "SAPIENS_STORAGE_MODE"
  exists <- doesFileExist (root </> "corpora-identity.json")
- -- Source launch reopens its selected directory; native startup supplies an
- -- explicit choice, which must never silently fall back to attaching.
  startHostWith (if managed || mode==Just "existing" || mode==Nothing && exists then AttachExisting else StartNew) root requested managed
 
 startHostWith :: StorageChoice -> FilePath -> Int -> Bool -> IO Host

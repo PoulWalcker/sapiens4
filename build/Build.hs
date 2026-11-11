@@ -29,7 +29,12 @@ main = do
  index <- doesFileExist (cache </> "packages/hackage.haskell.org/01-index.tar")
  unless index (callProcess "cabal" ["update"])
  sodium <- doesFileExist (project </> "sodium/src/libsodium/.libs/libsodium.a")
- unless sodium $ do
+ let targetStamp = project </> "sodium/.sapiens-build-target"
+     target = os ++ "-" ++ arch ++ if os=="darwin" then "-13.0" else ""
+ stamped <- doesFileExist targetStamp
+ reusable <- if stamped then (==target) <$> readFile targetStamp else pure False
+ unless (sodium && reusable) $ do
+  when stamped (removeFile targetStamp)
   extracted <- doesDirectoryExist (project </> "sodium")
   unless extracted $ do
    callProcess "tar" ["-xzf",project </> "vendor/libsodium-1.0.20.tar.gz","-C",project]
@@ -43,8 +48,11 @@ main = do
     settings <- read <$> readProcess "ghc" ["--info"] "" :: IO [(String,String)]
     compiler <- mapM (\key -> maybe (ioError $ userError $ "GHC did not report "<>key) pure (lookup key settings)) ["C compiler command","C compiler flags"]
     setEnv "CC" (map (\c -> if c=='\\' then '/' else c) (unwords compiler))
+   configured <- doesFileExist "Makefile"
+   when configured $ callProcess "make" (["distclean"] ++ ["SHELL=sh" | os=="mingw32"])
    callProcess "sh" ["configure","--disable-shared","--enable-static","--disable-dependency-tracking"]
    callProcess "make" (["-j4"] ++ if os=="mingw32" then ["SHELL=sh","LIBTOOL=sh $(top_builddir)/libtool"] else [])
+  writeFile targetStamp target
  when (os=="mingw32") $ do
   createDirectoryIfMissing True build
   callProcess "windres" ["-I",root</>"environments/windows",root</>"environments/windows/resources.rc","-O","coff","-o",build</>"windows-resources.o"]

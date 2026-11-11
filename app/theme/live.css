@@ -437,7 +437,6 @@
 .connection-status[data-online="true"] .connection-dot { background:#3b9b69; }
 
 
-/* Pre-backend storage selection. */
 :root body.sapi-workspace { --setup-accent:#d90068; }
 :root[data-theme=dark] body.sapi-workspace { --setup-accent:#ff5aa5; }
 :root body.sapi-workspace .setup-header { display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:30px; }
