@@ -23,7 +23,7 @@ function Audit-Payload($Package) {
     $system = @('advapi32.dll','bcrypt.dll','comctl32.dll','comdlg32.dll','crypt32.dll','d3d11.dll','dbghelp.dll','dnsapi.dll','dwmapi.dll','dxgi.dll','gdi32.dll','imm32.dll','iphlpapi.dll','kernel32.dll','msvcrt.dll','ncrypt.dll','normaliz.dll','ntdll.dll','ole32.dll','oleaut32.dll','powrprof.dll','psapi.dll','rpcrt4.dll','secur32.dll','setupapi.dll','shell32.dll','shlwapi.dll','ucrtbase.dll','user32.dll','userenv.dll','uxtheme.dll','version.dll','winhttp.dll','wininet.dll','winmm.dll','winspool.drv','wintrust.dll','ws2_32.dll','wtsapi32.dll')
     foreach ($file in $files) {
         $headers = & objdump -p $file.FullName
-        if ($LASTEXITCODE -ne 0 -or ($headers -join "`n") -notmatch 'file format pei-x86-64') { throw "Not an x64 PE: $($file.FullName)" }
+        if ($LASTEXITCODE -ne 0 -or ($headers -join "`n") -notmatch 'file format (pei|coff)-x86-64') { throw "Not an x64 PE: $($file.FullName)" }
         foreach ($line in $headers) {
             if ($line -match 'DLL Name:\s*(\S+)') {
                 $dependency = $Matches[1].ToLowerInvariant()

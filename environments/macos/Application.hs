@@ -69,8 +69,7 @@ startServer = mask $ \restore -> do
     (Just input, Just output, Just errors, process) <- createProcess (proc binary ["--port","0","--data-dir",destination,"--desktop"])
         { cwd = Just runtime, env = Just (overrides ++ filter ((`notElem` map fst overrides) . fst) environment)
         , std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe, create_group = True }
-    let close h = hClose h `catch` (\(_ :: IOException) -> pure ())
-        cleanup = stopServer (ServerProcess process input output errors [])
+    let cleanup = stopServer (ServerProcess process input output errors [])
     mapM_ (\h -> hSetEncoding h utf8 >> hSetNewlineMode h universalNewlineMode) [input,output,errors] `onException` cleanup
     reader <- async $ withFile (destination </> "desktop-server.log") AppendMode $ \logFile ->
         (forever (hGetLine errors >>= hPutStrLn logFile >> hFlush logFile)) `catch` (\(_ :: IOException) -> pure ())
