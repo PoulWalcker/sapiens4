@@ -17,12 +17,17 @@ open .build/macos/Sapiens4.app
 
 The build records the compiled backend executable, PATH, repository location
 and data directory. Keep the checkout and its build output in place.
-The app starts the local backend when needed; closing or quitting its window
-leaves the backend running so conversations can finish. It installs no login item.
+Closing the Workspace window leaves the backend running so conversations can
+finish. Quitting stops its owned backend and active calls; closing during startup
+cancels startup. The app installs no login item.
 Right-click the Dock icon → Options → Keep in Dock.
 
-Data defaults to the checkout's `.sapiens4` directory. Set `SAPIENS_DATA_DIR` when
-building to retain an existing data location. The backend log is
+Fresh source builds default to `~/Library/Application Support/Sapiens4 Development/data`.
+When no storage selection is saved, the launcher discovers existing baseline data
+at the build's `Launcher.plist` DataDirectory (normally the checkout's `.sapiens4`)
+and validates it before reuse. `SAPIENS_DATA_DIR` at launch explicitly overrides
+the selection. Empty folders can initialize new data from the same storage screen.
+The backend log is
 `desktop-server.log` inside that directory. Builds do not move or delete data.
 
 ## Manual version changes

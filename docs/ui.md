@@ -19,13 +19,19 @@ corpora's cached preferences.
 
 macOS and Windows open the shared `bootstrap.html` before starting the backend:
 Welcome + Storage → Validate Storage → Start Backend → Workspace.
-Start fresh requires an empty default directory; attaching opens an existing
-complete Sapiens Data Root in place without copying or resetting its data.
+Start fresh uses the empty default directory. Use another folder initializes an
+empty selected directory or attaches a complete existing Data Root in place.
+Nonempty, partial and invalid roots are never replaced or repaired.
 
 After successful workspace navigation, the launcher durably saves the canonical
 path in `storage.json` under the configuration directory. Subsequent launches
-validate and reopen that root. Missing, invalid or locked storage returns to the
-pre-backend picker instead of creating replacement data. The running workspace
+validate and reopen that root. Explicit launch overrides take precedence. When
+no selection exists, source macOS launches discover the baseline Launcher.plist
+DataDirectory (otherwise the checkout's `.sapiens4`); stable Windows discovers
+baseline `%LOCALAPPDATA%\Sapiens4`. Discovery still requires full validation,
+never copies data, and never crosses stable/development defaults. Fresh installs
+retain the profile-specific default. Missing, invalid or locked storage returns
+to the pre-backend picker instead of creating replacement data. The running workspace
 has no storage switching or persistent onboarding stages.
 
 `DataRoot.hs` shares validation between the launchers and backend. The backend
@@ -37,8 +43,9 @@ navigation does not commit a new selected path.
 
 The native shells mirror workspace preferences, appearance and active Corpora
 by canonical Data Root: macOS uses a profile-specific NSUserDefaults suite;
-Windows uses durable JSON under the configuration directory. They restore this
-state before the UI starts on a new loopback origin, so a changed port does not
+Windows uses durable JSON under the configuration directory, falling back to
+safe defaults and logging errors if optional preferences cannot be decoded.
+They restore this state before the UI starts on a new loopback origin, so a changed port does not
 lose drafts. Windows reuses existing WebView2 shell profiles in place. Only the
 trusted shell can update this device-local state; guest pages and Corpora
 snapshots do not carry it.

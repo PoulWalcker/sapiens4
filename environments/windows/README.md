@@ -9,7 +9,11 @@ Chat requires authenticated Codex CLI 0.156.1+. Run `codex login`; installed CLI
 and native npm binaries are discovered automatically. Set `SAPIENS_CODEX_BINARY`
 to a full executable path to override discovery.
 
-Data lives in `%LOCALAPPDATA%\Sapiens4`, separate from the application. Closing the
+New data defaults to `%LOCALAPPDATA%\Sapiens4\data` for stable packages and
+`%LOCALAPPDATA%\Sapiens4 Development\data` for development packages. A stable
+upgrade discovers valid baseline data directly in `%LOCALAPPDATA%\Sapiens4`
+when no storage selection is saved. Chosen folders are reused in place; empty
+folders can initialize new data. Closing the
 app stops its server and cancels active calls. The package is unsigned and has no
 automatic updater: replace the application directory while retaining the data.
 Licenses ship in `license/`, `runtime/submodules/blindly4/license/` and `runtime/submodules/libs4/license/`.

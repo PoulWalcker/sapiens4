@@ -11,7 +11,7 @@ import qualified Data.Aeson as JSON
 import Data.Bits
 import Data.IORef
 import Data.Int
-import Data.Maybe (isNothing)
+import Data.Maybe (isNothing, listToMaybe)
 import Data.Word
 import Types (readJSON, writeJSON)
 import qualified Data.Aeson.KeyMap as KM
@@ -50,7 +50,10 @@ desktopSession memory probe = do
   configRoot <- configDirectory
   -- Reuse the former data-root profile in place if no newer config profile
   -- exists. Never move, overwrite or create browser files inside a fresh root.
-  saved <- try savedDataDirectory :: IO (Either IOException (Maybe FilePath))
+  dataEnv <- lookupEnv "SAPIENS_DATA_DIR"
+  legacyData <- legacyDataDirectory
+  let explicit = listToMaybe [value | (key,value) <- zip args (drop 1 args), key=="--data-dir"] `mplus` dataEnv
+  saved <- try (startupDataDirectory explicit legacyData) :: IO (Either IOException (Maybe FilePath))
   let legacyRoot = either (const $ dataDirectory host) (maybe (dataDirectory host) id) saved
       configuredProfile = configRoot </> "WebView2/Shell"
       legacyProfile = legacyRoot </> "WebView2/Shell"
@@ -203,7 +206,8 @@ desktopSession memory probe = do
         writeIORef browserRef (Just browser)
         writeIORef selectedRoot (Just (dataDirectory selected,url))
         writeIORef activeRoot (dataDirectory selected)
-        values <- readJSON (preferencesPath $ dataDirectory selected) KM.empty
+        values <- (KM.map String <$> (readJSON (preferencesPath $ dataDirectory selected) KM.empty :: IO (KM.KeyMap T.Text)))
+          `catch` (\(e :: IOException) -> reportException (toException e) >> pure KM.empty)
         writeIORef preferenceValues values
         oldScript <- atomicModifyIORef' preferenceScript (\old -> (Nothing,old))
         mapM_ (\identity -> withWide identity $ \name -> callPtr (core view) 28 name) oldScript
@@ -228,7 +232,7 @@ desktopSession memory probe = do
         async (threadDelay 35000000 >> post (do
           selection <- readIORef selectedRoot
           when (selection==Just (dataDirectory selected,url)) $ recoverStartup "Your workspace did not load within 35 seconds. Your saved storage selection is unchanged.")) >>= writeIORef workerRef . Just
-      startSelected choice directory = mask $ \unmask -> do
+      startSelected requestedChoice directory = mask $ \unmask -> do
         busy <- atomicModifyIORef' starting (\value -> (True,value))
         unless busy $ do
           storageScript "window.storageLoading?.()"
@@ -237,6 +241,7 @@ desktopSession memory probe = do
             Nothing -> post (recoverStartup $ storageMessage e)) $ unmask $ do
               closeHost host
               selectedDirectory <- canonicalizePath directory
+              choice <- maybe (storageChoiceForDirectory selectedDirectory) pure requestedChoice
               let selected = host {dataDirectory=selectedDirectory}
               checkStorage selected choice
               void (B.readFile $ runtimeDirectory host </> ".build/web/guest.js")
@@ -246,7 +251,7 @@ desktopSession memory probe = do
       chooseStorage message = do
         busy <- readIORef starting
         unless busy $ case field "storage" message of
-          String "new" -> startSelected StartNew (dataDirectory host)
+          String "new" -> startSelected (Just StartNew) (dataDirectory host)
           String "pick" -> do
             picking <- atomicModifyIORef' starting (\value -> (True,value))
             unless picking $ do
@@ -254,7 +259,7 @@ desktopSession memory probe = do
               storageScript ("window.storagePicked?.(" ++ T.unpack (TE.decodeUtf8 $ L.toStrict $ encode selected) ++ ")")
           String "existing" -> do
             let directory=string (field "directory" message)
-            if isAbsolute directory then startSelected AttachExisting directory
+            if isAbsolute directory then startSelected Nothing directory
               else storageError "Choose a folder before continuing."
           _ -> pure ()
       loaded result = do
@@ -306,11 +311,10 @@ desktopSession memory probe = do
                   Nothing -> do
                     first <- atomicModifyIORef' initialStorage (\value -> (False,value))
                     when first $ do
-                      saved <- try savedDataDirectory
                       case saved of
-                        Left (e :: SomeException) -> storageError (storageMessage e)
+                        Left e -> storageError (storageMessage e)
                         Right Nothing -> pure ()
-                        Right (Just directory) -> startSelected AttachExisting directory
+                        Right (Just directory) -> startSelected (Just AttachExisting) directory
               else do
                 selection <- readIORef selectedRoot
                 forM_ selection $ \(directory,url) -> when (current==url) $ do

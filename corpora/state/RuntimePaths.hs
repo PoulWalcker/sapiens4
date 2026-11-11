@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module RuntimePaths (configDirectory, defaultDataDirectory) where
+module RuntimePaths (configDirectory, defaultDataDirectory, legacyDataDirectory) where
 
 import Data.Aeson
 import Control.Monad
@@ -40,3 +40,10 @@ configDirectory = lookupEnv "SAPIENS_CONFIG_DIR" >>= maybe ((</> "config") <$> p
 
 defaultDataDirectory :: IO FilePath
 defaultDataDirectory = lookupEnv "SAPIENS_DATA_DIR" >>= maybe ((</> "data") . takeDirectory <$> configDirectory) makeAbsolute
+
+-- The specified Windows baseline used the stable profile root itself. It had
+-- no development default; never discover stable data from a development build.
+legacyDataDirectory :: IO (Maybe FilePath)
+legacyDataDirectory = do
+ root <- profileRoot
+ pure (if os=="mingw32" && takeFileName root=="Sapiens4" then Just root else Nothing)

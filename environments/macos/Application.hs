@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Application where
 
@@ -33,13 +34,17 @@ import System.Process hiding (shell)
 import System.Timeout
 import System.Exit (ExitCode(..))
 import System.Posix.Process (getProcessID)
+import System.Posix.Signals (signalProcess, signalProcessGroup, sigKILL)
+import System.Posix.Types (ProcessID, CPid(..))
+import System.IO.Error (isDoesNotExistError)
 import Data.List (stripPrefix)
 import Numeric (showHex)
+import Text.Read (readMaybe)
 
 
-data Application = Application { native :: Obj, browser :: IORef Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: IORef (Maybe ServerProcess), address :: IORef Text, startup :: IORef (Maybe (Async ())), starting :: IORef Bool, localLoaded :: IORef Bool, runtime :: FilePath, selectedRoot :: IORef (Maybe FilePath), recoveryError :: IORef (Maybe Text), clientPreferences :: Obj }
+data Application = Application { native :: Obj, browser :: IORef Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: IORef (Maybe ServerProcess), address :: IORef Text, startup :: IORef (Maybe (Async ())), starting :: IORef Bool, localLoaded :: IORef Bool, runtime :: FilePath, selectedRoot :: IORef (Maybe FilePath), recoveryError :: IORef (Maybe Text), baselineRoot :: Maybe FilePath, clientPreferences :: Obj }
 
-data ServerProcess = ServerProcess { serverHandle :: ProcessHandle, serverInput :: Handle, serverOutput :: Handle, serverErrors :: Async (), serverDrain :: Maybe (Async ()), serverDirectory :: FilePath }
+data ServerProcess = ServerProcess { serverHandle :: ProcessHandle, serverSession :: ProcessID, serverInput :: Handle, serverOutput :: Handle, serverErrors :: Async (), serverDrain :: Maybe (Async ()), serverDirectory :: FilePath }
 
 post :: Application -> IO () -> IO ()
 post application action = atomicModifyIORef' (pending application) (\actions -> (actions ++ [action],()))
@@ -71,23 +76,27 @@ startServer application choice runtime destination = do
     pid <- getProcessID
     let overrides = [("SAPIENS_REPOSITORY",runtime),("SAPIENS_CONFIG_DIR",configRoot),("SAPIENS_DATA_DIR",destination),("SAPIENS_DESKTOP_PID",show pid),("SAPIENS_STORAGE_MODE",if choice==StartNew then "new" else "existing")]
     let command = (proc binary ["--port","0","--data-dir",destination,"--desktop"])
-            { cwd = Just runtime, env = Just (overrides ++ filter ((`notElem` map fst overrides) . fst) environment)
-            , std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe, create_group = True }
+            { cwd = Just runtime, env = Just (overrides ++ filter ((`notElem` map fst overrides) . fst) environment) }
     launchServer application destination command
 
 launchServer :: Application -> FilePath -> CreateProcess -> IO (ServerProcess, Text)
 launchServer application destination command = mask $ \restore -> do
-    (Just input, Just output, Just errors, process) <- createProcess command
+    (Just input, Just output, Just errors, process) <- createProcess command {std_in=CreatePipe, std_out=CreatePipe, std_err=CreatePipe, new_session=True, create_group=False}
     let close h = hClose h `catch` (\(_ :: IOException) -> pure ())
-    reader <- async $ (do
+    let cleanup = do
+            group <- getPid process
+            mapM_ (\owned -> signalProcessGroup sigKILL owned `catch` (\(e :: IOException) -> unless (isDoesNotExistError e) (throwIO e))) group
+                `finally` (void (waitForProcess process) `finally` mapM_ close [input,output,errors])
+    group <- (getPid process >>= maybe (ioError (userError "Could not own the application server process group.")) pure) `onException` cleanup
+    reader <- (async $ (do
         hSetEncoding errors utf8
         hSetNewlineMode errors universalNewlineMode
         withFile (destination </> "desktop-server.log") AppendMode $ \logFile ->
             (forever $ do
                 line <- hGetLine errors
                 hPutStrLn logFile line
-                hFlush logFile) `catch` (\(_ :: IOException) -> pure ())) `finally` close errors
-    let server = ServerProcess process input output reader Nothing destination
+                hFlush logFile) `catch` (\(_ :: IOException) -> pure ())) `finally` close errors) `onException` cleanup
+    let server = ServerProcess process group input output reader Nothing destination
         await = do
             ended <- hIsEOF output
             when ended $ do
@@ -108,21 +117,44 @@ launchServer application destination command = mask $ \restore -> do
     writeIORef (child application) (Just running)
     pure (running, ready)
 
+-- A private session contains the owned backend group and provider groups.
+-- Capture its ID before reaping the root, so exited roots cannot hide orphans.
+foreign import ccall unsafe "getsid" processSession :: ProcessID -> IO ProcessID
+
+serverProcesses :: ServerProcess -> IO [ProcessID]
+serverProcesses server = do
+    result <- timeout 2000000 (readProcessWithExitCode "/bin/ps" ["-axo","pid="] "")
+    pids <- case result of
+        Just (ExitSuccess,output,_) -> pure (mapMaybe readMaybe (words output))
+        _ -> ioError (userError "Could not enumerate the application server session.")
+    filterM (fmap (==serverSession server) . processSession) pids
+
 stopServer :: ServerProcess -> IO ()
 stopServer server = stop `finally` (do
-    cancel (serverErrors server)
-    mapM_ cancel (serverDrain server)
-    mapM_ (\h -> hClose h `catch` (\(_ :: IOException) -> pure ())) [serverInput server,serverOutput server])
+    cancel (serverErrors server) `finally` mapM_ cancel (serverDrain server))
+    `finally` mapM_ (\h -> hClose h `catch` (\(_ :: IOException) -> pure ())) [serverInput server,serverOutput server]
     where
         process=serverHandle server
         input=serverInput server
+        signal action = action `catch` (\(e :: IOException) -> unless (isDoesNotExistError e) (throwIO e))
         stop = do
-            (hPutStrLn input "stop" >> hFlush input >> hClose input) `catch` (\(_ :: IOException) -> pure ())
-            ended <- timeout 10000000 (waitForProcess process)
-            when (isNothing ended) $ do
-                terminateProcess process
-                confirmed <- timeout 5000000 (waitForProcess process)
-                when (isNothing confirmed) (ioError (userError "The application server could not be stopped."))
+            void $ timeout 10000000 $ do
+                (hPutStrLn input "stop" >> hFlush input >> hClose input) `catch` (\(_ :: IOException) -> pure ())
+                void (waitForProcess process)
+            confirmed <- timeout 5000000 $ do
+                signal (signalProcessGroup sigKILL (serverSession server))
+                void (waitForProcess process)
+                let sweep = do
+                        owned <- serverProcesses server
+                        unless (null owned) $ do
+                            -- Recheck session membership before each signal.
+                            forM_ owned $ \pid -> do
+                                session <- processSession pid
+                                when (session==serverSession server) (signal (signalProcess sigKILL pid))
+                            threadDelay 50000
+                            sweep
+                sweep
+            when (isNothing confirmed) (ioError (userError "The application server session could not be stopped."))
 
 alert :: Text -> IO ()
 alert message = do
@@ -185,11 +217,12 @@ installMethods application = do
                 writeIORef (starting application) False
                 forM_ problem (showStorageError application)
                 unless (loaded || isJust problem) $ do
-                    selection <- try savedDataDirectory
+                    explicit <- lookupEnv "SAPIENS_DATA_DIR"
+                    selection <- try (startupDataDirectory explicit (baselineRoot application))
                     case selection of
                         Left (e :: IOException) -> showStorageError application (T.pack (storageMessage e))
                         Right Nothing -> pure ()
-                        Right (Just directory) -> startSelected application AttachExisting directory
+                        Right (Just directory) -> startSelected application (Just AttachExisting) directory
             sh <- withBrowser (readIORef . shell)
             selection <- readIORef (selectedRoot application)
             readyAddress <- readIORef (address application)
@@ -315,7 +348,7 @@ runSession isFixture initialAddress = do
     executable <- getExecutablePath
     let packaged = takeDirectory executable </> "../Resources/runtime"
     bundled <- doesDirectoryExist packaged
-    runtime <- if bundled then canonicalizePath packaged else do
+    (runtime,baseline) <- if bundled then (,Nothing) <$> canonicalizePath packaged else do
         bundle <- cls "NSBundle" >>= (`obj0` "mainBundle")
         resource <- str "Launcher"; extension <- str "plist"
         path <- obj2 bundle "pathForResource:ofType:" resource extension
@@ -325,7 +358,10 @@ runSession isFixture initialAddress = do
         pathKey <- str "Path"
         search <- obj1 configuration "objectForKey:" pathKey >>= string
         unless (T.null search) (setEnv "PATH" (T.unpack search))
-        canonicalizePath =<< if T.null root then getCurrentDirectory else pure (T.unpack root)
+        directory <- canonicalizePath =<< if T.null root then getCurrentDirectory else pure (T.unpack root)
+        dataKey <- str "DataDirectory"
+        previous <- obj1 configuration "objectForKey:" dataKey >>= string
+        pure (directory, Just (if T.null previous then directory </> ".sapiens4" else T.unpack previous))
     application <- cls "NSApplication" >>= \c -> obj0 c "sharedApplication"
     http <- newManager defaultManagerSettings
     guestScript <- if isFixture then
@@ -341,13 +377,14 @@ runSession isFixture initialAddress = do
         let hex byte = let value=showHex byte "" in replicate (2-length value) '0' ++ value
             suite="com.sapiens4.client." <> T.pack (concatMap hex (BS.unpack (SHA256.hash (TE.encodeUtf8 (T.pack config)))))
         allocated "NSUserDefaults" >>= \o -> str suite >>= obj1 o "initWithSuiteName:"
-    let state = Application application b win tasks isFixture process address worker busy loaded runtime selection problem preferences
-    target <- installMethods state
-    initialize state target initialAddress
-    void (obj0 application "run") `finally` do
-        closeApplication state
-        readIORef b >>= \current -> void (obj0 (origin current) "release")
-        unless isFixture $ void (obj0 preferences "release")
+    let state = Application application b win tasks isFixture process address worker busy loaded runtime selection problem baseline preferences
+    (do
+        target <- installMethods state
+        initialize state target initialAddress
+        void (obj0 application "run")) `finally` do
+        closeApplication state `finally` do
+            readIORef b >>= \current -> void (obj0 (origin current) "release")
+            unless isFixture $ void (obj0 preferences "release")
 
 createShell :: Application -> Obj -> IO Obj
 createShell application target = do
@@ -402,7 +439,7 @@ receiveMessage application message = do
             raw <- obj0 message "body" >>= jsonObject
             forM_ raw $ \input -> do
               case text (field "storage" input) of
-                "new" -> defaultDataDirectory >>= \directory -> startSelected application StartNew directory
+                "new" -> defaultDataDirectory >>= \directory -> startSelected application (Just StartNew) directory
                 "pick" -> do
                     busy <- atomicModifyIORef' (starting application) (\old -> (True,old))
                     unless busy $ do
@@ -410,7 +447,7 @@ receiveMessage application message = do
                         script sh ("window.storagePicked?.(" <> jsonText (maybe Null (String . T.pack) selected) <> ")")
                 "existing" -> do
                     let directory=T.unpack (text (field "directory" input))
-                    if isAbsolute directory then startSelected application AttachExisting directory
+                    if isAbsolute directory then startSelected application Nothing directory
                       else showStorageError application "Choose a folder before continuing."
                 _ -> pure ()
 
@@ -472,7 +509,7 @@ installClientPreferences application view readyAddress directory = unless (fixtu
 
 serverRunning :: Maybe ServerProcess -> IO Bool
 serverRunning Nothing = pure False
-serverRunning (Just server) = isNothing <$> getProcessExitCode (serverHandle server)
+serverRunning (Just server) = not . null <$> serverProcesses server
 
 -- Clear ownership only after a confirmed exit, including failed startup cleanup.
 stopOwnedServer :: Application -> IO ()
@@ -528,8 +565,8 @@ recoverStartup application message = do
             loadBootstrap application
     writeIORef (startup application) (Just worker)
 
-startSelected :: Application -> StorageChoice -> FilePath -> IO ()
-startSelected application choice directory = mask $ \unmask -> do
+startSelected :: Application -> Maybe StorageChoice -> FilePath -> IO ()
+startSelected application requestedChoice directory = mask $ \unmask -> do
     busy <- atomicModifyIORef' (starting application) (\old -> (True,old))
     unless busy $ do
         b <- readIORef (browser application)
@@ -541,8 +578,10 @@ startSelected application choice directory = mask $ \unmask -> do
                 -- Retry must first reap any child retained after failed cleanup.
                 stopOwnedServer application
                 selected <- canonicalizePath directory
+                choice <- maybe (storageChoiceForDirectory selected) pure requestedChoice
                 let binary=runtime application </> ".build/bin/sapiens4"
-                (code,_,errors) <- readProcessWithExitCode binary ["check-data",selected,if choice==StartNew then "new" else "existing"] ""
+                result <- timeout 35000000 (readProcessWithExitCode binary ["check-data",selected,if choice==StartNew then "new" else "existing"] "")
+                (code,_,errors) <- maybe (ioError (userError "Storage validation did not finish within 35 seconds.")) pure result
                 unless (code==ExitSuccess) $ ioError (userError errors)
                 guestScript <- TIO.readFile (runtime application </> ".build/web/guest.js")
                 mask $ \restore -> do

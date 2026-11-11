@@ -49,7 +49,7 @@ if(matchMedia('(prefers-color-scheme:dark)').matches) document.documentElement.d
       <div class="setup-storage-option" id="storage-existing" data-change="false">
         <button type="button" class="setup-choice" aria-label="Use another folder" aria-pressed="false" onclick="selectStorage('existing')">
           <span class="setup-choice-symbol" aria-hidden="true">↗</span>
-          <span class="setup-choice-copy"><strong>Use another folder</strong><small id="storage-directory">Use your existing agents and conversations.</small></span>
+          <span class="setup-choice-copy"><strong>Use another folder</strong><small id="storage-directory">Open existing data or start in an empty folder.</small></span>
           <span class="setup-choice-arrow" aria-hidden="true">›</span>
         </button>
         <button type="button" class="setup-storage-change" id="storage-change" aria-label="Choose another folder" onclick="pickStorage()" hidden>Change</button>
@@ -78,7 +78,7 @@ function updateStorage() {
  document.getElementById('storage-change').hidden=!selected;
  const path=document.getElementById('storage-directory');
  const parts=storageDirectory.replaceAll('\\','/').split('/').filter(Boolean);
- path.textContent=storageDirectory ? (parts.length>2?'…/':'')+parts.slice(-2).join('/') : 'Use your existing agents and conversations.';
+ path.textContent=storageDirectory ? (parts.length>2?'…/':'')+parts.slice(-2).join('/') : 'Open existing data or start in an empty folder.';
  path.title=storageDirectory;
 }
 function selectStorage(choice) {

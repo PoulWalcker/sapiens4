@@ -10,7 +10,7 @@ import Data.Char (toUpper)
 import Data.IORef
 import Data.List (stripPrefix)
 import Data.Maybe
-import DataRoot (configDirectory, StorageChoice(..), startupMessage)
+import DataRoot (configDirectory, defaultDataDirectory, StorageChoice(..), startupMessage)
 import Network.HTTP.Client
 import Network.URI
 import Native (processId)
@@ -41,8 +41,8 @@ data ServerProcess = ServerProcess
 data HostPaths = HostPaths { dataPath :: FilePath, runtimePath :: FilePath }
 
 hostPaths :: [String] -> FilePath -> FilePath -> Maybe FilePath -> Maybe FilePath -> HostPaths
-hostPaths args executable local dataEnv runtimeEnv = HostPaths
-  (fromMaybe (local </> "Sapiens4 Development/data") (option "--data-dir" `mplus` dataEnv))
+hostPaths args executable fallback dataEnv runtimeEnv = HostPaths
+  (fromMaybe fallback (option "--data-dir" `mplus` dataEnv))
   (fromMaybe (takeDirectory executable </> "runtime") (option "--runtime-dir" `mplus` runtimeEnv))
   where option name = listToMaybe [value | (key,value) <- zip args (drop 1 args), key == name]
 
@@ -56,10 +56,10 @@ hostEnvironment overrides inherited = overrides ++ filter keep inherited
 prepareHost :: [String] -> IO Host
 prepareHost args = do
   executable <- getExecutablePath
-  local <- lookupEnv "LOCALAPPDATA" >>= maybe getHomeDirectory pure
+  fallback <- defaultDataDirectory
   dataEnv <- lookupEnv "SAPIENS_DATA_DIR"
   runtimeEnv <- lookupEnv "SAPIENS_RUNTIME_DIR"
-  let paths = hostPaths args executable local dataEnv runtimeEnv
+  let paths = hostPaths args executable fallback dataEnv runtimeEnv
   directory <- makeAbsolute (dataPath paths)
   runtime <- makeAbsolute (runtimePath paths)
   Host directory runtime <$> newIORef Nothing <*> newIORef Nothing
@@ -98,9 +98,10 @@ checkStorage :: Host -> StorageChoice -> IO ()
 checkStorage host choice = do
   let binary = runtimeDirectory host </> ".build/bin/sapiens4.exe"
       mode = if choice == StartNew then "new" else "existing"
-  (code,_,errors) <- readCreateProcessWithExitCode
+  result <- timeout 35000000 $ readCreateProcessWithExitCode
     (proc binary ["check-data",dataDirectory host,mode])
-      { cwd=Just (runtimeDirectory host), detach_console=True } ""
+      { cwd=Just (runtimeDirectory host), detach_console=True, use_process_jobs=True } ""
+  (code,_,errors) <- maybe (ioError $ userError "Storage validation did not finish within 35 seconds.") pure result
   unless (code==ExitSuccess) $ ioError $ userError $ if null errors then "This data directory could not be opened." else errors
 
 readyAddress :: String -> Maybe URI

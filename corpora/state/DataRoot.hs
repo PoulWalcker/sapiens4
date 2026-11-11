@@ -3,7 +3,7 @@
 module DataRoot (module DataRoot, module RuntimePaths) where
 
 import Types (writeJSON)
-import RuntimePaths (configDirectory, defaultDataDirectory)
+import RuntimePaths (configDirectory, defaultDataDirectory, legacyDataDirectory)
 import Control.Exception
 import Control.Monad
 import Data.Aeson
@@ -40,6 +40,27 @@ savedDataDirectory = do
   case value of
    Object fields | Just (Number 1) <- K.lookup "version" fields, Just (String folder) <- K.lookup "directory" fields, isAbsolute (T.unpack folder) -> pure (Just (T.unpack folder))
    _ -> ioError (userError "Saved storage settings are incompatible. Choose your data directory again.")
+
+-- Explicit launch overrides and committed selections outrank baseline discovery.
+-- Presence only selects a candidate: normal preflight must still validate it.
+startupDataDirectory :: Maybe FilePath -> Maybe FilePath -> IO (Maybe FilePath)
+startupDataDirectory (Just explicit) _ = Just <$> makeAbsolute explicit
+startupDataDirectory Nothing legacy = do
+ saved <- savedDataDirectory
+ case saved of
+  Just _ -> pure saved
+  Nothing -> case legacy of
+   Nothing -> pure Nothing
+   Just root -> do
+    present <- or <$> mapM (doesPathExist . (root </>)) ["corpora-identity.json","corpora.sqlite3","agentpy"]
+    pure (if present then Just root else Nothing)
+
+-- An empty chosen folder initializes; every nonempty folder must attach and
+-- pass the complete-root checks. The backend rechecks under its lifetime lock.
+storageChoiceForDirectory :: FilePath -> IO StorageChoice
+storageChoiceForDirectory directory = do
+ names <- listDirectory directory
+ pure (if all (`elem` ["host.lock","desktop-server.log"]) names then StartNew else AttachExisting)
 
 saveDataDirectory :: FilePath -> IO ()
 saveDataDirectory directory = do
