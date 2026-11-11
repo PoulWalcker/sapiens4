@@ -33,7 +33,6 @@ import System.Info
 import System.IO
 import System.Process
 
--- Native scripts compile first. This tool only stages and packages those outputs.
 main :: IO ()
 main = do
  args <- getArgs
@@ -58,13 +57,12 @@ renameNew :: FilePath -> FilePath -> IO ()
 foreign import ccall unsafe "MoveFileExW" moveFileNew :: Ptr () -> Ptr () -> CUInt -> IO CInt
 foreign import ccall unsafe "GetLastError" lastFileError :: IO CUInt
 renameNew source destination = runInBoundThread $ wide source $ \from -> wide destination $ \to -> do
- result <- moveFileNew from to 0 -- No replacement or cross-volume copy fallback.
+ result <- moveFileNew from to 0
  when (result==0) $ do
   code <- lastFileError
   fail ("Cannot publish "++source++" to "++destination++" (Windows error "++show code++")")
  where
  wide path action = do
-  -- Keep directory's long-path support without following a destination symlink.
   parent <- canonicalizePath (takeDirectory path)
   let absolute=parent</>takeFileName path
       extended | "\\\\?\\" `isPrefixOf` absolute = absolute
@@ -81,9 +79,9 @@ renameNew source destination = do
  encoding <- getFileSystemEncoding
  withCString encoding source $ \from -> withCString encoding destination $ \to ->
 #ifdef darwin_HOST_OS
-  throwErrnoIfMinus1_ ("publish "++destination) (renameExclusive from to 4) -- RENAME_EXCL
+  throwErrnoIfMinus1_ ("publish "++destination) (renameExclusive from to 4)
 #elif defined(linux_HOST_OS)
-  throwErrnoIfMinus1_ ("publish "++destination) (renameExclusiveAt (-100) from (-100) to 1) -- AT_FDCWD, RENAME_NOREPLACE
+  throwErrnoIfMinus1_ ("publish "++destination) (renameExclusiveAt (-100) from (-100) to 1)
 #else
   fail "Exclusive package publication is unsupported on this platform"
 #endif
@@ -165,8 +163,6 @@ relocate input = do
       let internal=inside app resolved
           target=if internal then resolved else frameworks</>takeFileName resolved
       present <- exists target
-      -- A copied library's identity is its original canonical path, even after
-      -- install_name_tool changes its bytes. Equal basenames are insufficient.
       when (present && not internal) $ do
        identity <- maybe (canonicalizePath target) pure (Map.lookup target known)
        unless (identity==resolved) $ fail ("Library filename collision at "++target++": "++identity++" and "++resolved)
@@ -210,7 +206,6 @@ sign :: FilePath -> FilePath -> Maybe String -> IO ()
 sign root app identity = do
  let flags=["--force","--sign",fromMaybe "-" identity]++[value | isJust identity,value<-["--options","runtime","--timestamp"]]
  binaries app >>= mapM_ (\binary->run "codesign" (flags++[binary])) . sortOn (negate . length . splitDirectories)
- -- Microphone access belongs to the desktop host, not its nested executables.
  run "codesign" (flags++["--entitlements",root</>"build/package/macos-entitlements.plist",app])
  run "codesign" ["--verify","--deep","--strict",app]
 
@@ -243,8 +238,6 @@ diskImage app temporary plan = do
   forM_ profile $ \_ -> run "spctl" ["--assess","--type","execute","--verbose=2",installed]
  pure image
 
--- Allocate under the destination parent, then publish without replacement on
--- the same filesystem. Cleanup only touches a directory created by this attempt.
 withTemporary :: FilePath -> (FilePath -> IO a) -> IO a
 withTemporary parent action = do
  nonce <- getCPUTime

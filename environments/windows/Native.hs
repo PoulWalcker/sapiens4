@@ -200,16 +200,11 @@ webViewRuntimeAvailable = bracket webViewLoader (void . freeLibrary) $ \loader -
     result <- availableBrowserVersion entry nullPtr version
     value <- peek version
     versionText <- if value==nullPtr then pure "" else readWide value `finally` coFree value
-    -- Preview Edge channels append a channel name. Only accept the numeric
-    -- production Runtime version, using the same loader as view creation.
     pure (result >= 0 && not (null versionText) && all (\c -> c `elem` ['0'..'9'] || c=='.') versionText)
 
 newView :: Arena -> Window -> String -> (Either String View -> IO ()) -> IO ()
 newView = newViewWhile (pure True)
 
--- Cancellation invalidates an attempt; COM still owns its pending callbacks.
--- Keep them in the arena until Release, and dispose any late controller on the
--- apartment thread instead of handing it to a subsequent startup attempt.
 newViewWhile :: IO Bool -> Arena -> Window -> String -> (Either String View -> IO ()) -> IO ()
 newViewWhile active arena parent profile done = do
   loader <- webViewLoader
@@ -285,7 +280,7 @@ rectangle window = allocaArray 4 $ \rect -> do
 
 workArea :: IO (Int32, Int32, Int32, Int32)
 workArea = allocaArray 4 $ \rect -> do
-  result <- systemParametersInfo 0x0030 0 rect 0 -- SPI_GETWORKAREA excludes the taskbar.
+  result <- systemParametersInfo 0x0030 0 rect 0
   when (result == 0) $ ioError $ userError "Cannot get desktop work area"
   [left, upper, right, lower] <- peekArray 4 rect
   pure (left, upper, right - left, lower - upper)

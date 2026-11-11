@@ -12,8 +12,6 @@ main :: IO ()
 main = do
  args <- getArgs
  root <- getCurrentDirectory >>= buildPath
- -- Environment changes alone do not invalidate Cabal's cached executables.
- -- Keep the declared target fixed for both direct source and package builds.
  when (os=="darwin") $ setEnv "MACOSX_DEPLOYMENT_TARGET" "13.0"
  -- Source releases omit test helpers; development checkouts build the probes.
  helpers <- filterM (doesFileExist . (root </>) . snd)
@@ -46,7 +44,6 @@ main = do
     compiler <- mapM (\key -> maybe (ioError $ userError $ "GHC did not report "<>key) pure (lookup key settings)) ["C compiler command","C compiler flags"]
     setEnv "CC" (map (\c -> if c=='\\' then '/' else c) (unwords compiler))
    callProcess "sh" ["configure","--disable-shared","--enable-static","--disable-dependency-tracking"]
-   -- Keep libtool's shell invocation literal on Windows.
    callProcess "make" (["-j4"] ++ if os=="mingw32"
     then ["SHELL=sh","LIBTOOL=sh $(top_builddir)/libtool"] else [])
  when (os=="mingw32") $ do

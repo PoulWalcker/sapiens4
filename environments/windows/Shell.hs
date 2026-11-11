@@ -206,8 +206,6 @@ desktopSession memory probe = do
                   ready <- not <$> readIORef waiting
                   when ready $ void $ showWindow label 0
                 else
-                  -- OPERATION_CANCELED is expected when navigation is superseded.
-                  -- Close the controller after returning from its COM callback.
                   when (code /= 14) $ post $ active $ failStart ("Cannot load Sapiens4: " ++ show code)
                 when probe $ do
                   putStrLn $ "NAVIGATION END " ++ show identity ++ " " ++ (if success /= 0 then "True" else "False") ++ " " ++ show code

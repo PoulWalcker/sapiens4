@@ -46,8 +46,6 @@ data ServerProcess = ServerProcess ProcessHandle Handle Handle Handle [Async ()]
 post :: Application -> IO () -> IO ()
 post application action = atomicModifyIORef' (pending application) (\actions -> (actions ++ [action],()))
 
--- Only the child started by this application is trusted. Never attach to a
--- fixed port, which might belong to another installation or data directory.
 check :: Application -> IO ()
 check application = do
     destination <- readIORef (address application)
@@ -72,8 +70,6 @@ startServer owner = mask $ \restore -> do
     mapM_ (createDirectoryIfMissing True) [destination, configRoot]
     environment <- getEnvironment
     pid <- getProcessID
-    -- System tools take precedence; expose standard Homebrew installs and the
-    -- caller's tool managers without running shell startup scripts.
     let toolPath = intercalate [searchPathSeparator] $ nub $
             ["/usr/bin","/bin","/usr/sbin","/sbin","/opt/homebrew/bin","/usr/local/bin"] ++
             filter isAbsolute (maybe [] splitSearchPath $ lookup "PATH" environment)
@@ -82,7 +78,6 @@ startServer owner = mask $ \restore -> do
         { cwd = Just runtime, env = Just (overrides ++ filter ((`notElem` map fst overrides) . fst) environment)
         , std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe, create_group = True }
     let own readers = writeIORef owner (Just (ServerProcess process input output errors readers))
-    -- Publish the child before any cancellable initialization/readiness work.
     own []
     mapM_ (\h -> hSetEncoding h utf8 >> hSetNewlineMode h universalNewlineMode) [input,output,errors]
     reader <- async $ withFile (destination </> "desktop-server.log") AppendMode $ \logFile ->
@@ -111,7 +106,6 @@ closeServer owner = mask_ $ do
 
 stopApplication :: Application -> IO ()
 stopApplication application = do
-    -- Joining startup prevents a later acquisition from racing shutdown.
     readIORef (startupWorker application) >>= mapM_ cancel
     writeIORef (startupWorker application) Nothing
     closeServer (child application)
@@ -119,7 +113,6 @@ stopApplication application = do
 stopServer :: ServerProcess -> IO ()
 stopServer (ServerProcess process input output errors readers) = mask_ $ do
     stop
-    -- Failed termination retains stdout/stderr supervision and ownership.
     mapM_ cancel readers `finally` mapM_ close [input,output,errors]
     where
         close h = hClose h `catch` (\(_ :: IOException) -> pure ())
@@ -131,10 +124,6 @@ stopServer (ServerProcess process input output errors readers) = mask_ $ do
                 confirmed <- timeout 5000000 (waitForProcess process)
                 when (isNothing confirmed) (ioError (userError "The application server could not be stopped. Quit was cancelled."))
 
--- Freeze the owned tree before walking it: Codex has its own process group,
--- and a running parent could otherwise fork or exit while we discover children.
--- Keep the backend alive until every discovered descendant is gone, so a failed
--- fallback retains ownership and cannot permit a second server to start.
 forceStopServer :: ProcessHandle -> IO ()
 forceStopServer process = getPid process >>= mapM_ (\root -> do
     frozen <- newIORef []
@@ -322,8 +311,6 @@ initialize application target address = do
     showWindow application
     timerClass <- cls "NSTimer"; timerSelector <- sel "scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:"; tick <- sel "tick:"
     timer <- callTimer timerClass timerSelector 0.05 target tick nullPtr 1
-    -- NSTerminateLater runs a modal loop. Keep the completion queue serviced
-    -- there so confirmed backend exit can finish (or cancel) the Quit request.
     loop <- cls "NSRunLoop" >>= \c -> obj0 c "currentRunLoop"
     modal <- str "NSModalPanelRunLoopMode"
     void (obj2 loop "addTimer:forMode:" timer modal)
@@ -364,7 +351,6 @@ serverHealthy application destination = do
                     (decode (responseBody response) >>= fieldStatus) == Just ("ok" :: Text)))
                 `catch` (\(_ :: IOException) -> pure False)
                 `catch` (\(_ :: HttpException) -> pure False)
-        -- A short transient stall must not interrupt a healthy provider run.
         fromMaybe False <$> timeout 5000000 (do
             healthy <- probe
             if healthy then pure True else threadDelay 250000 >> probe)
@@ -416,6 +402,5 @@ runSession isFixture initialAddress = do
     flip finally (stopApplication state) $ do
         target <- installMethods state
         initialize state target initialAddress
-        -- The first timer tick starts the worker only after AppKit is running.
         unless isFixture $ post state (beginStartup state)
         void (obj0 application "run")

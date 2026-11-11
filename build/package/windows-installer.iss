@@ -1,4 +1,3 @@
-; Installer-only: no updater, migration, auth or process termination.
 [Setup]
 AppId={#PackageId}
 AppName={#PackageName}
@@ -60,8 +59,6 @@ var Target, StateRoot, Parent, NextParent: String; Item: TFindRec; Attributes: C
 begin
   Target := AddBackslash(ExpandFileName(ExpandConstant('{app}')));
   Result := True;
-  { Reject junctions/symlinks before ownership checks: lexical guards alone
-    cannot protect a state directory reached through a redirected parent. }
   Parent := RemoveBackslash(Target);
   while Parent <> '' do begin
     Attributes := FileAttributes(Parent);
@@ -107,7 +104,7 @@ function CloseInstalledImage(Handle: THandle): BOOL;
   external 'CloseHandle@kernel32.dll stdcall';
 
 type
-  TImageFindData = array[0..147] of Cardinal; { WIN32_FIND_DATAW: 592 bytes; fields unused }
+  TImageFindData = array[0..147] of Cardinal;
 function FindImageFile(Pattern: String; var Data: TImageFindData): THandle;
   external 'FindFirstFileW@kernel32.dll stdcall';
 function CloseImageSearch(Handle: THandle): BOOL;
@@ -125,8 +122,6 @@ begin
   Result := False;
   if (Attributes and $400) <> 0 then Exit;
   if not FindFirst(AddBackslash(Directory) + '*', Item) then begin
-    { Built-in FindFirst does not expose its error through DLLGetLastError.
-      Confirm no matches with a direct API call; access/search errors fail closed. }
     Handle := FindImageFile(AddBackslash(Directory) + '*', FindData);
     if Handle = THandle(-1) then Result := DLLGetLastError = 2
     else CloseImageSearch(Handle);
@@ -137,7 +132,6 @@ begin
     repeat
       if (Item.Name = '.') or (Item.Name = '..') then Continue;
       Path := AddBackslash(Directory) + Item.Name;
-      { Never follow a redirected installation subtree. }
       if (Item.Attributes and $400) <> 0 then begin Result := False; Exit; end;
       if (Item.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
         Result := InstallationImagesWritable(Path, Exempt)
@@ -145,9 +139,6 @@ begin
         Extension := ExtractFileExt(Path);
         if ((CompareText(Extension, '.exe') = 0) or (CompareText(Extension, '.dll') = 0)) and
            (CompareText(Path, Exempt) <> 0) then begin
-          { OPEN_EXISTING + GENERIC_WRITE tests the image lock even when WMI
-            cannot reveal an elevated process's path. No bytes are written.
-            Allow all sharing: unrelated open handles need not block Setup. }
           Handle := OpenInstalledImage(Path, $40000000, 7, 0, 3, 0, 0);
           Result := Handle <> THandle(-1);
           if Result then Result := CloseInstalledImage(Handle);
@@ -182,8 +173,6 @@ begin
       Process := Processes.ItemIndex(I);
       Executable := Process.ExecutablePath;
       if FileExists(Executable) then Executable := GetShortName(Executable);
-      { Inno keeps its original installed first phase alive while the temporary
-        second phase runs. Exempt only this exact path and current/parent PID. }
       if ForUninstall and (CompareText(Executable, Uninstaller) = 0) and
          ((Process.ProcessId = InstallerProcessId) or (Process.ProcessId = ParentId)) then Continue;
       if CompareText(Copy(Executable, 1, Length(Prefix)), Prefix) = 0 then begin
@@ -191,8 +180,6 @@ begin
         Exit;
       end;
     end;
-    { The running uninstaller is intentionally exempt; its original/temporary
-      process identities were checked above. All payload images remain guarded. }
     Executable := '';
     if ForUninstall then Executable := ExpandConstant('{uninstallexe}');
     Result := InstallationImagesWritable(ExpandConstant('{app}'), Executable);

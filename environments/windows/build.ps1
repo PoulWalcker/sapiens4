@@ -28,12 +28,10 @@ $output = [IO.Path]::GetFullPath($OutputDirectory).TrimEnd('\','/')
 if (Test-Path -LiteralPath $output) { throw 'Output must be a new directory' }
 if ($repo -eq $output -or $repo.StartsWith($output + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Output must not contain the source checkout' }
 $compiler = (Get-Command ISCC.exe -ErrorAction Stop).Source
-# Audit every PE, including delay-import DLLs reported by compiler tooling.
 function Audit-Payload($Package) {
     $files = @(Get-ChildItem -LiteralPath $Package -Recurse -File | Where-Object { $_.Extension -in @('.exe','.dll') })
     $system = @('advapi32.dll','bcrypt.dll','comctl32.dll','comdlg32.dll','crypt32.dll','d3d11.dll','dbghelp.dll','dnsapi.dll','dwmapi.dll','dxgi.dll','gdi32.dll','imm32.dll','iphlpapi.dll','kernel32.dll','msvcrt.dll','ncrypt.dll','normaliz.dll','ntdll.dll','ole32.dll','oleaut32.dll','powrprof.dll','propsys.dll','psapi.dll','rpcrt4.dll','secur32.dll','setupapi.dll','shell32.dll','shlwapi.dll','ucrtbase.dll','user32.dll','userenv.dll','uxtheme.dll','version.dll','winhttp.dll','wininet.dll','winmm.dll','winspool.drv','wintrust.dll','ws2_32.dll','wtsapi32.dll')
     foreach ($file in $files) {
-        # Read the PE machine field rather than relying on tool-specific format names.
         $reader = [IO.BinaryReader]::new([IO.File]::OpenRead($file.FullName))
         try {
             if ($reader.ReadUInt16() -ne 0x5a4d) { throw "Not a PE image: $($file.FullName)" }
@@ -48,8 +46,6 @@ function Audit-Payload($Package) {
             if ($line -match 'DLL Name:\s*(\S+)') {
                 $dependency = $Matches[1].ToLowerInvariant()
                 if ($dependency -notmatch '^(api-ms-win-|ext-ms-win-)' -and $dependency -notin $system) {
-                    # Windows only searches the executable's directory for our
-                    # private dependencies; a DLL elsewhere in the tree is insufficient.
                     $adjacent = Join-Path $file.DirectoryName $dependency
                     if (-not (Test-Path -LiteralPath $adjacent -PathType Leaf)) { throw "Unresolved PE dependency $dependency in $($file.FullName)" }
                 }
@@ -115,7 +111,6 @@ try {
     if ($PublicRelease) { Verify-Signature $installer }
     $checksum = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText((Join-Path $product 'SHA256SUMS'), "$checksum  $artifactName`n")
-    # Directory.Move refuses any existing destination, including a racing build.
     [IO.Directory]::Move($product, $output)
     Write-Host "Installer $(Join-Path $output $artifactName)"
 } finally {

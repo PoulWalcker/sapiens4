@@ -110,7 +110,6 @@ closeService s = do
   E.stopRuns s
   worker <- swapMVar (serviceWorker s) Nothing
   mapM_ (void . waitCatch) worker
-  -- A tick may have passed its stopping check before the first cancellation.
   E.stopRuns s
   let awaitRuns = do runs<-readMVar (serviceRuns s); unless (M.null runs) (threadDelay 50000 >> awaitRuns)
   awaitRuns

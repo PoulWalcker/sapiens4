@@ -45,8 +45,6 @@ newBrowser address guestScript = do
     configureBrowser browser address guestScript
     pure browser
 
--- Called on the AppKit thread after private readiness. Retain the new URL
--- beyond the timer callback's autorelease pool, then release the old one.
 configureBrowser browser address guestScript = do
     base <- url address >>= \u -> obj0 u "retain"
     old <- atomicModifyIORef' (origin browser) (\value -> (base,value))

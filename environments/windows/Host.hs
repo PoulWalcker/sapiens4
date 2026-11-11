@@ -38,7 +38,6 @@ data ServerProcess = ServerProcess
   }
 
 hostEnvironment :: [(String,String)] -> [(String,String)] -> [(String,String)]
--- Windows names are case-insensitive; leave explicit path values unchanged.
 hostEnvironment overrides inherited = overrides ++ filter keep inherited
   where
     owned = map (map toUpper . fst) overrides
@@ -128,7 +127,6 @@ closeHost host = mask_ $ do
 stopServer :: ServerProcess -> IO ()
 stopServer server = mask_ $ do
   stop
-  -- A cancelled Quit retains the live child's readers and output handles.
   mapM_ cancel (catMaybes [outputReader server,errorReader server]) `finally` mapM_ closeStream streams
   where
     streams = [processInput server, processOutput server, processErrors server]

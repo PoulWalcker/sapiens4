@@ -109,8 +109,6 @@ codexBinary = do
  candidates <- case override of
   Just p | not (null p) -> do
    found <- findExecutable p
-   -- Native proc cannot run npm's .cmd shim. Resolve the supported native
-   -- package beside that shim instead; an invalid explicit override never falls back.
    case found of
     Nothing -> pure []
     Just executable | os=="mingw32" && map toLower (takeExtension executable)==".cmd" -> npm (takeDirectory executable)

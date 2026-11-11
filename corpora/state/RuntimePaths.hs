@@ -7,8 +7,6 @@ import System.Environment
 import System.FilePath
 import System.Info
 
--- The runtime argument is retained for native host callers; profile identity
--- is fixed and never depends on mutable package metadata.
 profileRoot :: FilePath -> IO FilePath
 profileRoot _ = do
  home <- getHomeDirectory
