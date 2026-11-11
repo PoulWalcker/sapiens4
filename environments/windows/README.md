@@ -37,7 +37,7 @@ For a public release, set `SAPIENS_WINDOWS_CERT_THUMBPRINT` to a certificate in
 the signing account's store and add `-PublicRelease`. A timestamp URL may be
 supplied with `-TimestampUrl`. Builds sign and verify application binaries,
 the installer and its embedded uninstaller. Local builds are unsigned.
-Run the finished-installer [acceptance suite](../../docs/testing.md#d1-native-distribution).
+Installer acceptance tests are deferred until the implementation is complete.
 
 For source CLI development use `.\build\start.ps1 -Open`. For the native host,
 set `SAPIENS_RUNTIME_DIR` to the checkout. `--data-dir`, `SAPIENS_DATA_DIR` and

@@ -40,5 +40,5 @@ profile, then add `--release`:
 Public builds require both credentials, sign nested code with Hardened Runtime,
 notarize and staple the app and DMG, then run Gatekeeper and signature checks.
 The temporary notarization ZIP is discarded. Credentials are not stored in outputs.
-Run the finished-installer [acceptance suite](../../docs/testing.md#d1-native-distribution).
+Installer acceptance tests are deferred until the implementation is complete.
 Native browser tabs, file picking and accessibility behavior retain their existing interfaces.
