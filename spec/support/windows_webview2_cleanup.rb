@@ -1,5 +1,6 @@
 require 'time'
 require 'digest'
+require 'rspec/core'
 require_relative 'desktop'
 raise 'Windows required' unless Gem.win_platform?
 $stdout.sync = true
