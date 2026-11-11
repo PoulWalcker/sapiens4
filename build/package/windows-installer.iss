@@ -106,8 +106,16 @@ function OpenInstalledImage(FileName: String; Access, Sharing: Cardinal;
 function CloseInstalledImage(Handle: THandle): BOOL;
   external 'CloseHandle@kernel32.dll stdcall';
 
+type
+  TImageFindData = array[0..147] of Cardinal; { WIN32_FIND_DATAW: 592 bytes; fields unused }
+function FindImageFile(Pattern: String; var Data: TImageFindData): THandle;
+  external 'FindFirstFileW@kernel32.dll stdcall';
+function CloseImageSearch(Handle: THandle): BOOL;
+  external 'FindClose@kernel32.dll stdcall';
+
 function InstallationImagesWritable(Directory, Exempt: String): Boolean;
 var Item: TFindRec; Path, Extension: String; Handle: THandle; Attributes: Cardinal;
+    FindData: TImageFindData;
 begin
   Attributes := FileAttributes(Directory);
   if Attributes = $FFFFFFFF then begin
@@ -115,7 +123,15 @@ begin
     Exit;
   end;
   Result := False;
-  if not FindFirst(AddBackslash(Directory) + '*', Item) then Exit;
+  if (Attributes and $400) <> 0 then Exit;
+  if not FindFirst(AddBackslash(Directory) + '*', Item) then begin
+    { Built-in FindFirst does not expose its error through DLLGetLastError.
+      Confirm no matches with a direct API call; access/search errors fail closed. }
+    Handle := FindImageFile(AddBackslash(Directory) + '*', FindData);
+    if Handle = THandle(-1) then Result := DLLGetLastError = 2
+    else CloseImageSearch(Handle);
+    Exit;
+  end;
   Result := True;
   try
     repeat

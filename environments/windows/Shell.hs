@@ -84,7 +84,7 @@ desktopSession memory probe = do
         0x10 -> do
           busy <- atomicModifyIORef' closing (\value -> (True,value))
           unless busy $ do
-            modifyIORef' generation (+1)
+            readIORef starting >>= \inStartup -> when inStartup $ modifyIORef' generation (+1)
             void $ async $ do
               result <- try stop
               let complete = case result of
@@ -153,7 +153,7 @@ desktopSession memory probe = do
             windowTitle label $ "Sapiens4 could not start.\n\n" ++ detail ++ "\n\nChoose Install/Repair WebView2, Retry or Cancel.\nData: " ++ dataDirectory host
             void $ showWindow label 5
             mapM_ (\button -> void (showWindow button 5)) setupButtons
-          loaded url result = do
+          loaded attempt waiting url result = do
             view <- either (ioError . userError) pure result
             dead <- readIORef closing
             if dead then closeView view else do
@@ -164,16 +164,20 @@ desktopSession memory probe = do
               release settings
               browser <- newBrowser memory hwnd view host top
               writeIORef browserRef (Just browser)
+              workspaceNavigation <- newIORef Nothing
               let active action = do
                     current <- readIORef shellRef
                     dead <- readIORef closing
-                    when (not dead && maybe False ((== core view) . core) current) action
+                    currentAttempt <- readIORef generation
+                    when (not dead && currentAttempt == attempt && maybe False ((== core view) . core) current) action
                   on index iid action = onEvent memory (core view) index iid (\event -> active (action event))
               on 7 "{9ADBE429-F36D-432B-9DDC-F8881FBD76E3}" $ \event -> do
                 destination <- getString event 3
                 base <- readIORef (origin host)
                 unless (Navigation.trusted base destination) $ callInt event 8 1
-                when probe $ (getValue event 9 :: IO Word64) >>= \identity -> putStrLn $ "NAVIGATION START " ++ show identity
+                identity <- getValue event 9 :: IO Word64
+                when (destination == url) $ writeIORef workspaceNavigation (Just identity)
+                when probe $ putStrLn $ "NAVIGATION START " ++ show identity
               on 44 "{D4C185FE-C81C-4989-97AF-2D3FA7AB5651}" $ \event -> do
                 callInt event 6 1
                 destination <- getString event 3
@@ -193,12 +197,19 @@ desktopSession memory probe = do
               on 15 "{D33A35BF-1C49-4F98-93AB-006E0533FE1C}" $ \event -> do
                 success <- getValue event 3 :: IO Int32
                 code <- getValue event 4 :: IO Int32
-                if success /= 0 then void $ showWindow label 0 else
+                identity <- getValue event 5 :: IO Word64
+                workspace <- readIORef workspaceNavigation
+                if success /= 0 then do
+                  when (workspace == Just identity) $ do
+                    writeIORef waiting False
+                    writeIORef starting False
+                  ready <- not <$> readIORef waiting
+                  when ready $ void $ showWindow label 0
+                else
                   -- OPERATION_CANCELED is expected when navigation is superseded.
                   -- Close the controller after returning from its COM callback.
                   when (code /= 14) $ post $ active $ failStart ("Cannot load Sapiens4: " ++ show code)
                 when probe $ do
-                  identity <- getValue event 5 :: IO Word64
                   putStrLn $ "NAVIGATION END " ++ show identity ++ " " ++ (if success /= 0 then "True" else "False") ++ " " ++ show code
               navigate view url
               callInt (controller view) 12 0
@@ -226,11 +237,9 @@ desktopSession memory probe = do
                     timer <- async $ do
                       threadDelay 35000000
                       post $ active $ readIORef waiting >>= \pending -> when pending $
-                        failStart "WebView2 did not initialize within 35 seconds."
+                        failStart "Sapiens4 did not finish loading within 35 seconds."
                     writeIORef workerRef (Just timer)
-                    let completed created = do
-                          writeIORef waiting False
-                          loaded url created `catch` \(e :: SomeException) -> failed (displayException e)
+                    let completed created = loaded attempt waiting url created `catch` \(e :: SomeException) -> failed (displayException e)
                     newViewWhile valid memory hwnd (dataDirectory host </> "WebView2/Shell") completed
                       `catch` \(e :: SomeException) -> failStart (displayException e)
           begin = mask_ $ do
