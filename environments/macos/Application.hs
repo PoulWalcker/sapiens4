@@ -30,7 +30,7 @@ import System.Posix.Process (getProcessID)
 import Data.List (stripPrefix, nub, intercalate)
 
 
-data Application = Application { native :: Obj, browser :: Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: Maybe ServerProcess, address :: Text }
+data Application = Application { native :: Obj, browser :: Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: IORef (Maybe ServerProcess), address :: IORef Text, startupWorker :: IORef (Maybe (Async ())), quitting :: IORef Bool }
 
 data ServerProcess = ServerProcess ProcessHandle Handle Handle Handle [Async ()]
 
@@ -41,14 +41,17 @@ post application action = atomicModifyIORef' (pending application) (\actions -> 
 -- fixed port, which might belong to another installation or data directory.
 check :: Application -> IO ()
 check application = do
-    alive <- case child application of
+    destination <- readIORef (address application)
+    current <- readIORef (child application)
+    alive <- case current of
         Nothing -> pure False
         Just (ServerProcess process _ _ _ _) -> isNothing <$> getProcessExitCode process
-    if alive then readIORef (shell (browser application)) >>= \view -> loadURL view (address application)
-      else alert "The application server stopped. Quit and reopen Sapiens4."
+    unless (T.null destination) $
+        if alive then readIORef (shell (browser application)) >>= \view -> loadURL view destination
+          else alert "The application server stopped. Quit and reopen Sapiens4."
 
-startServer :: IO (ServerProcess, Text)
-startServer = mask $ \restore -> do
+startServer :: IORef (Maybe ServerProcess) -> IO Text
+startServer owner = mask $ \restore -> do
     executable <- getExecutablePath
     let resources = takeDirectory executable </> "../Resources"
     runtime <- canonicalizePath (resources </> "runtime")
@@ -69,10 +72,13 @@ startServer = mask $ \restore -> do
     (Just input, Just output, Just errors, process) <- createProcess (proc binary ["--port","0","--data-dir",destination,"--desktop"])
         { cwd = Just runtime, env = Just (overrides ++ filter ((`notElem` map fst overrides) . fst) environment)
         , std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe, create_group = True }
-    let cleanup = stopServer (ServerProcess process input output errors [])
-    mapM_ (\h -> hSetEncoding h utf8 >> hSetNewlineMode h universalNewlineMode) [input,output,errors] `onException` cleanup
+    let own readers = writeIORef owner (Just (ServerProcess process input output errors readers))
+    -- Publish the child before any cancellable initialization/readiness work.
+    own []
+    mapM_ (\h -> hSetEncoding h utf8 >> hSetNewlineMode h universalNewlineMode) [input,output,errors]
     reader <- async $ withFile (destination </> "desktop-server.log") AppendMode $ \logFile ->
         (forever (hGetLine errors >>= hPutStrLn logFile >> hFlush logFile)) `catch` (\(_ :: IOException) -> pure ())
+    own [reader]
     let await = do
             line <- hGetLine output
             case stripPrefix "Sapiens4: " line >>= parseURI of
@@ -86,14 +92,25 @@ startServer = mask $ \restore -> do
         case result of
             Left _ -> pure ()
             Right _ -> (forever (void (hGetLine output))) `catch` (\(_ :: IOException) -> pure ())
-    let server = ServerProcess process input output errors [reader,outputReader]
-    ready <- restore (timeout 35000000 (takeMVar readiness) >>= maybe (ioError (userError "The application server did not start within 35 seconds. See desktop-server.log in the application data folder.")) (either throwIO pure))
-        `onException` stopServer server
-    pure (server, ready)
+    own [reader,outputReader]
+    restore (timeout 35000000 (takeMVar readiness) >>= maybe (ioError (userError "The application server did not start within 35 seconds. See desktop-server.log in the application data folder.")) (either throwIO pure))
+
+closeServer :: IORef (Maybe ServerProcess) -> IO ()
+closeServer owner = mask_ $ do
+    readIORef owner >>= mapM_ stopServer
+    writeIORef owner Nothing
+
+stopApplication :: Application -> IO ()
+stopApplication application = do
+    -- Joining startup prevents a later acquisition from racing shutdown.
+    readIORef (startupWorker application) >>= mapM_ cancel
+    closeServer (child application)
 
 stopServer :: ServerProcess -> IO ()
-stopServer (ServerProcess process input output errors readers) = mask_ $
-    stop `finally` (mapM_ cancel readers `finally` mapM_ close [input,output,errors])
+stopServer (ServerProcess process input output errors readers) = mask_ $ do
+    stop
+    -- Failed termination retains stdout/stderr supervision and ownership.
+    mapM_ cancel readers `finally` mapM_ close [input,output,errors]
     where
         close h = hClose h `catch` (\(_ :: IOException) -> pure ())
         stop = do
@@ -133,14 +150,13 @@ installMethods application = do
     on1 "tick:" $ \_ -> atomicModifyIORef' (pending application) (\items -> ([],items)) >>= sequence_
     on0 "reloadWorkspace" (reload application)
     on0 "quit" (void (obj1 (native application) "terminate:" nullPtr))
-    quitting <- newIORef False
     wrapLong1 (\_ _ _ -> do
-        busy <- atomicModifyIORef' quitting (\value -> (True,value))
+        busy <- atomicModifyIORef' (quitting application) (\value -> (True,value))
         unless busy $ void $ async $ do
-            result <- try (mapM_ stopServer (child application))
+            result <- try (stopApplication application)
             post application $ do
                 case result of
-                    Left (e :: SomeException) -> writeIORef quitting False >> alert (T.pack (displayException e))
+                    Left (e :: SomeException) -> writeIORef (quitting application) False >> alert (T.pack (displayException e))
                     Right () -> pure ()
                 void (obj1 (native application) "replyToApplicationShouldTerminate:" (flag (either (const False) (const True) result)))
         pure 2) >>= method c "applicationShouldTerminate:" "Q@:@"
@@ -175,7 +191,7 @@ installMethods application = do
         sh <- readIORef (shell b)
         when (view == sh) $ do
             request <- obj0 action "request"; u <- obj0 request "URL"
-            local <- sameOrigin u (origin b)
+            local <- sameOrigin u =<< readIORef (origin b)
             when local $ void (obj1 view "loadRequest:" request)
         pure nullPtr) >>= method c "webView:createWebViewWithConfiguration:forNavigationAction:windowFeatures:" "@@:@@@@"
     registerClass c
@@ -260,7 +276,34 @@ initialize application target address = do
       else do
         html <- str "<body style='background:#191919;color:#eee;font:20px system-ui;padding:48px'>Starting Sapiens4…</body>"
         void (obj2 view "loadHTMLString:baseURL:" html nullPtr)
-        check application
+
+fetchGuestScript :: Text -> IO Text
+fetchGuestScript address =
+    let base = maybe address (T.pack . show . (\u -> u { uriPath = "", uriQuery = "", uriFragment = "" })) (parseURI (T.unpack address))
+    in bracket (newManager defaultManagerSettings) closeManager $ \http ->
+        (do r <- parseRequest (T.unpack (T.dropWhileEnd (== '/') base <> "/workspace/guest.js"))
+            response <- httpLbs r { responseTimeout = responseTimeoutMicro 2000000 } http
+            pure (TE.decodeUtf8With (\_ _ -> Just '\xfffd') (L.toStrict (responseBody response))))
+        `catch` (\(_ :: HttpException) -> pure "")
+
+beginStartup :: Application -> IO ()
+beginStartup application = do
+    closing <- readIORef (quitting application)
+    unless closing $ do
+        worker <- async $ do
+            result <- try $ (do
+                destination <- startServer (child application)
+                guestScript <- fetchGuestScript destination
+                pure (destination,guestScript)) `onException` closeServer (child application)
+            post application $ do
+                closing <- readIORef (quitting application)
+                unless closing $ case result of
+                    Left (e :: SomeException) -> alert (T.pack (displayException e))
+                    Right (destination,guestScript) -> do
+                        configureBrowser (browser application) destination guestScript
+                        writeIORef (address application) destination
+                        check application
+        writeIORef (startupWorker application) (Just worker)
 
 runApplication :: Bool -> Text -> IO ()
 runApplication isFixture address = do
@@ -268,16 +311,16 @@ runApplication isFixture address = do
     withAutoreleasePool $ (runSession isFixture address `catch` (\(e :: SomeException) -> alert (T.pack (displayException e))))
 
 runSession :: Bool -> Text -> IO ()
-runSession isFixture initialAddress = bracket acquire (mapM_ (stopServer . fst)) $ \started -> do
-    let address = maybe initialAddress snd started
-        base = maybe address (T.pack . show . (\u -> u { uriPath = "", uriQuery = "", uriFragment = "" })) (parseURI (T.unpack address))
+runSession isFixture initialAddress = do
     application <- cls "NSApplication" >>= \c -> obj0 c "sharedApplication"
-    http <- newManager defaultManagerSettings
-    guestScript <- (do r <- parseRequest (T.unpack (T.dropWhileEnd (== '/') base <> "/workspace/guest.js")); response <- httpLbs r { responseTimeout = responseTimeoutMicro 2000000 } http; pure (TE.decodeUtf8With (\_ _ -> Just '\xfffd') (L.toStrict (responseBody response)))) `catch` (\(_ :: HttpException) -> pure "")
-    b <- newBrowser address guestScript
-    win <- newIORef nullPtr; tasks <- newIORef []
-    let state = Application application b win tasks isFixture (fst <$> started) address
-    target <- installMethods state
-    initialize state target address
-    void (obj0 application "run")
-    where acquire = if isFixture then pure Nothing else Just <$> startServer
+    guestScript <- if isFixture then fetchGuestScript initialAddress else pure ""
+    b <- newBrowser (if isFixture then initialAddress else "about:blank") guestScript
+    win <- newIORef nullPtr; tasks <- newIORef []; owner <- newIORef Nothing
+    destination <- newIORef ""; worker <- newIORef Nothing; closing <- newIORef False
+    let state = Application application b win tasks isFixture owner destination worker closing
+    flip finally (stopApplication state) $ do
+        target <- installMethods state
+        initialize state target initialAddress
+        -- The first timer tick starts the worker only after AppKit is running.
+        unless isFixture $ post state (beginStartup state)
+        void (obj0 application "run")

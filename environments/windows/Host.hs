@@ -75,11 +75,14 @@ startHost host = mask $ \restore -> do
     { cwd = Just (runtimeDirectory host), std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe
     , env = Just (hostEnvironment overrides environment)
     , create_group = True, use_process_jobs = True, detach_console = True }
-  let cleanup = stopServer (ServerProcess child input output errors Nothing Nothing)
+  let owned = ServerProcess child input output errors Nothing Nothing
+      cleanup = closeHost host
+  writeIORef (serverProcess host) (Just owned)
   mapM_ (\stream -> hSetEncoding stream utf8 >> hSetNewlineMode stream universalNewlineMode) [input, output, errors] `onException` cleanup
   errorText <- newIORef ""
   collect <- async $ (forever $ hGetLine errors >>= \line -> modifyIORef' errorText (\old -> let next = old ++ line ++ "\n" in drop (max 0 $ length next - 12000) next))
     `catch` \(_ :: IOException) -> pure ()
+  writeIORef (serverProcess host) (Just owned { errorReader=Just collect })
   readiness <- newEmptyMVar
   drain <- async $ do
     result <- try (awaitHost host output errorText) :: IO (Either IOException String)
@@ -121,7 +124,10 @@ closeHost host = mask_ $ do
     writeIORef (serverProcess host) Nothing
 
 stopServer :: ServerProcess -> IO ()
-stopServer server = stop `finally` (mapM_ cancel (catMaybes [outputReader server,errorReader server]) `finally` mapM_ closeStream streams)
+stopServer server = mask_ $ do
+  stop
+  -- A cancelled Quit retains the live child's readers and output handles.
+  mapM_ cancel (catMaybes [outputReader server,errorReader server]) `finally` mapM_ closeStream streams
   where
     streams = [processInput server, processOutput server, processErrors server]
     stop = do
