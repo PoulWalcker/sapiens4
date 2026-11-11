@@ -2,6 +2,7 @@
 module Main where
 
 import Types
+import qualified RuntimePaths as Paths
 import HostServer
 import Assets
 import BuildUI
@@ -75,7 +76,11 @@ hostMain :: FilePath -> [String] -> IO ()
 hostMain root args = do
  when ("--help" `elem` args || "-h" `elem` args) $ putStrLn "Usage: sapiens4 [--port PORT] [--data-dir DIRECTORY] [--open]" >> exitSuccess
  settings <- validated (hostOptions root args)
- let directory = hostDirectory settings
+ source <- doesFileExist (root</>"corpora/Main.hs")
+ defaultData <- if source then
+  lookupEnv "SAPIENS_DATA_DIR" >>= maybe (pure (root</>".sapiens4")) makeAbsolute
+  else Paths.defaultDataDirectory root
+ let directory=option "--data-dir" defaultData args
  void (asset root "/")
  void (asset root "/workspace/app.js")
  bracket (startHost directory (requestedPort settings) False) hostStop $ \host -> do
