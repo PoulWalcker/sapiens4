@@ -297,6 +297,7 @@ beginStartup application = do
     closing <- readIORef (quitting application)
     worker <- readIORef (startupWorker application)
     unless (closing || isJust worker) $ do
+        writeIORef (address application) ""
         worker <- async $ do
             result <- try $ (do
                 closeServer (child application)
