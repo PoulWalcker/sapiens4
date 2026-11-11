@@ -104,6 +104,7 @@ stopApplication :: Application -> IO ()
 stopApplication application = do
     -- Joining startup prevents a later acquisition from racing shutdown.
     readIORef (startupWorker application) >>= mapM_ cancel
+    writeIORef (startupWorker application) Nothing
     closeServer (child application)
 
 stopServer :: ServerProcess -> IO ()
@@ -134,7 +135,12 @@ alert message = do
     void (long panel "runModal")
 
 reload :: Application -> IO ()
-reload application = if fixture application then readIORef (shell (browser application)) >>= void . (`obj0` "reload") else check application
+reload application = if fixture application then readIORef (shell (browser application)) >>= void . (`obj0` "reload") else do
+    current <- readIORef (child application)
+    alive <- case current of
+        Nothing -> pure False
+        Just (ServerProcess process _ _ _ _) -> isNothing <$> getProcessExitCode process
+    if alive then check application else beginStartup application
 showWindow :: Application -> IO ()
 showWindow application = do win <- readIORef (windowRef application); void (obj1 win "makeKeyAndOrderFront:" nullPtr); void (obj1 (native application) "activateIgnoringOtherApps:" (int 1))
 
@@ -289,20 +295,24 @@ fetchGuestScript address =
 beginStartup :: Application -> IO ()
 beginStartup application = do
     closing <- readIORef (quitting application)
-    unless closing $ do
+    worker <- readIORef (startupWorker application)
+    unless (closing || isJust worker) $ do
         worker <- async $ do
             result <- try $ (do
+                closeServer (child application)
                 destination <- startServer (child application)
                 guestScript <- fetchGuestScript destination
                 pure (destination,guestScript)) `onException` closeServer (child application)
             post application $ do
                 closing <- readIORef (quitting application)
-                unless closing $ case result of
-                    Left (e :: SomeException) -> alert (T.pack (displayException e))
-                    Right (destination,guestScript) -> do
-                        configureBrowser (browser application) destination guestScript
-                        writeIORef (address application) destination
-                        check application
+                unless closing $ do
+                    writeIORef (startupWorker application) Nothing
+                    case result of
+                        Left (e :: SomeException) -> alert (T.pack (displayException e))
+                        Right (destination,guestScript) -> do
+                            configureBrowser (browser application) destination guestScript
+                            writeIORef (address application) destination
+                            check application
         writeIORef (startupWorker application) (Just worker)
 
 runApplication :: Bool -> Text -> IO ()

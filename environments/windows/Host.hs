@@ -49,9 +49,11 @@ prepareHost args = do
   executable <- getExecutablePath
   runtimeEnv <- lookupEnv "SAPIENS_RUNTIME_DIR"
   let option name = listToMaybe [value | (key,value) <- zip args (drop 1 args), key == name]
+  when ((option "--runtime-dir" `mplus` runtimeEnv)==Just "") $ fail "Runtime directory must not be empty"
+  when (option "--data-dir"==Just "") $ fail "Data directory must not be empty"
   runtime <- makeAbsolute $ fromMaybe (takeDirectory executable </> "runtime") (option "--runtime-dir" `mplus` runtimeEnv)
   source <- doesFileExist (runtime </> "corpora/Main.hs")
-  let sourcePath key fallback = lookupEnv key >>= maybe (pure fallback) makeAbsolute
+  let sourcePath key fallback = lookupEnv key >>= maybe (pure fallback) (\path -> if null path then fail (key++" must not be empty") else makeAbsolute path)
       defaultData = if source then sourcePath "SAPIENS_DATA_DIR" (runtime </> ".sapiens4")
         else Paths.defaultDataDirectory runtime
   directory <- maybe defaultData makeAbsolute (option "--data-dir")
@@ -117,11 +119,11 @@ awaitHost host output errors = do
 
 closeHost :: Host -> IO ()
 closeHost host = mask_ $ do
-  writeIORef (origin host) Nothing
   current <- readIORef (serverProcess host)
   forM_ current $ \server -> do
     stopServer server
     writeIORef (serverProcess host) Nothing
+  writeIORef (origin host) Nothing
 
 stopServer :: ServerProcess -> IO ()
 stopServer server = mask_ $ do

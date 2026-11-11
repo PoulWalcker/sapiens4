@@ -2,6 +2,7 @@
 module RuntimePaths (configDirectory, defaultDataDirectory) where
 
 import System.Directory
+import Control.Monad (when)
 import System.Environment
 import System.FilePath
 import System.Info
@@ -18,7 +19,13 @@ profileRoot _ = do
  pure (base </> "Sapiens4")
 
 configDirectory :: FilePath -> IO FilePath
-configDirectory runtime = lookupEnv "SAPIENS_CONFIG_DIR" >>= maybe ((</> "config") <$> profileRoot runtime) makeAbsolute
+configDirectory runtime = do
+ supplied <- lookupEnv "SAPIENS_CONFIG_DIR"
+ when (supplied==Just "") $ fail "SAPIENS_CONFIG_DIR must not be empty"
+ maybe ((</> "config") <$> profileRoot runtime) makeAbsolute supplied
 
 defaultDataDirectory :: FilePath -> IO FilePath
-defaultDataDirectory runtime = lookupEnv "SAPIENS_DATA_DIR" >>= maybe ((</> "data") <$> profileRoot runtime) makeAbsolute
+defaultDataDirectory runtime = do
+ supplied <- lookupEnv "SAPIENS_DATA_DIR"
+ when (supplied==Just "") $ fail "SAPIENS_DATA_DIR must not be empty"
+ maybe ((</> "data") <$> profileRoot runtime) makeAbsolute supplied

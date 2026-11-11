@@ -82,7 +82,7 @@ hostMain root args = do
  settings <- validated (hostOptions root args)
  source <- doesFileExist (root</>"corpora/Main.hs")
  defaultData <- if source then
-  lookupEnv "SAPIENS_DATA_DIR" >>= maybe (pure (root</>".sapiens4")) makeAbsolute
+  lookupEnv "SAPIENS_DATA_DIR" >>= maybe (pure (root</>".sapiens4")) (\path -> if null path then fail "SAPIENS_DATA_DIR must not be empty" else makeAbsolute path)
   else Paths.defaultDataDirectory root
  let directory=option "--data-dir" defaultData args
  void (asset root "/")
@@ -103,6 +103,7 @@ data HostOptions = HostOptions
 hostOptions :: FilePath -> [String] -> Validation HostOptions
 hostOptions root args = do
  validateOptions ["--port","--data-dir"] ["--open","--desktop"] args
+ check (not (null (option "--data-dir" "." args))) 400 "Data directory must not be empty"
  port <- parseIntegerOption "--port" "4174" args
  check (port>=0 && port<=65535) 400 "Port must be between 0 and 65535"
  pure (HostOptions port (option "--data-dir" (root</>".sapiens4") args) ("--desktop" `elem` args) ("--open" `elem` args))

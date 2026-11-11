@@ -55,10 +55,11 @@ desktopSession memory probe = do
         when (label /= nullPtr) $ void $ setWindowPos label nullPtr 0 0 (fromIntegral width) (fromIntegral height) 4
       stop = do
         writeIORef closing True
-        (readIORef workerRef >>= mapM_ cancel) `finally` closeViews
+        readIORef workerRef >>= mapM_ cancel
+        closeHost host
       closeViews =
         (atomicModifyIORef' browserRef (\value -> (Nothing, value)) >>= mapM_ closeBrowser) `finally`
-          ((atomicModifyIORef' shellRef (\value -> (Nothing, value)) >>= mapM_ closeView) `finally` closeHost host)
+          (atomicModifyIORef' shellRef (\value -> (Nothing, value)) >>= mapM_ closeView)
       runPending = do
         actions <- atomicModifyIORef' pending (\actions -> ([], reverse actions))
         sequence_ actions
@@ -79,14 +80,18 @@ desktopSession memory probe = do
           resize hwnd
           defaultProc hwnd message wparam lparam
         0x10 -> do
-          result <- try stop
-          case result of
-            Right () -> void (destroyWindow hwnd)
-            Left (e :: SomeException) -> do
-              writeIORef closing False
-              label <- readIORef statusRef
-              windowTitle label ("Quit cancelled: " ++ displayException e)
-              void (showWindow label 5)
+          busy <- atomicModifyIORef' closing (\value -> (True,value))
+          unless busy $ void $ async $ do
+            result <- try stop
+            let complete = case result of
+                  Right () -> closeViews >> void (destroyWindow hwnd)
+                  Left (e :: SomeException) -> do
+                    writeIORef closing False
+                    label <- readIORef statusRef
+                    windowTitle label ("Quit cancelled: " ++ displayException e)
+                    void (showWindow label 5)
+            atomicModifyIORef' pending (\actions -> (complete:actions, ()))
+            void (postMessage hwnd 0x802A 0 0)
           pure 0
         0x02 -> quitMessage 0 >> pure 0
         0x0111 -> case wparam .&. 0xffff of
@@ -96,7 +101,7 @@ desktopSession memory probe = do
           _ -> defaultProc hwnd message wparam lparam
         0x802A -> runPending >> pure 0
         _ -> defaultProc hwnd message wparam lparam
-  flip finally stop $ do
+  flip finally (stop >> closeViews) $ do
     proc <- wrapWindowProc $ \hwnd message wparam lparam -> procedure hwnd message wparam lparam `catch` \(e :: SomeException) -> reportException e >> defaultProc hwnd message wparam lparam
     retain memory (freeHaskellFunPtr proc)
     instanceHandle <- moduleHandle nullPtr
@@ -133,7 +138,7 @@ desktopSession memory probe = do
             dead <- readIORef closing
             unless dead $ atomicModifyIORef' pending (\xs -> (action:xs, ())) >> void (postMessage hwnd 0x802A 0 0)
           failStart message = do
-            cleanup <- try closeViews
+            cleanup <- try (closeHost host >> closeViews)
             let detail = case cleanup of
                   Left (e :: SomeException) -> message ++ "\n\nStartup cleanup failed: " ++ displayException e
                   Right () -> message
