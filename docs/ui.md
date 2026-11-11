@@ -15,12 +15,33 @@ and attachments; newer input survives. Failed resources require explicit retry.
 Native browser reports are serialized, and corpora switching restores that
 corpora's cached preferences.
 
+## Desktop startup and storage
+
+macOS and Windows open the shared `bootstrap.html` before starting the backend:
+Welcome + Storage → Validate Storage → Start Backend → Workspace.
+Start fresh requires an empty default directory; attaching opens an existing
+complete Sapiens Data Root in place without copying or resetting its data.
+
+After successful workspace navigation, the launcher durably saves the canonical
+path in `storage.json` under the configuration directory. Subsequent launches
+validate and reopen that root. Missing, invalid or locked storage returns to the
+pre-backend picker instead of creating replacement data. The running workspace
+has no storage switching or persistent onboarding stages.
+
+`DataRoot.hs` shares validation between the launchers and backend. The backend
+rechecks storage under its exclusive lock before initialization or migration.
+Partial initialization is rejected; restore complete data from backup or select
+another empty directory. Startup failures stop owned children and preserve data;
+process ownership is retained until exit is confirmed, and failed startup or
+navigation does not commit a new selected path.
+
 The native shells mirror workspace preferences, appearance and active Corpora
 by canonical Data Root: macOS uses a profile-specific NSUserDefaults suite;
 Windows uses durable JSON under the configuration directory. They restore this
 state before the UI starts on a new loopback origin, so a changed port does not
-lose drafts. Windows reuses existing WebView2 shell profiles in place. Only the trusted shell can update this device-local state;
-guest pages and Corpora snapshots do not carry it.
+lose drafts. Windows reuses existing WebView2 shell profiles in place. Only the
+trusted shell can update this device-local state; guest pages and Corpora
+snapshots do not carry it.
 
 Browser/native APIs and third-party bindings live in
 `submodules/libs4/purescript/src/Libs4/Browser.purs` and its foreign implementation.
