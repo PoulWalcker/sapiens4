@@ -71,7 +71,11 @@ repository = do
    cwd <- getCurrentDirectory
    here <- doesDirectoryExist (cwd</>"app")
    executable <- getExecutablePath
-   canonicalizePath (if here then cwd else takeDirectory (takeDirectory (takeDirectory executable)))
+   let runtime=takeDirectory (takeDirectory (takeDirectory executable))
+   assets <- doesFileExist (runtime</>"app/shell/index.html")
+   -- A workspace may also contain an app directory. Prefer the executable's
+   -- own assets so generated console commands remain relocatable from any cwd.
+   canonicalizePath (if assets then runtime else if here then cwd else runtime)
 hostMain :: FilePath -> [String] -> IO ()
 hostMain root args = do
  when ("--help" `elem` args || "-h" `elem` args) $ putStrLn "Usage: sapiens4 [--port PORT] [--data-dir DIRECTORY] [--open]" >> exitSuccess
