@@ -11,6 +11,7 @@ import Data.Word
 import Foreign hiding (void)
 import Foreign.C
 import System.IO
+import System.Directory (createDirectoryIfMissing, removeFile)
 import System.Environment (getExecutablePath)
 import System.FilePath ((</>), takeDirectory)
 import qualified Data.Text as T
@@ -132,10 +133,7 @@ retain :: Arena -> IO () -> IO ()
 retain (Arena entries) dispose = modifyIORef' entries (ArenaEntry (pure False) dispose :)
 
 freeArena :: Arena -> IO ()
-freeArena (Arena entries) = do
-  traceLifecycle "freeArena begin"
-  atomicModifyIORef' entries (\owned -> ([], owned)) >>= disposeAll
-  traceLifecycle "freeArena end"
+freeArena (Arena entries) = atomicModifyIORef' entries (\owned -> ([], owned)) >>= disposeAll
 
 disposeAll :: [ArenaEntry] -> IO ()
 disposeAll [] = pure ()
@@ -165,17 +163,9 @@ callback (Arena arena) guid invoke = do
       else poke out nullPtr >> pure (-2147467262)
   pokeArray table [castFunPtr identify, castFunPtr add, castFunPtr dropRef, castFunPtr invoke]
   poke (castPtr object) table
-  let dispose = do
-        remaining <- readIORef count
-        traceLifecycle ("dispose callback " ++ guid ++ " refs=" ++ show remaining)
-        mapM_ freeHaskellFunPtr [castFunPtr identify, castFunPtr add, castFunPtr dropRef, castFunPtr invoke]
-        free table
-        free object
+  let dispose = mapM_ freeHaskellFunPtr [castFunPtr identify, castFunPtr add, castFunPtr dropRef, castFunPtr invoke] >> free table >> free object
   modifyIORef' arena (ArenaEntry ((== 0) <$> readIORef count) dispose :)
   pure object
-
-traceLifecycle :: String -> IO ()
-traceLifecycle message = hPutStrLn stderr ("[DEBUG-d1-wv2] " ++ message) `catch` (\(_ :: IOException) -> pure ())
 
 guardCallback :: IO () -> IO HRESULT
 guardCallback action = (action >> pure 0) `catch` \(e :: SomeException) -> reportException e >> pure (-2147467259)
@@ -216,16 +206,26 @@ webViewRuntimeAvailable = bracket webViewLoader (void . freeLibrary) $ \loader -
 newView :: Arena -> Window -> String -> (Either String View -> IO ()) -> IO ()
 newView = newViewWhile (pure True)
 
+prepareWebViewProfile :: FilePath -> IO ()
+prepareWebViewProfile profile =
+  (do
+    let storage = profile </> "EBWebView"
+    createDirectoryIfMissing True storage
+    bracket (openBinaryTempFile storage ".sapiens4-write-check")
+      (\(path, stream) -> hClose stream `finally` removeFile path)
+      (\(_, stream) -> B.hPut stream (B.singleton 0) >> hFlush stream))
+  `catch` \(e :: IOException) -> ioError $ userError $
+    "Cannot prepare WebView2 data directory " ++ profile ++ ": " ++ displayException e
+
 newViewWhile :: IO Bool -> Arena -> Window -> String -> (Either String View -> IO ()) -> IO ()
 newViewWhile active arena parent profile done = do
-  traceLifecycle ("create environment " ++ profile)
+  prepareWebViewProfile profile
   loader <- webViewLoader
-  retain arena (traceLifecycle "unload WebView2Loader" >> void (freeLibrary loader))
+  retain arena (void $ freeLibrary loader)
   entry <- withCString "CreateCoreWebView2EnvironmentWithOptions" (getProcAddress loader)
   when (entry == nullFunPtr) $ ioError $ userError "WebView2 loader entry point is unavailable"
   environment <- completion arena "{4E8A3389-C9D8-4BD2-B6B5-124FEE6CC14D}" $ \result env -> do
     valid <- active
-    traceLifecycle ("environment completion hr=" ++ show result ++ " object=" ++ show env ++ " active=" ++ show valid)
     when valid $ if result < 0 || env == nullPtr then done (Left $ "Cannot initialize WebView2 Runtime: " ++ show result) else do
       -- Give each view its own child window so guest panes can sit above the shell.
       child <- withWide "STATIC" $ \className -> withWide "" $ \title ->
@@ -238,20 +238,16 @@ newViewWhile active arena parent profile done = do
       modifyIORef' entries (ArenaEntry ((||) <$> ((== nullPtr) <$> readIORef pendingChild) <*> (not <$> active)) discardChild :)
       ready <- completion arena "{6C4819F3-C9B7-4260-8127-C9F5BDE7F68C}" $ \code ctrl -> do
         valid <- active
-        traceLifecycle ("controller completion hr=" ++ show code ++ " object=" ++ show ctrl ++ " active=" ++ show valid)
         if not valid then (when (ctrl /= nullPtr) $ call0 ctrl 24) `finally` discardChild else if code < 0 || ctrl == nullPtr then discardChild >> done (Left $ "Cannot create browser view: " ++ show code) else do
           addRef ctrl
           web <- getValue ctrl 25 `onException` (release ctrl >> discardChild)
           writeIORef pendingChild nullPtr
           done (Right $ View ctrl web child)
       (call2 env 3 child ready `onException` discardChild) `finally` release ready
-  (withWide profile $ \path -> do
-    result <- createEnvironment entry nullPtr path nullPtr environment
-    traceLifecycle ("create environment returned hr=" ++ show result)
-    check result) `finally` release environment
+  (withWide profile $ \path -> createEnvironment entry nullPtr path nullPtr environment >>= check) `finally` release environment
 
 closeView :: View -> IO ()
-closeView view = (traceLifecycle ("closeView " ++ show (controller view)) >> call0 (controller view) 24) `finally`
+closeView view = call0 (controller view) 24 `finally`
   (release (core view) `finally` (release (controller view) `finally` void (destroyWindow $ container view)))
 
 bounds :: View -> Int -> Int -> Int -> Int -> IO ()
