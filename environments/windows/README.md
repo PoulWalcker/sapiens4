@@ -14,6 +14,8 @@ Setup refuses active installation processes, unowned nonempty destinations and
 protected state directories, and destinations with junction/symlink parents. Uninstall preserves data, configuration and unowned
 files. Process checks are preflight safeguards, not an atomic installation lock.
 The ownership marker left after uninstall allows safe reinstallation.
+Pre-D1 installations that stored data directly in `%LOCALAPPDATA%\Sapiens4`
+can retain that location with `SAPIENS_DATA_DIR`; D1 does not migrate existing state.
 
 ## Build and verify
 
