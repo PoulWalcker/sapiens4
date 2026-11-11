@@ -1,0 +1,49 @@
+{
+  "evidence_kind": "Manual transcription of Windows console observations; raw JSON/logs remain at the recorded Windows paths",
+  "validation_date_dubai": "2026-11-12",
+  "source_sha": "6dc6cfab6b2ed0a90e4c3fc6004d02282902ce16",
+  "windows": {"caption": "Microsoft Windows Server 2022 Datacenter", "version": "10.0.20348", "architecture": "64-bit", "session": 1, "interactive": true},
+  "webview2_version": "157.0.4341.42",
+  "installer": {
+    "path": "C:/Build/d1-final-regression/.build/d1-final-regression/Sapiens-Setup-win-x64.exe",
+    "sha256": "75594a411414652f74dc6af8dddeb3bc64839c84807d5e6fdc1c177d4d8f1a38",
+    "sha256sums_match": true
+  },
+  "rspec_runs": [
+    {"files": ["spec/installed_distribution_spec.rb"], "seed": 27321, "examples": 2, "failures": 0, "pending": 1, "duration_seconds": 19.2036398, "raw_json": "C:/Build/d1-final-regression/.build/installed.json"},
+    {"files": ["spec/windows_startup_spec.rb", "spec/windows_package_spec.rb"], "examples": 4, "failures": 0, "pending": 0, "errors_outside_examples": 0, "duration_seconds": 16.6575306, "raw_json": "C:/Build/d1-final-regression/.build/windows.json"}
+  ],
+  "webview2_matrix": {
+    "root": "C:/Build/d1-final-cleanup", "exit": 0, "stderr_empty": true,
+    "cases": [
+      {"case": "A", "host_pid": 6816, "backend_pid": null, "main_webview_pid": null, "owned_post_exit": 0, "owned_post_uninstall": 0, "uninstall_completed": true},
+      {"case": "B", "host_pid": 7560, "backend_pid": null, "main_webview_pid": null, "owned_post_exit": 0, "owned_post_uninstall": 0, "uninstall_completed": true},
+      {"case": "C", "host_pid": 6448, "backend_pid": 7300, "main_webview_pid": 7104, "owned_post_exit": 0, "owned_post_uninstall": 0, "uninstall_completed": true},
+      {"case": "D", "host_pid": 3344, "backend_pid": 7880, "main_webview_pid": 3064, "owned_post_exit": 0, "owned_post_uninstall": 0, "uninstall_completed": true},
+      {"case": "E", "host_pid": 2460, "backend_pid": 6356, "main_webview_pid": 9116, "owned_post_exit": 0, "owned_post_uninstall": 0, "uninstall_completed": true}
+    ],
+    "case_a_obstruction_after": "D1-A", "case_b_obstruction_after": "D1-B", "write_check_files": 0,
+    "unrelated_control": {"data": "C:/Build/d1-final-control", "host_pid": 1152, "backend_pid": 8868, "webview_pids": [6760, 7884, 4268, 7376, 8772, 5496], "all_eight_retained_same_pid_creation_executable_command": true, "closed_normally_after_comparison": true}
+  },
+  "rapid_quit": {
+    "raw_json": "C:/Build/d1-final-extra/rapid.json",
+    "pid": 8916, "created": "2026-11-11T22:20:13.4602460Z", "close_ms_after_start_process_returned": 70.0727,
+    "close_accepted": true, "exited_within_35_seconds": true, "exit": 0, "processes_after_five_seconds": []
+  },
+  "recovered_profile_restart": {
+    "working_ui_observed": true, "cwd": "C:/Build/d1-final-extra", "path": "C:/Windows/System32;C:/Windows",
+    "source_runtime_overrides_unset": true, "provider_outside_checkout": true,
+    "host_pid": 3484, "host_executable": "C:/Build/d1-final-package/Sapiens4.exe",
+    "backend_pid": 3296, "backend_executable": "C:/Build/d1-final-package/runtime/.build/bin/sapiens4.exe",
+    "profile": "C:/Build/d1-final-cleanup/case-C/data/WebView2/Shell", "backend_and_webview_command_lines_matching_data": 7,
+    "raw_process_snapshot": "C:/Build/d1-final-extra/restart-processes.json"
+  },
+  "final_uninstall": {
+    "uninstaller_absent": true,
+    "unchanged_sha256": ["C:/Build/d1-final-cleanup/case-C/data/corpora.sqlite3", "C:/Build/d1-final-extra/data/keep.txt", "C:/Build/d1-final-extra/config/keep.txt"],
+    "sapiens_codex_webview_processes": [], "raw_process_snapshot": "C:/Build/d1-final-extra/final-processes.json"
+  },
+  "environment_cleanup": {"temporary_inno_uninstall_exit": 0, "temporary_iscc_exists_after": false, "windows_source_git_status_clean": true},
+  "confirmed_defects": [],
+  "recommendation": "GO for the tested unsigned Windows x64 candidate on this Server 2022 configuration; see report for coverage limitations"
+}
