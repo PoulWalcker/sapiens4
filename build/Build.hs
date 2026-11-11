@@ -64,6 +64,14 @@ main = do
   let destination = root </> (if name=="sapiens-domain" then ".build/domain" else ".build/bin") </> name<>suffix
   copyFile source (destination<>".installing")
   renameFile (destination<>".installing") destination
+ when (os=="mingw32") $ do
+  runtime <- case arch of
+   "x86_64" -> pure "win-x64"
+   "aarch64" -> pure "win-arm64"
+   _ -> fail ("Unsupported Windows architecture: "<>arch)
+  -- Windows PowerShell must not inherit PowerShell 7's incompatible modules.
+  unsetEnv "PSModulePath"
+  callProcess "powershell" ["-NoProfile","-ExecutionPolicy","Bypass","-File",root</>"submodules/libs4/windows/webview2.ps1","-Runtime",runtime,"-Destination",root</>".build/bin"]
  callProcess (root </> ".build/bin/sapiens4"<>suffix) ["build-ui"]
 trim :: String -> String
 trim = dropWhileEnd (`elem` "\r\n \t") . dropWhile (`elem` "\r\n \t")

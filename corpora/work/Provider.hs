@@ -102,7 +102,7 @@ codexBinary = do
       if present then map (folder </>) . sort <$> listDirectory folder else pure []
      vendors scope = do
       packages <- filter (T.isPrefixOf "codex" . T.pack . takeFileName) <$> children scope
-      concat <$> forM packages (\package -> map (</> "codex/codex.exe") <$> children (package </> "vendor"))
+      concat <$> forM packages (\package -> map (</> "bin/codex.exe") <$> children (package </> "vendor"))
      npm prefix = (++) <$> vendors (prefix </> "node_modules/@openai")
        <*> vendors (prefix </> "node_modules/@openai/codex/node_modules/@openai")
      native p = os /= "mingw32" || map toLower (takeExtension p)==".exe"
@@ -111,8 +111,10 @@ codexBinary = do
    found <- findExecutable p
    -- Native proc cannot run npm's .cmd shim. Resolve the supported native
    -- package beside that shim instead; an invalid explicit override never falls back.
-   if os=="mingw32" && map toLower (takeExtension p)==".cmd" then npm (takeDirectory p)
-    else pure (maybeToList found)
+   case found of
+    Nothing -> pure []
+    Just executable | os=="mingw32" && map toLower (takeExtension executable)==".cmd" -> npm (takeDirectory executable)
+    Just executable -> pure [executable]
   _ -> do
    path <- findExecutable "codex"
    home <- getHomeDirectory
