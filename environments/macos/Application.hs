@@ -109,6 +109,8 @@ alert :: Text -> IO ()
 alert message = do
     application <- cls "NSApplication" >>= \c -> obj0 c "sharedApplication"
     void (obj1 application "setActivationPolicy:" (int 0))
+    running <- booleanValue application "isRunning"
+    unless running $ void (obj0 application "finishLaunching")
     void (obj1 application "activateIgnoringOtherApps:" (int 1))
     panel <- new "NSAlert"
     setText panel "setMessageText:" "Sapiens4 could not open"

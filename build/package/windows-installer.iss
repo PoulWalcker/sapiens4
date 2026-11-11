@@ -49,15 +49,36 @@ begin
   Result := Result and (Trim(String(Marker)) = Identity);
 end;
 
+function FileAttributes(FileName: String): Cardinal;
+  external 'GetFileAttributesW@kernel32.dll stdcall';
+
 function SafeDestination: Boolean;
-var Target, StateRoot: String; Item: TFindRec;
+var Target, StateRoot, Parent, NextParent: String; Item: TFindRec; Attributes: Cardinal;
 begin
-  Target := AddBackslash(ExpandConstant('{app}'));
+  Target := AddBackslash(ExpandFileName(ExpandConstant('{app}')));
   Result := True;
+  { Reject junctions/symlinks before ownership checks: lexical guards alone
+    cannot protect a state directory reached through a redirected parent. }
+  Parent := RemoveBackslash(Target);
+  while Parent <> '' do begin
+    Attributes := FileAttributes(Parent);
+    if (Attributes <> $FFFFFFFF) and ((Attributes and $400) <> 0) then begin Result := False; Exit; end;
+    NextParent := ExtractFileDir(Parent);
+    if CompareText(Parent, NextParent) = 0 then Break;
+    Parent := NextParent;
+  end;
   StateRoot := AddBackslash(ExpandConstant('{localappdata}\Sapiens4'));
   if CompareText(Copy(Target, 1, Length(StateRoot)), StateRoot) = 0 then begin Result := False; Exit; end;
   StateRoot := AddBackslash(ExpandConstant('{localappdata}\Sapiens4 Development'));
   if CompareText(Copy(Target, 1, Length(StateRoot)), StateRoot) = 0 then begin Result := False; Exit; end;
+  if GetEnv('SAPIENS_DATA_DIR') <> '' then begin
+    StateRoot := AddBackslash(ExpandFileName(GetEnv('SAPIENS_DATA_DIR')));
+    if CompareText(Copy(Target, 1, Length(StateRoot)), StateRoot) = 0 then begin Result := False; Exit; end;
+  end;
+  if GetEnv('SAPIENS_CONFIG_DIR') <> '' then begin
+    StateRoot := AddBackslash(ExpandFileName(GetEnv('SAPIENS_CONFIG_DIR')));
+    if CompareText(Copy(Target, 1, Length(StateRoot)), StateRoot) = 0 then begin Result := False; Exit; end;
+  end;
   if OwnedDirectory then Exit;
   if FindFirst(Target + '*', Item) then begin
     try

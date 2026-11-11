@@ -11,7 +11,7 @@ Codex CLI and existing authentication. Native npm binaries are supported;
 Data and configuration live in `%LOCALAPPDATA%\Sapiens4\{data,config}`, outside the
 installation. Quit stops the owned backend. Quit before replacement or uninstall;
 Setup refuses active installation processes, unowned nonempty destinations and
-protected state directories. Uninstall preserves data, configuration and unowned
+protected state directories, and destinations with junction/symlink parents. Uninstall preserves data, configuration and unowned
 files. Process checks are preflight safeguards, not an atomic installation lock.
 The ownership marker left after uninstall allows safe reinstallation.
 
@@ -20,7 +20,7 @@ The ownership marker left after uninstall allows safe reinstallation.
 Install x64 GHC 9.14.1, Cabal 3.18.2, Node.js 22.5+, npm, Git, a POSIX shell,
 GNU Make, stable Rust and MSVC C++ tools (or LLVM-MinGW with
 `-BlindlyToolchain gnullvm`). Put GHC's `bin` and `mingw/bin`, the compiler's
-`objdump`, and an installed Inno Setup 6 `ISCC.exe` on PATH. Public builds also
+`objdump`, and an installed Inno Setup 6+ `ISCC.exe` on PATH. Public builds also
 need Windows SDK `signtool.exe`. Keep shell/Make tool paths free of spaces.
 
 ```powershell

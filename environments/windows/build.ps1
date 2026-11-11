@@ -54,8 +54,12 @@ try {
     }
     & runghc build/Build.hs
     if ($LASTEXITCODE -ne 0) { throw 'Haskell application build failed' }
-    & (Join-Path $repo 'submodules/blindly4/windows/build.ps1') -Runtime 'win-x64' -Toolchain $BlindlyToolchain
-    if ($LASTEXITCODE -ne 0) { throw 'Blindly4 build failed' }
+    $previousRustFlags = $env:RUSTFLAGS
+    try {
+        $env:RUSTFLAGS = "$previousRustFlags -C target-feature=+crt-static"
+        & (Join-Path $repo 'submodules/blindly4/windows/build.ps1') -Runtime 'win-x64' -Toolchain $BlindlyToolchain
+        if ($LASTEXITCODE -ne 0) { throw 'Blindly4 build failed' }
+    } finally { $env:RUSTFLAGS = $previousRustFlags }
     & (Join-Path $repo 'submodules/libs4/windows/webview2.ps1') -Runtime 'win-x64' -Destination (Join-Path $repo '.build/bin')
     if ($LASTEXITCODE -ne 0) { throw 'WebView2 loader preparation failed' }
     $parent = Split-Path -Parent $output
