@@ -86,9 +86,6 @@ PureScript storage UI, live-switch transactions, rollback and old-backend restar
 | `app/shell/rendering/View.purs` | remove setup gating/loading/error/retry UI |
 | `app/theme/live.css` | remove wizard-only rules; keep bootstrap styles |
 | `spec/support/host.rb` | initialize saved storage instead of completed setup for existing native journeys |
-| `spec/support/desktop.rb` | bounded observation retry while a launched native app registers with Accessibility |
-| `spec/launcher_spec.rb` | comprehensive public storage-validation/preservation journey |
-| `spec/desktop_startup_spec.rb` | two native startup, quit/relaunch, picker, restoration and recovery journeys |
 | `spec/windows_startup_spec.rb` | adapt missing/exiting-runtime checks to the pre-backend screen; isolate configuration |
 | `docs/onboarding.md`, `docs/ui.md` | document current startup, recovery and preference behavior |
 
@@ -123,6 +120,11 @@ writing remain shared; no replacement framework or storage initialization comman
 was introduced.
 
 ## Executed validation and limits
+
+The results below describe validation performed before removal of MR-added tests.
+At the user’s request, the two new native startup scenarios and the new public
+storage-validation scenario were removed; pre-existing tests and their necessary
+startup adaptations remain. No tests were run for that removal.
 
 On macOS ARM64, the backend, native launcher and PureScript bundles built with
 GHC 9.14.1, Ruby 3.4.11 and Node 22.23.2. The Windows adapter passes a host-side
