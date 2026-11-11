@@ -4,6 +4,8 @@ Run **Sapiens-Setup-win-x64.exe** on Windows 10/11 x64. Setup installs per user 
 administrator access and creates a Start menu shortcut. No Sapiens build tools
 are needed. The app uses the system WebView2 Runtime; native Install/Repair,
 Retry and Cancel controls handle a missing Runtime before starting the backend.
+Main-window loading failures restore these controls after closing the failed
+views and stopping the owned backend; Retry starts a fresh attempt.
 No browser Runtime or Codex CLI is bundled. Model execution uses your installed
 Codex CLI and existing authentication. Native npm binaries are supported;
 `SAPIENS_CODEX_BINARY` selects an executable explicitly.
@@ -13,7 +15,8 @@ installation. Quit stops the owned backend. Quit before replacement or uninstall
 Setup refuses active installation processes, unowned nonempty destinations and
 protected state directories, and destinations with junction/symlink parents. Uninstall preserves data, configuration and unowned
 files. Process checks are preflight safeguards, not an atomic installation lock.
-The ownership marker left after uninstall allows safe reinstallation.
+Uninstall removes the installed ownership marker and registration. Reinstall
+into the empty installation directory; retained unowned files require a new directory.
 Pre-D1 installations that stored data directly in `%LOCALAPPDATA%\Sapiens4`
 can retain that location with `SAPIENS_DATA_DIR`; D1 does not migrate existing state.
 
@@ -49,6 +52,13 @@ The ARM64 packaging path is configured but **not qualified**: GHC 9.14.1's
 x64, but no Windows ARM64 compiler. A matching native ARM64 toolchain and device
 are required before claiming a working ARM64 installer. Inno retains its existing
 x86 setup engine, which [runs on ARM64 through Windows emulation](https://jrsoftware.org/ishelp/topic_setup_setuparchitecture.htm); the application payload must be native ARM64.
+Qualification requires a native `aarch64-*-mingw*` GHC 9.14.1 toolchain with
+matching C compiler, linker and resource compiler, ARM64-capable `objdump`, all
+Haskell dependencies and libsodium built for that target, a matching Rust Windows
+ARM64 target, and WebView2 on a Windows ARM64 device. Build with
+`-Runtime win-arm64`, retain the PE audit results, and verify installation,
+startup, navigation recovery, Quit, reinstall and uninstall with retained data on
+that device. An x64 build running under emulation does not qualify this target.
 
 For a public release, set `SAPIENS_WINDOWS_CERT_THUMBPRINT` to a certificate in
 the signing account's store and add `-PublicRelease`. A timestamp URL may be

@@ -138,11 +138,12 @@ desktopSession memory probe = do
             dead <- readIORef closing
             unless dead $ atomicModifyIORef' pending (\xs -> (action:xs, ())) >> void (postMessage hwnd 0x802A 0 0)
           failStart message = do
-            cleanup <- try (closeHost host >> closeViews)
+            cleanup <- try (closeViews `finally` closeHost host)
             let detail = case cleanup of
                   Left (e :: SomeException) -> message ++ "\n\nStartup cleanup failed: " ++ displayException e
                   Right () -> message
             writeIORef starting False
+            writeIORef focusRef nullPtr
             windowTitle label $ "Sapiens4 could not start.\n\n" ++ detail ++ "\n\nChoose Install/Repair WebView2, Retry or Cancel.\nData: " ++ dataDirectory host
             void $ showWindow label 5
             mapM_ (\button -> void (showWindow button 5)) setupButtons
@@ -157,7 +158,11 @@ desktopSession memory probe = do
               release settings
               browser <- newBrowser memory hwnd view host top
               writeIORef browserRef (Just browser)
-              let on index iid = onEvent memory (core view) index iid
+              let active action = do
+                    current <- readIORef shellRef
+                    dead <- readIORef closing
+                    when (not dead && maybe False ((== core view) . core) current) action
+                  on index iid action = onEvent memory (core view) index iid (\event -> active (action event))
               on 7 "{9ADBE429-F36D-432B-9DDC-F8881FBD76E3}" $ \event -> do
                 destination <- getString event 3
                 base <- readIORef (origin host)
@@ -182,9 +187,10 @@ desktopSession memory probe = do
               on 15 "{D33A35BF-1C49-4F98-93AB-006E0533FE1C}" $ \event -> do
                 success <- getValue event 3 :: IO Int32
                 code <- getValue event 4 :: IO Int32
-                if success /= 0 then void $ showWindow label 0 else do
-                  windowTitle label ("Cannot load Sapiens4: " ++ show code)
-                  void $ showWindow label 5
+                if success /= 0 then void $ showWindow label 0 else
+                  -- OPERATION_CANCELED is expected when navigation is superseded.
+                  -- Close the controller after returning from its COM callback.
+                  when (code /= 14) $ post $ active $ failStart ("Cannot load Sapiens4: " ++ show code)
                 when probe $ do
                   identity <- getValue event 5 :: IO Word64
                   putStrLn $ "NAVIGATION END " ++ show identity ++ " " ++ (if success /= 0 then "True" else "False") ++ " " ++ show code
@@ -206,7 +212,7 @@ desktopSession memory probe = do
                 result <- try $ startHost host
                 post $ case result of
                   Left (e :: SomeException) -> failStart (displayException e)
-                  Right url -> newView memory hwnd (dataDirectory host </> "WebView2/Shell") (\created -> loaded url created `catch` \(e :: SomeException) -> failStart (displayException e)) `catch` \(e :: SomeException) -> failStart (displayException e)
+                  Right url -> newView memory hwnd (dataDirectory host </> "WebView2/Shell") (\created -> loaded url created `catch` \(e :: SomeException) -> post (failStart (displayException e))) `catch` \(e :: SomeException) -> failStart (displayException e)
           begin = mask_ $ do
             dead <- readIORef closing
             unless dead $ do

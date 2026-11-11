@@ -4,8 +4,22 @@ On macOS 13+ Apple Silicon, mount `Sapiens.dmg`, copy **Sapiens4.app** to
 Applications (or your own Applications folder), and open it. No Sapiens build
 tools are needed. The app opens without Codex; model execution requires your
 installed Codex CLI and existing `codex login`. Nothing changes Codex credentials.
+The launcher exposes standard Homebrew locations, inherited absolute PATH entries
+and the standalone install at `~/.local/bin/codex`. For npm installations in a
+custom prefix or shell-managed Node installation, provide that installation's
+absolute executable with `SAPIENS_CODEX_BINARY` when launching the app; Finder
+does not run shell startup files. If using npm's JavaScript launcher, its Node
+executable must also be on the launch environment's PATH. For example:
+
+```sh
+SAPIENS_CODEX_BINARY=/absolute/path/to/codex /Applications/Sapiens4.app/Contents/MacOS/Sapiens4
+```
 
 The native Starting window stays responsive; Quit can cancel backend startup.
+Loading failures offer Retry and Cancel; View > Reload App can retry later.
+Retry reuses a live owned backend or starts a replacement after confirmed exit.
+Guest document integration loads from the app's packaged `guest.js`; a missing
+or empty asset reports a startup error before the backend starts.
 Quit Sapiens4 before replacing or removing the app. Quit stops its owned backend;
 closing the last window keeps the app running. Replacing, removing and reinstalling
 the app retain `~/Library/Application Support/Sapiens4/{data,config}`. The backend

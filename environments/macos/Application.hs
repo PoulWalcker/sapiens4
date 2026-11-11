@@ -14,7 +14,9 @@ import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import qualified Data.Text.IO as TIO
 import Foreign hiding (void, new)
+import Foreign.C.Types (CLong)
 import Network.HTTP.Client hiding (method)
 import Network.URI (parseURI, uriScheme, uriAuthority, uriRegName, uriUserInfo, uriPath, uriQuery, uriFragment)
 import ObjC
@@ -48,7 +50,7 @@ check application = do
         Just (ServerProcess process _ _ _ _) -> isNothing <$> getProcessExitCode process
     unless (T.null destination) $
         if alive then readIORef (shell (browser application)) >>= \view -> loadURL view destination
-          else alert "The application server stopped. Quit and reopen Sapiens4."
+          else startupFailure application "The application server stopped."
 
 startServer :: IORef (Maybe ServerProcess) -> IO Text
 startServer owner = mask $ \restore -> do
@@ -123,24 +125,37 @@ stopServer (ServerProcess process input output errors readers) = mask_ $ do
                 when (isNothing confirmed) (ioError (userError "The application server could not be stopped. Quit was cancelled."))
 
 alert :: Text -> IO ()
-alert message = do
+alert message = void $ prompt message ["OK"]
+
+prompt :: Text -> [Text] -> IO CLong
+prompt message buttons = do
     application <- cls "NSApplication" >>= \c -> obj0 c "sharedApplication"
     void (obj1 application "setActivationPolicy:" (int 0))
     running <- booleanValue application "isRunning"
     unless running $ void (obj0 application "finishLaunching")
     void (obj1 application "activateIgnoringOtherApps:" (int 1))
-    panel <- new "NSAlert"
-    setText panel "setMessageText:" "Sapiens4 could not open"
-    setText panel "setInformativeText:" message
-    void (long panel "runModal")
+    bracket (new "NSAlert") (void . (`obj0` "release")) $ \panel -> do
+        setText panel "setMessageText:" "Sapiens4 could not open"
+        setText panel "setInformativeText:" message
+        mapM_ (\title -> str title >>= void . obj1 panel "addButtonWithTitle:") buttons
+        long panel "runModal"
+
+startupFailure :: Application -> Text -> IO ()
+startupFailure application message = do
+    closing <- readIORef (quitting application)
+    unless closing $ do
+        result <- prompt (message <> "\n\nRetry reloads the app and restarts its server if needed. You can also choose View > Reload App later.") ["Retry","Cancel"]
+        when (result == 1000) $ post application (reload application)
 
 reload :: Application -> IO ()
-reload application = if fixture application then readIORef (shell (browser application)) >>= void . (`obj0` "reload") else do
-    current <- readIORef (child application)
-    alive <- case current of
-        Nothing -> pure False
-        Just (ServerProcess process _ _ _ _) -> isNothing <$> getProcessExitCode process
-    if alive then check application else beginStartup application
+reload application = do
+    closing <- readIORef (quitting application)
+    unless closing $ if fixture application then readIORef (shell (browser application)) >>= void . (`obj0` "reload") else do
+        current <- readIORef (child application)
+        alive <- case current of
+            Nothing -> pure False
+            Just (ServerProcess process _ _ _ _) -> isNothing <$> getProcessExitCode process
+        if alive then check application else beginStartup application
 showWindow :: Application -> IO ()
 showWindow application = do win <- readIORef (windowRef application); void (obj1 win "makeKeyAndOrderFront:" nullPtr); void (obj1 (native application) "activateIgnoringOtherApps:" (int 1))
 
@@ -180,8 +195,8 @@ installMethods application = do
     on3 "webView:decidePolicyForNavigationAction:decisionHandler:" (navigation b)
     on2 "webView:didCommitNavigation:" (\view _ -> finished b view)
     on2 "webView:didFinishNavigation:" (\view _ -> finished b view)
-    on3 "webView:didFailNavigation:withError:" (\view _ err -> failed b view err)
-    on3 "webView:didFailProvisionalNavigation:withError:" (\view _ err -> failed b view err)
+    on3 "webView:didFailNavigation:withError:" (\view _ err -> failed b (post application . startupFailure application) view err)
+    on3 "webView:didFailProvisionalNavigation:withError:" (\view _ err -> failed b (post application . startupFailure application) view err)
     on1 "webViewWebContentProcessDidTerminate:" $ \view -> do
         item <- lookupView b view
         case item of
@@ -290,7 +305,6 @@ fetchGuestScript address =
         (do r <- parseRequest (T.unpack (T.dropWhileEnd (== '/') base <> "/workspace/guest.js"))
             response <- httpLbs r { responseTimeout = responseTimeoutMicro 2000000 } http
             pure (TE.decodeUtf8With (\_ _ -> Just '\xfffd') (L.toStrict (responseBody response))))
-        `catch` (\(_ :: HttpException) -> pure "")
 
 beginStartup :: Application -> IO ()
 beginStartup application = do
@@ -301,15 +315,16 @@ beginStartup application = do
         worker <- async $ do
             result <- try $ (do
                 closeServer (child application)
+                guestScript <- getExecutablePath >>= \executable -> TIO.readFile (takeDirectory executable </> "../Resources/runtime/.build/web/guest.js")
+                when (T.null (T.strip guestScript)) $ ioError (userError "The packaged guest.js is empty. Reinstall the complete Sapiens4 app.")
                 destination <- startServer (child application)
-                guestScript <- fetchGuestScript destination
                 pure (destination,guestScript)) `onException` closeServer (child application)
             post application $ do
                 closing <- readIORef (quitting application)
                 unless closing $ do
                     writeIORef (startupWorker application) Nothing
                     case result of
-                        Left (e :: SomeException) -> alert (T.pack (displayException e))
+                        Left (e :: SomeException) -> startupFailure application (T.pack (displayException e))
                         Right (destination,guestScript) -> do
                             configureBrowser (browser application) destination guestScript
                             writeIORef (address application) destination

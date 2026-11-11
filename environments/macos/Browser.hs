@@ -303,12 +303,15 @@ shellNavigation browser action completion = do
 finished browser view = withTab browser view $ \tab -> do
     let done = tab { tabAwaiting = False }
     save browser done; report browser done
-failed browser view err = do
+failed :: Browser -> (Text -> IO ()) -> Obj -> Obj -> IO ()
+failed browser shellFailed view err = do
     code <- long err "code"
-    when (code /= -999) $ withTab browser view $ \tab -> do
+    when (code /= -999) $ do
         reason <- textProp err "localizedDescription"
-        let done = tab { tabAwaiting = False, tabError = reason }
-        save browser done; report browser done
+        sh <- readIORef (shell browser)
+        if view == sh then shellFailed reason else withTab browser view $ \tab -> do
+            let done = tab { tabAwaiting = False, tabError = reason }
+            save browser done; report browser done
 
 textDocument content title = "<!doctype html><meta charset=\"utf-8\"><meta name=\"color-scheme\" content=\"light dark\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'\"><title>" <> escape title <> "</title><style>html{color-scheme:light dark;background:#fff;color:#171717}body{margin:24px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:15px/1.6 ui-monospace,monospace}@media(prefers-color-scheme:dark){html{background:#000;color:#eee}}</style><pre>" <> escape content <> "</pre>"
   where escape = T.replace "\"" "&quot;" . T.replace ">" "&gt;" . T.replace "<" "&lt;" . T.replace "&" "&amp;"
