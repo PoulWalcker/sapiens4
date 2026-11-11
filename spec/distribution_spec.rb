@@ -4,7 +4,7 @@ RSpec.describe 'Source distribution contract' do
     @release = File.join(@folder, 'source')
     files, error, code = Contract.capture('git', 'ls-files', '-z', '--recurse-submodules',
       'build', 'corpora', 'remote', 'environments', 'app',
-      'license', 'README.md', 'submodules/blindly4/license', 'submodules/blindly4/README.md', 'submodules/libs4')
+      'license', 'README.md', 'submodules/blindly4', 'submodules/libs4')
     expect(code).to eq(0), error
     additions, error, code = Contract.capture('git', 'ls-files', '-z', '--others', '--exclude-standard',
       'build', 'corpora', 'remote', 'environments', 'app', 'license')
@@ -29,12 +29,15 @@ RSpec.describe 'Source distribution contract' do
     @data = File.join(@folder, "existing corpora's é")
     FileUtils.mkdir_p(@data)
     File.write(File.join(@data, 'keep.txt'), 'Existing corpora data')
-    @app = File.join(@release, '.build/macos/Sapiens4.app')
+    @product = File.join(@folder, 'macos release')
     if RUBY_PLATFORM.include?('darwin')
-      FileUtils.mkdir_p(File.join(@app, 'Contents/Resources'))
-      File.write(File.join(@app, 'Contents/Resources/obsolete-helper.py'), 'Old build artifact')
+      bin = File.join(@release, '.build/bin')
+      FileUtils.mkdir_p(bin)
+      File.write(File.join(bin, 'obsolete-helper.py'), 'Old build artifact')
+      command = ['sh', 'environments/macos/build.sh', '0.1.0', @product]
+    else
+      command = ['runghc', 'build/Build.hs']
     end
-    command = RUBY_PLATFORM.include?('darwin') ? ['sh', 'environments/macos/build.sh'] : ['runghc', 'build/Build.hs']
     out, error, code = Contract.capture(*command, chdir: @release, timeout: 1200,
       env: {'SAPIENS_DATA_DIR' => @data})
     expect(code).to eq(0), out + error
@@ -54,17 +57,29 @@ RSpec.describe 'Source distribution contract' do
     end
   end
 
-  it 'builds a signed macOS launcher for existing data without changing that data', :macos do
+  it 'packages a signed standalone app from source without changing existing user data', :macos do
     skip 'macOS desktop build' unless RUBY_PLATFORM.include?('darwin')
-    out, error, code = Contract.capture('plutil', '-convert', 'json', '-o', '-', File.join(@app, 'Contents/Resources/Launcher.plist'))
+    expect(Dir.children(@product)).to contain_exactly('Sapiens.dmg', 'SHA256SUMS')
+    out, error, code = Contract.capture('shasum', '-a', '256', '-c', 'SHA256SUMS', chdir: @product)
+    expect(code).to eq(0), out + error
+    expect(out).to include('Sapiens.dmg: OK')
+    mount = File.join(@folder, 'mounted')
+    Dir.mkdir(mount)
+    _, error, code = Contract.capture('hdiutil', 'attach', '-readonly', '-nobrowse', '-mountpoint', mount, File.join(@product, 'Sapiens.dmg'))
     expect(code).to eq(0), error
-    expect(JSON.parse(out)).to include('Repository' => @release, 'DataDirectory' => @data,
-      'Executable' => File.join(@release, '.build/bin/sapiens4'))
+    begin
+      app = File.join(mount, 'Sapiens4.app')
+      bin = File.join(app, 'Contents/Resources/runtime/.build/bin')
+      expect(File.executable?(File.join(bin, 'sapiens4'))).to be(true)
+      expect(File.exist?(File.join(bin, 'obsolete-helper.py'))).to be(false)
+      _, error, code = Contract.capture('codesign', '--verify', '--deep', '--strict', app)
+      expect(code).to eq(0), error
+    ensure
+      _, error, code = Contract.capture('hdiutil', 'detach', mount)
+      raise error unless code == 0
+    end
     expect(Dir.children(@data)).to eq(['keep.txt'])
     expect(File.read(File.join(@data, 'keep.txt'))).to eq('Existing corpora data')
-    expect(File.exist?(File.join(@app, 'Contents/Resources/obsolete-helper.py'))).to eq(false)
-    _, error, code = Contract.capture('codesign', '--verify', '--strict', @app)
-    expect(code).to eq(0), error
   end
 
   it 'boots from a source-only release and completes work using its packaged assets' do
