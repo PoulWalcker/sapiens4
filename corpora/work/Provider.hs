@@ -97,31 +97,36 @@ codexArguments workdir config =
 codexBinary :: IO (Maybe FilePath)
 codexBinary = do
  override <- lookupEnv "SAPIENS_CODEX_BINARY"
- case override of
+ let children folder = do
+      present <- doesDirectoryExist folder
+      if present then map (folder </>) . sort <$> listDirectory folder else pure []
+     vendors scope = do
+      packages <- filter (T.isPrefixOf "codex" . T.pack . takeFileName) <$> children scope
+      concat <$> forM packages (\package -> map (</> "codex/codex.exe") <$> children (package </> "vendor"))
+     npm prefix = (++) <$> vendors (prefix </> "node_modules/@openai")
+       <*> vendors (prefix </> "node_modules/@openai/codex/node_modules/@openai")
+     native p = os /= "mingw32" || map toLower (takeExtension p)==".exe"
+ candidates <- case override of
   Just p | not (null p) -> do
    found <- findExecutable p
-   pure (found >>= \candidate -> if os /= "mingw32" || map toLower (takeExtension candidate)==".exe" then Just candidate else Nothing)
+   -- Native proc cannot run npm's .cmd shim. Resolve the supported native
+   -- package beside that shim instead; an invalid explicit override never falls back.
+   if os=="mingw32" && map toLower (takeExtension p)==".cmd" then npm (takeDirectory p)
+    else pure (maybeToList found)
   _ -> do
    path <- findExecutable "codex"
    home <- getHomeDirectory
    local <- fromMaybe (home </> "AppData/Local") <$> lookupEnv "LOCALAPPDATA"
    roaming <- fromMaybe (home </> "AppData/Roaming") <$> lookupEnv "APPDATA"
-   let children folder = do
-        present <- doesDirectoryExist folder
-        if present then map (folder </>) . sort <$> listDirectory folder else pure []
-       vendors scope = do
-        packages <- filter (T.isPrefixOf "codex" . T.pack . takeFileName) <$> children scope
-        concat <$> forM packages (\package -> map (</> "codex/codex.exe") <$> children (package </> "vendor"))
    installed <- if os /= "mingw32" then pure [] else do
     app <- map (</> "codex.exe") <$> children (local </> "OpenAI/Codex/bin")
-    npm <- vendors (roaming </> "npm/node_modules/@openai")
-    bundled <- vendors (roaming </> "npm/node_modules/@openai/codex/node_modules/@openai")
-    pure (app ++ npm ++ bundled)
-   let candidates = maybeToList path ++ installed ++ ["/Applications/" ++ app ++ ".app/Contents/Resources/" ++ binary | os == "darwin", app <- ["Codex","ChatGPT"],binary <- ["codex","codex-cli/bin/codex"]]
-       native = filter (\p -> os /= "mingw32" || map toLower (takeExtension p) == ".exe") candidates
-   existing <- filterM doesFileExist (nub native)
-   runnable <- filterM (fmap executable . getPermissions) existing
-   pure (listToMaybe runnable)
+    prefixes <- nub . ((roaming </> "npm"):) <$> getSearchPath
+    packages <- concat <$> mapM npm prefixes
+    pure (app ++ packages)
+   pure $ maybeToList path ++ installed ++ ["/Applications/" ++ app ++ ".app/Contents/Resources/" ++ binary | os == "darwin", app <- ["Codex","ChatGPT"],binary <- ["codex","codex-cli/bin/codex"]]
+ existing <- filterM doesFileExist (nub (filter native candidates))
+ runnable <- filterM (fmap executable . getPermissions) existing
+ pure (listToMaybe runnable)
 
 killTree :: ProcessHandle -> IO ()
 killTree ph = do
