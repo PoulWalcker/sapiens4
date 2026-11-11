@@ -15,6 +15,7 @@ RSpec.describe 'D1 native distribution' do
     app = @suite.install(File.join(@suite.root, 'lifecycle-install'))
     home = File.join(@suite.root, 'lifecycle-user')
     listener = TCPServer.new('127.0.0.1', 0)
+    @suite.prerequisite_recovery(app, home)
     @suite.with_native(app, home) do |native|
       expect(native.fetch(:desktop).text).to include('Sapiens')
       status, state = Contract.http(native.fetch(:url) + '/api/state', 'GET')
@@ -25,7 +26,14 @@ RSpec.describe 'D1 native distribution' do
     end
     # Controlled external CLI; never use real credentials or paid model calls.
     fixture = Host.new(start: false)
-    overrides = fixture.environment.merge('SAPIENS_DATA_DIR' => fixture.root, 'SAPIENS_CONFIG_DIR' => File.join(home, 'config'))
+    external = fixture.environment
+    if @suite.windows?
+      npm_binary = File.join(home, 'Roaming/npm/node_modules/@openai/codex/vendor/x86_64-pc-windows-msvc/codex/codex.exe')
+      FileUtils.mkdir_p(File.dirname(npm_binary))
+      FileUtils.cp(external.fetch('SAPIENS_CODEX_BINARY'), npm_binary)
+      external = external.merge('SAPIENS_CODEX_BINARY' => nil)
+    end
+    overrides = external.merge('SAPIENS_DATA_DIR' => fixture.root, 'SAPIENS_CONFIG_DIR' => File.join(home, 'config'))
     @suite.with_native(app, home, overrides) do |native|
       url = native.fetch(:url)
       _, state = Contract.http(url + '/api/state', 'GET')
@@ -95,6 +103,17 @@ RSpec.describe 'D1 native distribution' do
       _, state = Contract.http(native.fetch(:url) + '/api/state', 'GET')
       expect(state.fetch('agents').map { |a| a['id'] }).not_to include(@saved_agent)
     end
+    %w[data config].each do |kind|
+      user = File.join(@suite.root, "#{kind}-override")
+      target = File.join(user, 'selected')
+      @suite.with_native(app, user, {"SAPIENS_#{kind.upcase}_DIR" => target}) do
+        other = kind == 'data' ? 'config' : 'data'
+        defaults = File.join(user, @suite.windows? ? 'Local' : 'Library/Application Support', 'Sapiens4')
+        expect(File.directory?(target)).to eq(true)
+        expect(File.directory?(File.join(defaults, other))).to eq(true)
+        expect(File.exist?(File.join(defaults, kind))).to eq(false)
+      end
+    end
     2.times do |index|
       @suite.uninstall(app) if index == 1
       app = @suite.install(folder)
@@ -112,6 +131,16 @@ RSpec.describe 'D1 native distribution' do
       expect(File.read(File.join(unowned, 'keep.txt'))).to eq('Unowned')
       protected = File.join(ENV.fetch('LOCALAPPDATA'), 'Sapiens4', 'data')
       @suite.installer(protected, success: false, reason: 'Existing data or unowned files')
+      empty = File.join(@suite.root, 'redirect-target')
+      link = File.join(@suite.root, 'redirect-install')
+      FileUtils.mkdir_p(empty)
+      @suite.ps('New-Item -ItemType Junction -Path $env:D1_LINK -Target $env:D1_TARGET | Out-Null', env: {'D1_LINK' => link, 'D1_TARGET' => empty})
+      begin
+        @suite.installer(link, success: false, reason: 'Existing data or unowned files')
+        expect(Dir.children(empty)).to be_empty
+      ensure
+        Dir.rmdir(link)
+      end
       File.write(File.join(app, 'user-added.txt'), 'Unowned')
     end
     @suite.uninstall(app)

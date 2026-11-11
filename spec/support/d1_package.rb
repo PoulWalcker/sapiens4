@@ -168,6 +168,27 @@ class D1Package
     [child, pid]
   end
 
+  def prerequisite_recovery(app, home)
+    return unless windows?
+    FileUtils.mkdir_p(home)
+    loader = File.join(app, 'WebView2Loader.dll')
+    File.rename(loader, loader + '.disabled')
+    child, pid = launch_native(app, home, environment(home))
+    desktop = Desktop.new(process: Struct.new(:pid).new(pid), ready: false)
+    desktop.see('WebView2Loader.dll is missing')
+    desktop.find('Install/Repair WebView2')
+    raise 'Prerequisite failure started a backend' unless backends(pid, app).empty?
+    File.rename(loader + '.disabled', loader)
+    desktop.click('Retry')
+    Contract.wait(timeout: 40, description: 'WebView2 Retry readiness') { backends(pid, app).any? { |b| !b.fetch('ports').empty? } }
+    desktop.see('Sapiens')
+    ps("$p=Get-Process -Id #{pid}; if (-not $p.CloseMainWindow() -or -not $p.WaitForExit(15000)) { throw 'Recovery quit failed' }")
+    raise 'Recovery left a backend' unless backends(pid, app).empty?
+  ensure
+    File.rename(loader + '.disabled', loader) if loader && File.exist?(loader + '.disabled')
+    ps("Stop-Process -Id #{pid} -Force -ErrorAction SilentlyContinue") if pid && alive?(pid)
+  end
+
   def startup_failure(app, home)
     FileUtils.mkdir_p(home)
     child, pid = launch_native(app, home, environment(home))
@@ -183,6 +204,7 @@ class D1Package
     end
   ensure
     child&.close
+    ps("Stop-Process -Id #{pid} -Force -ErrorAction SilentlyContinue") if windows? && pid && alive?(pid)
   end
 
   def with_native(app, home, overrides = {}, args: [], abrupt: false)
