@@ -30,7 +30,7 @@ SignedUninstaller=no
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "sapiens-installation.id"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SourceDir}\sapiens-installation.id"; DestDir: "{app}"; Flags: ignoreversion uninsneveruninstall
+Source: "{#SourceDir}\sapiens-installation.id"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{userprograms}\{#PackageName}"; Filename: "{app}\Sapiens4.exe"
@@ -43,10 +43,13 @@ const
   Identity = '{#PackageId}';
 
 function OwnedDirectory: Boolean;
-var Marker: AnsiString;
+var Marker: AnsiString; Installed: String;
 begin
   Result := LoadStringFromFile(ExpandConstant('{app}\sapiens-installation.id'), Marker);
   Result := Result and (Trim(String(Marker)) = Identity);
+  Result := Result and RegQueryStringValue(HKCU,
+    'Software\Microsoft\Windows\CurrentVersion\Uninstall\' + Identity + '_is1', 'InstallLocation', Installed);
+  Result := Result and (CompareText(AddBackslash(Installed), AddBackslash(ExpandConstant('{app}'))) = 0);
 end;
 
 function FileAttributes(FileName: String): Cardinal;
