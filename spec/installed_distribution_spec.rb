@@ -139,7 +139,14 @@ RSpec.describe 'Installed D1 distribution' do
       run_setup = lambda do |path|
         Contract.capture(setup, *flags, "/DIR=#{path.tr('/', '\\')}", env: env, chdir: dir, timeout: 120)
       end
+      # The host shows its recovery controls after a 35-second WebView2 startup deadline.
+      wait_for_recovery = lambda do |desktop|
+        Contract.wait(timeout: 55, description: 'native Windows startup recovery') do
+          desktop.text.include?('Sapiens4 could not start')
+        end
+      end
       uninstall = File.join(install, 'unins000.exe')
+      uninstalled = false
       begin
         expect(run_setup.call(unsafe).last).to eq(7) # PrepareToInstall refused the destination.
         expect(Dir.children(unsafe)).to eq(['keep.txt'])
@@ -149,13 +156,13 @@ RSpec.describe 'Installed D1 distribution' do
         FileUtils.mkdir_p(File.dirname(shell_profile))
         File.write(shell_profile, token)
         launch(host, env, dir) do |desktop, process|
-          desktop.see('Sapiens4 could not start')
+          wait_for_recovery.call(desktop)
           desktop.find('Retry', role: 'AXButton')
           desktop.press('Cancel')
           expect(process.finish(30).last).to eq(0)
         end
         launch(host, env, dir) do |desktop, process|
-          desktop.see('Sapiens4 could not start')
+          wait_for_recovery.call(desktop)
           expect(File.read(shell_profile)).to eq(token)
           File.unlink(shell_profile)
           desktop.press('Retry')
@@ -173,12 +180,16 @@ RSpec.describe 'Installed D1 distribution' do
         File.write(keep.last, token)
         expect(run_setup.call(install).last).to eq(0)
         command(uninstall, *flags, env: env, chdir: dir, timeout: 120)
-        remaining = Dir.glob(File.join(install, '**', '*'), File::FNM_DOTMATCH).select { |file| File.file?(file) }
-        expect(remaining).to contain_exactly(keep.last)
+        uninstalled = true
+        # Inno removes its own image asynchronously. Compare names relative to the install
+        # root because TEMP may use the short spelling of the Windows user directory.
+        Contract.wait(timeout: 20, description: 'uninstaller self-removal') { !File.exist?(uninstall) }
+        remaining = Dir.glob('**/*', File::FNM_DOTMATCH, base: install).select { |name| File.file?(File.join(install, name)) }
+        expect(remaining).to contain_exactly(File.basename(keep.last))
         expect(Digest::SHA256.file(db).hexdigest).to eq(digest)
         keep.each { |path| expect(File.read(path)).to eq(token) }
       ensure
-        [uninstall, File.join(unsafe, 'unins000.exe')].each do |path|
+        [uninstalled ? nil : uninstall, File.join(unsafe, 'unins000.exe')].compact.each do |path|
           command(path, *flags, env: env, chdir: dir, timeout: 120) if File.file?(path)
         end
       end
