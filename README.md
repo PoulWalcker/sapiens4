@@ -10,7 +10,7 @@ independent judgment with human oversight.
 | Platform | Setup |
 | --- | --- |
 | macOS 13+, Apple Silicon | [Install or build the desktop app](environments/macos/README.md) |
-| Windows 10/11, x64 | [Installer and source setup](environments/windows/README.md) |
+| Windows 10/11 | [x64 installer and ARM64 build target](environments/windows/README.md) |
 | Ubuntu 22.04 / 24.04, x86-64 X11 (development adapter) | [Linux host and desktop setup](environments/linux/README.md) |
 | Remote browser or mobile app | [Pairing and relay setup](docs/remote.md) |
 

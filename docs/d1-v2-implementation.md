@@ -1,5 +1,8 @@
 # D1 Architecture Plan V2 — implementation report
 
+Historical snapshot at `52e2dfb`; subsequent fixes and current limitations are in
+[the PR #63 review report](pr63-review-fixes.md).
+
 2026-11-11. Branch: `codex/d1-v2`. No merge into `main`.
 Primary reference: [approved investigation and V2 plan](https://chatgpt.com/share/6af422e0-9444-83ed-8808-11e0e74c14c0).
 

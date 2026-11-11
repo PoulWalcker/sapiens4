@@ -5,6 +5,7 @@ Applications (or your own Applications folder), and open it. No Sapiens build
 tools are needed. The app opens without Codex; model execution requires your
 installed Codex CLI and existing `codex login`. Nothing changes Codex credentials.
 
+The native Starting window stays responsive; Quit can cancel backend startup.
 Quit Sapiens4 before replacing or removing the app. Quit stops its owned backend;
 closing the last window keeps the app running. Replacing, removing and reinstalling
 the app retain `~/Library/Application Support/Sapiens4/{data,config}`. The backend

@@ -1,6 +1,6 @@
 # Sapiens4 for Windows
 
-Run **Sapiens-Setup.exe** on Windows 10/11 x64. Setup installs per user without
+Run **Sapiens-Setup-win-x64.exe** on Windows 10/11 x64. Setup installs per user without
 administrator access and creates a Start menu shortcut. No Sapiens build tools
 are needed. The app uses the system WebView2 Runtime; native Install/Repair,
 Retry and Cancel controls handle a missing Runtime before starting the backend.
@@ -19,7 +19,7 @@ can retain that location with `SAPIENS_DATA_DIR`; D1 does not migrate existing s
 
 ## Build and verify
 
-Install x64 GHC 9.14.1, Cabal 3.18.2, Node.js 22.5+, npm, Git, a POSIX shell,
+Install GHC 9.14.1 for the native target, Cabal 3.18.2, Node.js 22.5+, npm, Git, a POSIX shell,
 GNU Make, stable Rust and MSVC C++ tools (or LLVM-MinGW with
 `-BlindlyToolchain gnullvm`). Put GHC's `bin` and `mingw/bin`, the compiler's
 `objdump`, and an installed Inno Setup 6+ `ISCC.exe` on PATH. Public builds also
@@ -27,13 +27,28 @@ need Windows SDK `signtool.exe`. Keep shell/Make tool paths free of spaces.
 
 ```powershell
 git submodule update --init --recursive
-.\environments\windows\build.ps1 -Version 0.1.0 -OutputDirectory .build\release-local
-Get-FileHash .build\release-local\Sapiens-Setup.exe -Algorithm SHA256
+.\environments\windows\build.ps1 -Runtime win-x64 -Version 0.1.0 -OutputDirectory .build\release-x64
+Get-FileHash .build\release-x64\Sapiens-Setup-win-x64.exe -Algorithm SHA256
 ```
 
 The output directory must be new. Only the installer and `SHA256SUMS` are
-published. All packaged PE files must be x64 and resolve imports to Windows
-inbox libraries or adjacent packaged DLLs. The WebView2 loader is hash-pinned.
+published. All packaged PE files must match the selected GHC target and resolve
+imports to Windows inbox libraries or adjacent packaged DLLs. The WebView2 loader
+is hash-pinned. The ordinary `runghc build/Build.hs` build also prepares this
+app-local loader; packaging consumes that result.
+
+`-Runtime win-x64` and `-Runtime win-arm64` select native payload variants. The
+script rejects a mismatch with the active GHC target, passes the target to
+Blindly and the loader, audits every PE machine type, and configures Inno's
+architecture restrictions. Output names include `win-x64` or `win-arm64`; the
+default output directory is `.build/<runtime>`. Application identity/data remain
+common to both variants. Build variants serially in a checkout.
+
+The ARM64 packaging path is configured but **not qualified**: GHC 9.14.1's
+[official bindists](https://downloads.haskell.org/~ghc/9.14.1/) include Windows
+x64, but no Windows ARM64 compiler. A matching native ARM64 toolchain and device
+are required before claiming a working ARM64 installer. Inno retains its existing
+x86 setup engine, which [runs on ARM64 through Windows emulation](https://jrsoftware.org/ishelp/topic_setup_setuparchitecture.htm); the application payload must be native ARM64.
 
 For a public release, set `SAPIENS_WINDOWS_CERT_THUMBPRINT` to a certificate in
 the signing account's store and add `-PublicRelease`. A timestamp URL may be

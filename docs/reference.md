@@ -119,8 +119,9 @@ D1 does not alter onboarding, permissions, authentication or workspace selection
 D3 must preserve explicit configuration and selected data-directory inputs. A
 storage switch must stop the owned child, confirm exit, start it with the selected
 directory, receive private pipe readiness, then update the view. D3 must decide
-whether selection precedes backend creation; macOS currently creates the backend
-before constructing its UI. Directory overrides do not isolate Codex credentials.
+whether selection precedes backend creation; macOS now constructs the native
+Starting window before starting its owned backend worker. Directory overrides do
+not isolate Codex credentials.
 
 Native signatures authenticate the publisher; SHA-256 identifies final installer
 bytes. There is no authenticated commit-to-artifact provenance or continuous
