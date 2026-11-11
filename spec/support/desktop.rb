@@ -30,14 +30,9 @@ class Desktop
       return @binary
     end
     @binary = File.join(Contract::ROOT, '.build/bin', Gem.win_platform? ? 'sapiens-windows-probe.exe' : 'sapiens-macos')
-    unless File.executable?(@binary) && (!Gem.win_platform? || File.file?(File.join(Contract::ROOT, '.build/bin/WebView2Loader.dll')))
-      command = ['runghc', 'build/Build.hs']
-      out, error, code = Contract.capture(*command, timeout: 600)
+    unless File.executable?(@binary)
+      out, error, code = Contract.capture('runghc', 'build/Build.hs', timeout: 600)
       raise out + error unless code == 0
-      if Gem.win_platform?
-        out, error, code = Contract.capture('powershell.exe', '-NoProfile', '-File', 'submodules/libs4/windows/webview2.ps1', '-Runtime', 'win-x64', '-Destination', '.build/bin', timeout: 120)
-        raise out + error unless code == 0
-      end
     end
     @binary
   end
@@ -80,10 +75,10 @@ class Desktop
         control('tree', '--depth', '50', '--max-nodes', '10000')
       rescue RuntimeError => error
         transient = error.message.match?(/\ABlindly4 tree:.*"code":"accessibility_error".*0x(?:80040201|00000000)/m)
-        starting = wait_for_window && (error.message.include?("No visible windows for PID #{process.pid}") || error.message.include?("PID #{process.pid} is not a running application"))
+        starting = wait_for_window && error.message.include?("No visible windows for PID #{process.pid}")
         replaced = self.class.linux? && error.message.start_with?('Blindly4 tree: ') &&
           error.message.match?(/org\.freedesktop\.DBus\.Error\.UnknownObject|Object does not exist at path|Accessible element is defunct|No such interface .(?:org\.a11y\.atspi\.Accessible|org\.freedesktop\.DBus\.Properties). on object/)
-        raise unless starting || (Gem.win_platform? && transient) || replaced
+        raise unless (Gem.win_platform? && (transient || starting)) || replaced
         false
       end
     end
