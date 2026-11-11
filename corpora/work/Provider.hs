@@ -128,7 +128,7 @@ codexBinary = do
    pure $ maybeToList path ++ installed ++ ["/Applications/" ++ app ++ ".app/Contents/Resources/" ++ binary | os == "darwin", app <- ["Codex","ChatGPT"],binary <- ["codex","codex-cli/bin/codex"]]
  existing <- filterM doesFileExist (nub (filter native candidates))
  runnable <- filterM (fmap executable . getPermissions) existing
- pure (listToMaybe runnable)
+ traverse makeAbsolute (listToMaybe runnable)
 
 killTree :: ProcessHandle -> IO ()
 killTree ph = do
