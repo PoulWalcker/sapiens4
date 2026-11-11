@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <script>try { const saved=localStorage.getItem("sapi-color-theme"); document.documentElement.dataset.theme=["dark","light"].includes(saved) ? saved : matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"; } catch (_) { document.documentElement.dataset.theme=matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"; }</script>
   <meta name="theme-color" content="#f1ede3">
   <link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/app-icon-180.png"><meta name="apple-mobile-web-app-capable" content="yes"><link rel="stylesheet" href="/corpora.css"><link rel="stylesheet" href="/remote-install.css">
   <title>Sapi4: Corpora</title>

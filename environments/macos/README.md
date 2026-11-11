@@ -15,15 +15,24 @@ executable must also be on the launch environment's PATH. For example:
 SAPIENS_CODEX_BINARY=/absolute/path/to/codex /Applications/Sapiens4.app/Contents/MacOS/Sapiens4
 ```
 
-The native Starting window stays responsive; Quit can cancel backend startup.
-Loading failures offer Retry and Cancel; View > Reload App can retry later.
-Retry reuses a live owned backend or starts a replacement after confirmed exit.
+Before starting the backend, a fresh installation opens Welcome + Storage.
+Start fresh initializes the empty default directory. Use another folder opens a
+complete existing Data Root in place or initializes an empty selected folder.
+The selected directory is validated first and saved only after Workspace loads;
+later launches validate and reuse it. Missing, invalid or locked data returns to
+the storage screen without creating replacement data.
+
+The native window stays responsive; Quit can cancel backend startup.
+Workspace loading failures return to the storage screen. View > Reload App
+reuses a healthy owned backend or validates the selected root and starts a
+replacement after confirmed exit. Early startup errors appear in a native alert.
 Guest document integration loads from the app's packaged `guest.js`; a missing
 or empty asset reports a startup error before the backend starts.
 Quit Sapiens4 before replacing or removing the app. Quit stops its owned backend;
-closing the last window keeps the app running. Replacing, removing and reinstalling
+closing the Workspace window keeps the app running. Closing the storage window
+cancels startup and quits. Replacing, removing and reinstalling
 the app retain `~/Library/Application Support/Sapiens4/{data,config}`. The backend
-log is `data/desktop-server.log`. Older Development directories remain untouched.
+log is `desktop-server.log` in the selected Data Root. Older Development directories remain untouched.
 Use `SAPIENS_DATA_DIR` and `SAPIENS_CONFIG_DIR` at launch for explicit isolation.
 For example, run `SAPIENS_DATA_DIR=/path/to/data /Applications/Sapiens4.app/Contents/MacOS/Sapiens4`.
 

@@ -255,9 +255,10 @@ stage root destination = do
   prompts <- files (root</>"corpora/prompts")
   let suffix=if os=="mingw32" then ".exe" else ""
       blindly=if os=="mingw32" then "windows/blindly4.exe" else "release/blindly4"
-      payload=nub (map assetFile allAssets++[".build/bin/sapiens4"++suffix,"submodules/blindly4/.build/"++blindly]++map (makeRelative root) (notices++prompts))
+      payload=nub (map assetFile allAssets++["app/shell/bootstrap.html",".build/bin/sapiens4"++suffix,"submodules/blindly4/.build/"++blindly]++map (makeRelative root) (notices++prompts))
   forM_ payload $ \path -> copy (root</>path) (destination</>path)
   when (os=="mingw32") $ forM_ ["AppIcon.ico","AppIconDark.ico"] $ \icon -> copy (root</>"environments/windows"</>icon) (destination</>"environments/windows"</>icon)
+  writeFile (destination</>"package-manifest.json") "{\"channel\":\"stable\",\"appId\":\"com.sapiens4.desktop\"}\n"
 
 packageMac :: FilePath -> String -> FilePath -> Bool -> IO ()
 packageMac root version outputInput public = do

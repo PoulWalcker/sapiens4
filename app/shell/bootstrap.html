@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>Sapiens4</title>
+<link rel="stylesheet" href="../theme/styles.css">
+<link rel="stylesheet" href="../theme/live.css">
+<link rel="stylesheet" href="../theme/sapi-theme.css">
+<style>
+html,body{margin:0;min-height:100%;background:var(--sapi-bg)}
+body{min-height:100vh;display:flex;align-items:stretch;justify-content:center}
+main{box-sizing:border-box;width:min(100%,540px);height:100dvh;min-height:0;padding:24px 30px;display:flex;flex-direction:column}
+.setup-stage{flex:1;display:flex;flex-direction:column;padding:clamp(25px,6vh,55px) 0 24px;min-height:0;overflow:auto}
+h1{font:600 27px/1.2 var(--sapi-font);letter-spacing:-.8px;margin:0 0 10px}
+p{color:var(--sapi-muted);font-size:13px;line-height:1.6;margin:0 0 18px}
+.setup-intro{max-width:410px}
+.setup-bootstrap .setup-footer{min-height:52px}
+.setup-choice-symbol{display:grid;place-items:center;width:30px;height:30px;flex:none;border-radius:7px;background:var(--sapi-pink-tint);font-size:18px;font-weight:500}
+.setup-choice-copy small{line-height:1.4}
+.setup-choice-arrow{color:var(--sapi-muted);font-size:21px}
+.setup-note{font-size:11px;margin:0;color:var(--sapi-muted)}
+#error{color:var(--sapi-ink);white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;margin:10px 0 0}
+#error:empty{display:none}
+@media(max-height:440px){main{padding-top:14px;padding-bottom:14px}.setup-stage{padding:10px 0}h1{font-size:24px}}
+@media(max-width:400px){main{padding:18px}}
+</style>
+<script>
+if(matchMedia('(prefers-color-scheme:dark)').matches) document.documentElement.dataset.theme='dark';
+</script>
+</head>
+<body class="sapi-workspace setup-bootstrap">
+<main>
+<header class="setup-header">
+  <div class="setup-wordmark"><picture aria-hidden="true"><source media="(prefers-color-scheme: dark)" srcset="favicon-dark.svg"><img class="setup-mark" src="favicon.svg" alt=""></picture><span>Sapiens4</span></div>
+  <span class="setup-kicker">SETUP</span>
+</header>
+<div class="setup-stage">
+  <section id="welcome">
+    <h1>Meet your Sapis.</h1>
+    <p class="setup-intro">Your own team of AI coworkers. Think together, make things, and get work done on your computer.</p>
+    <div class="setup-choice-list">
+      <button type="button" class="setup-choice" aria-label="Start fresh" aria-pressed="true" onclick="selectStorage('new')">
+        <span class="setup-choice-symbol" aria-hidden="true">+</span>
+        <span class="setup-choice-copy"><strong>Start fresh</strong><small>Use the default location for your Sapiens data.</small></span>
+        <span class="setup-choice-arrow" aria-hidden="true">›</span>
+      </button>
+      <div class="setup-storage-option" id="storage-existing" data-change="false">
+        <button type="button" class="setup-choice" aria-label="Use another folder" aria-pressed="false" onclick="selectStorage('existing')">
+          <span class="setup-choice-symbol" aria-hidden="true">↗</span>
+          <span class="setup-choice-copy"><strong>Use another folder</strong><small id="storage-directory">Open existing data or start in an empty folder.</small></span>
+          <span class="setup-choice-arrow" aria-hidden="true">›</span>
+        </button>
+        <button type="button" class="setup-storage-change" id="storage-change" aria-label="Choose another folder" onclick="pickStorage()" hidden>Change</button>
+      </div>
+    </div>
+    <p class="setup-note">Existing data stays in its original location.</p>
+    <p id="error" role="alert"></p>
+  </section>
+</div>
+<footer class="setup-footer">
+  <button class="button primary" id="get-started" type="button" onclick="continueSetup(event)">Continue</button>
+</footer>
+</main>
+<script>
+let storageChoice='new', storageDirectory='', storageBusy=false;
+function postStorage(message) {
+ if(window.webkit?.messageHandlers?.browser) window.webkit.messageHandlers.browser.postMessage(message);
+ else window.chrome?.webview?.postMessage(message);
+}
+function updateStorage() {
+ document.querySelectorAll('.setup-choice').forEach((button,index)=>button.setAttribute('aria-pressed',String((index===0)===(storageChoice==='new'))));
+ document.querySelectorAll('button').forEach(button=>button.disabled=storageBusy);
+ document.getElementById('get-started').disabled=storageBusy || (storageChoice==='existing' && !storageDirectory);
+ const selected=storageChoice==='existing' && !!storageDirectory;
+ document.getElementById('storage-existing').dataset.change=String(selected);
+ document.getElementById('storage-change').hidden=!selected;
+ const path=document.getElementById('storage-directory');
+ const parts=storageDirectory.replaceAll('\\','/').split('/').filter(Boolean);
+ path.textContent=storageDirectory ? (parts.length>2?'…/':'')+parts.slice(-2).join('/') : 'Open existing data or start in an empty folder.';
+ path.title=storageDirectory;
+}
+function selectStorage(choice) {
+ if(storageBusy) return;
+ if(choice==='existing' && !storageDirectory) { pickStorage(); return; }
+ storageChoice=choice;
+ updateStorage();
+}
+function pickStorage() {
+ if(storageBusy) return;
+ storageBusy=true;
+ updateStorage();
+ postStorage({storage:'pick'});
+}
+function storagePicked(directory) {
+ storageBusy=false;
+ if(directory) { storageDirectory=directory; storageChoice='existing'; }
+ updateStorage();
+}
+function continueSetup(event) {
+ if(event?.detail>1) return;
+ if(storageBusy) return;
+ if(storageChoice!=='existing' || storageDirectory) {
+  storageLoading();
+  postStorage({storage:storageChoice,directory:storageDirectory});
+ }
+}
+function storageError(message) {
+ document.getElementById('error').textContent=message;
+ storageBusy=false;
+ updateStorage();
+}
+function storageLoading() {
+ storageBusy=true;
+ updateStorage();
+}
+</script>
+</body>
+</html>

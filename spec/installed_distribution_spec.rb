@@ -73,6 +73,7 @@ RSpec.describe 'Installed D1 distribution' do
       end
       install.call
       launch(host, env, dir) do |desktop, process|
+        desktop.press('Start fresh')
         send_message(desktop, token)
         desktop.see('Contract test reply')
         expect(provider.calls.first.fetch('prompt')).to include(token)
@@ -152,7 +153,7 @@ RSpec.describe 'Installed D1 distribution' do
         expect(Dir.children(unsafe)).to eq(['keep.txt'])
         expect(run_setup.call(install).last).to eq(0)
         host = File.join(install, 'Sapiens4.exe')
-        shell_profile = File.join(data, 'WebView2', 'Shell')
+        shell_profile = File.join(config, 'WebView2', 'Shell')
         FileUtils.mkdir_p(File.dirname(shell_profile))
         File.write(shell_profile, token)
         launch(host, env, dir) do |desktop, process|
@@ -166,6 +167,7 @@ RSpec.describe 'Installed D1 distribution' do
           expect(File.read(shell_profile)).to eq(token)
           File.unlink(shell_profile)
           desktop.press('Retry')
+          desktop.press('Start fresh')
           desktop.see('Message ChiefSapi')
           expect(run_setup.call(install).last).to eq(7)
           desktop.fill('Message ChiefSapi', token)

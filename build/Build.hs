@@ -44,12 +44,11 @@ main = do
     compiler <- mapM (\key -> maybe (ioError $ userError $ "GHC did not report "<>key) pure (lookup key settings)) ["C compiler command","C compiler flags"]
     setEnv "CC" (map (\c -> if c=='\\' then '/' else c) (unwords compiler))
    callProcess "sh" ["configure","--disable-shared","--enable-static","--disable-dependency-tracking"]
-   callProcess "make" (["-j4"] ++ if os=="mingw32"
-    then ["SHELL=sh","LIBTOOL=sh $(top_builddir)/libtool"] else [])
+   callProcess "make" (["-j4"] ++ if os=="mingw32" then ["SHELL=sh","LIBTOOL=sh $(top_builddir)/libtool"] else [])
  when (os=="mingw32") $ do
   createDirectoryIfMissing True build
   callProcess "windres" ["-I",root</>"environments/windows",root</>"environments/windows/resources.rc","-O","coff","-o",build</>"windows-resources.o"]
- let cabal options = callProcess "cabal" (["--project-file="<>project</>"cabal.project","--builddir="<>build]++options)
+ let cabal options = callProcess "cabal" (["--project-file="<>root</>"build/cabal.project","--builddir="<>build]++options)
  cabal (["build"]++buildFlags++map ("exe:"++) (filter (/="sapiens-windows") targets)++
   ["--ghc-options=-optc-mmacosx-version-min=13.0 -optl-mmacosx-version-min=13.0" | os=="darwin"])
  -- The desktop resource already contains the application's DPI/UAC manifest.
@@ -57,7 +56,7 @@ main = do
  createDirectoryIfMissing True (root </> ".build/bin")
  createDirectoryIfMissing True (root </> ".build/domain")
  forM_ targets $ \name -> do
-  source <- trim <$> readProcess "cabal" (["--project-file="<>project</>"cabal.project","--builddir="<>build,"list-bin","exe:"<>name]++buildFlags) ""
+  source <- trim <$> readProcess "cabal" (["--project-file="<>root</>"build/cabal.project","--builddir="<>build,"list-bin","exe:"<>name]++buildFlags) ""
   let destination = root </> (if name=="sapiens-domain" then ".build/domain" else ".build/bin") </> name<>suffix
   copyFile source (destination<>".installing")
   renameFile (destination<>".installing") destination

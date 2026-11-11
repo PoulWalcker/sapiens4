@@ -130,15 +130,17 @@ codexBinary = do
 
 killTree :: ProcessHandle -> IO ()
 killTree ph = do
+#ifdef mingw32_HOST_OS
+ -- Retain the job handle until termination, even if its root already exited.
+ -- getProcessExitCode can otherwise close the root and lose the job handle.
+ terminateProcess ph
+#else
  result <- getProcessExitCode ph
  when (isNothing result) $ do
   pid <- getPid ph
   case pid of
    Nothing -> terminateProcess ph
    Just root -> do
-#ifdef mingw32_HOST_OS
-    terminateProcess ph
-#else
     let send sig p = signalProcess sig p `catch` (\(_::IOException) -> pure ())
         collect stopped pending = do
          mapM_ (send sigSTOP) pending
@@ -148,8 +150,8 @@ killTree ph = do
          if null children then pure known else collect known children
     stopped <- collect [] [root] `catch` (\(_::SomeException) -> pure [root])
     mapM_ (send sigKILL) (reverse stopped)
-#endif
   pure ()
+#endif
 invoke :: Service -> Run -> Text -> IO Text
 invoke s run input = do
  foreground <- Computer.captureForeground (repositoryRoot s) (workspaceRoot s (agentIdText (runOwner run)))

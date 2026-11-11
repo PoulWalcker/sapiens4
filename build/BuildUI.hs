@@ -33,6 +33,8 @@ buildUI root = do
   let components = map (reads . T.unpack) (T.splitOn "." (T.drop 1 (T.strip (T.pack version)))) :: [[(Int,String)]]
   require (case components of [(major,"")]:[(minor,"")]:_ -> (major,minor)>=(22,5); _ -> False) 500 "Building the UI requires Node.js 22.5 or newer on PATH."
   path <- getEnv "PATH"
+  -- Spago prefers purs.cmd even when purs.exe precedes it. Keep npm shims out
+  -- of its Windows PATH so later shell-free compiler calls use the native exe.
   setEnv "PATH" (if os=="mingw32" then path else (libs</>"node_modules/.bin")++[searchPathSeparator]++path)
   setEnv "XDG_CACHE_HOME" (libs</>".cache")
   setEnv "npm_config_cache" (libs</>".cache/npm")

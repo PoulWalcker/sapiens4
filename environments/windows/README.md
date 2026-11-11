@@ -11,14 +11,22 @@ Codex CLI and existing authentication. Native npm binaries are supported;
 `SAPIENS_CODEX_BINARY` selects an executable explicitly.
 
 Data and configuration live in `%LOCALAPPDATA%\Sapiens4\{data,config}`, outside the
-installation. Quit stops the owned backend. Quit before replacement or uninstall;
+installation by default. A fresh installation opens Welcome + Storage before
+starting the backend. Start fresh initializes the empty default directory;
+Use another folder opens a complete existing Data Root in place or initializes
+an empty selected folder. The selection is saved only after Workspace loads.
+Later launches validate and reuse it; missing, invalid or locked data returns
+to the storage screen without creating replacement data. Quit stops the owned
+backend. Quit before replacement or uninstall;
 Setup refuses active installation processes, unowned nonempty destinations and
 protected state directories, and destinations with junction/symlink parents. Uninstall preserves data, configuration and unowned
 files. Process checks are preflight safeguards, not an atomic installation lock.
 Uninstall removes the installed ownership marker and registration. Reinstall
 into the empty installation directory; retained unowned files require a new directory.
 Pre-D1 installations that stored data directly in `%LOCALAPPDATA%\Sapiens4`
-can retain that location with `SAPIENS_DATA_DIR`; D1 does not migrate existing state.
+are discovered and validated when no selection is saved. Data stays in place;
+`SAPIENS_DATA_DIR` explicitly overrides the saved selection. The launcher and
+backend share the stable profile in `runtime/package-manifest.json`.
 
 ## Build and verify
 

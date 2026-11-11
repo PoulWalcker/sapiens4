@@ -270,6 +270,14 @@ execute arena view script done = do
     when (result >= 0) $ readWide (castPtr output) >>= done
   (withWide script $ \source -> call2 (core view) 29 source handler) `finally` release handler
 
+-- The completion barrier must run before navigating the shell.
+addDocumentScript :: Arena -> View -> String -> (Either String String -> IO ()) -> IO ()
+addDocumentScript arena view source done = do
+  handler <- completion arena "{B99369F3-9B11-47B5-BC6F-8E7895FCEA17}" $ \result identity ->
+    if result < 0 then done (Left "Could not restore workspace preferences.")
+    else readWide (castPtr identity) >>= done . Right
+  (withWide source $ \script -> call2 (core view) 27 script handler) `finally` release handler
+
 -- Ask the engine for the committed frame's URL and MIME type. Guest script
 -- cannot override this result. An unsupported or failed query leaves the tab live.
 frameTree :: Arena -> View -> (String -> IO ()) -> IO ()
@@ -315,3 +323,22 @@ pickFile window directory = allocaBytes 152 $ \dialog -> allocaArray 32768 $ \fi
     pokeByteOff dialog 96 (0x00001000 .|. 0x00000800 .|. 0x00080000 :: Word32)
     selected <- getOpenFileName dialog
     if selected /= 0 then Just <$> readWide filename else pure Nothing
+
+foreign import ccall safe "CoCreateInstance" coCreateInstance :: Ptr Word8 -> Object -> Word32 -> Ptr Word8 -> Ptr Object -> IO HRESULT
+
+foreign import ccall "dynamic" invokeIntPtr :: FunPtr (Object -> Word32 -> Ptr a -> IO HRESULT) -> Object -> Word32 -> Ptr a -> IO HRESULT
+
+-- The native folder picker returns the selected Data Root without copying it.
+pickDirectory :: Window -> IO (Maybe FilePath)
+pickDirectory owner = withGuid "{DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7}" $ \classId ->
+  withGuid "{D57C7288-D4AD-4768-BE02-9D969532D960}" $ \interfaceId ->
+    bracket (alloca $ \out -> coCreateInstance classId nullPtr 1 interfaceId out >>= check >> peek out) release $ \dialog -> do
+      options <- getValue dialog 10 :: IO Word32
+      callInt dialog 9 (fromIntegral $ options .|. 0x20 .|. 0x40 .|. 0x800 .|. 0x10000000)
+      putString dialog 17 "Open Sapiens data"
+      result <- method dialog 3 >>= \showDialog -> invokePtr showDialog dialog owner
+      if result == -2147023673 then pure Nothing else do
+        check result
+        bracket (getValue dialog 20) release $ \item -> do
+          getName <- method item 5
+          Just <$> bracket (alloca $ \out -> invokeIntPtr getName item 0x80058000 out >>= check >> peek out) coFree readWide

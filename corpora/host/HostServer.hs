@@ -1,6 +1,8 @@
 module HostServer where
 
 import Types
+import DataRoot
+import System.Environment (lookupEnv)
 import qualified Service as Service
 import Assets
 import HTTP
@@ -22,6 +24,8 @@ import Network.Wai.Handler.WebSockets (websocketsOr)
 import qualified Network.WebSockets as WS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import System.Directory (doesFileExist)
+import System.FilePath ((</>))
 import Network.HTTP.Types
 import Network.Wai
 import Network.Wai.Handler.Warp
@@ -40,15 +44,26 @@ listenLoopback port = Socket.withSocketsDo $ do
   pure (sock,fromIntegral assigned)
 startHost :: FilePath -> Int -> Bool -> IO Host
 startHost root requested managed = do
- unless managed (recoverRelays root)
- service <- Service.openService root
+ mode <- lookupEnv "SAPIENS_STORAGE_MODE"
+ exists <- doesFileExist (root </> "corpora-identity.json")
+ -- Source launch reopens its selected directory; native startup supplies an
+ -- explicit choice, which must never silently fall back to attaching.
+ startHostWith (if managed || mode==Just "existing" || mode==Nothing && exists then AttachExisting else StartNew) root requested managed
+
+startHostWith :: StorageChoice -> FilePath -> Int -> Bool -> IO Host
+startHostWith choice root requested managed = do
+ service <- Service.openService choice root
  flip onException (Service.closeService service) $ do
+  start service
+ where
+ start service = do
+  unless managed (recoverRelays root)
   (socket,port) <- listenLoopback requested
   flip onException (Socket.close socket) $ do
    Service.attachEndpoint service ("http://127.0.0.1:"<>T.pack (show port))
    bridge <- newBridge service
-   let child path = do
-        host <- startHost path 0 True
+   let child selection path = do
+        host <- startHostWith selection path 0 True
         pure (hostService host,hostBridge host,hostStop host)
    registry <- if managed then pure Nothing else Just <$> newRegistry service bridge child
    shutdown <- newEmptyMVar

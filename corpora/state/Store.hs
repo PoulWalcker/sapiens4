@@ -19,6 +19,7 @@ import System.FilePath
 import Text.Read (readMaybe)
 import qualified Data.List.NonEmpty as NE
 import Types
+import DataRoot (supportedDatabaseVersions)
 
 -- Only these tables contain JSON documents; callers cannot interpolate SQL names.
 data Collection = Workloads | Groups | ScheduledRoutines | PulseCalls | TurnDetails | Preferences | SystemPulse deriving (Eq, Show)
@@ -81,9 +82,9 @@ saveSingleton :: Service -> Collection -> Value -> IO ()
 saveSingleton s table v = executeSQL s ("INSERT INTO " <> tableName table <> " VALUES (1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value") [SQLText (jsonText v)]
 initialize :: Service -> IO ()
 initialize s = connection s $ \db -> do
- execute_ db "PRAGMA journal_mode=WAL"
  [Only version] <- query_ db "PRAGMA user_version" :: IO [Only Int]
- require (version `elem` [0..8]) 500 ("Unsupported CORPORA schema: " <> T.pack (show version))
+ require (version `elem` supportedDatabaseVersions) 500 ("Unsupported CORPORA schema: " <> T.pack (show version))
+ execute_ db "PRAGMA journal_mode=WAL"
  mapM_ (execute_ db) [
   "CREATE TABLE IF NOT EXISTS scheduled_routines (sequence INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS system_pulse (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)",
