@@ -205,23 +205,37 @@ webViewRuntimeAvailable = bracket webViewLoader (void . freeLibrary) $ \loader -
     pure (result >= 0 && not (null versionText) && all (\c -> c `elem` ['0'..'9'] || c=='.') versionText)
 
 newView :: Arena -> Window -> String -> (Either String View -> IO ()) -> IO ()
-newView arena parent profile done = do
+newView = newViewWhile (pure True)
+
+-- Cancellation invalidates an attempt; COM still owns its pending callbacks.
+-- Keep them in the arena until Release, and dispose any late controller on the
+-- apartment thread instead of handing it to a subsequent startup attempt.
+newViewWhile :: IO Bool -> Arena -> Window -> String -> (Either String View -> IO ()) -> IO ()
+newViewWhile active arena parent profile done = do
   loader <- webViewLoader
   retain arena (void $ freeLibrary loader)
   entry <- withCString "CreateCoreWebView2EnvironmentWithOptions" (getProcAddress loader)
   when (entry == nullFunPtr) $ ioError $ userError "WebView2 loader entry point is unavailable"
-  environment <- completion arena "{4E8A3389-C9D8-4BD2-B6B5-124FEE6CC14D}" $ \result env ->
-    if result < 0 || env == nullPtr then done (Left $ "Cannot initialize WebView2 Runtime: " ++ show result) else do
+  environment <- completion arena "{4E8A3389-C9D8-4BD2-B6B5-124FEE6CC14D}" $ \result env -> do
+    valid <- active
+    when valid $ if result < 0 || env == nullPtr then done (Left $ "Cannot initialize WebView2 Runtime: " ++ show result) else do
       -- Give each view its own child window so guest panes can sit above the shell.
       child <- withWide "STATIC" $ \className -> withWide "" $ \title ->
         createWindow 0 className title 0x56000000 0 0 0 0 parent nullPtr nullPtr nullPtr
       when (child == nullPtr) $ ioError $ userError "Cannot create browser container"
-      ready <- completion arena "{6C4819F3-C9B7-4260-8127-C9F5BDE7F68C}" $ \code ctrl ->
-        if code < 0 || ctrl == nullPtr then void (destroyWindow child) >> done (Left $ "Cannot create browser view: " ++ show code) else do
+      pendingChild <- newIORef child
+      let discardChild = atomicModifyIORef' pendingChild (\value -> (nullPtr,value)) >>= \value ->
+            when (value /= nullPtr) $ void (destroyWindow value)
+          Arena entries = arena
+      modifyIORef' entries (ArenaEntry ((||) <$> ((== nullPtr) <$> readIORef pendingChild) <*> (not <$> active)) discardChild :)
+      ready <- completion arena "{6C4819F3-C9B7-4260-8127-C9F5BDE7F68C}" $ \code ctrl -> do
+        valid <- active
+        if not valid then (when (ctrl /= nullPtr) $ call0 ctrl 24) `finally` discardChild else if code < 0 || ctrl == nullPtr then discardChild >> done (Left $ "Cannot create browser view: " ++ show code) else do
           addRef ctrl
-          web <- getValue ctrl 25 `onException` (release ctrl >> void (destroyWindow child))
+          web <- getValue ctrl 25 `onException` (release ctrl >> discardChild)
+          writeIORef pendingChild nullPtr
           done (Right $ View ctrl web child)
-      (call2 env 3 child ready `onException` void (destroyWindow child)) `finally` release ready
+      (call2 env 3 child ready `onException` discardChild) `finally` release ready
   (withWide profile $ \path -> createEnvironment entry nullPtr path nullPtr environment >>= check) `finally` release environment
 
 closeView :: View -> IO ()

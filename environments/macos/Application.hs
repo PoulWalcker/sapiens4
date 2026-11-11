@@ -7,6 +7,7 @@ import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
 import Data.Aeson
+import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy as L
 import Data.IORef
@@ -26,9 +27,15 @@ import System.Directory
 import System.Environment
 import System.FilePath
 import System.IO
+import System.IO.Error (isDoesNotExistError)
 import System.Process hiding (shell)
 import System.Timeout
 import System.Posix.Process (getProcessID)
+import System.Posix.Signals
+import System.Posix.Types (ProcessID)
+import System.Exit (ExitCode(..))
+import Text.Read (readMaybe)
+import Network.HTTP.Types.Status (statusCode)
 import Data.List (stripPrefix, nub, intercalate)
 
 
@@ -120,9 +127,49 @@ stopServer (ServerProcess process input output errors readers) = mask_ $ do
             (hPutStrLn input "stop" >> hFlush input >> hClose input) `catch` (\(_ :: IOException) -> pure ())
             ended <- timeout 10000000 (waitForProcess process)
             when (isNothing ended) $ do
-                terminateProcess process
+                forceStopServer process
                 confirmed <- timeout 5000000 (waitForProcess process)
                 when (isNothing confirmed) (ioError (userError "The application server could not be stopped. Quit was cancelled."))
+
+-- Freeze the owned tree before walking it: Codex has its own process group,
+-- and a running parent could otherwise fork or exit while we discover children.
+-- Keep the backend alive until every discovered descendant is gone, so a failed
+-- fallback retains ownership and cannot permit a second server to start.
+forceStopServer :: ProcessHandle -> IO ()
+forceStopServer process = getPid process >>= mapM_ (\root -> do
+    frozen <- newIORef []
+    let snapshot = do
+            (code,out,_) <- readProcessWithExitCode "/bin/ps" ["-axo","pid=,ppid=,stat=,lstart="] ""
+            unless (code == ExitSuccess) $ ioError (userError "Cannot inspect the application process tree.")
+            pure [(pid,parent,state,unwords stamp) | line <- lines out,
+                  p:pp:state:stamp <- [words line], Just pid <- [readMaybe p], Just parent <- [readMaybe pp]]
+        matches rows (pid,stamp) = [(state,parent) | (p,parent,state,start) <- rows, p == pid, start == stamp]
+        send sig owned = do
+            rows <- snapshot
+            forM_ owned $ \item@(pid,_) -> unless (null (matches rows item)) $
+                signalProcess sig pid `catch` (\e -> if isDoesNotExistError e then pure () else throwIO e)
+        collect discovered = do
+            modifyIORef' frozen (++ discovered)
+            send sigSTOP discovered
+            rows <- snapshot
+            known <- readIORef frozen
+            let live = [(pid,stamp) | (pid,_,state,stamp) <- rows, take 1 state /= "Z"]
+                stopped = all (\item -> all (\(state,_) -> take 1 state `elem` ["T","Z"]) (matches rows item)) known
+                children = [(pid,stamp) | (pid,parent,_,stamp) <- rows, parent `elem` [p | item@(p,_) <- known, not (null (matches rows item))], (pid,stamp) `notElem` known]
+            if not stopped then threadDelay 10000 >> collect []
+              else if null children then pure (filter (`elem` live) known) else collect children
+        awaitGone owned = do
+            rows <- snapshot
+            unless (all (\item -> all (\(state,_) -> take 1 state == "Z") (matches rows item)) owned) $
+                threadDelay 10000 >> awaitGone owned
+        bounded action = timeout 5000000 action >>= maybe (ioError (userError "The application process tree could not be stopped. Quit was cancelled.")) pure
+    rows <- snapshot
+    let owned = [(pid,stamp) | (pid,_,_,stamp) <- rows, pid == (root :: ProcessID)]
+    (do tree <- bounded (collect owned)
+        let descendants = filter ((/= root) . fst) tree
+        send sigKILL (reverse descendants)
+        bounded (awaitGone descendants)
+        send sigKILL owned) `onException` (readIORef frozen >>= send sigCONT))
 
 alert :: Text -> IO ()
 alert message = void $ prompt message ["OK"]
@@ -150,12 +197,8 @@ startupFailure application message = do
 reload :: Application -> IO ()
 reload application = do
     closing <- readIORef (quitting application)
-    unless closing $ if fixture application then readIORef (shell (browser application)) >>= void . (`obj0` "reload") else do
-        current <- readIORef (child application)
-        alive <- case current of
-            Nothing -> pure False
-            Just (ServerProcess process _ _ _ _) -> isNothing <$> getProcessExitCode process
-        if alive then check application else beginStartup application
+    unless closing $ if fixture application then readIORef (shell (browser application)) >>= void . (`obj0` "reload") else beginStartup application
+
 showWindow :: Application -> IO ()
 showWindow application = do win <- readIORef (windowRef application); void (obj1 win "makeKeyAndOrderFront:" nullPtr); void (obj1 (native application) "activateIgnoringOtherApps:" (int 1))
 
@@ -306,19 +349,45 @@ fetchGuestScript address =
             response <- httpLbs r { responseTimeout = responseTimeoutMicro 2000000 } http
             pure (TE.decodeUtf8With (\_ _ -> Just '\xfffd') (L.toStrict (responseBody response))))
 
+serverHealthy :: Application -> Text -> IO Bool
+serverHealthy application destination = do
+    current <- readIORef (child application)
+    alive <- case current of
+        Nothing -> pure False
+        Just (ServerProcess process _ _ _ _) -> isNothing <$> getProcessExitCode process
+    if not alive || T.null destination then pure False else do
+        let probe = (bracket (newManager defaultManagerSettings) closeManager $ \http -> do
+                let endpoint = fmap (\uri -> uri { uriPath = "/api/health", uriQuery = "", uriFragment = "" }) (parseURI (T.unpack destination))
+                request <- parseRequest (maybe "" show endpoint)
+                response <- httpLbs request { responseTimeout = responseTimeoutMicro 2000000, redirectCount = 0 } http
+                pure (statusCode (responseStatus response) == 200 &&
+                    (decode (responseBody response) >>= fieldStatus) == Just ("ok" :: Text)))
+                `catch` (\(_ :: IOException) -> pure False)
+                `catch` (\(_ :: HttpException) -> pure False)
+        -- A short transient stall must not interrupt a healthy provider run.
+        fromMaybe False <$> timeout 5000000 (do
+            healthy <- probe
+            if healthy then pure True else threadDelay 250000 >> probe)
+    where fieldStatus = parseMaybe (withObject "health" (.: "status"))
+
 beginStartup :: Application -> IO ()
 beginStartup application = do
     closing <- readIORef (quitting application)
     worker <- readIORef (startupWorker application)
     unless (closing || isJust worker) $ do
-        writeIORef (address application) ""
+        destination <- readIORef (address application)
         worker <- async $ do
-            result <- try $ (do
-                closeServer (child application)
-                guestScript <- getExecutablePath >>= \executable -> TIO.readFile (takeDirectory executable </> "../Resources/runtime/.build/web/guest.js")
-                when (T.null (T.strip guestScript)) $ ioError (userError "The packaged guest.js is empty. Reinstall the complete Sapiens4 app.")
-                destination <- startServer (child application)
-                pure (destination,guestScript)) `onException` closeServer (child application)
+            result <- try $ do
+                healthy <- serverHealthy application destination
+                if healthy then do
+                    script <- readIORef (guest (browser application))
+                    pure (destination,script)
+                  else flip onException (closeServer (child application)) $ do
+                    closeServer (child application)
+                    guestScript <- getExecutablePath >>= \executable -> TIO.readFile (takeDirectory executable </> "../Resources/runtime/.build/web/guest.js")
+                    when (T.null (T.strip guestScript)) $ ioError (userError "The packaged guest.js is empty. Reinstall the complete Sapiens4 app.")
+                    target <- startServer (child application)
+                    pure (target,guestScript)
             post application $ do
                 closing <- readIORef (quitting application)
                 unless closing $ do

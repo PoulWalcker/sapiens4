@@ -44,8 +44,10 @@ desktopSession memory probe = do
   focusRef <- newIORef nullPtr
   closing <- newIORef False
   retrySetup <- newIORef (pure ())
+  restoreSetup <- newIORef (pure ())
   workerRef <- newIORef Nothing
   starting <- newIORef False
+  generation <- newIORef (0 :: Integer)
   let resize hwnd = do
         (width, height) <- rectangle hwnd
         offset <- readIORef top
@@ -81,17 +83,20 @@ desktopSession memory probe = do
           defaultProc hwnd message wparam lparam
         0x10 -> do
           busy <- atomicModifyIORef' closing (\value -> (True,value))
-          unless busy $ void $ async $ do
-            result <- try stop
-            let complete = case result of
-                  Right () -> closeViews >> void (destroyWindow hwnd)
-                  Left (e :: SomeException) -> do
-                    writeIORef closing False
-                    label <- readIORef statusRef
-                    windowTitle label ("Quit cancelled: " ++ displayException e)
-                    void (showWindow label 5)
-            atomicModifyIORef' pending (\actions -> (complete:actions, ()))
-            void (postMessage hwnd 0x802A 0 0)
+          unless busy $ do
+            modifyIORef' generation (+1)
+            void $ async $ do
+              result <- try stop
+              let complete = case result of
+                    Right () -> closeViews >> void (destroyWindow hwnd)
+                    Left (e :: SomeException) -> do
+                      writeIORef closing False
+                      readIORef restoreSetup >>= id
+                      label <- readIORef statusRef
+                      windowTitle label ("Quit cancelled: " ++ displayException e)
+                      void (showWindow label 5)
+              atomicModifyIORef' pending (\actions -> (complete:actions, ()))
+              void (postMessage hwnd 0x802A 0 0)
           pure 0
         0x02 -> quitMessage 0 >> pure 0
         0x0111 -> case wparam .&. 0xffff of
@@ -138,6 +143,7 @@ desktopSession memory probe = do
             dead <- readIORef closing
             unless dead $ atomicModifyIORef' pending (\xs -> (action:xs, ())) >> void (postMessage hwnd 0x802A 0 0)
           failStart message = do
+            modifyIORef' generation (+1)
             cleanup <- try (closeViews `finally` closeHost host)
             let detail = case cleanup of
                   Left (e :: SomeException) -> message ++ "\n\nStartup cleanup failed: " ++ displayException e
@@ -200,19 +206,33 @@ desktopSession memory probe = do
                 putStrLn "TITLE: Sapiens4"
                 readIORef (origin host) >>= mapM_ (putStrLn . ("Sapiens4: " ++) . show)
                 void $ forkIO $ probeInput post hwnd top resize
-          launch = do
+          launch attempt = do
+            let valid = (&&) <$> (not <$> readIORef closing) <*> ((== attempt) <$> readIORef generation)
+                active action = valid >>= flip when action
+                failed message = post $ active $ failStart message
             available <- try webViewRuntimeAvailable
             case available of
-              Left (e :: SomeException) -> post (failStart (displayException e))
-              Right False -> post $ do
+              Left (e :: SomeException) -> failed (displayException e)
+              Right False -> post $ active $ do
                 windowTitle label "Microsoft Edge WebView2 is required.\n\nChoose Install/Repair WebView2 to open Microsoft's official installer.\nRun the downloaded installer, then choose Retry.\nCancel closes Sapiens4 without starting its server."
                 mapM_ (\button -> void (showWindow button 5)) setupButtons
                 writeIORef starting False
               Right True -> do
                 result <- try $ startHost host
-                post $ case result of
+                post $ active $ case result of
                   Left (e :: SomeException) -> failStart (displayException e)
-                  Right url -> newView memory hwnd (dataDirectory host </> "WebView2/Shell") (\created -> loaded url created `catch` \(e :: SomeException) -> post (failStart (displayException e))) `catch` \(e :: SomeException) -> failStart (displayException e)
+                  Right url -> do
+                    waiting <- newIORef True
+                    timer <- async $ do
+                      threadDelay 35000000
+                      post $ active $ readIORef waiting >>= \pending -> when pending $
+                        failStart "WebView2 did not initialize within 35 seconds."
+                    writeIORef workerRef (Just timer)
+                    let completed created = do
+                          writeIORef waiting False
+                          loaded url created `catch` \(e :: SomeException) -> failed (displayException e)
+                    newViewWhile valid memory hwnd (dataDirectory host </> "WebView2/Shell") completed
+                      `catch` \(e :: SomeException) -> failStart (displayException e)
           begin = mask_ $ do
             dead <- readIORef closing
             unless dead $ do
@@ -220,9 +240,13 @@ desktopSession memory probe = do
               unless busy $ do
                 mapM_ (\button -> void (showWindow button 0)) setupButtons
                 windowTitle label "Starting Sapiens4…"
-                asyncWithUnmask (\unmask -> unmask launch) >>= writeIORef workerRef . Just
+                attempt <- atomicModifyIORef' generation (\value -> (value+1,value+1))
+                asyncWithUnmask (\unmask -> unmask (launch attempt)) >>= writeIORef workerRef . Just
       hSetBuffering stdout LineBuffering
       writeIORef retrySetup begin
+      writeIORef restoreSetup $ do
+        writeIORef starting False
+        mapM_ (\button -> void (showWindow button 5)) setupButtons
       begin
       void $ showWindow hwnd 5
       void $ updateWindow hwnd

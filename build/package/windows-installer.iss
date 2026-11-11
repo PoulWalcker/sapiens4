@@ -100,6 +100,50 @@ end;
 function InstallerProcessId: Cardinal;
   external 'GetCurrentProcessId@kernel32.dll stdcall';
 
+function OpenInstalledImage(FileName: String; Access, Sharing: Cardinal;
+  Security: THandle; Creation, Attributes: Cardinal; Template: THandle): THandle;
+  external 'CreateFileW@kernel32.dll stdcall';
+function CloseInstalledImage(Handle: THandle): BOOL;
+  external 'CloseHandle@kernel32.dll stdcall';
+
+function InstallationImagesWritable(Directory, Exempt: String): Boolean;
+var Item: TFindRec; Path, Extension: String; Handle: THandle; Attributes: Cardinal;
+begin
+  Attributes := FileAttributes(Directory);
+  if Attributes = $FFFFFFFF then begin
+    Result := (DLLGetLastError = 2) or (DLLGetLastError = 3);
+    Exit;
+  end;
+  Result := False;
+  if not FindFirst(AddBackslash(Directory) + '*', Item) then Exit;
+  Result := True;
+  try
+    repeat
+      if (Item.Name = '.') or (Item.Name = '..') then Continue;
+      Path := AddBackslash(Directory) + Item.Name;
+      { Never follow a redirected installation subtree. }
+      if (Item.Attributes and $400) <> 0 then begin Result := False; Exit; end;
+      if (Item.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
+        Result := InstallationImagesWritable(Path, Exempt)
+      else begin
+        Extension := ExtractFileExt(Path);
+        if ((CompareText(Extension, '.exe') = 0) or (CompareText(Extension, '.dll') = 0)) and
+           (CompareText(Path, Exempt) <> 0) then begin
+          { OPEN_EXISTING + GENERIC_WRITE tests the image lock even when WMI
+            cannot reveal an elevated process's path. No bytes are written.
+            Allow all sharing: unrelated open handles need not block Setup. }
+          Handle := OpenInstalledImage(Path, $40000000, 7, 0, 3, 0, 0);
+          Result := Handle <> THandle(-1);
+          if Result then Result := CloseInstalledImage(Handle);
+        end;
+      end;
+      if not Result then begin Log('Installation image unavailable: ' + Path); Exit; end;
+    until not FindNext(Item);
+  finally
+    FindClose(Item);
+  end;
+end;
+
 function ProcessesStopped(ForUninstall: Boolean): Boolean;
 var Locator, Service, Processes, Process, SelfProcess: Variant;
     I: Integer; ParentId: Cardinal; Prefix, Executable, Uninstaller: String;
@@ -131,7 +175,11 @@ begin
         Exit;
       end;
     end;
-    Result := True;
+    { The running uninstaller is intentionally exempt; its original/temporary
+      process identities were checked above. All payload images remain guarded. }
+    Executable := '';
+    if ForUninstall then Executable := ExpandConstant('{uninstallexe}');
+    Result := InstallationImagesWritable(ExpandConstant('{app}'), Executable);
   except
     Log('Cannot establish stopped installation: ' + GetExceptionMessage);
   end;
