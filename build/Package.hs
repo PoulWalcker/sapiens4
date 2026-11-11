@@ -206,11 +206,12 @@ audit input = do
 splitVersion :: String -> [String]
 splitVersion value = case break (=='.') value of (part,[]) -> [part];(part,_:rest) -> part:splitVersion rest
 
-sign :: FilePath -> Maybe String -> IO ()
-sign app identity = do
+sign :: FilePath -> FilePath -> Maybe String -> IO ()
+sign root app identity = do
  let flags=["--force","--sign",fromMaybe "-" identity]++[value | isJust identity,value<-["--options","runtime","--timestamp"]]
  binaries app >>= mapM_ (\binary->run "codesign" (flags++[binary])) . sortOn (negate . length . splitDirectories)
- run "codesign" (flags++[app])
+ -- Microphone access belongs to the desktop host, not its nested executables.
+ run "codesign" (flags++["--entitlements",root</>"build/package/macos-entitlements.plist",app])
  run "codesign" ["--verify","--deep","--strict",app]
 
 diskImage :: FilePath -> FilePath -> Maybe String -> IO FilePath
@@ -293,7 +294,7 @@ packageMac root version outputInput public = do
   run "plutil" ["-lint",app</>"Contents/Info.plist"]
   relocate app
   audit app
-  sign app identity
+  sign root app identity
   forM_ profile $ \credential -> do
    let submitted=temporary</>"notarization.zip"
    run "ditto" ["-c","-k","--keepParent",app,submitted]
