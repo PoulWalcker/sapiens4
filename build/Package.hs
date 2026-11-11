@@ -289,7 +289,7 @@ packageMac root version outputInput public = do
   run (root</>".build/bin/sapiens-macos") ["--icon",iconset,root</>"app/shell/favicon.svg"]
   run "iconutil" ["-c","icns",iconset,"-o",resources</>"AppIcon.icns"]
   writeFile (app</>"Contents/Info.plist") $ "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict>"++
-   concat ["<key>"++key++"</key><string>"++value++"</string>" | (key,value)<-[("CFBundleIdentifier","com.poulwalcker.sapiens4"),("CFBundleName","Sapiens4"),("CFBundleDisplayName","Sapiens4"),("CFBundleExecutable","Sapiens4"),("CFBundlePackageType","APPL"),("CFBundleVersion",version),("CFBundleShortVersionString",version),("CFBundleIconFile","AppIcon"),("LSMinimumSystemVersion","13.0"),("NSMicrophoneUsageDescription","Sapiens4 uses the microphone to record voice messages.")]]++
+   concat ["<key>"++key++"</key><string>"++value++"</string>" | (key,value)<-[("CFBundleIdentifier","com.sapiens4.desktop"),("CFBundleName","Sapiens4"),("CFBundleDisplayName","Sapiens4"),("CFBundleExecutable","Sapiens4"),("CFBundlePackageType","APPL"),("CFBundleVersion",version),("CFBundleShortVersionString",version),("CFBundleIconFile","AppIcon"),("LSMinimumSystemVersion","13.0"),("NSMicrophoneUsageDescription","Sapiens4 uses the microphone to record voice messages.")]]++
    "<key>NSHighResolutionCapable</key><true/><key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/><key>NSAllowsArbitraryLoadsInWebContent</key><true/></dict></dict></plist>"
   run "plutil" ["-lint",app</>"Contents/Info.plist"]
   relocate app

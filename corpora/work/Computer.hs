@@ -173,7 +173,7 @@ captureForeground root workdir = do
  captured <- try $ if not managed then pure Nothing else if os=="darwin" then do
    (code,out,_) <- invoke "osascript" ["-l","JavaScript","-e","ObjC.import('AppKit'); $.NSWorkspace.sharedWorkspace.frontmostApplication.bundleIdentifier.js"] 5
    let bundle=T.strip (T.pack out)
-   pure (if code==ExitSuccess && bundle `elem` ["com.poulwalcker.sapiens4","com.openai.codex","com.google.Chrome","com.apple.Safari","com.microsoft.edgemac","org.mozilla.firefox"] then Just bundle else Nothing)
+   pure (if code==ExitSuccess && bundle `elem` ["com.sapiens4.desktop","com.openai.codex","com.google.Chrome","com.apple.Safari","com.microsoft.edgemac","org.mozilla.firefox"] then Just bundle else Nothing)
   else if os `elem` ["mingw32","linux"] then do
    expected <- lookupEnv "SAPIENS_DESKTOP_PID"
    case expected of
