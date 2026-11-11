@@ -106,24 +106,3 @@ a supplied Origin must match the loopback Host. Common entrypoints:
 Group notes, messages, attachments, tasks and calls use `/api/groups/<id>`.
 Updates require the relevant revision. [RSpec scenarios](../spec) exercise the
 public contracts; see [Testing](testing.md) to run them.
-
-## D1 integration contract for D3
-
-D1 retains a separate backend and the existing UI/HTTP interfaces. Opening the
-application does not require Codex. Provider execution resolves an explicit
-`SAPIENS_CODEX_BINARY` first, then supported installed locations/PATH; Windows npm
-shims resolve to native executables. Discovery never selects the highest version.
-Missing CLI/authentication guidance belongs to D3; existing execution errors remain.
-D1 does not alter onboarding, permissions, authentication or workspace selection.
-
-D3 must preserve explicit configuration and selected data-directory inputs. A
-storage switch must stop the owned child, confirm exit, start it with the selected
-directory, receive private pipe readiness, then update the view. D3 must decide
-whether selection precedes backend creation; macOS now constructs the native
-Starting window before starting its owned backend worker. Directory overrides do
-not isolate Codex credentials.
-
-Native signatures authenticate the publisher; SHA-256 identifies final installer
-bytes. There is no authenticated commit-to-artifact provenance or continuous
-integrity check of installed JS/CSS. External Codex updates remain a compatibility
-dependency. Finder app replacement cannot enforce Windows-style process guards.
