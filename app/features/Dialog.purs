@@ -25,13 +25,12 @@ nameHelp :: String
 nameHelp = "Start with A–Z. Letters, numbers, and - _ . : # + | ( ) & $ ^ are allowed. No spaces."
 
 make :: M.DialogKind -> F.Context -> M.Model -> M.Dialog
-make kind record m = {storage:M.emptyStorage,providerPage:M.Providers,kind,title,record,fields,content:F.NoContent,status:M.Editing,identity:m.sequence+1}
+make kind record m = {storage:M.emptyStorage,kind,title,record,fields,content:F.NoContent,status:M.Editing,identity:m.sequence+1}
   where
   name = F.contextName record
   title = case kind of
     M.AppMenu -> D.fallback "CORPORA" $ m.snapshot.corpora.name
     M.WorkspaceSettings -> "Workspace & settings"
-    M.AIProviders -> "AI Connections"
     M.Computer -> "Shared computer"
     M.Onboarding -> "Set up Sapiens"
     M.AgentSettings -> name <> " settings"
@@ -72,57 +71,33 @@ view m = case m.dialog of
       ,V.when (d.kind /= M.Onboarding) $ V.span [V.cls "tiny-label"] "SAPIENS4"
       ,V.when (d.kind == M.Onboarding) $ V.span [V.cls "setup-kicker"] "SETUP"
       ,V.when (dismissible d) $ V.icon (if M.corporaDialog d.kind then "Close" else "Close dialog") "×" CloseDialog]
-    ,V.when (d.kind == M.Onboarding) $ V.node "div" [V.cls "setup-progress",V.attr "aria-hidden" "true"] [V.div ("setup-progress-fill setup-progress-" <> (if d.storage.page == M.SetupWelcome then "welcome" else if d.storage.page == M.ChooseStorage then "storage" else D.s "step" (F.setupValue d.content))) []]
-    ,V.node "div" [V.id $ if M.corporaDialog d.kind then "corpora-dialog-body" else "modal-content"] [V.when (A.elem d.kind [M.AIProviders,M.Onboarding] && d.providerPage /= M.Providers && d.storage.page == M.SetupSteps && not (authenticating d)) $ V.control [V.cls "ai-provider-back"] "‹  AI Connections" $ ProviderNavigate M.Providers,V.node "h2" [V.id "dialog-title",V.attr "tabindex" "-1",V.cls (if A.elem d.kind [M.AIProviders,M.Onboarding] then "provider-title" else "")] ((if A.elem d.kind [M.AIProviders,M.Onboarding] && d.providerPage /= M.Providers && d.storage.page == M.SetupSteps then [providerIcon "codex"] else []) <> [V.text $ dialogTitle d]),body m d,V.textNode "p" [V.cls "corpora-feedback",V.attr "role" "status"] ((M.dialogError d))
-      ,V.when (A.elem d.kind [M.Onboarding,M.AIProviders,M.Computer] && d.storage.page == M.SetupSteps && M.dialogError d /= "") $ V.button "button" "Check again" $ OnboardingPoll d.identity]]
-
-authenticating :: M.Dialog -> Boolean
-authenticating d = (M.dialogBusy d) || A.elem (D.s "provider" (F.setupValue d.content)) ["signing_in","signing_out"]
+    ,V.node "div" [V.id $ if M.corporaDialog d.kind then "corpora-dialog-body" else "modal-content"]
+      [V.textNode "h2" [V.id "dialog-title",V.attr "tabindex" "-1"] (dialogTitle d),body m d
+      ,V.textNode "p" [V.cls "corpora-feedback",V.attr "role" "status"] (M.dialogError d)
+      ,V.when (A.elem d.kind [M.Onboarding,M.Computer] && d.storage.page == M.SetupSteps && M.dialogError d /= "") $ V.button "button" "Check again" $ OnboardingPoll d.identity]]
 
 dismissible :: M.Dialog -> Boolean
-dismissible d
-  | A.elem d.kind [M.AIProviders,M.Onboarding] && authenticating d = false
-  | d.kind /= M.Onboarding = true
-  | otherwise = D.b "completed" (F.setupValue d.content)
+dismissible d = not (M.dialogBusy d) && (d.kind /= M.Onboarding || M.setupStep (F.setupValue d.content) == Just M.CompleteStep)
 
 dialogTitle :: M.Dialog -> String
 dialogTitle d
-  | d.kind == M.Computer = if D.s "computer_permission" (F.setupValue d.content) == "denied" then "Computer access needed" else "Computer access"
-  | d.kind == M.AIProviders = case d.providerPage of
-      M.Providers -> "Your AI lineup"
-      M.CodexAuth -> connectionTitle (F.setupValue d.content)
-      _ -> "Codex"
-  | d.kind == M.Onboarding && d.storage.page == M.ChooseStorage = "Where should we start?"
-  | d.kind == M.Onboarding && d.storage.page == M.SetupWelcome = "Meet your Sapis."
-  | d.kind == M.Onboarding = case D.s "step" (F.setupValue d.content) of
-      "permissions" -> "Computer access"
-      "corpora" -> "Choose your Corpora"
-      "ready" -> "You're ready"
-      _ -> case d.providerPage of
-        M.Providers -> "Connect your AI"
-        M.CodexAuth -> connectionTitle (F.setupValue d.content)
-        _ -> "Codex"
+  | d.kind == M.Onboarding && d.storage.page == M.ChooseStorage = "Your data"
+  | d.kind == M.Onboarding = case M.setupStep (F.setupValue d.content) of
+      Just M.ReadyStep -> "You're ready"
+      Just M.ComputerAccessStep -> "Computer access"
+      _ -> "Set up Sapiens"
   | otherwise = d.title
-
-connectionTitle :: Json -> String
-connectionTitle value = case D.s "provider" value of
-  "missing" -> "Codex isn't available"
-  "unavailable" -> "Couldn't check Codex"
-  _ -> if A.elem (D.s "state" (D.get "login" value)) ["failed","expired"] then "Couldn't connect Codex" else "Connecting Codex"
 
 body :: M.Model -> M.Dialog -> V.Html
 body m d = case d.kind of
   M.AppMenu -> V.node "nav" [V.label "Corpora menu"]
     [V.button "app-menu-row" "Workspace & settings" $ OpenDialog M.WorkspaceSettings F.NoRecord
-    ,V.when m.localAvailable $ V.button "app-menu-row" "AI Connections" $ OpenDialog M.AIProviders F.NoRecord
     ,V.button "app-menu-row" "Shared computer" $ OpenDialog M.Computer F.NoRecord]
   M.WorkspaceSettings -> V.div ""
     [V.p "" "Talk to your Sapis in chat, manage their notes, and save documents in their workspaces. Sapis can delegate requests through ChiefSapi."
     ,V.p "" "Use the corpora menu to switch workspaces. Active and Paused describe execution on the host; Connecting means this device is restoring its connection."
-    ,V.when m.localAvailable $ V.button "button" "AI Connections" $ OpenDialog M.AIProviders F.NoRecord
     ,V.button "button" "Edit decision prompts" $ OpenDialog M.DecisionPrompts F.NoRecord
     ,V.when m.localAvailable $ V.button "button" "Computer access" $ OpenDialog M.Computer F.NoRecord]
-  M.AIProviders -> aiProvidersView d (F.setupValue d.content)
   M.Computer | m.snapshot.computer.platform == "linux" -> linuxComputer m d
   M.Computer -> V.div ""
     [V.div "settings-row"
@@ -273,185 +248,23 @@ saveTask m d deleted =
 setupButton :: M.Dialog -> String -> String -> V.Html
 setupButton d name caption = (if name == "back" then V.navigationControl else V.control) [V.cls "button",V.disabled $ M.dialogBusy d] caption $ DialogCommand $ Intent.Setup name
 
-signInView :: Json -> V.Html
-signInView value = V.div "account-sign-in" $
-  [V.textNode "p" [V.attr "role" "status"] $ if signing then "Finish signing in with ChatGPT in your browser. Waiting for sign-in…" else if provider == "sign_in_required" && not (A.elem state ["failed","expired"]) then "Finish signing in with ChatGPT in your browser." else ""
-  ,V.when (provider == "missing") $ V.div ""
-    [V.p "" "We couldn't find a working Codex installation. Install Codex, then check again."
-    ,V.div "account-actions" [V.link "https://openai.com/codex/" "Download Codex"]]
-  ,V.when (provider == "unavailable") $ V.p "" "Your account may still be connected. Try checking again."
-  ,V.when (state == "failed" || state == "expired" || state == "browser_busy" || state == "logout_failed" || state == "cancelled") $ V.p "" $ case state of
-    "expired" -> "Sign-in expired. Try again or use a one-time code."
-    "browser_busy" -> "Another sign-in is using the browser callback. Finish it and try again, or use a one-time code."
-    "logout_failed" -> "We couldn’t finish signing out. Recheck your connection, then try signing out again."
-    "cancelled" -> "Sign-in cancelled. You can try again when you’re ready."
-    _ -> "Sign-in didn't finish. Try again or use a one-time code."
-  ,V.when (provider == "sign_in_required") $ V.button "button primary" (if state == "failed" || state == "expired" then "Try again" else "Connect") $ DialogCommand $ Intent.Setup "login"
-  ,V.when (provider == "sign_in_required") $ V.p "form-hint" "Your browser will open to complete sign-in."
-  ,V.when (signing && D.s "url" login /= "") $ V.div "account-actions"
-    [V.button "button" (if D.s "code" login == "" then "Open browser again" else "Open sign-in page") $ DialogCommand $ Intent.Setup "open-login"
-    ,V.button "button" "Copy sign-in link" $ Copy (D.s "url" login) "Sign-in link copied."]
-  ,V.when (D.s "code" login /= "") $ V.div "account-device-code"
-    [V.p "" "Enter this one-time code on the official OpenAI page. Only continue if you started this sign-in in Sapiens."
-    ,V.textNode "strong" [] (D.s "code" login)]
-  ,V.when signing $ V.control [V.cls "button",V.id "cancel-codex-login"] "Cancel" $ DialogCommand $ Intent.Setup "cancel"
-  ,V.when (not signing) $ V.button "button" "Check again" $ DialogCommand $ Intent.Setup "refresh"
-  ,V.when (provider == "sign_in_required") $ V.node "details" [V.cls "account-help"]
-    [V.textNode "summary" [] "Having trouble signing in?"
-    ,V.p "form-hint" "You can connect the same ChatGPT account using a one-time code. Device code login must be enabled in your ChatGPT security settings."
-    ,V.button "button" "Use a one-time code" $ DialogCommand $ Intent.Setup "device-login"]]
-  where
-  provider = D.s "provider" value
-  login = D.get "login" value
-  state = D.s "state" login
-  signing = provider == "signing_in"
-
-accountView :: M.Dialog -> V.Html
-accountView d = V.node "section" [V.cls "ai-provider-detail-body",V.label "Codex account"] $
-  let value = F.setupValue d.content
-      provider = D.s "provider" value
-      state = D.s "state" (D.get "login" value)
-      confirmation = A.elem d.providerPage [M.ConfirmChange,M.ConfirmDisconnect]
-  in if provider == "signing_out" then [V.textNode "p" [V.attr "role" "status"] "Signing out…"]
-  else if confirmation then
-    [V.textNode "h4" [] (if d.providerPage == M.ConfirmChange then "Change Codex account?" else "Disconnect Codex?")
-    ,V.p "" (if d.providerPage == M.ConfirmChange then "We'll sign out of your current account first. If you cancel the new sign-in, Codex will stay disconnected." else "Your Sapis won't be able to use Codex until you reconnect. Your chats and settings will stay on this device.")
-    ,V.div "account-actions" [setupButton d (if d.providerPage == M.ConfirmChange then "change-account" else "sign-out") (if d.providerPage == M.ConfirmChange then "Continue" else "Disconnect"),V.control [V.cls "button",V.disabled $ M.dialogBusy d] "Cancel" $ ProviderNavigate M.CodexDetails]]
-  else if provider == "signed_in" then
-    [V.textNode "p" [V.cls "account-connected",V.attr "role" "status"] "Connected"
-    ,V.when (D.s "hold" value == "review") $ V.div ""
-      [V.p "form-hint" "AI work is paused. Review any pending tasks before continuing with this account."
-      ,V.control [V.cls "button",V.id "resume-ai-work",V.disabled $ M.dialogBusy d] "Resume AI work" $ DialogCommand $ Intent.Setup "resume"]
-    ,V.when (D.s "hold" value /= "" && D.s "hold" value /= "review") $ V.p "" "The last account change was interrupted. Sign out and reconnect before resuming AI work."
-    ,V.div "ai-provider-actions"
-      [V.control [V.cls "ai-provider-action",V.disabled $ M.dialogBusy d] "Change account  ›" $ ProviderNavigate M.ConfirmChange
-      ,V.control [V.cls "ai-provider-action ai-provider-action-danger",V.disabled $ M.dialogBusy d] "Disconnect  ›" $ ProviderNavigate M.ConfirmDisconnect]]
-  else [V.when (provider /= "signing_in") $ V.p "" (if provider == "unavailable" then "Couldn't check Codex" else if provider == "missing" then "Codex isn't available" else "Not connected")
-       ,signInView value
-       ,V.when (provider == "unavailable" || state == "logout_failed") $ V.control [V.cls "button",V.disabled $ M.dialogBusy d] "Sign out" $ ProviderNavigate M.ConfirmDisconnect]
-
-
-providerIcon :: String -> V.Html
-providerIcon slug = V.node "img" [V.cls "ai-provider-icon",V.attr "src" ("/ai-" <> slug <> ".svg"),V.attr "alt" "",V.attr "aria-hidden" "true"] []
-
-providerCopy :: String -> String -> V.Html
-providerCopy caption status = V.div "ai-provider-copy"
-  [V.textNode "strong" [] caption,V.span [V.cls "ai-provider-status"] status]
-
-providerRow :: String -> String -> String -> V.Html -> V.Html
-providerRow slug caption status action = V.div "ai-provider-row"
-  [providerIcon slug,providerCopy caption status,action]
-
-providerLink :: String -> String -> String -> Action -> V.Html
-providerLink slug caption status action = V.controlWith [V.cls "ai-provider-row ai-provider-link",V.label $ "Manage " <> caption]
-  [providerIcon slug,providerCopy caption status,V.span [V.cls "ai-provider-arrow",V.attr "aria-hidden" "true"] "›"] action
-
-
-comingSoonProviders :: Array V.Html
-comingSoonProviders =
-  [providerRow "claude" "Claude Code" "Anthropic" (V.span [V.cls "ai-provider-soon"] "Coming soon")
-  ,providerRow "gemini" "Gemini CLI" "Google" (V.span [V.cls "ai-provider-soon"] "Coming soon")
-  ,providerRow "kimi" "Kimi Code" "Moonshot AI" (V.span [V.cls "ai-provider-soon"] "Coming soon")]
-
-aiProvidersView :: M.Dialog -> Json -> V.Html
-aiProvidersView d value =
-  let provider = D.s "provider" value
-      hold = D.s "hold" value
-      page = d.providerPage
-      details = A.elem page [M.CodexDetails,M.ConfirmChange,M.ConfirmDisconnect]
-      inAuth = page == M.CodexAuth
-      needsAttention = A.elem (D.s "state" (D.get "login" value)) ["failed","expired","browser_busy","logout_failed"]
-      status = case provider of
-        "signed_in" -> if hold /= "" && hold /= "review" then "Needs attention" else "Connected"
-        "signing_in" -> "Connecting…"
-        "signing_out" -> "Disconnecting…"
-        "missing" -> "Needs attention"
-        "unavailable" -> "Needs attention"
-        _ -> if needsAttention then "Needs attention" else "Not connected"
-      navigate = ProviderNavigate M.CodexDetails
-      codex = case provider of
-        "sign_in_required" -> if needsAttention then providerLink "codex" "Codex" status navigate else providerRow "codex" "Codex" status (setupButton d "login" "Connect")
-        active | A.elem active ["signing_in","signing_out"] -> providerLink "codex" "Codex" status (ProviderNavigate M.CodexAuth)
-        _ -> providerLink "codex" "Codex" status navigate
-  in V.div "ai-providers" $ if inAuth then
-    [if provider == "signing_out" then V.p "form-hint" "Signing out of the previous account…" else signInView value
-    ,V.when (A.elem provider ["signing_in","signing_out"]) $ V.p "form-hint" "Stay here until sign-in finishes, or cancel sign-in to leave."]
-  else if details then [accountView d]
-  else
-    [V.p "form-hint" "Connect the AI tools your Sapis can use."
-    ,V.div "ai-provider-list" $ [codex] <> comingSoonProviders]
-
-
-onboardingCorpora :: M.Model -> Array X.Corpora
-onboardingCorpora m = A.filter (\r -> r.location == X.Local && r.status /= X.Archived) m.records
-
-startingCorpora :: M.Model -> Json -> Maybe X.Corpora
-startingCorpora m value = A.find ((_ == D.s "selected_corpora" value) <<< _.id) (onboardingCorpora m)
-
-setupSelection :: M.Model -> Json -> Maybe X.Corpora
-setupSelection m value
-  | D.b "completed" value && (m.setupChecked || m.restoredCorpora) = Nothing
-  | otherwise = case startingCorpora m value of
-      Just record -> Just record
-      Nothing -> case A.uncons (onboardingCorpora m) of
-        Just {head,tail} | A.null tail -> Just head
-        _ -> Nothing
-
-onboardingConnected :: M.Model -> Boolean
-onboardingConnected m = M.online m && m.snapshot.corpora.id == (M.activeRecord m).id && A.any ((_ == m.active) <<< _.key) (onboardingCorpora m)
-
 onboardingView :: M.Model -> M.Dialog -> Json -> V.Html
-onboardingView _ d _ | d.storage.page /= M.SetupSteps = storageView d
+onboardingView _ d _ | d.storage.page == M.ChooseStorage = storageView d
 onboardingView m d value = V.div "setup-screen"
-  [V.div "setup-step-content" content
-  ,V.when navigation $ V.div "setup-footer"
-    [V.div "setup-navigation"
-      [V.div "setup-back" [if needsCorpora then setupButton d "back" "← Back" else V.when m.env.native $ V.navigationControl [V.cls "button",V.disabled $ authenticating d] "← Back" $ StorageNavigate M.ChooseStorage]
-      ,V.navigationControl [V.cls "button primary",V.disabled $ M.dialogBusy d || needsCorpora && (M.busy m || not (onboardingConnected m))] caption $ DialogCommand $ Intent.Setup forward]]]
+  [V.div "setup-step-content" $ case M.setupStep value of
+    Just M.ComputerAccessStep -> [V.p "setup-intro" "Computer control is optional. You can use Sapiens without granting access.",computerAccess d value]
+    Just M.ReadyStep -> [V.p "setup-intro" "Your Sapiens workspace is ready to use."]
+    _ -> [V.p "setup-intro" "Loading setup…"]
+  ,V.div "setup-footer" [V.div "setup-navigation"
+    [V.div "setup-back" [if ready then setupButton d "back" "← Back" else V.when (m.env.native && permissions) $ V.navigationControl [V.cls "button",V.disabled $ M.dialogBusy d] "Your data" $ StorageNavigate M.ChooseStorage]
+    ,V.navigationControl [V.cls "button primary",V.disabled $ M.dialogBusy d || not (ready || permissions)] (if ready then "Open Workspace" else if D.s "computer_permission" value == "granted" || D.s "computer_permission" value == "not_required" then "Continue" else "Skip for now") $ DialogCommand $ Intent.Setup (if ready then "finish" else "permissions-done")]]]
   where
-  permission = D.s "computer_permission" value
-  step = D.s "step" value
-  needsCorpora = step /= "provider"
-  navigation = needsCorpora || A.elem d.providerPage [M.Providers,M.CodexDetails] && not (authenticating d)
-  forward = case step of
-    "permissions" -> "permissions-done"
-    "corpora" -> "corpora-done"
-    "ready" -> "finish"
-    _ -> if D.b "ready" value then "provider-next" else "provider-skip"
-  caption = case step of
-    "ready" -> if M.dialogBusy d then "Opening Sapiens4…" else "Open Sapiens4"
-    "provider" | not (D.b "ready" value) -> "Skip for now"
-    _ -> "Continue"
-  content = case step of
-    "permissions" ->
-      [V.p "setup-intro" "Computer control is optional. Chat works without it."
-      ,computerAccess d value]
-    "corpora" ->
-      [V.p "setup-intro" "Choose the Corpora you'd like to open first."
-      ,V.div "setup-corpora-list" $ map (\r -> V.control [V.cls "setup-corpora-choice",V.disabled $ M.busy m,V.attr "aria-pressed" $ show $ r.key == m.active] r.name (EnterCorpora r.key)) (onboardingCorpora m)]
-    "ready" ->
-      [V.p "setup-intro" "Your Sapiens4 workspace is ready to use."
-      ,V.div "setup-summary"
-        [V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "AI connection",V.span [] (if D.s "provider" value == "signed_in" then "Codex connected" else "Not connected")]
-        ,V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "Computer access",V.span [] (case permission of
-          "granted" -> "Enabled"
-          "not_required" -> "Available for supported apps"
-          "missing" -> "Helper unavailable"
-          _ -> "Not enabled")]
-        ,V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "Corpora",V.span [] (M.activeRecord m).name]
-        ,V.div "setup-summary-divider" []
-        ,V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "Remote Control",V.span [V.cls "setup-muted"] "Available in Settings"]
-        ,V.div "setup-summary-row" [V.span [V.cls "setup-summary-label"] "Analytics",V.span [V.cls "setup-muted"] "Coming soon"]]]
-    _ -> [aiProvidersView d value]
+  ready = M.setupStep value == Just M.ReadyStep
+  permissions = M.setupStep value == Just M.ComputerAccessStep
 
 storageView :: M.Dialog -> V.Html
 storageView d = V.div "setup-screen"
-  [V.div "setup-step-content" $ if storage.page == M.SetupWelcome then
-    [V.p "setup-intro" "Your own team of AI coworkers. Think together, make things, and get work done on your computer."
-    ,V.node "ul" [V.cls "setup-benefits"]
-      [V.textNode "li" [] "Your team, conversations, and tasks in one place"
-      ,V.textNode "li" [] "Connect your AI tools whenever you're ready"]]
-    else
+  [V.div "setup-step-content"
     [V.p "setup-intro" "Keep your current space or choose another storage location. Changes apply when you continue."
     ,V.div "setup-choice-list"
       [choice M.KeepStorage "Keep current storage" storage.current
@@ -461,8 +274,8 @@ storageView d = V.div "setup-screen"
         ,V.when (storage.choice == M.ExistingStorage && storage.directory /= "") $ V.control [V.cls "setup-storage-change",V.label "Choose another folder",V.disabled busy] "Change" StoragePick]]
     ,V.p "setup-note" "Existing data stays in its original location."]
   ,V.div "setup-footer" [V.div "setup-navigation"
-    [V.div "setup-back" [V.when (storage.page /= M.SetupWelcome) $ V.navigationControl [V.cls "button",V.disabled busy] "← Back" $ StorageNavigate M.SetupWelcome]
-    ,V.navigationControl [V.cls "button primary",V.disabled $ busy || storage.page == M.ChooseStorage && (storage.current == "" || storage.choice == M.ExistingStorage && storage.directory == "")] "Continue" (if storage.page == M.SetupWelcome then StorageNavigate M.ChooseStorage else StorageApply)]]]
+    [V.div "setup-back" [V.navigationControl [V.cls "button",V.disabled busy] "← Back" $ StorageNavigate M.SetupSteps]
+    ,V.navigationControl [V.cls "button primary",V.disabled $ busy || storage.current == "" || storage.choice == M.ExistingStorage && storage.directory == ""] "Continue" StorageApply]]]
   where
   storage = d.storage
   busy = M.dialogBusy d

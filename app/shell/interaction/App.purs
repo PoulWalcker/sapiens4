@@ -9,7 +9,7 @@ import Control.Parallel (parallel, sequential)
 import Control.Promise (toAffE)
 import Data.Array as A
 import Data.Either (Either(..), either)
-import Data.Maybe (Maybe(..), maybe)
+import Data.Maybe (Maybe(..))
 import Data.Foldable (traverse_)
 import Data.Tuple (Tuple(..))
 import Effect.Aff (Aff, Milliseconds(..), delay, try)
@@ -24,7 +24,6 @@ import Sapiens.CorporaEffects as Corpora
 import Sapiens.Data as D
 import Sapiens.Browser as Browser
 import Sapiens.DialogEffects as Dialog
-import Sapiens.Dialog as DialogView
 import Sapiens.Effects as E
 import Sapiens.Model as M
 import Sapiens.Navigation as N
@@ -67,26 +66,23 @@ handle runtime input = session input
       when (M.remote m) do
         liftEffect $ B.historyReplace $ m.env.path
         void $ H.fork $ void $ H.liftAff $ try $ toAffE $ B.registerWorker "/sw.js"
-      unless required $ dispatch LoadRegistry
+      unless required do
+        dispatch CheckSetup
+        dispatch LoadRegistry
       E.sync runtime
     CheckSetup -> do
       m <- H.get
-      now <- liftEffect B.now
-      unless (M.remote m || m.env.hidden || m.accountChecking || m.setupChecked && now - m.accountCheckedAt < 30000.0 || maybe false (\d -> A.elem d.kind [M.Onboarding,M.AIProviders,M.Computer]) m.dialog) do
-        H.modify_ _ {accountChecking=true,accountCheckedAt=now}
-        E.attempt (C.json "/api/host/onboarding" "GET" D.null) \result -> case result of
-          Right value -> do
-            H.modify_ _ {accountChecking=false}
-            current <- H.get
-            when (current.sequence == m.sequence) do
-              let selected = DialogView.setupSelection current value
-              traverse_ (\record -> when ((record.key) /= current.active) $ dispatch $ EnterCorpora (record.key)) selected
-              restored <- H.get
-              H.modify_ _ {account=value,setupChecked=not (D.b "completed" value) || case selected of
-                Just _ -> DialogView.onboardingConnected restored
-                Nothing -> true}
-              if D.b "completed" value then E.sync runtime else dispatch $ OpenDialog M.Onboarding F.NoRecord
-          Left failure -> H.modify_ _ {accountChecking=false,feedback=message failure}
+      unless (M.remote m || m.setupChecking || m.setupStage /= Nothing) do
+        H.modify_ _ {setupChecking=true}
+        E.attempt (C.json "/api/host/onboarding" "GET" D.null) \result -> do
+          H.modify_ _ {setupChecking=false}
+          case result of
+            Right value -> case M.setupStep value of
+              Nothing -> H.modify_ _ {feedback="Could not read setup. Check again."}
+              Just stage -> do
+                H.modify_ _ {setupStage=Just stage}
+                if stage == M.CompleteStep then E.sync runtime else dispatch $ OpenDialog M.Onboarding F.NoRecord
+            Left failure -> H.modify_ _ {feedback=message failure}
     Finalize -> liftEffect $ C.dispose runtime
     Poll -> E.runUpdate runtime dispatch U.Poll
     Copy text caption -> do

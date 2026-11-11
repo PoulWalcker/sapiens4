@@ -69,7 +69,7 @@ startServer choice runtime destination = do
     createDirectoryIfMissing True configRoot
     environment <- getEnvironment
     pid <- getProcessID
-    let overrides = [("PATH","/usr/bin:/bin:/usr/sbin:/sbin"),("SAPIENS_REPOSITORY",runtime),("SAPIENS_CONFIG_DIR",configRoot),("SAPIENS_DATA_DIR",destination),("SAPIENS_DESKTOP_PID",show pid),("SAPIENS_STORAGE_MODE",if choice==StartNew then "new" else "existing")]
+    let overrides = [("SAPIENS_REPOSITORY",runtime),("SAPIENS_CONFIG_DIR",configRoot),("SAPIENS_DATA_DIR",destination),("SAPIENS_DESKTOP_PID",show pid),("SAPIENS_STORAGE_MODE",if choice==StartNew then "new" else "existing")]
     let command = (proc binary ["--port","0","--data-dir",destination,"--desktop"])
             { cwd = Just runtime, env = Just (overrides ++ filter ((`notElem` map fst overrides) . fst) environment)
             , std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe, create_group = True }
@@ -293,6 +293,9 @@ runSession isFixture initialAddress = do
         configuration <- cls "NSDictionary" >>= \c -> obj1 c "dictionaryWithContentsOfFile:" path
         key <- str "Repository"
         root <- obj1 configuration "objectForKey:" key >>= string
+        pathKey <- str "Path"
+        search <- obj1 configuration "objectForKey:" pathKey >>= string
+        unless (T.null search) (setEnv "PATH" (T.unpack search))
         canonicalizePath =<< if T.null root then getCurrentDirectory else pure (T.unpack root)
     application <- cls "NSApplication" >>= \c -> obj0 c "sharedApplication"
     http <- newManager defaultManagerSettings
@@ -302,7 +305,7 @@ runSession isFixture initialAddress = do
     b <- newBrowser (if isFixture then initialAddress else "about:blank") guestScript >>= newIORef
     win <- newIORef nullPtr; tasks <- newIORef []
     process <- newIORef Nothing; address <- newIORef (if isFixture then initialAddress else "")
-    worker <- newIORef Nothing; busy <- newIORef False; loaded <- newIORef False; setup <- newIORef (Just "welcome")
+    worker <- newIORef Nothing; busy <- newIORef False; loaded <- newIORef False; setup <- newIORef (Just "storage")
     problem <- newIORef Nothing
     preferences <- if isFixture then pure nullPtr else do
         config <- configDirectory >>= canonicalizePath
@@ -362,9 +365,6 @@ receiveMessage application message = do
         when (sourceView==sh && mainFrame && scheme=="file" && path==T.pack (bootstrapPath application)) $ do
             raw <- obj0 message "body" >>= jsonObject
             forM_ raw $ \input -> do
-              when (text (field "storageStage" input)=="storage") $ do
-                win <- readIORef (windowRef application)
-                size win "setContentSize:" 560 600
               case text (field "storage" input) of
                 "new" -> defaultDataDirectory >>= \directory -> startSelected application StartNew directory Nothing
                 "pick" -> do
@@ -449,7 +449,7 @@ storageReply application request fields = do
 storageMessageReceived :: Application -> Value -> IO ()
 storageMessageReceived application request = unless (fixture application) $ do
     step <- readIORef (windowSetup application)
-    when (step==Just "provider") $ do
+    when (step==Just "permissions") $ do
         active <- readIORef (child application)
         case text (field "operation" request) of
             "info" -> do

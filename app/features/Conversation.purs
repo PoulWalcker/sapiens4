@@ -127,4 +127,4 @@ composer m = V.node "div" [V.cls "composer-area",V.id "composer-area",V.hidden $
           _ -> [])
     <> [V.icon ("Remove " <> item.name) "×" $ RemoveAttachment $ item.id]
   placeholder = if N.limit m.env < 3 then "Message…" else "Message " <> a.name <> "…"
-  blocked = M.accountBlocked m || not (M.online m) || (M.busy m) || a.retired || a.archived || A.elem (m.snapshot.corpora.status) [X.Paused,X.Archived] || Set.member m.selected m.sending || m.uploading > 0 || M.voiceBusy m
+  blocked = not (M.online m) || (M.busy m) || a.retired || a.archived || A.elem (m.snapshot.corpora.status) [X.Paused,X.Archived] || Set.member m.selected m.sending || m.uploading > 0 || M.voiceBusy m

@@ -1,94 +1,67 @@
-# Local AI onboarding
+# One-time desktop setup
 
-Native startup shows **Welcome → Your data** before launching the backend.
-Choosing another folder opens the picker immediately. Continue applies the
-selection, and cancelling the picker retains the previous selection.
-Choose **Start fresh** or **Use another folder**; the selected directory is saved in
-`storage.json` under `SAPIENS_CONFIG_DIR`. Existing data must pass compatibility
-and ownership checks. No automatic search, copy or migration is performed.
-**Start fresh** requires an empty directory. **Use another folder** requires a
-complete installation and never initializes missing data. Source launch reopens
-its existing selected directory unless an explicit storage mode is supplied.
-After storage selection: **AI → Computer access → Corpora (if needed) → Ready**.
-AI connection and computer access are optional. **Skip for now** opens the
-remaining setup steps without Codex; finishing opens the dashboard and settings.
-Only AI task execution requires a ready account. **Back** revisits earlier setup
-decisions without losing the selected Corpora or changing account credentials.
-Forward actions require an available local Corpora; permission grants and sign-in
-are never required merely to explore the application.
-The completed setup and selected Corpora survive restart; AI connections remain
-available from **AI Connections**.
-On a cold launch without a saved client selection, restore the starting Corpora
-from setup. A valid client selection takes precedence after setup is complete;
-later account checks never switch Corpora.
-Claude Code, Gemini CLI and Kimi Code remain Coming soon. Browser sign-in uses
-the complete authorization URL produced by Codex. One-time-code sign-in is
-available after cancelling an active browser sign-in.
+macOS and Windows use the same local Welcome + Storage page before starting the
+backend. Start fresh uses the existing default location and requires an empty
+folder. Use another folder attaches a complete Sapiens Data Root in place.
+The selection is saved in `storage.json` under the installation's configuration
+directory. A missing saved folder opens the picker with a recoverable error;
+it never falls back to creating a replacement store.
 
-## Source prerequisites
+`DataRoot.hs` supplies shared checks for both native launchers and the backend.
+Preflight checks ownership, identity, database integrity, registered children
+and saved agent state. Backend initialization repeats checks under its own lock,
+then uses the existing SQLite and agent-state migrations. Supported SQLite
+versions remain 0–8, including the version 1/2 jobs import. No new initialization
+command, storage modes, copying or data migration system is introduced.
 
-This feature builds independently of the distribution/installer branch. Until
-the module registration dependency is merged upstream, initialize the pinned
-libs4 fork at the commit recorded by `git ls-tree HEAD submodules/libs4`.
+After storage opens, setup consists of **Computer Access → Ready → Complete**.
+Accessibility request and Recheck remain available on macOS. Skip continues
+without permission. Windows uses its existing UI Automation behavior and does
+not request macOS Accessibility approval. Ready contains a short confirmation
+and Open Workspace. A failed completion save leaves Ready open for retry.
 
-For source builds, provide a Codex CLI through `SAPIENS_CODEX_BINARY` or the
-existing installation discovery. This branch does not download distribution
-payloads. D1 owns pinned provider acquisition and bundling for installable packages.
+Only the setup stage and schema are written to `onboarding.json`. Missing
+settings start at Computer Access; interrupted setup resumes its last committed
+stage. Completed earlier D3 settings retain completion even if their discarded
+Corpora selection is absent. An earlier provider stage resumes at Computer
+Access; an earlier Corpora stage resumes at Ready. Unreadable or invalid setup
+settings retain the existing explicit startup error and are not overwritten.
+An update/reinstall preserving this configuration retains completion.
 
-## Account and data safety
+Setup has no role in task admission, queue processing or Corpora restoration.
+Users install and authenticate Codex externally. Existing CLI discovery,
+`SAPIENS_CODEX_BINARY`, inherited `CODEX_HOME`/authentication variables and normal
+execution arguments are preserved. Sapiens does not install, authenticate,
+replace accounts, poll provider status or hold work for setup. Active Corpora
+and the saved client selection resume through the existing registry paths.
 
-Login and execution share an app-owned Codex home, under `SAPIENS_CONFIG_DIR`
-when configured. Inherited CODEX_* and OPENAI_* authentication variables are
-removed. Disconnect and account replacement take an exclusive profile lock;
-running AI work retains a shared lease. Queued work remains paused after account
-replacement until **Resume AI work**. Chats and settings are retained.
-Initial setup completion is a separate execution requirement: authentication
-alone cannot release queued, scheduled or delegated AI work in any local Corpora.
-Finishing setup validates the local selection and saves completion before
-resuming saved services. If resuming fails, retry Finish or reload the Corpora
-list; already-open services are reused. Account-safety holds remain independent.
-Finishing with an unavailable existing login leaves AI held for explicit review;
-finishing without any login keeps the disconnected hold until connection succeeds.
+## Runtime storage switching
 
-Only the current setup schema is supported. Missing `onboarding.json` starts
-setup; unreadable, corrupt or incompatible settings stop startup with a recovery
-error and preserve the file. Restore valid settings from backup before restarting.
+Your data on Computer Access revisits the existing runtime storage picker.
+Keep current storage and reselecting the current root reuse the owned process.
+Repeated Start fresh also reuses a root created by this session. Picking another
+folder records a draft; Continue validates it before stopping the current host.
+A different nonempty folder never becomes a fresh store.
 
-AI connection and computer permission actions share `/api/host/onboarding`.
-Permission checks remain separate from the action that requests Accessibility access.
+The existing replacement and rollback lifecycle remains: failed preflight keeps
+the current backend running; failed replacement startup reopens the prior root;
+failed rollback disconnects into the shared picker. Saved selection changes only
+after replacement installation succeeds. Native handlers serialize requests and
+scope replies to the requesting dialog. No files are moved or deleted.
 
-Accessibility permission is optional on macOS and can be requested/rechecked
-from Computer settings. Windows does not display macOS permission instructions
-for its normal permission state. Automatic recovery UI triggered by a denied
-computer tool call is not implemented by this extraction.
+## Build and verification
 
-## Manual acceptance
+Application module registration is in `build/sapiens-domain.cabal` and
+`build/cabal.project`. Dependencies and native bindings still come from upstream
+libs4 at the baseline commit; no fork-only pin is needed. Build normally with
+`runghc build/Build.hs`.
 
-Use an isolated config and data directory. Check first launch, real browser
-sign-in, complete copied link, cancel/retry, disconnect then immediate reconnect,
-change account and explicit Resume. Check restart persistence and that queued
-work stays paused during account replacement. Check narrow/normal windows and
-light/dark themes. Verify native focus returns after sign-in on each OS.
-
-No installer, release workflow or publishing behavior is included in this
-feature branch.
-
-## Revisiting storage during setup
-
-Back from the native AI step opens storage selection inside the existing page.
-Welcome, storage and AI navigation retain the storage draft without stopping the
-current backend. Keep current storage returns immediately. Selecting a folder
-only records a draft; Continue applies it. Native handlers serialize folder
-pickers and startup, and replies are scoped to their owning dialog generation.
-An existing path that resolves to the current directory is also a no-op.
-Repeating Start fresh for the current Data Root created by this running session
-also reuses it; it does not initialize or overwrite it again. A different
-populated directory still fails StartNew validation.
-
-For a different directory, validate it while the current backend still owns its
-lock, then stop/join that process and start the replacement. Failed validation
-leaves the current backend and selection intact. If replacement startup fails
-after stopping the prior process, the draft remains visible; choosing Keep
-current storage and Continue reopens the previous directory. No data is moved
-or deleted. Storage details show the final two path components; hovering reveals
-the full path. Change is part of the existing-data card.
+`spec/onboarding_spec.rb` exercises durable stages, save failures, external
+credentials and AI execution/active Corpora restoration before completion.
+`spec/storage_spec.rb` checks invalid, missing, partial, locked and unsupported
+stores, retry, and every supported SQLite version through the real initializer.
+`spec/onboarding_browser_spec.rb` contains two macOS native journeys covering
+storage selection/switching/rollback, permission request/recheck/skip, interrupted
+setup, completion save failure, selected Corpora/draft restoration and missing
+saved-folder recovery. Permission responses use a controlled external helper;
+actual OS permission grants and Windows desktop journeys require platform QA.

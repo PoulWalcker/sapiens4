@@ -242,7 +242,7 @@ desktopSession memory probe = do
                     Right () -> writeIORef starting False
       storageMessageReceived request = do
         step <- readIORef onboardingStep
-        when (step=="provider") $ case string (field "operation" request) of
+        when (step=="permissions") $ case string (field "operation" request) of
           "info" -> do
             directory <- activeDataDirectory host
             available <- hostRunning host
@@ -262,7 +262,6 @@ desktopSession memory probe = do
       chooseStorage message = do
         busy <- readIORef starting
         unless busy $ case field "storage" message of
-          _ | field "storageStage" message == String "storage" -> resizeContent hwnd 560 600
           String "new" -> startSelected StartNew (dataDirectory host) Nothing
           String "pick" -> do
             picking <- atomicModifyIORef' starting (\value -> (True,value))

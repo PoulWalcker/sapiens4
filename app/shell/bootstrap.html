@@ -24,12 +24,11 @@ p{color:var(--sapi-muted);font-size:13px;line-height:1.6;margin:0 0 18px}
 .setup-choice-copy{display:grid;gap:3px;flex:1}
 .setup-choice-copy small{font-size:11px;color:var(--sapi-muted);line-height:1.4}
 .setup-choice-arrow{color:var(--sapi-muted);font-size:21px}
-#storage .setup-intro{margin-bottom:12px}
 .setup-note{font-size:11px;margin:0;color:var(--sapi-muted)}
 #error{color:var(--sapi-ink);white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;margin:10px 0 0}
 #error:empty{display:none}
-@media(max-height:440px){main{padding-top:14px;padding-bottom:14px}.setup-stage{padding:10px 0}.setup-benefits{margin-top:12px}h1{font-size:24px}}
-@media(max-width:400px){main{padding:18px}.setup-benefits{font-size:11px}}
+@media(max-height:440px){main{padding-top:14px;padding-bottom:14px}.setup-stage{padding:10px 0}h1{font-size:24px}}
+@media(max-width:400px){main{padding:18px}}
 </style>
 <script>
 if(matchMedia('(prefers-color-scheme:dark)').matches) document.documentElement.dataset.theme='dark';
@@ -41,27 +40,18 @@ if(matchMedia('(prefers-color-scheme:dark)').matches) document.documentElement.d
   <div class="setup-wordmark"><picture aria-hidden="true"><source media="(prefers-color-scheme: dark)" srcset="favicon-dark.svg"><img class="setup-mark" src="favicon.svg" alt=""></picture><span>Sapiens4</span></div>
   <span class="setup-kicker">SETUP</span>
 </header>
-<div class="setup-progress" aria-hidden="true"><div class="setup-progress-fill" id="setup-progress-fill"></div></div>
 <div class="setup-stage">
   <section id="welcome">
     <h1>Meet your Sapis.</h1>
     <p class="setup-intro">Your own team of AI coworkers. Think together, make things, and get work done on your computer.</p>
-    <ul class="setup-benefits">
-      <li>Your team, conversations, and tasks in one place</li>
-      <li>Connect your AI tools whenever you're ready</li>
-    </ul>
-  </section>
-  <section id="storage" hidden>
-    <h1>Where should we start?</h1>
-    <p class="setup-intro">Create your space or continue with existing Sapiens data.</p>
     <div class="setup-choice-list">
-      <button type="button" class="setup-choice" aria-pressed="true" onclick="selectStorage('new')">
+      <button type="button" class="setup-choice" aria-label="Start fresh" aria-pressed="true" onclick="selectStorage('new')">
         <span class="setup-choice-symbol" aria-hidden="true">+</span>
         <span class="setup-choice-copy"><strong>Start fresh</strong><small>Use the default location for your Sapiens data.</small></span>
         <span class="setup-choice-arrow" aria-hidden="true">›</span>
       </button>
       <div class="setup-storage-option" id="storage-existing" data-change="false">
-        <button type="button" class="setup-choice" aria-pressed="false" onclick="selectStorage('existing')">
+        <button type="button" class="setup-choice" aria-label="Use another folder" aria-pressed="false" onclick="selectStorage('existing')">
           <span class="setup-choice-symbol" aria-hidden="true">↗</span>
           <span class="setup-choice-copy"><strong>Use another folder</strong><small id="storage-directory">Use your existing agents and conversations.</small></span>
           <span class="setup-choice-arrow" aria-hidden="true">›</span>
@@ -74,7 +64,6 @@ if(matchMedia('(prefers-color-scheme:dark)').matches) document.documentElement.d
   </section>
 </div>
 <footer class="setup-footer">
-  <button class="button" id="storage-back" type="button" onclick="welcomeScreen()" hidden>← Back</button>
   <button class="button primary" id="get-started" type="button" onclick="continueSetup(event)">Continue</button>
 </footer>
 </main>
@@ -85,7 +74,7 @@ function postStorage(message) {
  else window.chrome?.webview?.postMessage(message);
 }
 function updateStorage() {
- document.querySelectorAll('#storage .setup-choice').forEach((button,index)=>button.setAttribute('aria-pressed',String((index===0)===(storageChoice==='new'))));
+ document.querySelectorAll('.setup-choice').forEach((button,index)=>button.setAttribute('aria-pressed',String((index===0)===(storageChoice==='new'))));
  document.querySelectorAll('button').forEach(button=>button.disabled=storageBusy);
  document.getElementById('get-started').disabled=storageBusy || (storageChoice==='existing' && !storageDirectory);
  const selected=storageChoice==='existing' && !!storageDirectory;
@@ -116,35 +105,19 @@ function storagePicked(directory) {
 function continueSetup(event) {
  if(event?.detail>1) return;
  if(storageBusy) return;
- if(!document.getElementById('welcome').hidden) storageScreen();
- else if(storageChoice!=='existing' || storageDirectory) {
+ if(storageChoice!=='existing' || storageDirectory) {
   storageLoading();
   postStorage({storage:storageChoice,directory:storageDirectory});
  }
 }
-function welcomeScreen() {
- document.getElementById('welcome').hidden=false;
- document.getElementById('storage').hidden=true;
- document.getElementById('storage-back').hidden=true;
- document.getElementById('setup-progress-fill').style.width='8%';
- document.getElementById('get-started').focus();
-}
-function storageScreen(error='') {
- document.getElementById('welcome').hidden=true;
- document.getElementById('storage').hidden=false;
- document.getElementById('storage-back').hidden=false;
- document.getElementById('setup-progress-fill').style.width='20%';
- document.getElementById('error').textContent=error;
+function storageError(message) {
+ document.getElementById('error').textContent=message;
  storageBusy=false;
  updateStorage();
- document.querySelector('#storage button').focus();
- postStorage({storageStage:'storage'});
 }
-function storageError(message) { storageScreen(message); }
 function storageLoading() {
  storageBusy=true;
  updateStorage();
- document.getElementById('setup-progress-fill').style.width='32%';
 }
 </script>
 </body>

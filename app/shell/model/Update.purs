@@ -140,7 +140,7 @@ update action m = case action of
           pairing = if localPair then [ReplaceHistory m.env.path] <> (case local of
             Nothing -> []
             Just record -> [Dispatch $ Shell.OpenDialog M.HostPairing $ F.CorporaRecord record false]) else []
-      in Changed (if localPair then next {env=m.env {search=""}} else next) ([SaveRegistry registry.records] <> connect <> pairing <> [Sync] <> (if selected == Nothing then [Dispatch Shell.CheckSetup] else []))
+      in Changed (if localPair then next {env=m.env {search=""}} else next) ([SaveRegistry registry.records] <> connect <> pairing <> [Sync])
   Entered record cached ->
     let dialog = case m.dialog of
           Just d | d.kind == M.Onboarding -> Just d

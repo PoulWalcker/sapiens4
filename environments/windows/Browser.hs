@@ -174,10 +174,7 @@ webError code = fromMaybe (show code) $ lookup code $ zip [0..] ["Unknown", "Cer
 syncBrowser :: Browser -> Value -> IO ()
 syncBrowser browser message = do
   dead <- readIORef (disposed browser)
-  unless dead $ if boolean (field "activate" message) then do
-    void $ showWindow (window browser) 9
-    void $ foregroundWindow (window browser)
-  else if boolean (field "pickFile" message) then do
+  unless dead $ if boolean (field "pickFile" message) then do
     selected <- pickFile (window browser) (string $ field "directory" message)
     forM_ selected $ \file -> report browser $ object ["owner" .= field "owner" message, "file" .= file]
   else case field "unloadIdle" message of

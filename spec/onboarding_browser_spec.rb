@@ -53,28 +53,13 @@ RSpec.describe 'Native first-run onboarding', :desktop do
     click_setup('Choose data')
   end
 
-  def cancel_sign_in(directory)
-    desktop.see('Copy sign-in link')
-    pid = Integer(File.read(File.join(directory, 'login.pid')))
-    click_setup('Cancel')
-    desktop.see('Sign-in cancelled.')
-    Contract.wait(description: 'cancelled login process exits') do
-      Process.kill(0, pid)
-      false
-    rescue Errno::ESRCH
-      true
-    end
-  end
-
-  it 'recovers storage and sign-in errors, retains setup decisions, and finishes durably in the chosen Corpora' do
-    skip 'This journey drives the macOS native storage picker' unless RUBY_PLATFORM.include?('darwin')
+  def with_setup
+    skip 'This journey drives the macOS native folder picker' unless RUBY_PLATFORM.include?('darwin')
     @host = Host.new
-    studio = host.api('POST', '/api/host/local', {name: 'Onboarding Studio'}, status: 201)
+    @studio = host.api('POST', '/api/host/local', {name: 'Onboarding Studio'}, status: 201)
     host.stop
-
     Dir.mktmpdir('sapiens-onboarding-') do |directory|
       directory = File.realpath(directory)
-      # Use an app bundle for native activation, with the current compiled binary.
       contents = File.join(directory, 'Onboarding.app/Contents')
       FileUtils.mkdir_p(File.join(contents, 'MacOS'))
       binary = File.join(contents, 'MacOS/Sapiens4')
@@ -90,142 +75,167 @@ RSpec.describe 'Native first-run onboarding', :desktop do
         <key>NSAllowsArbitraryLoadsInWebContent</key><true/></dict>
         </dict></plist>
       PLIST
-      config, fresh, invalid = %w[config fresh invalid].map { |name| File.join(directory, name) }
-      FileUtils.mkdir_p(invalid)
-      marker = File.join(invalid, 'keep.txt')
-      File.write(marker, 'Existing data must survive rejected storage')
-      tool = File.join(directory, 'onboarding-tool')
+      config, fresh = %w[config fresh].map { |name| File.join(directory, name) }
+      tool = File.join(directory, 'permission-tool')
       File.write(tool, "#!#{RbConfig.ruby}\nload #{File.join(__dir__, 'support/onboarding_tools.rb').inspect}\n")
       File.chmod(0755, tool)
-      File.write(File.join(directory, 'login-mode'), 'fail')
       environment = host.environment.merge('SAPIENS_CONFIG_DIR' => config, 'SAPIENS_DATA_DIR' => fresh,
-        'SAPIENS_CODEX_BINARY' => tool, 'SAPIENS_BLINDLY_BINARY' => tool, 'SAPIENS_ONBOARDING_FIXTURE' => directory)
+        'SAPIENS_BLINDLY_BINARY' => tool, 'SAPIENS_ONBOARDING_FIXTURE' => directory)
+      yield directory, binary, environment, config, fresh
+    rescue Exception
+      warn @launcher.stderr if @launcher
+      warn @desktop.text if @desktop
+      raise
+    ensure
+      @launcher&.close
+      @launcher = nil
+      @desktop = nil
+    end
+  end
+
+  it 'selects storage before startup, switches safely, resumes permission setup and saves completion before opening the restored workspace' do
+    with_setup do |directory, binary, environment, config, fresh|
+      invalid = File.join(directory, 'invalid')
+      Dir.mkdir(invalid)
+      marker = File.join(invalid, 'keep.txt')
+      File.write(marker, 'Preserve existing data')
       selection, setup = %w[storage.json onboarding.json].map { |name| File.join(config, name) }
+      launch_setup(binary, environment)
+      desktop.see('Meet your Sapis.')
+      desktop.find('Start fresh')
+      expect(backend_pids).to be_empty
+      expect(File.exist?(selection)).to be(false)
+      click_setup('Continue')
+      desktop.see('Computer access')
+      original = backend_pids
+      expect(original.size).to eq(1)
+      identity = File.binread(File.join(fresh, 'corpora-identity.json'))
+      saved_selection = File.binread(selection)
+      click_setup('Your data')
+      click_setup('Start fresh')
+      click_setup('Continue')
+      desktop.see('Computer access')
+      expect(backend_pids).to eq(original)
+      expect(File.binread(File.join(fresh, 'corpora-identity.json'))).to eq(identity)
+      click_setup('Your data')
+      click_setup('Use another folder')
+      choose_storage(invalid)
+      expect(backend_pids).to eq(original)
+      expect(File.binread(selection)).to eq(saved_selection)
+      click_setup('Continue')
+      desktop.see('This is not a complete Sapiens Data Root.')
+      expect(backend_pids).to eq(original)
+      expect(File.read(marker)).to eq('Preserve existing data')
+      expect(File.exist?(File.join(invalid, 'corpora.sqlite3'))).to be(false)
+      click_setup('Choose another folder')
+      choose_storage(host.root)
+      click_setup('Continue')
+      desktop.see('Computer access')
+      expect(backend_pids.size).to eq(1)
+      expect(backend_pids).not_to eq(original)
+      expect(JSON.parse(File.read(selection))['directory']).to eq(host.root)
+      click_setup('Recheck access')
+      desktop.see('Sapiens needs Accessibility permission.')
+      click_setup('Skip for now')
+      desktop.see("You're ready")
+      click_setup('← Back')
+      desktop.see('Computer access')
+      expect(JSON.parse(File.read(setup))['step']).to eq('permissions')
+      quit_setup
+      launch_setup(binary, environment)
+      desktop.see('Computer access')
+      click_setup('Enable access')
+      Contract.wait { File.exist?(File.join(directory, 'permission-requested')) }
+      File.write(File.join(directory, 'permission-granted'), '')
+      click_setup('Recheck access')
+      desktop.see('Computer control enabled.')
+      click_setup('Continue')
+      desktop.see("You're ready")
+      expect(JSON.parse(File.read(setup))['step']).to eq('ready')
+      quit_setup
+      launch_setup(binary, environment)
+      desktop.see("You're ready")
+      ready = File.binread(setup)
+      File.rename(setup, setup + '.saved')
+      Dir.mkdir(setup)
       begin
-        # First launch and same-session Start fresh reuse.
-        launch_setup(binary, environment)
-        desktop.see('Meet your Sapis.')
-        click_setup('Continue')
-        desktop.see('Where should we start?')
-        expect(backend_pids).to be_empty
-        expect(File.exist?(selection)).to be(false)
-        click_setup('Continue')
-        desktop.see('Connect your AI')
-        original = backend_pids
-        expect(original.size).to eq(1)
-        identity = File.binread(File.join(fresh, 'corpora-identity.json'))
-        saved_selection = File.binread(selection)
-        click_setup('← Back')
-        click_setup('Start fresh')
-        click_setup('Continue')
-        desktop.see('Connect your AI')
-        expect(backend_pids).to eq(original)
-        expect(File.binread(File.join(fresh, 'corpora-identity.json'))).to eq(identity)
-
-        # A draft does not apply storage; rejection leaves the old host usable.
-        click_setup('← Back')
-        click_setup('Use another folder')
-        choose_storage(invalid)
-        expect(backend_pids).to eq(original)
-        expect(File.binread(selection)).to eq(saved_selection)
-        click_setup('Continue')
-        desktop.see('This is not a complete Sapiens Data Root.')
-        expect(backend_pids).to eq(original)
-        expect(File.binread(selection)).to eq(saved_selection)
-        expect(File.read(marker)).to eq('Existing data must survive rejected storage')
-        expect(File.exist?(File.join(invalid, 'corpora.sqlite3'))).to be(false)
-        click_setup('Choose another folder')
-        choose_storage(host.root)
-        expect(File.binread(selection)).to eq(saved_selection)
-        click_setup('Continue')
-        desktop.see('Connect your AI')
-        expect(backend_pids.size).to eq(1)
-        expect(backend_pids).not_to eq(original)
-        expect(JSON.parse(File.read(selection))['directory']).to eq(host.root)
-
-        # Error, retry, cancellation, and optional AI/permission steps.
-        click_setup('Connect')
-        desktop.see("Sign-in didn't finish.")
-        File.write(File.join(directory, 'login-mode'), 'wait')
-        click_setup('Try again')
-        cancel_sign_in(directory)
-        expect(File.exist?(File.join(config, 'codex/auth.json'))).to be(false)
-        click_setup('Skip for now')
-        desktop.see('Computer access')
-        desktop.see('Accessibility permission')
-        click_setup('Recheck access')
-        desktop.see('To interact with apps on your Mac, Sapiens needs Accessibility permission.')
-        expect(JSON.parse(File.read(setup))['step']).to eq('permissions')
-        quit_setup
-        launch_setup(binary, environment)
-        desktop.see('Computer access')
-        expect(JSON.parse(File.read(selection))['directory']).to eq(host.root)
-        expect(JSON.parse(File.read(setup))['step']).to eq('permissions')
-
-        # Return to AI, use the alternative login, and retain the Corpora choice.
-        click_setup('← Back')
-        desktop.see('Connect your AI')
-        click_setup('Connect')
-        cancel_sign_in(directory)
-        click_setup('Having trouble signing in?')
-        # The expanded help extends below the scrollable content viewport.
-        desktop.control('scroll', '--direction', 'down', '--amount', '6')
-        click_setup('Use a one-time code')
-        desktop.see('ABCD-EFGH')
-        File.write(File.join(directory, 'finish-login'), '')
-        desktop.see('Connected')
-        expect(desktop.text).not_to include('ABCD-EFGH', 'Copy sign-in link')
-        click_setup('Continue')
-        desktop.see('Computer access')
-        desktop.see('Accessibility permission')
-        click_setup('Continue')
-        desktop.see('Choose your Corpora')
-        click_setup('Onboarding Studio', role: 'AXCheckBox')
-        click_setup('Continue')
-        desktop.see("You're ready")
-        desktop.see('Onboarding Studio')
-        click_setup('← Back')
-        desktop.see('Choose your Corpora')
-        expect(desktop.find('Onboarding Studio', role: 'AXCheckBox')['value'].to_f).to eq(1.0)
-        click_setup('Continue')
-        desktop.see("You're ready")
-
-        # A failed durable save must not dismiss setup; retry uses the same choice.
-        ready = File.binread(setup)
-        File.rename(setup, setup + '.saved')
-        Dir.mkdir(setup)
-        begin
-          click_setup('Open Sapiens4')
-          desktop.see('Could not save setup.')
-          desktop.find("You're ready", role: 'AXHeading')
-          expect(File.binread(setup + '.saved')).to eq(ready)
-        ensure
-          Dir.rmdir(setup)
-          File.rename(setup + '.saved', setup)
-        end
-        click_setup('Open Sapiens4')
-        desktop.find('Onboarding Studio', role: 'AXHeading')
-        desktop.find('Message ChiefSapi')
-        expect(JSON.parse(File.read(setup))).to include('step' => 'complete', 'selected_corpora' => studio.fetch('id'))
-        quit_setup
-        launch_setup(binary, environment)
-        desktop.find('Onboarding Studio', role: 'AXHeading')
-        desktop.find('Message ChiefSapi')
-        expect(desktop.text).not_to include('Meet your Sapis.', 'Connect your AI', "You're ready")
-        expect(JSON.parse(File.read(selection))['directory']).to eq(host.root)
-        click_setup('Menu')
-        click_setup('AI Connections')
-        click_setup('Manage Codex')
-        desktop.see('Connected')
-        quit_setup
-      rescue Exception
-        if @desktop && @launcher
-          warn desktop.text
-          File.write(File.join(Contract::ROOT, '.build/desktop-failure-onboarding.json'), JSON.pretty_generate(desktop.tree))
-        end
-        raise
+        click_setup('Open Workspace')
+        desktop.see('Could not save setup.')
+        desktop.find("You're ready", role: 'AXHeading')
+        expect(File.binread(setup + '.saved')).to eq(ready)
       ensure
-        @launcher&.close
+        Dir.rmdir(setup)
+        File.rename(setup + '.saved', setup)
+      end
+      click_setup('Open Workspace')
+      desktop.find('Message ChiefSapi')
+      expect(JSON.parse(File.read(setup))).to eq('schema' => 2, 'step' => 'complete')
+      desktop.click('Local')
+      desktop.click('Onboarding Studio')
+      desktop.click('Close corpora menu')
+      desktop.find('Onboarding Studio', role: 'AXHeading')
+      desktop.fill('Message ChiefSapi', 'Retain this draft')
+      quit_setup
+      launch_setup(binary, environment)
+      desktop.find('Onboarding Studio', role: 'AXHeading')
+      desktop.value('Message ChiefSapi', 'Retain this draft')
+      expect(desktop.text).not_to include('Meet your Sapis.', 'Connect your AI', "You're ready")
+      quit_setup
+    end
+  end
+
+  it 'rolls back failed replacement startup, retries locked storage, and recovers a missing saved folder without resetting completion' do
+    with_setup do |directory, binary, environment, config, _fresh|
+      selection = File.join(config, 'storage.json')
+      broken = File.join(host.root, 'agentpy/corpora/directory.json')
+      saved = File.binread(broken)
+      File.write(broken, '{broken')
+      launch_setup(binary, environment)
+      click_setup('Continue')
+      desktop.see('Computer access')
+      original = backend_pids
+      selected = File.binread(selection)
+      click_setup('Your data')
+      click_setup('Use another folder')
+      choose_storage(host.root)
+      click_setup('Continue')
+      desktop.see("We couldn't switch storage. Your previous storage has been reopened.")
+      click_setup('OK')
+      desktop.see('Computer access')
+      expect(File.binread(selection)).to eq(selected)
+      expect(backend_pids.size).to eq(1)
+      expect(backend_pids).not_to eq(original)
+      File.binwrite(broken, saved)
+      host.start
+      click_setup('Your data')
+      click_setup('Use another folder')
+      choose_storage(host.root)
+      click_setup('Continue')
+      desktop.see('Another Sapiens4 server')
+      expect(File.binread(selection)).to eq(selected)
+      host.stop
+      click_setup('Continue')
+      desktop.see('Computer access')
+      click_setup('Skip for now')
+      desktop.see("You're ready")
+      click_setup('Open Workspace')
+      desktop.find('Message ChiefSapi')
+      quit_setup
+      moved = host.root + '.moved'
+      File.rename(host.root, moved)
+      begin
+        launch_setup(binary, environment)
+        desktop.see('This data directory is unavailable.')
+        expect(backend_pids).to be_empty
+        click_setup('Use another folder')
+        choose_storage(moved)
+        click_setup('Continue')
+        desktop.find('Message ChiefSapi')
+        expect(desktop.text).not_to include('Computer access', "You're ready")
+        expect(JSON.parse(File.read(selection))['directory']).to eq(moved)
+        quit_setup
+      ensure
+        File.rename(moved, host.root)
       end
     end
   end

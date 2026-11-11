@@ -25,7 +25,6 @@ import Network.Wai.Handler.WebSockets (websocketsOr)
 import qualified Network.WebSockets as WS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import qualified Data.UUID as UUID
 import System.Directory (doesFileExist)
 import System.FilePath ((</>))
 import Network.HTTP.Types
@@ -159,14 +158,9 @@ httpApplication service bridge registry onboarding port req respond = respond =<
    ("GET",["","api","host","onboarding"]) -> maybe (failure 404 "Local setup unavailable") (fmap (jsonResponse 200) . O.onboardingView) onboarding
    ("POST",["","api","host","onboarding"]) -> do
     setup <- maybe (failure 404 "Local setup unavailable") pure onboarding
-    value <- O.onboardingAction setup (validateSetupCorpora r . UUID.toText) data_
-    when (at data_ "action"=="finish") (resumeRegistry r)
+    value <- O.onboardingAction setup data_
     pure (jsonResponse 200 value)
-   ("GET",["","api","host"]) -> do
-    forM_ onboarding $ \setup -> do
-     saved <- O.setupState setup
-     when (boolean (get saved "completed")) (resumeRegistry r)
-    jsonResponse 200 <$> registryRecords r
+   ("GET",["","api","host"]) -> jsonResponse 200 <$> registryRecords r
    ("GET",["","api","host","relays"]) -> jsonResponse 200 <$> relayView r Nothing
    ("GET",["","api","host","relays",ident]) -> jsonResponse 200 <$> relayView r (Just ident)
    ("POST",["","api","host","relays"]) -> jsonResponse 200 <$> relayChange r data_

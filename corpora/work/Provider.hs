@@ -8,37 +8,32 @@ import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
 import Data.Aeson hiding (pairs)
-import Data.Aeson.Types (Parser, parseEither)
+import Data.Aeson.Types (Parser)
 import Text.Read (readMaybe)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import Data.IORef
-import Data.Char (toUpper, toLower)
+import Data.Char (toLower)
 import Data.List (nub,sortOn)
 import qualified Data.Map.Strict as M
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import qualified Data.UUID as UUID
 import Data.Time.Clock.POSIX
 import GHC.Clock (getMonotonicTimeNSec)
 import System.Directory
 import System.Environment
 import System.Exit
-import System.FileLock
 import System.FilePath
 import System.Info
 import System.IO
-import System.IO.Error (isDoesNotExistError)
 import System.Process hiding (runProcess)
 import System.Timeout
+import Text.Regex.TDFA ((=~))
 #ifndef mingw32_HOST_OS
 import System.Posix.Signals
-import System.Posix.Files (setFileMode)
 #endif
-import qualified RuntimePaths as Paths
-import Text.Regex.TDFA ((=~))
 import Types
 import Population (executionSettings)
 import qualified Computer as Computer
@@ -66,94 +61,6 @@ instance FromJSON ProviderEvent where
     pure ((if started then ToolStarted else ToolCompleted) identity label)
    else if not started && kind=="agent_message" then AgentMessage <$> item .: "text" else pure OtherEvent
 
--- Login and execution deliberately share an app-owned credential/config root.
--- Never inherit a shell's Codex home, API key or workload identity credentials.
-codexEnvironment :: FilePath -> IO [(String,String)]
-codexEnvironment binary = do
- home <- codexHome
- environment <- getEnvironment
- let name=if os=="mingw32" then map toUpper else id
-     tools=takeDirectory (takeDirectory binary)</>"codex-path"
-     path=fromMaybe "" (listToMaybe [value | (key,value)<-environment,name key=="PATH"])
- pure (("CODEX_HOME",home):("PATH",tools<>[searchPathSeparator]<>path):filter (\(key,_) -> name key/="PATH" && not ("CODEX_" `T.isPrefixOf` T.pack (name key) || "OPENAI_" `T.isPrefixOf` T.pack (name key))) environment)
-codexHome :: IO FilePath
-codexHome = do
- config <- Paths.configDirectory
- home <- makeAbsolute (config</>"codex")
- createDirectoryIfMissing True home
-#ifndef mingw32_HOST_OS
- setFileMode home 0o700
-#endif
- pure home
-codexConfig :: [String]
-codexConfig = ["-c","cli_auth_credentials_store=\"file\"","-c","forced_login_method=\"chatgpt\""]
-
--- A profile-wide OS lock covers whole runs, including gaps between model calls.
--- Credential changes take the exclusive side, across corpora and host processes.
-profileFile :: FilePath -> IO FilePath
-profileFile name = (</>name) . takeDirectory <$> codexHome
-
-profileHold :: IO Text
-profileHold = do
- path <- profileFile "account-state.json"
- (do
-  value <- readJSON path empty
-  pure (at value "hold")) `catch` (\(_::IOException) -> pure "uncertain")
-
-holdProfile :: Text -> IO ()
-holdProfile hold = profileFile "account-state.json" >>= \path -> writeJSON path (obj [("hold",str hold)])
-
-profileLock :: SharedExclusive -> IO (Maybe FileLock)
-profileLock mode = profileFile "account.lock" >>= flip tryLockFile mode
-
--- Setup and account safety are independent. Login can clear an account hold,
--- but only the durable setup decision authorizes the first execution.
-data SetupStep = AIProvider | ComputerAccess | CorporaChoice | SetupReady | SetupComplete deriving (Eq)
-
-stepName :: SetupStep -> Text
-stepName step = case step of
- AIProvider -> "provider"
- ComputerAccess -> "permissions"
- CorporaChoice -> "corpora"
- SetupReady -> "ready"
- SetupComplete -> "complete"
-
-readSetup :: IO (SetupStep,Maybe UUID.UUID)
-readSetup = do
- path <- profileFile "onboarding.json"
- saved <- (Just <$> BS.readFile path) `catch` (\(e::IOException) -> if isDoesNotExistError e then pure Nothing else invalid)
- case saved of
-  Nothing -> pure (AIProvider,Nothing)
-  Just bytes -> either (const invalid) pure (eitherDecodeStrict' bytes >>= parseEither parseSetup)
- where
- invalid :: IO a
- invalid = failure 503 "Could not read onboarding.json. Restore valid setup settings from backup and restart Sapiens; saved decisions have been preserved."
- parseSetup = withObject "setup" $ \o -> do
-  schema <- o .: "schema" :: Parser Int
-  unless (schema==2) (fail "Unsupported setup schema")
-  name <- o .: "step"
-  step <- maybe (fail "Invalid setup step") pure (lookup name [(stepName step,step) | step <- [AIProvider,ComputerAccess,CorporaChoice,SetupReady,SetupComplete]])
-  selected <- o .:? "selected_corpora" >>= traverse (maybe (fail "Invalid Corpora identity") pure . UUID.fromText)
-  when (step `elem` [SetupReady,SetupComplete] && isNothing selected) (fail "Missing starting Corpora")
-  pure (step,selected)
-
-runLease :: IO (Maybe FileLock)
-runLease = mask_ $ do
- lease <- profileLock Shared
- case lease of
-  Nothing -> pure Nothing
-  Just lock -> do
-   ready <- (do
-    (step,_) <- readSetup
-    hold <- profileHold
-    pure (step==SetupComplete && T.null hold)) `catch` (\(_::APIError) -> pure False)
-    `onException` unlockFile lock
-   if ready then pure lease else unlockFile lock >> pure Nothing
-
-withReadyProfile :: IO a -> IO a
-withReadyProfile action = bracket
- (runLease >>= maybe (failure 409 "Complete setup, connect ChatGPT in Settings and resume AI work before starting a task.") pure)
- unlockFile (const action)
 data ProviderState = ProviderState
  { providerTools :: M.Map Text Text, providerMessage :: Maybe Text }
 
@@ -186,7 +93,7 @@ resolveCodexConfig settings defaults = case executionMode settings of
  Deep -> defaults { codexEffort = "xhigh" }
 
 codexArguments :: FilePath -> CodexConfig -> [String]
-codexArguments workdir config = codexConfig ++
+codexArguments workdir config =
  ["exec","-c","model_reasoning_effort=" ++ T.unpack (jsonText (str (codexEffort config))),"-c","model=" ++ T.unpack (jsonText (str (codexModel config))),"--skip-git-repo-check","--json","--dangerously-bypass-approvals-and-sandbox","--cd",workdir,"--color","never","-"]
 
 codexBinary :: IO (Maybe FilePath)
@@ -195,41 +102,36 @@ codexBinary = do
  case override of
   Just p | not (null p) -> findExecutable p
   _ -> do
-   root <- lookupEnv "SAPIENS_REPOSITORY" >>= maybe getCurrentDirectory pure
-   packaged <- doesFileExist (root </> "package-manifest.json")
-   let candidate = root </> (if packaged then "codex" else ".build/codex") </> "bin" </> (if os=="mingw32" then "codex.exe" else "codex")
-   bundled <- doesFileExist candidate
-   if packaged || bundled then pure (if bundled then Just candidate else Nothing) else do
-    path <- findExecutable "codex"
-    home <- getHomeDirectory
-    local <- fromMaybe (home </> "AppData/Local") <$> lookupEnv "LOCALAPPDATA"
-    roaming <- fromMaybe (home </> "AppData/Roaming") <$> lookupEnv "APPDATA"
-    let children folder = do
-         present <- doesDirectoryExist folder
-         if present then map (folder </>) <$> listDirectory folder else pure []
-        vendors scope = do
-         packages <- filter (T.isPrefixOf "codex" . T.pack . takeFileName) <$> children scope
-         concat <$> forM packages (\package -> map (</> "codex/codex.exe") <$> children (package </> "vendor"))
-    installed <- if os /= "mingw32" then pure [] else do
-     app <- map (</> "codex.exe") <$> children (local </> "OpenAI/Codex/bin")
-     npm <- vendors (roaming </> "npm/node_modules/@openai")
-     bundled <- vendors (roaming </> "npm/node_modules/@openai/codex/node_modules/@openai")
-     pure (app ++ npm ++ bundled)
-    let candidates = maybeToList path ++ installed ++ ["/Applications/" ++ app ++ ".app/Contents/Resources/" ++ binary | os == "darwin", app <- ["Codex","ChatGPT"],binary <- ["codex","codex-cli/bin/codex"]]
-        native = filter (\p -> os /= "mingw32" || map toLower (takeExtension p) == ".exe") candidates
-    existing <- filterM doesFileExist (nub native)
-    runnable <- filterM (fmap executable . getPermissions) existing
-    versions <- forM runnable $ \p -> do
-     result <- try (timeout 10000000 (readProcessWithExitCode p ["--version"] "")) :: IO (Either SomeException (Maybe (ExitCode,String,String)))
-     case result of
-      Left errorValue | Just (_ :: SomeAsyncException) <- fromException errorValue -> throwIO errorValue
-      Left errorValue | Just (_ :: AsyncCancelled) <- fromException errorValue -> throwIO errorValue
-      _ -> pure ()
-     let version = case result of
-          Right (Just (ExitSuccess,out,_)) -> let (_,_,_,numbers) = out =~ ("codex-cli[[:space:]]+([0-9]+)\\.([0-9]+)\\.([0-9]+)" :: String) :: (String,String,String,[String]) in mapMaybe readMaybe numbers
-          _ -> [] :: [Int]
-     pure (version,p)
-    pure (snd <$> listToMaybe (reverse (sortOn id (filter (not . null . fst) versions))))
+   path <- findExecutable "codex"
+   home <- getHomeDirectory
+   local <- fromMaybe (home </> "AppData/Local") <$> lookupEnv "LOCALAPPDATA"
+   roaming <- fromMaybe (home </> "AppData/Roaming") <$> lookupEnv "APPDATA"
+   let children folder = do
+        present <- doesDirectoryExist folder
+        if present then map (folder </>) <$> listDirectory folder else pure []
+       vendors scope = do
+        packages <- filter (T.isPrefixOf "codex" . T.pack . takeFileName) <$> children scope
+        concat <$> forM packages (\package -> map (</> "codex/codex.exe") <$> children (package </> "vendor"))
+   installed <- if os /= "mingw32" then pure [] else do
+    app <- map (</> "codex.exe") <$> children (local </> "OpenAI/Codex/bin")
+    npm <- vendors (roaming </> "npm/node_modules/@openai")
+    bundled <- vendors (roaming </> "npm/node_modules/@openai/codex/node_modules/@openai")
+    pure (app ++ npm ++ bundled)
+   let candidates = maybeToList path ++ installed ++ ["/Applications/" ++ app ++ ".app/Contents/Resources/" ++ binary | os == "darwin", app <- ["Codex","ChatGPT"],binary <- ["codex","codex-cli/bin/codex"]]
+       native = filter (\p -> os /= "mingw32" || map toLower (takeExtension p) == ".exe") candidates
+   existing <- filterM doesFileExist (nub native)
+   runnable <- filterM (fmap executable . getPermissions) existing
+   versions <- forM runnable $ \p -> do
+    result <- try (timeout 10000000 (readProcessWithExitCode p ["--version"] "")) :: IO (Either SomeException (Maybe (ExitCode,String,String)))
+    case result of
+     Left errorValue | Just (_ :: SomeAsyncException) <- fromException errorValue -> throwIO errorValue
+     Left errorValue | Just (_ :: AsyncCancelled) <- fromException errorValue -> throwIO errorValue
+     _ -> pure ()
+    let version = case result of
+         Right (Just (ExitSuccess,out,_)) -> let (_,_,_,numbers) = out =~ ("codex-cli[[:space:]]+([0-9]+)\\.([0-9]+)\\.([0-9]+)" :: String) :: (String,String,String,[String]) in mapMaybe readMaybe numbers
+         _ -> [] :: [Int]
+    pure (version,p)
+   pure (snd <$> listToMaybe (reverse (sortOn id (filter (not . null . fst) versions))))
 killTree :: ProcessHandle -> IO ()
 killTree ph = do
 #ifdef mingw32_HOST_OS
@@ -271,13 +173,13 @@ invokeModel s run input = do
  require (not cancelled) 409 "Stopped by Admin"
  before <- getMonotonicTimeNSec
  require (before < runDeadline run) 504 "Call time limit exhausted between decision nodes"
- binary <- codexBinary >>= maybe (failure 503 "Codex is missing. Open Sapiens setup or reinstall the application.") pure
+ binary <- codexBinary >>= maybe (failure 503 "Codex CLI was not found. Install Codex and run codex login.") pure
  defaults <- modelDefaults
  settings <- executionSettings s (agentIdText (runOwner run))
  let config = resolveCodexConfig settings defaults
      workdir = workspaceRoot s (agentIdText (runOwner run))
      args = codexArguments workdir config
- environment <- codexEnvironment binary
+ environment <- getEnvironment
  started <- realToFrac . (*1000) <$> getPOSIXTime :: IO Double
  writeIORef (runActivity run) (obj [("started",toJSON started),("updated",toJSON started),("phase",str "Waiting for model"),("last_action",str "")])
  notifyChange s

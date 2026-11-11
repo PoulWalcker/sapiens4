@@ -3,7 +3,6 @@ module Registry where
 
 import Types
 import DataRoot
-import Database.SQLite.Simple (query_)
 import System.FileLock (unlockFile)
 import qualified Service as Service
 import Bridge
@@ -21,7 +20,6 @@ import qualified Data.Map.Strict as M
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import System.Directory
@@ -83,45 +81,13 @@ registryRecords :: Registry -> IO Value
 registryRecords registry = registryLock registry $ do
  saved <- readIORef (registrySaved registry)
  mainIdentity <- Service.corporaIdentity (registryService registry)
- opened <- readIORef (registryLocals registry)
  localRecords <- if not localAvailable then pure [] else forM (get mainIdentity "id" : items saved "locals") $ \identity -> do
-  case M.lookup (text identity) opened of
-   Just (service,bridge,_) -> do
-    metadata <- Service.corporaIdentity service
-    status <- bridgeStatus bridge
-    pure $ merge metadata $ obj [("location",str "Local"),("paired",get status "paired")]
-   Nothing -> do
-    -- Listing choices must not recover/start every saved Corpora and its work.
-    let folder=serviceRoot (registryService registry) </> "corporas" </> T.unpack (text identity)
-    cfg <- readJSON (folder </> "corpora-settings.json") (CorporaConfig Nothing "This computer" "" Active 1 mempty)
-    ownIdentity <- readDataJSON (folder </> "corpora-identity.json")
-    require (get ownIdentity "corpora_id"==identity) 409 "Corpora identity does not match its registry entry."
-    rows <- withReadOnlyDatabase folder (\db -> query_ db "SELECT id,name FROM agents ORDER BY created,id LIMIT 1") :: IO [(Text,Text)]
-    (chief,name) <- maybe (failure 409 "Corpora has no Chief Sapi. Restore complete data from backup.") pure (listToMaybe rows)
-    template <- T.strip <$> TIO.readFile (repositoryRoot (registryService registry) </> "corpora/prompts/corpora-settings-request.md")
-    device <- readJSON (folder </> "remote-device.json") Null
-    pure $ merge (remove ["operations"] (toJSON cfg)) $ obj
-     [("id",identity),("name",toJSON (corporaName cfg) `fallback` str ("CORPORA · "<>name)),("chief_id",str chief)
-     ,("settings_template",str template),("stopping",Bool False),("location",str "Local"),("paired",Bool (get device "peer"/=Null))]
+  (service, bridge, _) <- local registry (text identity)
+  metadata <- Service.corporaIdentity service
+  status <- bridgeStatus bridge
+  pure $ merge metadata $ obj [("location",str "Local"),("paired",get status "paired")]
  let remoteRecords = [put "location" (str "Remote") (get config "corpora") | (_,config) <- pairs (get saved "remotes")]
  pure $ obj [("local_available",Bool localAvailable),("corpora",arr (localRecords ++ remoteRecords))]
-
-
-validateSetupCorpora :: Registry -> Text -> IO ()
-validateSetupCorpora registry identity = do
- records <- registryRecords registry
- require (any (\row -> at row "id"==identity && at row "location"=="Local" && at row "status"/="archived") (items records "corpora")) 409 "Choose a registered, available local Corpora before continuing."
-
--- Completed setup resumes the saved active local services once. Choice-list
--- reads during setup remain passive; local reuses each already-opened service.
-resumeRegistry :: Registry -> IO ()
-resumeRegistry registry = do
- records <- registryRecords registry
- registryLock registry $ do
-  closed <- readIORef (registryClosed registry)
-  unless closed $ forM_ (items records "corpora") $ \record ->
-   when (at record "location"=="Local" && at record "status"=="active") $
-    void (local registry (at record "id"))
 
 data RouteTarget = LocalTarget Service Bridge | RemoteTarget Client
 

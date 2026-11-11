@@ -38,14 +38,14 @@ decodePreview memo value = case toString (D.get "content" value) of
 
 type Request = { epoch :: Int, sequence :: Int, key :: String, revision :: String, path :: String }
 
-data DialogKind = AppMenu | WorkspaceSettings | AIProviders | Onboarding | Computer | AgentSettings | GroupSettings | Attach | Reference X.AttachmentKind | DecisionPrompts | GroupTask | CreateCorpora | EditCorpora | ConnectRemote | HostPairing | RelayList | RelayAdd | RelaySwitch | RelayTerms | Installation | Notice
+data DialogKind = AppMenu | WorkspaceSettings | Onboarding | Computer | AgentSettings | GroupSettings | Attach | Reference X.AttachmentKind | DecisionPrompts | GroupTask | CreateCorpora | EditCorpora | ConnectRemote | HostPairing | RelayList | RelayAdd | RelaySwitch | RelayTerms | Installation | Notice
 
 derive instance eqDialogKind :: Eq DialogKind
 
 corporaDialog :: DialogKind -> Boolean
 corporaDialog kind = A.elem kind [CreateCorpora,EditCorpora,ConnectRemote,HostPairing,RelayList,RelayAdd,RelaySwitch,RelayTerms,Notice]
 
-data SetupPage = SetupSteps | ChooseStorage | SetupWelcome
+data SetupPage = SetupSteps | ChooseStorage
 derive instance eqSetupPage :: Eq SetupPage
 
 data StorageChoice = KeepStorage | FreshStorage | ExistingStorage
@@ -56,8 +56,22 @@ type StorageDraft = {page :: SetupPage, choice :: StorageChoice, directory :: St
 emptyStorage :: StorageDraft
 emptyStorage = {page:SetupSteps,choice:KeepStorage,directory:"",current:"",defaultDirectory:"",available:true}
 
-data ProviderPage = Providers | CodexDetails | CodexAuth | ConfirmChange | ConfirmDisconnect
-derive instance eqProviderPage :: Eq ProviderPage
+data SetupStep = ComputerAccessStep | ReadyStep | CompleteStep
+derive instance eqSetupStep :: Eq SetupStep
+
+setupStep :: Json -> Maybe SetupStep
+setupStep value = case D.s "step" value of
+  "permissions" -> Just ComputerAccessStep
+  "ready" -> Just ReadyStep
+  "complete" -> Just CompleteStep
+  _ -> Nothing
+
+setupStepName :: Maybe SetupStep -> String
+setupStepName = case _ of
+  Just ComputerAccessStep -> "permissions"
+  Just ReadyStep -> "ready"
+  Just CompleteStep -> "complete"
+  Nothing -> ""
 
 data DialogStatus = Editing | Submitting String | Rejected String
 derive instance eqDialogStatus :: Eq DialogStatus
@@ -79,7 +93,7 @@ setDialogBusy running d = d {status=if running then Submitting (dialogError d) e
 setDialogError :: String -> Dialog -> Dialog
 setDialogError message d = d {status=if dialogBusy d then Submitting message else if message == "" then Editing else Rejected message}
 
-type Dialog = { storage :: StorageDraft, providerPage :: ProviderPage, kind :: DialogKind, title :: String, record :: F.Context, fields :: F.Fields, content :: F.Content, status :: DialogStatus, identity :: Int }
+type Dialog = { storage :: StorageDraft, kind :: DialogKind, title :: String, record :: F.Context, fields :: F.Fields, content :: F.Content, status :: DialogStatus, identity :: Int }
 
 data ConnectionState = Offline | Online | ChangingLifecycle Boolean
 derive instance eqConnectionState :: Eq ConnectionState
@@ -162,7 +176,7 @@ type SessionState =
   , epoch :: Int, sequence :: Int, now :: Number, env :: Environment
   , records :: Array X.Corpora, active :: String, connection :: ConnectionState
   , localAvailable :: Boolean, showArchived :: Boolean, installRequired :: Boolean
-  , setupChecked :: Boolean, restoredCorpora :: Boolean, account :: Json, accountCheckedAt :: Number, accountChecking :: Boolean
+  , setupStage :: Maybe SetupStep, setupChecking :: Boolean
   , preferencesSaved :: String, voice :: Maybe VoiceSession, outboxes :: O.Object Outbox
   )
 
@@ -178,7 +192,7 @@ initial env =
   , epoch:0, sequence:0, now:0.0, env, panes:[N.ChatPane,N.Sidebar,N.Workspace], search:"", searchOpen:false, menu:Nothing, dialog:Nothing
   , records:[], active:"", connection:Offline, localAvailable:false, showArchived:false
   , toast:"", feedback:"", theme:if env.dark then "dark" else "light", installRequired:false
-  , setupChecked:false, restoredCorpora:false, account:D.empty, accountCheckedAt:0.0, accountChecking:false
+  , setupStage:Nothing, setupChecking:false
   , dialogStack:[], preview:NotAsked, address:"", addressOpen:false, scrollPosition:Nothing, restoringScroll:false, preferencesSaved:""
   }
 
@@ -377,8 +391,5 @@ dropRejected sent kept = O.mapWithKey (\owner items -> A.filter (\item -> not (A
   where
   ids owner value = map D.str (D.arr (D.get owner value))
 
-accountBlocked :: Model -> Boolean
-accountBlocked m = setupRequired m || not (remote m) && (activeRecord m).location == X.Local && D.n "schema" m.account > 0.0 && (not (D.b "ready" m.account) || D.s "hold" m.account /= "")
-
 setupRequired :: Model -> Boolean
-setupRequired m = not (remote m) && (not m.setupChecked || not (D.b "completed" m.account))
+setupRequired m = not (remote m) && m.setupStage /= Just CompleteStep

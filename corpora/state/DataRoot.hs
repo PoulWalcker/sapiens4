@@ -22,6 +22,9 @@ import System.FileLock
 import System.IO
 import System.IO.Error (ioeGetErrorString)
 
+supportedDatabaseVersions :: [Int]
+supportedDatabaseVersions = [0..8]
+
 -- A new location may be empty; attaching must always find a complete Data Root.
 data StorageChoice = StartNew | AttachExisting | CreateCorpora deriving (Eq, Show)
 
@@ -122,9 +125,12 @@ validateDataRoot choice = validate []
     storageError "The Corpora database is invalid. Restore it from a backup."
    agents <- withReadOnlyDatabase root $ \db -> do
     versions <- query_ db "PRAGMA user_version" :: IO [Only Int]
-    unless (versions==[Only 8]) $ storageError "Unsupported Corpora schema. Open these data with a compatible Sapiens version; no migration was performed."
+    unless (case versions of [Only version] -> version `elem` supportedDatabaseVersions; _ -> False) $ storageError "Unsupported Corpora schema. Open these data with a compatible Sapiens version; no migration was performed."
+    integrity <- query_ db "PRAGMA quick_check" :: IO [Only T.Text]
+    unless (integrity==[Only "ok"]) $ storageError "The Corpora database is corrupted. Restore it from a backup."
     tables <- map fromOnly <$> (query_ db "SELECT name FROM sqlite_master WHERE type='table'" :: IO [Only T.Text])
-    unless (all (`elem` tables) ["agents","turns","scheduled_routines","preferences","workloads","groups","system_pulse","pulse_calls","turn_details","attachments","message_inputs","group_attachments","activity_events"]) $
+    let required=if versions/=[Only 8] then ["agents"] ++ ["jobs" | versions `elem` [[Only 1],[Only 2]]] else ["agents","turns","scheduled_routines","preferences","workloads","groups","system_pulse","pulse_calls","turn_details","attachments","message_inputs","group_attachments","activity_events"]
+    unless (all (`elem` tables) required) $
      storageError "The Corpora database is incomplete. Restore a complete Data Root from backup."
     rows <- query_ db "SELECT id FROM agents ORDER BY created,id" :: IO [Only T.Text]
     when (null rows) $ storageError "The Corpora database has no agents. Restore a complete Data Root from backup."

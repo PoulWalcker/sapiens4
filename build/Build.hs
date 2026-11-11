@@ -49,14 +49,14 @@ main = do
  when (os=="mingw32") $ do
   createDirectoryIfMissing True build
   callProcess "windres" ["-I",root</>"environments/windows",root</>"environments/windows/resources.rc","-O","coff","-o",build</>"windows-resources.o"]
- let cabal options = callProcess "cabal" (["--project-file="<>project</>"cabal.project","--builddir="<>build]++options)
+ let cabal options = callProcess "cabal" (["--project-file="<>root</>"build/cabal.project","--builddir="<>build]++options)
  cabal (["build"]++buildFlags++map ("exe:"++) (filter (/="sapiens-windows") targets))
  -- The desktop resource already contains the application's DPI/UAC manifest.
  when (os=="mingw32") $ cabal (["build","exe:sapiens-windows","--ghc-options=-fno-gen-manifest"]++buildFlags)
  createDirectoryIfMissing True (root </> ".build/bin")
  createDirectoryIfMissing True (root </> ".build/domain")
  forM_ targets $ \name -> do
-  source <- trim <$> readProcess "cabal" (["--project-file="<>project</>"cabal.project","--builddir="<>build,"list-bin","exe:"<>name]++buildFlags) ""
+  source <- trim <$> readProcess "cabal" (["--project-file="<>root</>"build/cabal.project","--builddir="<>build,"list-bin","exe:"<>name]++buildFlags) ""
   let destination = root </> (if name=="sapiens-domain" then ".build/domain" else ".build/bin") </> name<>suffix
   copyFile source (destination<>".installing")
   when (os=="darwin") (packageMac root (destination<>".installing"))

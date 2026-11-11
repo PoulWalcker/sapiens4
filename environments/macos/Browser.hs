@@ -229,12 +229,6 @@ receive browser message onSetup onStorage onPreferences = do
             _ -> pure ()
           if field "clientPreferences" input /= Null then onPreferences (field "clientPreferences" input)
           else if not (T.null (text (field "operation" (field "storage" input)))) then onStorage (field "storage" input)
-          else if bool (field "activate" input) then do
-            win <- obj0 sh "window"
-            void (obj1 win "deminiaturize:" nullPtr)
-            void (obj1 win "makeKeyAndOrderFront:" nullPtr)
-            app <- cls "NSApplication" >>= (`obj0` "sharedApplication")
-            void (obj1 app "activateIgnoringOtherApps:" (int 1))
           else if bool (field "pickFile" input) then do
             panel <- new "NSOpenPanel"
             void (obj1 panel "setCanChooseDirectories:" (int 0)); void (obj1 panel "setAllowsMultipleSelection:" (int 1)); void (obj1 panel "setShowsHiddenFiles:" (int 1))

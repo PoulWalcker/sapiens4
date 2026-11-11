@@ -86,7 +86,6 @@ data Action
   | StoragePick
   | StorageApply
   | StorageReceived Json
-  | ProviderNavigate M.ProviderPage
   | OnboardingPoll Int
   | HostPairPoll Int
   | Install

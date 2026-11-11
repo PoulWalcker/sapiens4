@@ -29,10 +29,8 @@ class Host
       File.chmod(0755, binary)
     end
     config = File.join(root, 'fixture config')
-    FileUtils.mkdir_p(File.join(config, 'codex'))
-    File.write(File.join(config, 'codex/auth.json'), 'synthetic fixture authentication')
-    identity = JSON.parse(File.read(File.join(root, 'corpora-identity.json'))).fetch('corpora_id')
-    Contract.atomic_json(File.join(config, 'onboarding.json'), schema: 2, step: 'complete', selected_corpora: identity)
+    FileUtils.mkdir_p(config)
+    Contract.atomic_json(File.join(config, 'onboarding.json'), schema: 2, step: 'complete')
     @environment = {'SAPIENS_CONFIG_DIR' => config, 'SAPIENS_CODEX_BINARY' => binary, 'SAPIENS_CONTRACT_ENV' => root,
       'SAPIENS_CONTRACT_RUBY' => RbConfig.ruby, 'SAPIENS_CONTRACT_PROVIDER' => File.join(__dir__, 'provider.rb'),
       'NO_COLOR' => '1', 'SAPIENS_WHISPER_URL' => 'http://127.0.0.1:9', 'SAPIENS_CODEX_MODEL' => 'gpt-6-sol',

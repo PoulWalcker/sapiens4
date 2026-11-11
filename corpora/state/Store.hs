@@ -19,6 +19,7 @@ import System.FilePath
 import Text.Read (readMaybe)
 import qualified Data.List.NonEmpty as NE
 import Types
+import DataRoot (supportedDatabaseVersions)
 
 -- Only these tables contain JSON documents; callers cannot interpolate SQL names.
 data Collection = Workloads | Groups | ScheduledRoutines | PulseCalls | TurnDetails | Preferences | SystemPulse deriving (Eq, Show)
@@ -82,7 +83,7 @@ saveSingleton s table v = executeSQL s ("INSERT INTO " <> tableName table <> " V
 initialize :: Service -> IO ()
 initialize s = connection s $ \db -> do
  [Only version] <- query_ db "PRAGMA user_version" :: IO [Only Int]
- require (version `elem` [0,8]) 500 ("Unsupported CORPORA schema: " <> T.pack (show version))
+ require (version `elem` supportedDatabaseVersions) 500 ("Unsupported CORPORA schema: " <> T.pack (show version))
  execute_ db "PRAGMA journal_mode=WAL"
  mapM_ (execute_ db) [
   "CREATE TABLE IF NOT EXISTS scheduled_routines (sequence INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL)",
@@ -100,6 +101,7 @@ initialize s = connection s $ \db -> do
   "CREATE TABLE IF NOT EXISTS group_attachments (id TEXT PRIMARY KEY, agent TEXT NOT NULL REFERENCES groups(id), value TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS activity_events (id INTEGER PRIMARY KEY, owner TEXT NOT NULL, timestamp TEXT NOT NULL, actor TEXT NOT NULL, entity TEXT NOT NULL, event TEXT NOT NULL, agency TEXT, details TEXT NOT NULL)",
   "CREATE INDEX IF NOT EXISTS activity_events_owner ON activity_events(owner,id)"]
+ when (version `elem` [1,2]) $ execute_ db "INSERT OR IGNORE INTO turns SELECT * FROM jobs WHERE flow IN ('chat','computer')"
  execute_ db "PRAGMA user_version=8"
 agents :: Service -> IO [Value]
 agents s = map toJSON <$> agentProfiles s
