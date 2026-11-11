@@ -1,54 +1,72 @@
 # Sapiens4 for Windows
 
-Extract the whole portable package and run **Sapiens4.exe**. The `win-x64` package
-runs on Intel/AMD PCs and on Windows 11 ARM PCs with x64 app support. Requires
-Microsoft Edge WebView2 Evergreen Runtime. The Haskell runtime and Blindly4 are
-bundled; Python, .NET, WSL and administrator access are not required.
+Run **Sapiens-Setup-win-x64.exe** on Windows 10/11 x64. Setup installs per user without
+administrator access and creates a Start menu shortcut. No Sapiens build tools
+are needed. The app uses the system WebView2 Runtime; native Install/Repair,
+Retry and Cancel controls handle a missing Runtime before starting the backend.
+Main-window loading failures restore these controls after closing the failed
+views and stopping the owned backend; Retry starts a fresh attempt.
+No browser Runtime or Codex CLI is bundled. Model execution uses your installed
+Codex CLI and existing authentication. Native npm binaries are supported;
+`SAPIENS_CODEX_BINARY` selects an executable explicitly.
 
-Chat requires authenticated Codex CLI 0.156.1+. Run `codex login`; installed CLI
-and native npm binaries are discovered automatically. Set `SAPIENS_CODEX_BINARY`
-to a full executable path to override discovery.
+Data and configuration live in `%LOCALAPPDATA%\Sapiens4\{data,config}`, outside the
+installation. Quit stops the owned backend. Quit before replacement or uninstall;
+Setup refuses active installation processes, unowned nonempty destinations and
+protected state directories, and destinations with junction/symlink parents. Uninstall preserves data, configuration and unowned
+files. Process checks are preflight safeguards, not an atomic installation lock.
+Uninstall removes the installed ownership marker and registration. Reinstall
+into the empty installation directory; retained unowned files require a new directory.
+Pre-D1 installations that stored data directly in `%LOCALAPPDATA%\Sapiens4`
+can retain that location with `SAPIENS_DATA_DIR`; D1 does not migrate existing state.
 
-Data lives in `%LOCALAPPDATA%\Sapiens4`, separate from the application. Closing the
-app stops its server and cancels active calls. The package is unsigned and has no
-automatic updater: replace the application directory while retaining the data.
-Licenses ship in `license/`, `runtime/submodules/blindly4/license/` and `runtime/submodules/libs4/license/`.
+## Build and verify
 
-## Build from source
-
-Install GHC 9.14.1, Cabal 3.18.2, Node.js 22.5+, npm, Git, a POSIX shell,
-GNU Make, and stable Rust with MSVC C++ build tools or LLVM-MinGW. Put GHC's
-`bin` and `mingw/bin` directories on PATH, along with the other build tools.
-Install GHC, the shell and Make in paths without spaces (or use their Windows
-short paths on PATH); their dependency build tools split paths containing spaces.
-Use x64 GHC and Node on ARM PCs. Add the matching Rust target, such as
-`x86_64-pc-windows-msvc` or `x86_64-pc-windows-gnullvm`.
+Install GHC 9.14.1 for the native target, Cabal 3.18.2, Node.js 22.5+, npm, Git, a POSIX shell,
+GNU Make, stable Rust and MSVC C++ tools (or LLVM-MinGW with
+`-BlindlyToolchain gnullvm`). Put GHC's `bin` and `mingw/bin`, the compiler's
+`objdump`, and an installed Inno Setup 6+ `ISCC.exe` on PATH. Public builds also
+need Windows SDK `signtool.exe`. Keep shell/Make tool paths free of spaces.
 
 ```powershell
-git clone --recurse-submodules https://github.com/aleski-green/sapiens4.git
-cd sapiens4
-.\build\start.ps1 -Open
-.\environments\windows\build.ps1 -Runtime win-x64
-.\.build\Sapiens4-win-x64\Sapiens4.exe
+git submodule update --init --recursive
+.\environments\windows\build.ps1 -Runtime win-x64 -Version 0.1.0 -OutputDirectory .build\release-x64
+Get-FileHash .build\release-x64\Sapiens-Setup-win-x64.exe -Algorithm SHA256
 ```
 
-`start.ps1` builds Blindly4, the Haskell host and the UI; `-SkipBuild` reuses the
-existing binaries. Packaging defaults to the GHC target and rejects a mismatched
-`-Runtime`. Native `win-arm64` packaging requires an ARM64 Windows GHC toolchain.
-Use `-BlindlyToolchain gnullvm` with LLVM-MinGW. The WebView2 loader is downloaded
-with a pinned checksum and selected for the executable's architecture.
+The output directory must be new. Only the installer and `SHA256SUMS` are
+published. All packaged PE files must match the selected GHC target and resolve
+imports to Windows inbox libraries or adjacent packaged DLLs. The WebView2 loader
+is hash-pinned. The ordinary `runghc build/Build.hs` build also prepares this
+app-local loader; packaging consumes that result.
 
-For desktop development, set `SAPIENS_RUNTIME_DIR` to the repository root. Other overrides are
-`SAPIENS_DATA_DIR`, `SAPIENS_BLINDLY_BINARY`, `SAPIENS_CODEX_BINARY`,
-`SAPIENS_CODEX_MODEL` and `SAPIENS_CODEX_REASONING_EFFORT`.
-The Haskell build regenerates icons from the favicons using the libs4 Node tool.
+`-Runtime win-x64` and `-Runtime win-arm64` select native payload variants. The
+script rejects a mismatch with the active GHC target, passes the target to
+Blindly and the loader, audits every PE machine type, and configures Inno's
+architecture restrictions. Output names include `win-x64` or `win-arm64`; the
+default output directory is `.build/<runtime>`. Application identity/data remain
+common to both variants. Build variants serially in a checkout.
 
-## Tests and desktop access
+The ARM64 packaging path is configured but **not qualified**: GHC 9.14.1's
+[official bindists](https://downloads.haskell.org/~ghc/9.14.1/) include Windows
+x64, but no Windows ARM64 compiler. A matching native ARM64 toolchain and device
+are required before claiming a working ARM64 installer. Inno retains its existing
+x86 setup engine, which [runs on ARM64 through Windows emulation](https://jrsoftware.org/ishelp/topic_setup_setuparchitecture.htm); the application payload must be native ARM64.
+Qualification requires a native `aarch64-*-mingw*` GHC 9.14.1 toolchain with
+matching C compiler, linker and resource compiler, ARM64-capable `objdump`, all
+Haskell dependencies and libsodium built for that target, a matching Rust Windows
+ARM64 target, and WebView2 on a Windows ARM64 device. Build with
+`-Runtime win-arm64`, retain the PE audit results, and verify installation,
+startup, navigation recovery, Quit, reinstall and uninstall with retained data on
+that device. An x64 build running under emulation does not qualify this target.
 
-Follow [Testing](../../docs/testing.md). Set `SAPIENS_TEST_WINDOWS_PACKAGE`
-to the built package directory for packaged-runtime tests; run ARM64 and x64 on
-matching machines. Tests use temporary data and controlled model executables.
+For a public release, set `SAPIENS_WINDOWS_CERT_THUMBPRINT` to a certificate in
+the signing account's store and add `-PublicRelease`. A timestamp URL may be
+supplied with `-TimestampUrl`. Builds sign and verify application binaries,
+the installer and its embedded uninstaller. Local builds are unsigned.
+Installer acceptance tests are deferred until the implementation is complete.
 
-Blindly4 requires an unlocked interactive desktop, accessible controls and matching
-privilege levels. Elevated apps and secure desktops are unsupported. Exact-value
-guards must remain enabled, and desktop workflows must run serially.
+For source CLI development use `.\build\start.ps1 -Open`. For the native host,
+set `SAPIENS_RUNTIME_DIR` to the checkout. `--data-dir`, `SAPIENS_DATA_DIR` and
+`SAPIENS_CONFIG_DIR` retain explicit path control. Use an unlocked interactive
+desktop with matching privilege levels for Blindly4 tests; run desktop tests serially.

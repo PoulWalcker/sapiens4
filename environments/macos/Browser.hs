@@ -36,12 +36,20 @@ entries _ = []
 
 
 data Tab = Tab { tabOwner :: Text, tabID :: Text, tabView :: Obj, tabSequence :: Text, tabDocument :: Maybe Text, tabRequested :: Maybe Text, tabError :: Text, tabAwaiting :: Bool, tabFiles :: Set.Set Text }
-data Browser = Browser { shell :: IORef Obj, delegate :: IORef Obj, tabs :: IORef (Map.Map Text Tab), current :: IORef Text, dark :: IORef Bool, origin :: Obj, guest :: Text }
+data Browser = Browser { shell :: IORef Obj, delegate :: IORef Obj, tabs :: IORef (Map.Map Text Tab), current :: IORef Text, dark :: IORef Bool, origin :: IORef Obj, guest :: IORef Text }
 
 newBrowser address guestScript = do
     sh <- newIORef nullPtr; de <- newIORef nullPtr; ts <- newIORef Map.empty
-    ac <- newIORef ""; da <- newIORef False; base <- url address
-    pure (Browser sh de ts ac da base guestScript)
+    ac <- newIORef ""; da <- newIORef False; base <- newIORef nullPtr; gs <- newIORef ""
+    let browser = Browser sh de ts ac da base gs
+    configureBrowser browser address guestScript
+    pure browser
+
+configureBrowser browser address guestScript = do
+    base <- url address >>= \u -> obj0 u "retain"
+    old <- atomicModifyIORef' (origin browser) (\value -> (base,value))
+    when (old /= nullPtr) $ void (obj0 old "release")
+    writeIORef (guest browser) guestScript
 
 key tab = tabOwner tab <> ":" <> tabID tab
 save browser tab = modifyIORef' (tabs browser) (Map.insert (key tab) tab)
@@ -69,7 +77,7 @@ createTab browser owner ident = do
     scheme <- str "sapiens-file"
     void (obj2 configuration "setURLSchemeHandler:forURLScheme:" target scheme)
     user <- obj0 configuration "userContentController"
-    source <- str (guest browser)
+    source <- readIORef (guest browser) >>= str
     scriptObject <- allocated "WKUserScript" >>= \o -> obj3 o "initWithSource:injectionTime:forMainFrameOnly:" source (int 1) (int 1)
     void (obj1 user "addUserScript:" scriptObject)
     view <- allocated "WKWebView" >>= \o -> rectObj o "initWithFrame:configuration:" (0,0,0,0) configuration
@@ -216,7 +224,7 @@ receive browser message = do
     frame <- obj0 message "frameInfo"
     mainFrame <- booleanValue frame "isMainFrame"
     source <- obj0 frame "request" >>= \r -> obj0 r "URL"
-    trusted <- sameOrigin source (origin browser)
+    trusted <- sameOrigin source =<< readIORef (origin browser)
     path <- textProp source "path"
     when (sourceView == sh && mainFrame && trusted && path `elem` ["/workspace","/workspace/","/workspace/index.html"]) $ do
         raw <- obj0 message "body"
@@ -263,7 +271,7 @@ navigation browser view action completion = do
         Just tab -> do
             request <- obj0 action "request"; u <- obj0 request "URL"
             address <- textProp u "absoluteString"; host <- textProp u "host"; scheme <- textProp u "scheme"; path <- textProp u "path"
-            port <- obj0 u "port" >>= \p -> long p "integerValue"; basePort <- obj0 (origin browser) "port" >>= \p -> long p "integerValue"
+            port <- obj0 u "port" >>= \p -> long p "integerValue"; basePort <- readIORef (origin browser) >>= \base -> obj0 base "port" >>= \p -> long p "integerValue"
             frame <- obj0 action "targetFrame"; navigationType <- long action "navigationType"
             requestedFile <- maybe (pure False) (\v -> url v >>= \x -> (== "file") <$> textProp x "scheme") (tabRequested tab)
             case planNavigation (tabFiles tab) (NavigationFacts scheme host path (port==basePort) requestedFile (navigationType==2) (frame==nullPtr)) of
@@ -283,7 +291,7 @@ shellNavigation browser action completion = do
     u <- obj0 action "request" >>= \r -> obj0 r "URL"
     frame <- obj0 action "targetFrame"
     mainFrame <- if frame == nullPtr then pure Nothing else Just <$> booleanValue frame "isMainFrame"
-    local <- sameOrigin u (origin browser)
+    local <- sameOrigin u =<< readIORef (origin browser)
     address <- textProp u "absoluteString"; scheme <- textProp u "scheme"
     let allowed = local || (mainFrame == Just True && address == "about:blank") || (mainFrame == Just False && (address `elem` ["about:blank","about:srcdoc"] || scheme `elem` ["http","https","blob","data"]))
     if allowed then invokeLong completion 1 else do
@@ -293,12 +301,15 @@ shellNavigation browser action completion = do
 finished browser view = withTab browser view $ \tab -> do
     let done = tab { tabAwaiting = False }
     save browser done; report browser done
-failed browser view err = do
+failed :: Browser -> (Text -> IO ()) -> Obj -> Obj -> IO ()
+failed browser shellFailed view err = do
     code <- long err "code"
-    when (code /= -999) $ withTab browser view $ \tab -> do
+    when (code /= -999) $ do
         reason <- textProp err "localizedDescription"
-        let done = tab { tabAwaiting = False, tabError = reason }
-        save browser done; report browser done
+        sh <- readIORef (shell browser)
+        if view == sh then shellFailed reason else withTab browser view $ \tab -> do
+            let done = tab { tabAwaiting = False, tabError = reason }
+            save browser done; report browser done
 
 textDocument content title = "<!doctype html><meta charset=\"utf-8\"><meta name=\"color-scheme\" content=\"light dark\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'\"><title>" <> escape title <> "</title><style>html{color-scheme:light dark;background:#fff;color:#171717}body{margin:24px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:15px/1.6 ui-monospace,monospace}@media(prefers-color-scheme:dark){html{background:#000;color:#eee}}</style><pre>" <> escape content <> "</pre>"
   where escape = T.replace "\"" "&quot;" . T.replace ">" "&gt;" . T.replace "<" "&lt;" . T.replace "&" "&amp;"

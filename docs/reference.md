@@ -49,7 +49,7 @@ Default model: `gpt-6-sol`, reasoning `high`; Deep work uses `xhigh`. A call's
 | Variable | Purpose |
 | --- | --- |
 | `SAPIENS_DATA_DIR` | Data directory |
-| `SAPIENS_PYTHON` | Python executable |
+| `SAPIENS_CONFIG_DIR` | Configuration directory exposed to native hosts and integrations |
 | `SAPIENS_CODEX_BINARY` | Codex executable |
 | `SAPIENS_CODEX_MODEL` | Model |
 | `SAPIENS_CODEX_REASONING_EFFORT` | Reasoning effort |
@@ -62,9 +62,12 @@ are inactive. Global Codex configuration is unchanged.
 
 ## Data and updates
 
-macOS/source data defaults to `.sapiens4` in the checkout; Windows packages use
-`%LOCALAPPDATA%\Sapiens4`. Back up the complete data directory while the host is
-stopped, including:
+Installed applications use `~/Library/Application Support/Sapiens4/data` on macOS
+and `%LOCALAPPDATA%\Sapiens4\data` on Windows, with a sibling `config` directory.
+Source CLI execution keeps the checkout’s `.sapiens4` default. Explicit
+`--data-dir` overrides `SAPIENS_DATA_DIR`; `SAPIENS_CONFIG_DIR` is independent.
+No default depends on package metadata. Back up the complete data directory
+while the host is stopped, including:
 
 - `corpora.sqlite3`: agents, workloads, Groups, preferences and attachments.
 - `agentpy/`: persisted chat state and archives; the legacy path remains in use.

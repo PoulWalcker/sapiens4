@@ -52,6 +52,7 @@ foreign import ccall "wrapper" wrap1 :: (Obj -> Sel -> Obj -> IO ()) -> IO (FunP
 foreign import ccall "wrapper" wrap2 :: (Obj -> Sel -> Obj -> Obj -> IO ()) -> IO (FunPtr (Obj -> Sel -> Obj -> Obj -> IO ()))
 foreign import ccall "wrapper" wrap3 :: (Obj -> Sel -> Obj -> Obj -> Obj -> IO ()) -> IO (FunPtr (Obj -> Sel -> Obj -> Obj -> Obj -> IO ()))
 foreign import ccall "wrapper" wrap4 :: (Obj -> Sel -> Obj -> Obj -> Obj -> Obj -> IO ()) -> IO (FunPtr (Obj -> Sel -> Obj -> Obj -> Obj -> Obj -> IO ()))
+foreign import ccall "wrapper" wrapLong1 :: (Obj -> Sel -> Obj -> IO CULong) -> IO (FunPtr (Obj -> Sel -> Obj -> IO CULong))
 foreign import ccall "wrapper" wrapBool1 :: (Obj -> Sel -> Obj -> IO CBool) -> IO (FunPtr (Obj -> Sel -> Obj -> IO CBool))
 foreign import ccall "wrapper" wrapBool2 :: (Obj -> Sel -> Obj -> CBool -> IO CBool) -> IO (FunPtr (Obj -> Sel -> Obj -> CBool -> IO CBool))
 foreign import ccall "wrapper" wrapObj4 :: (Obj -> Sel -> Obj -> Obj -> Obj -> Obj -> IO Obj) -> IO (FunPtr (Obj -> Sel -> Obj -> Obj -> Obj -> Obj -> IO Obj))

@@ -9,14 +9,14 @@ independent judgment with human oversight.
 
 | Platform | Setup |
 | --- | --- |
-| macOS 13+ | [Build and run the desktop app](environments/macos/README.md) |
-| Windows 10/11, ARM64 or x64 | [Portable packages and source setup](environments/windows/README.md) |
+| macOS 13+, Apple Silicon | [Install or build the desktop app](environments/macos/README.md) |
+| Windows 10/11 | [x64 installer and ARM64 build target](environments/windows/README.md) |
 | Ubuntu 22.04 / 24.04, x86-64 X11 (development adapter) | [Linux host and desktop setup](environments/linux/README.md) |
 | Remote browser or mobile app | [Pairing and relay setup](docs/remote.md) |
 
 Source builds require GHC 9.14.1, Cabal 3.18.2, Git, authenticated Codex CLI
 0.156.1+, stable Rust, Node.js 22.5+ and npm. Platform build tools are listed in
-the setup guides. Portable Windows packages bundle the native host and Blindly4.
+the setup guides. Native installers bundle the host, UI and Blindly4. Codex is installed separately.
 
 ```sh
 git clone --recurse-submodules https://github.com/aleski-green/sapiens4.git

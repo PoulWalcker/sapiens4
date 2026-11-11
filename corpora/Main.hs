@@ -2,6 +2,7 @@
 module Main where
 
 import Types
+import qualified RuntimePaths as Paths
 import HostServer
 import Assets
 import BuildUI
@@ -70,12 +71,18 @@ repository = do
    cwd <- getCurrentDirectory
    here <- doesDirectoryExist (cwd</>"app")
    executable <- getExecutablePath
-   canonicalizePath (if here then cwd else takeDirectory (takeDirectory (takeDirectory executable)))
+   let runtime=takeDirectory (takeDirectory (takeDirectory executable))
+   assets <- doesFileExist (runtime</>"app/shell/index.html")
+   canonicalizePath (if assets then runtime else if here then cwd else runtime)
 hostMain :: FilePath -> [String] -> IO ()
 hostMain root args = do
  when ("--help" `elem` args || "-h" `elem` args) $ putStrLn "Usage: sapiens4 [--port PORT] [--data-dir DIRECTORY] [--open]" >> exitSuccess
  settings <- validated (hostOptions root args)
- let directory = hostDirectory settings
+ source <- doesFileExist (root</>"corpora/Main.hs")
+ defaultData <- if source then
+  lookupEnv "SAPIENS_DATA_DIR" >>= maybe (pure (root</>".sapiens4")) (\path -> if null path then fail "SAPIENS_DATA_DIR must not be empty" else makeAbsolute path)
+  else Paths.defaultDataDirectory root
+ let directory=option "--data-dir" defaultData args
  void (asset root "/")
  void (asset root "/workspace/app.js")
  bracket (startHost directory (requestedPort settings) False) hostStop $ \host -> do
@@ -94,6 +101,7 @@ data HostOptions = HostOptions
 hostOptions :: FilePath -> [String] -> Validation HostOptions
 hostOptions root args = do
  validateOptions ["--port","--data-dir"] ["--open","--desktop"] args
+ check (not (null (option "--data-dir" "." args))) 400 "Data directory must not be empty"
  port <- parseIntegerOption "--port" "4174" args
  check (port>=0 && port<=65535) 400 "Port must be between 0 and 65535"
  pure (HostOptions port (option "--data-dir" (root</>".sapiens4") args) ("--desktop" `elem` args) ("--open" `elem` args))
