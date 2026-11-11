@@ -68,6 +68,8 @@ ENV.fetch('D1_CLEANUP_CASES', 'A B C D E').split.each do |label|
     host=Contract::Child.new(File.join(install,'Sapiens4.exe'),env:env,chdir:dir)
     snapshot.call('launched')
     desktop=Desktop.new(process:host,ready:false)
+    sleep 2
+    snapshot.call('two-seconds-after-launch')
     if %w[A B C].include?(label)
       Contract.wait(timeout:60,description:'native recovery'){desktop.text.include?('Sapiens4 could not start')}
       snapshot.call('first-recovery')
@@ -75,6 +77,7 @@ ENV.fetch('D1_CLEANUP_CASES', 'A B C D E').split.each do |label|
         puts 'B select Retry (still obstructed)'
         desktop.press('Retry')
         sleep 1
+        snapshot.call('retry-launched')
         Contract.wait(timeout:60,description:'second native recovery'){desktop.text.include?('Sapiens4 could not start')}
         snapshot.call('second-recovery')
       end
@@ -113,10 +116,11 @@ ENV.fetch('D1_CLEANUP_CASES', 'A B C D E').split.each do |label|
       out,err,code=Contract.capture(Desktop.driver,'tree','--pid',r['pid'].to_s,'--depth','20',chdir:File.dirname(Desktop.driver),timeout:20)
       File.write(File.join(dir,"survivor-#{r['pid']}-window.json"),out+err)
       # Close only the observed error window, after preserving the failure.
-      ps("$p=Get-Process -Id #{r['pid']} -ErrorAction SilentlyContinue; if($p -and $p.StartTime.ToUniversalTime().ToString('o') -eq '#{r['created']}'){$p.CloseMainWindow() | Out-Null}")
+      ps("$c=Get-CimInstance Win32_Process -Filter 'ProcessId=#{r['pid']}'; if($c -and $c.CreationDate.ToUniversalTime().ToString('o') -eq '#{r['created']}'){ $p=Get-Process -Id #{r['pid']} -ErrorAction SilentlyContinue; if($p){$p.CloseMainWindow() | Out-Null}}")
     end
     sleep 2
-    snapshot.call('after-owned-error-window-close')
+    remaining=snapshot.call('after-owned-error-window-close')
+    raise 'Recorded fixture process survived window cleanup; stop before next case' unless remaining.empty?
   rescue Exception=>e
     File.write(File.join(dir,'failure.txt'),"#{e.full_message}")
     snapshot.call('harness-failure') rescue nil

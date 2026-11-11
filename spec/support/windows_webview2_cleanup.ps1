@@ -12,7 +12,8 @@ New-Item -ItemType Directory $Evidence | Out-Null
 $env:D1_CLEANUP_SETUP = [IO.Path]::GetFullPath($Setup)
 $env:D1_CLEANUP_EVIDENCE = $Evidence.Replace('\','/')
 $env:D1_CLEANUP_CASES = $Cases
-$env:D1_CLEANUP_REVISION = & git -C $repo rev-parse HEAD
+$env:D1_CLEANUP_REVISION = & git -c ('safe.directory=' + $repo.Replace('\','/')) -C $repo rev-parse HEAD
+if ($LASTEXITCODE -ne 0) { throw 'Cannot record diagnostic revision' }
 $env:SAPIENS_CONFIG_DIR = Join-Path $Evidence 'runner-config'
 $env:CODEX_HOME = Join-Path $Evidence 'runner-codex'
 $env:SAPIENS_TEST_CODEX = Join-Path $repo '.build/bin/sapiens-provider.exe'
