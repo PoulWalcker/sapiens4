@@ -12,7 +12,7 @@ RSpec.describe 'D1 native distribution' do
   after(:context) { @suite&.close }
 
   it 'installs and renders without Codex, owns its backend, and cleans up on quit and startup failure' do
-    app = @suite.install(File.join(@suite.root, 'lifecycle-install'))
+    app = @suite.install(File.join(@suite.root, 'lifecycle installation é'))
     home = File.join(@suite.root, 'lifecycle-user')
     listener = TCPServer.new('127.0.0.1', 0)
     @suite.prerequisite_recovery(app, home)
@@ -71,7 +71,7 @@ RSpec.describe 'D1 native distribution' do
   end
 
   it 'preserves real state and isolated overrides through locking, replacement, uninstall and reinstall' do
-    folder = File.join(@suite.root, 'state-install')
+    folder = File.join(@suite.root, 'state installation é')
     app = @suite.install(folder)
     home = File.join(@suite.root, 'state-user')
     profile = File.join(home, @suite.windows? ? 'Local' : 'Library/Application Support', 'Sapiens4')
@@ -92,6 +92,8 @@ RSpec.describe 'D1 native distribution' do
       if @suite.windows?
         before = Digest::SHA256.file(@suite.binary(app)).hexdigest
         @suite.installer(app, success: false)
+        short_app = @suite.ps('(New-Object -ComObject Scripting.FileSystemObject).GetFolder($env:D1_APP).ShortPath', env: {'D1_APP' => app}).strip
+        @suite.installer(short_app, success: false)
         @suite.installer(app, remove: true, success: false)
         expect(@suite.alive?(native.fetch(:backend))).to eq(true)
         expect(Digest::SHA256.file(@suite.binary(app)).hexdigest).to eq(before)

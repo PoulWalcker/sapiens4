@@ -103,19 +103,22 @@ var Locator, Service, Processes, Process, SelfProcess: Variant;
 begin
   Result := False;
   try
-    Prefix := AddBackslash(ExpandConstant('{app}'));
+    Prefix := ExpandConstant('{app}');
+    if DirExists(Prefix) then Prefix := GetShortName(Prefix);
+    Prefix := AddBackslash(Prefix);
     Locator := CreateOleObject('WbemScripting.SWbemLocator');
     Service := Locator.ConnectServer('', 'root\CIMV2');
     ParentId := 0; Uninstaller := '';
     if ForUninstall then begin
       SelfProcess := Service.Get('Win32_Process.Handle="' + IntToStr(InstallerProcessId) + '"');
       ParentId := SelfProcess.ParentProcessId;
-      Uninstaller := ExpandConstant('{uninstallexe}');
+      Uninstaller := GetShortName(ExpandConstant('{uninstallexe}'));
     end;
     Processes := Service.ExecQuery('SELECT ExecutablePath, ProcessId FROM Win32_Process WHERE ExecutablePath IS NOT NULL');
     for I := 0 to Processes.Count - 1 do begin
       Process := Processes.ItemIndex(I);
       Executable := Process.ExecutablePath;
+      if FileExists(Executable) then Executable := GetShortName(Executable);
       { Inno keeps its original installed first phase alive while the temporary
         second phase runs. Exempt only this exact path and current/parent PID. }
       if ForUninstall and (CompareText(Executable, Uninstaller) = 0) and
