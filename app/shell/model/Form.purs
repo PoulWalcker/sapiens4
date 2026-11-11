@@ -117,7 +117,7 @@ type PairStatus = {available :: Boolean, paired :: Boolean, enabled :: Boolean, 
 
 type Access = {built :: Boolean, trusted :: Boolean, foregroundAvailable :: Boolean, error :: String}
 
-data Content = NoContent | SetupContent Json | ComputerAccess Access | Prompts (Array Prompt) | RelayRegistry Relays | Pairing PairStatus
+data Content = NoContent | ComputerAccess Access | Prompts (Array Prompt) | RelayRegistry Relays | Pairing PairStatus
 derive instance eqContent :: Eq Content
 
 computerAccess :: Json -> Content
@@ -253,8 +253,3 @@ fieldsFor context = case context of
   _ -> empty
   where
   empty = decode D.empty
-
-setupValue :: Content -> Json
-setupValue = case _ of
-  SetupContent value -> value
-  _ -> D.null

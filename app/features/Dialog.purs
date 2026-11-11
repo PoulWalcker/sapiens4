@@ -25,14 +25,13 @@ nameHelp :: String
 nameHelp = "Start with A–Z. Letters, numbers, and - _ . : # + | ( ) & $ ^ are allowed. No spaces."
 
 make :: M.DialogKind -> F.Context -> M.Model -> M.Dialog
-make kind record m = {storage:M.emptyStorage,kind,title,record,fields,content:F.NoContent,status:M.Editing,identity:m.sequence+1}
+make kind record m = {kind,title,record,fields,content:F.NoContent,status:M.Editing,identity:m.sequence+1}
   where
   name = F.contextName record
   title = case kind of
     M.AppMenu -> D.fallback "CORPORA" $ m.snapshot.corpora.name
     M.WorkspaceSettings -> "Workspace & settings"
     M.Computer -> "Shared computer"
-    M.Onboarding -> "Set up Sapiens"
     M.AgentSettings -> name <> " settings"
     M.GroupSettings -> name <> " settings"
     M.Attach -> "Attach"
@@ -65,47 +64,16 @@ make kind record m = {storage:M.emptyStorage,kind,title,record,fields,content:F.
 view :: M.Model -> V.Html
 view m = case m.dialog of
   Nothing -> V.node "dialog" [V.id "modal"] []
-  Just d -> V.node "dialog" [V.id $ if M.corporaDialog d.kind then "corpora-dialog" else "modal",V.cls $ if d.kind == M.AppMenu then "app-menu-sheet" else if d.kind == M.Onboarding then "onboarding" else "",V.attr "aria-labelledby" "dialog-title",V.on "cancel" \e -> Link e CloseDialog]
-    [V.div (if M.corporaDialog d.kind then "corpora-menu-heading" else "modal-top")
-      [V.when (d.kind == M.Onboarding) $ V.div "setup-wordmark" [V.node "img" [V.cls "setup-mark",V.attr "src" (if m.theme == "dark" then "/favicon-dark.svg" else "/favicon.svg"),V.attr "alt" "",V.attr "aria-hidden" "true"] [],V.span [] "Sapiens4"]
-      ,V.when (d.kind /= M.Onboarding) $ V.span [V.cls "tiny-label"] "SAPIENS4"
-      ,V.when (d.kind == M.Onboarding) $ V.span [V.cls "setup-kicker"] "SETUP"
-      ,V.when (dismissible d) $ V.icon (if M.corporaDialog d.kind then "Close" else "Close dialog") "×" CloseDialog]
-    ,V.node "div" [V.id $ if M.corporaDialog d.kind then "corpora-dialog-body" else "modal-content"]
-      [V.textNode "h2" [V.id "dialog-title",V.attr "tabindex" "-1"] (dialogTitle d),body m d
-      ,V.textNode "p" [V.cls "corpora-feedback",V.attr "role" "status"] (M.dialogError d)
-      ,V.when (A.elem d.kind [M.Onboarding,M.Computer] && d.storage.page == M.SetupSteps && M.dialogError d /= "") $ V.button "button" "Check again" $ OnboardingPoll d.identity]]
-
-dismissible :: M.Dialog -> Boolean
-dismissible d = not (M.dialogBusy d) && (d.kind /= M.Onboarding || M.setupStep (F.setupValue d.content) == Just M.CompleteStep)
-
-dialogTitle :: M.Dialog -> String
-dialogTitle d
-  | d.kind == M.Onboarding && d.storage.page == M.ChooseStorage = "Your data"
-  | d.kind == M.Onboarding = case M.setupStep (F.setupValue d.content) of
-      Just M.ReadyStep -> "You're ready"
-      Just M.ComputerAccessStep -> "Computer access"
-      _ -> "Set up Sapiens"
-  | otherwise = d.title
+  Just d -> V.node "dialog" [V.id $ if M.corporaDialog d.kind then "corpora-dialog" else "modal",V.cls $ if d.kind == M.AppMenu then "app-menu-sheet" else "",V.attr "aria-labelledby" "dialog-title",V.on "cancel" \e -> Link e CloseDialog]
+    [V.div (if M.corporaDialog d.kind then "corpora-menu-heading" else "modal-top") [V.span [V.cls "tiny-label"] "SAPIENS4",V.icon (if M.corporaDialog d.kind then "Close" else "Close dialog") "×" CloseDialog]
+    ,V.node "div" [V.id $ if M.corporaDialog d.kind then "corpora-dialog-body" else "modal-content"] [V.textNode "h2" [V.id "dialog-title"] (d.title),body m d,V.textNode "p" [V.cls "corpora-feedback",V.attr "role" "status"] ((M.dialogError d))]]
 
 body :: M.Model -> M.Dialog -> V.Html
 body m d = case d.kind of
-  M.AppMenu -> V.node "nav" [V.label "Corpora menu"]
-    [V.button "app-menu-row" "Workspace & settings" $ OpenDialog M.WorkspaceSettings F.NoRecord
-    ,V.button "app-menu-row" "Shared computer" $ OpenDialog M.Computer F.NoRecord]
-  M.WorkspaceSettings -> V.div ""
-    [V.p "" "Talk to your Sapis in chat, manage their notes, and save documents in their workspaces. Sapis can delegate requests through ChiefSapi."
-    ,V.p "" "Use the corpora menu to switch workspaces. Active and Paused describe execution on the host; Connecting means this device is restoring its connection."
-    ,V.button "button" "Edit decision prompts" $ OpenDialog M.DecisionPrompts F.NoRecord
-    ,V.when m.localAvailable $ V.button "button" "Computer access" $ OpenDialog M.Computer F.NoRecord]
+  M.AppMenu -> V.node "nav" [V.label "Corpora menu"] [V.button "app-menu-row" "Workspace & settings" $ OpenDialog M.WorkspaceSettings F.NoRecord,V.button "app-menu-row" "Shared computer" $ OpenDialog M.Computer F.NoRecord]
+  M.WorkspaceSettings -> V.div "" [V.p "" "Talk to your Sapis in chat, manage their notes, and save documents in their workspaces. Sapis can delegate requests through ChiefSapi.",V.p "" "Use the corpora menu to switch workspaces. Active and Paused describe execution on the host; Connecting means this device is restoring its connection.",V.button "button" "Edit decision prompts" $ OpenDialog M.DecisionPrompts F.NoRecord]
   M.Computer | m.snapshot.computer.platform == "linux" -> linuxComputer m d
-  M.Computer -> V.div ""
-    [V.div "settings-row"
-      [V.span [] (if m.snapshot.computer.built then "Computer helper is installed" else "Computer helper is missing. Reinstall Sapiens to repair it.")
-      ,V.span [V.cls "tag"] (if owner == "" then "Available" else "In use · " <> (M.agent m owner).name)]
-    ,V.p "" (if windows then "Windows UI Automation works with accessible apps. Elevated apps and secure system dialogs cannot be controlled." else "Computer control is optional. Chat does not need Accessibility access.")
-    ,computerAccess d (F.setupValue d.content)]
-  M.Onboarding -> onboardingView m d (F.setupValue d.content)
+  M.Computer -> V.div "" [V.p "" "Blindly4 is the main computer-use tool. Ask a Sapi in chat to work on your computer.",V.div "settings-row" [V.span [] (if m.snapshot.computer.built then "Blindly4 is built" else "Build required: run " <> if windows then ".\\start.ps1" else "./start.sh"),V.span [V.cls "tag"] (if owner == "" then "Available" else "In use · " <> (M.agent m owner).name)],V.p "" $ "Sapis share one computer. " <> if windows then "Windows UI Automation works with accessible apps on your desktop. Elevated apps and secure system dialogs cannot be controlled." else "macOS Accessibility access is required for desktop interaction; permission failures appear in chat."]
   M.AgentSettings -> form "Save"
     [V.node "div" [V.cls "settings-tabs",V.attr "role" "tablist",V.label "Sapi settings"] $ map (\caption -> V.textNode "button" [V.attr "type" "button",V.attr "role" "tab",V.attr "aria-selected" $ show $ caption == "Profile",V.disabled $ caption /= "Profile"] (caption)) ["Profile","Context","Usage","Limits"]
     ,input "Name" F.Name [V.bool "required" true,V.attr "maxlength" "24",V.attr "aria-describedby" "name-help",V.attr "autocomplete" "off"]
@@ -244,57 +212,3 @@ saveTask m d deleted =
   let existing = F.contextId d.record /= ""
       payload = D.merge (D.json {title:d.fields.title,body:d.fields.body,assignee:d.fields.assignee,state:d.fields.state}) $ if existing then D.json {revision:D.json $ F.contextRevision d.record,deleted,state:if F.contextDeleted d.record then "backlog" else d.fields.state} else D.empty
   in {path:M.ownerPath m <> "/tasks" <> if existing then "/" <> B.encodeURI (F.contextId d.record) else "",method:if existing then "PUT" else "POST",body:payload,caption:if deleted then "Task deleted." else "Task saved."}
-
-setupButton :: M.Dialog -> String -> String -> V.Html
-setupButton d name caption = (if name == "back" then V.navigationControl else V.control) [V.cls "button",V.disabled $ M.dialogBusy d] caption $ DialogCommand $ Intent.Setup name
-
-onboardingView :: M.Model -> M.Dialog -> Json -> V.Html
-onboardingView _ d _ | d.storage.page == M.ChooseStorage = storageView d
-onboardingView m d value = V.div "setup-screen"
-  [V.div "setup-step-content" $ case M.setupStep value of
-    Just M.ComputerAccessStep -> [V.p "setup-intro" "Computer control is optional. You can use Sapiens without granting access.",computerAccess d value]
-    Just M.ReadyStep -> [V.p "setup-intro" "Your Sapiens workspace is ready to use."]
-    _ -> [V.p "setup-intro" "Loading setup…"]
-  ,V.div "setup-footer" [V.div "setup-navigation"
-    [V.div "setup-back" [if ready then setupButton d "back" "← Back" else V.when (m.env.native && permissions) $ V.navigationControl [V.cls "button",V.disabled $ M.dialogBusy d] "Your data" $ StorageNavigate M.ChooseStorage]
-    ,V.navigationControl [V.cls "button primary",V.disabled $ M.dialogBusy d || not (ready || permissions)] (if ready then "Open Workspace" else if D.s "computer_permission" value == "granted" || D.s "computer_permission" value == "not_required" then "Continue" else "Skip for now") $ DialogCommand $ Intent.Setup (if ready then "finish" else "permissions-done")]]]
-  where
-  ready = M.setupStep value == Just M.ReadyStep
-  permissions = M.setupStep value == Just M.ComputerAccessStep
-
-storageView :: M.Dialog -> V.Html
-storageView d = V.div "setup-screen"
-  [V.div "setup-step-content"
-    [V.p "setup-intro" "Keep your current space or choose another storage location. Changes apply when you continue."
-    ,V.div "setup-choice-list"
-      [choice M.KeepStorage "Keep current storage" storage.current
-      ,choice M.FreshStorage "Start fresh" storage.defaultDirectory
-      ,V.node "div" [V.cls "setup-storage-option",V.attr "data-change" $ show $ storage.choice == M.ExistingStorage && storage.directory /= ""]
-        [choice M.ExistingStorage "Use another folder" (D.fallback "Choose a folder with your existing agents and conversations." storage.directory)
-        ,V.when (storage.choice == M.ExistingStorage && storage.directory /= "") $ V.control [V.cls "setup-storage-change",V.label "Choose another folder",V.disabled busy] "Change" StoragePick]]
-    ,V.p "setup-note" "Existing data stays in its original location."]
-  ,V.div "setup-footer" [V.div "setup-navigation"
-    [V.div "setup-back" [V.navigationControl [V.cls "button",V.disabled busy] "← Back" $ StorageNavigate M.SetupSteps]
-    ,V.navigationControl [V.cls "button primary",V.disabled $ busy || storage.current == "" || storage.choice == M.ExistingStorage && storage.directory == ""] "Continue" StorageApply]]]
-  where
-  storage = d.storage
-  busy = M.dialogBusy d
-  folder path =
-    let parts = A.filter (_ /= "") $ S.split (S.Pattern "/") $ S.replaceAll (S.Pattern "\\") (S.Replacement "/") path
-    in (if A.length parts > 2 then "…/" else "") <> S.joinWith "/" (A.drop (max 0 $ A.length parts - 2) parts)
-  choice key title detail = V.node "button" [V.attr "type" "button",V.cls "setup-choice",V.label title,V.disabled busy,V.attr "aria-pressed" $ show $ key == storage.choice,V.click $ StorageChoose key]
-    [V.div "setup-choice-copy" [V.textNode "strong" [] title,V.textNode "small" [V.attr "title" detail] (folder detail)]]
-
-computerAccess :: M.Dialog -> Json -> V.Html
-computerAccess d value = V.div "computer-access"
-  [V.p "" $ case permission of
-    "missing" -> "Computer helper missing. Reinstall Sapiens to repair it."
-    "granted" -> "Computer control enabled."
-    "denied" -> "To interact with apps on your Mac, Sapiens needs Accessibility permission."
-    "not_required" -> "Computer control works with supported apps."
-    _ -> "Couldn't check Accessibility. Check again or open System Settings."
-  ,V.node "div" [V.cls "actions",V.style "margin-top:24px"]
-    [V.when (A.elem permission ["denied","unavailable"]) $ setupButton d "permission" "Enable access"
-    ,V.when (permission /= "missing" && permission /= "not_required") $ setupButton d "refresh" "Recheck access"
-    ,V.when (d.kind /= M.Onboarding) $ V.control [V.cls "button",V.style "margin-left:auto"] "Done" CloseDialog]]
-  where permission = D.s "computer_permission" value

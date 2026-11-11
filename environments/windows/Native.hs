@@ -247,6 +247,15 @@ execute arena view script done = do
   withWide script $ \source -> call2 (core view) 29 source handler
   release handler
 
+-- The completion barrier must run before navigating the shell.
+addDocumentScript :: Arena -> View -> String -> (Either String String -> IO ()) -> IO ()
+addDocumentScript arena view source done = do
+  handler <- completion arena "{B99369F3-9B11-47B5-BC6F-8E7895FCEA17}" $ \result identity ->
+    if result < 0 then done (Left "Could not restore workspace preferences.")
+    else readWide (castPtr identity) >>= done . Right
+  withWide source $ \script -> call2 (core view) 27 script handler
+  release handler
+
 -- Ask the engine for the committed frame's URL and MIME type. Guest script
 -- cannot override this result. An unsupported or failed query leaves the tab live.
 frameTree :: Arena -> View -> (String -> IO ()) -> IO ()

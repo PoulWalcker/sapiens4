@@ -120,12 +120,11 @@ sync timers m = when (m.env.native) do
   let guestTabs owner workspace = workspace {tabs=A.filter (not <<< M.isMemoTab (M.notes m owner)) workspace.tabs}
       workspaces = if native m then O.mapWithKey guestTabs m.workspaces else O.empty
       active = M.activeTab m
-      visible = not (M.setupRequired m) && native m && not (M.isMemoTab (M.notes m m.selected) active) && A.elem N.Workspace (M.visiblePanes m) && m.dialog == Nothing && m.menu == Nothing && not m.env.hidden
+      visible = native m && not (M.isMemoTab (M.notes m m.selected) active) && A.elem N.Workspace (M.visiblePanes m) && m.dialog == Nothing && m.menu == Nothing && not m.env.hidden
       sourceFor key | key.epoch == m.epoch = do
         workspace <- O.lookup key.owner workspaces
         tab <- A.find (\t -> t.id == key.id && t.path /= "") workspace.tabs
         pure {path:tab.path, seq:maybe "" _.seq tab.command}
       sourceFor _ = Nothing
-  let message = D.json {onboardingStep:M.setupStepName m.setupStage, workspaces, owner: if native m then m.selected else "", active:active.id, visible, dark: m.theme == "dark", background, foreground, captionBackground: background, rect:{x:box.x,y:box.y,width:box.width,height:box.height}}
-  B.nativeMessage $ if m.setupStage /= Nothing then D.put "onboarding" (D.json $ M.setupRequired m) message else message
+  B.nativeMessage $ D.json {workspaces, owner: if native m then m.selected else "", active:active.id, visible, dark: m.theme == "dark", background, foreground, captionBackground: background, rect:{x:box.x,y:box.y,width:box.width,height:box.height}}
   IdleTabs.observe timers (if visible then Just {owner:m.selected, id:active.id, epoch:m.epoch} else Nothing) sourceFor

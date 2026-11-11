@@ -2,6 +2,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module DataRoot (module DataRoot, module RuntimePaths) where
 
+import Types (writeJSON)
 import RuntimePaths (configDirectory, defaultDataDirectory)
 import Control.Exception
 import Control.Monad
@@ -10,7 +11,6 @@ import qualified Data.Aeson.KeyMap as K
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
 import Data.Char (isAscii, isAlphaNum)
-import Data.List (isInfixOf)
 import qualified Data.Text as T
 import qualified Data.UUID as UUID
 import Database.SQLite.Simple
@@ -44,15 +44,7 @@ savedDataDirectory = do
 saveDataDirectory :: FilePath -> IO ()
 saveDataDirectory directory = do
  path <- selectionPath
- createDirectoryIfMissing True (takeDirectory path)
- bracketOnError (openBinaryTempFile (takeDirectory path) "storage.json.tmp")
-  (\(temporary,h) -> do
-   hClose h `catch` (\(_::IOException) -> pure ())
-   removeFile temporary `catch` (\(_::IOException) -> pure ())) $ \(temporary,h) -> do
-   L.hPut h (encode (object ["version" .= (1::Int), "directory" .= directory]))
-   hFlush h
-   hClose h
-   renameFile temporary path
+ writeJSON path (object ["version" .= (1::Int), "directory" .= directory])
 
 -- The pinned SQLite enables URI filenames. Read-only mode prevents journal
 -- recovery or accidental creation while checking an attached installation.
@@ -78,10 +70,8 @@ storageMessage :: Exception e => e -> String
 storageMessage errorValue = maybe (displayException errorValue) ioeGetErrorString (fromException (toException errorValue))
 
 -- Startup diagnostics belong in the log, rather than the storage picker.
-startupMessage :: String -> String
-startupMessage diagnostic
- | "Could not read onboarding.json." `isInfixOf` diagnostic = "We couldn't load your saved setup settings. Your agents and conversations are unchanged. Restore your setup settings from a backup, then reopen Sapiens4."
- | otherwise = "Sapiens4 couldn't start. Please reopen the app and try again."
+startupMessage :: String
+startupMessage = "Sapiens4 couldn't start. Please reopen the app and try again."
 
 storageError :: String -> IO a
 storageError = ioError . userError

@@ -142,10 +142,7 @@ update action m = case action of
             Just record -> [Dispatch $ Shell.OpenDialog M.HostPairing $ F.CorporaRecord record false]) else []
       in Changed (if localPair then next {env=m.env {search=""}} else next) ([SaveRegistry registry.records] <> connect <> pairing <> [Sync])
   Entered record cached ->
-    let dialog = case m.dialog of
-          Just d | d.kind == M.Onboarding -> Just d
-          _ -> Nothing
-        current = m {snapshotContent=Nothing,fallbackDelay=M.fastPoll,active=record.key,connection=M.Offline,polling=true,saving=false,nativeReporting=false,nativeReports=[],epoch=m.epoch+1,dialog=dialog,scrollPosition=Nothing}
+    let current = m {snapshotContent=Nothing,fallbackDelay=M.fastPoll,active=record.key,connection=M.Offline,polling=true,saving=false,nativeReporting=false,nativeReports=[],epoch=m.epoch+1,dialog=Nothing,scrollPosition=Nothing}
         updated = case cached of
           Just snapshot -> M.resetSnapshot snapshot current
           Nothing -> current {snapshot=X.emptySnapshot,agents=[],documents=O.empty}

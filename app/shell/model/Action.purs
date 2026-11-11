@@ -8,13 +8,11 @@ import Data.Argonaut.Core (Json)
 import Halogen (SubscriptionId)
 import Sapiens.Domain as X
 import Sapiens.Model (DialogKind)
-import Sapiens.Model as M
 import Sapiens.Navigation (Activity, Scope, Pane, Period)
 import Web.Event.Event (Event)
 
 data Action
   = Initialize
-  | CheckSetup
   | LoadRegistry
   | Finalize
   | Poll
@@ -81,12 +79,6 @@ data Action
   | ScanFrame Int
   | UploadQR
   | StopScan
-  | StorageNavigate M.SetupPage
-  | StorageChoose M.StorageChoice
-  | StoragePick
-  | StorageApply
-  | StorageReceived Json
-  | OnboardingPoll Int
   | HostPairPoll Int
   | Install
   | Submit Event Action
@@ -96,8 +88,7 @@ data Action
 data Success = Refresh | CloseAndRefresh String | SavedPrompt String
 
 data DialogIntent
-  = Setup String
-  | SuggestNames
+  = SuggestNames
   | CreateAgent
   | MentionGroup X.Entity
   | ResetRelay

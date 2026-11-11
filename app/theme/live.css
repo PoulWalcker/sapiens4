@@ -436,50 +436,21 @@
 .connection-dot { width:6px;height:6px;flex:none;border-radius:50%;background:#888; }
 .connection-status[data-online="true"] .connection-dot { background:#3b9b69; }
 
-:root body.sapi-workspace dialog.onboarding { inset:0;width:100%;max-width:none;height:100%;max-height:none;margin:0;padding:24px 30px;border:0;border-radius:0;background:var(--sapi-bg);box-shadow:none;overflow:hidden; }
-:root body.sapi-workspace dialog.onboarding[open] { display:flex;flex-direction:column; }
-:root body.sapi-workspace dialog.onboarding > #modal-content { display:flex;flex-direction:column;width:100%;max-width:480px;margin:0 auto;flex:1;min-height:0;padding:clamp(25px,6vh,55px) 0 0; }
-:root body.sapi-workspace dialog.onboarding::backdrop { background:var(--sapi-bg);backdrop-filter:none; }
-:root body.sapi-workspace .app-loading { box-sizing:border-box;width:100%;max-width:540px;min-height:100dvh;margin:0 auto;padding:24px 30px; }
-:root body.sapi-workspace .setup-load-error { margin-top:55px; }
 
-/* Unified first-run onboarding. Keep the bootstrap and in-app steps visually aligned. */
+/* Pre-backend storage selection. */
 :root body.sapi-workspace { --setup-accent:#d90068; }
 :root[data-theme=dark] body.sapi-workspace { --setup-accent:#ff5aa5; }
-:root body.sapi-workspace .setup-header,
-:root body.sapi-workspace dialog.onboarding > .modal-top { display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:30px; }
+:root body.sapi-workspace .setup-header { display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:30px; }
 :root body.sapi-workspace .setup-wordmark { display:inline-flex;align-items:center;gap:9px;font-size:15px;font-weight:600;letter-spacing:-.4px;color:var(--sapi-ink); }
 :root body.sapi-workspace .setup-mark { display:block;width:27px;height:27px;flex:none; }
 :root body.sapi-workspace .setup-kicker { font:600 10px/1 var(--sapi-font);letter-spacing:1px;color:var(--sapi-muted); }
 :root body.sapi-workspace .setup-footer { display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid var(--sapi-line);padding-top:15px;margin-top:24px; }
 :root body.sapi-workspace .setup-footer > .primary { margin-left:auto; }
 :root body.sapi-workspace .setup-footer .button { min-height:36px;min-width:96px;padding:8px 18px;font-size:12px; }
-:root body.sapi-workspace .setup-navigation { display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%; }
 :root body.sapi-workspace .setup-choice { display:flex;align-items:center;gap:12px;border:1px solid var(--sapi-line);border-radius:10px;background:var(--sapi-white);color:var(--sapi-ink);padding:12px 14px;font:inherit; }
 :root body.sapi-workspace .setup-choice:hover { border-color:var(--sapi-muted);background:var(--sapi-hover); }
 :root body.sapi-workspace .setup-choice:focus-visible { outline:2px solid var(--setup-accent);outline-offset:2px; }
 :root body.sapi-workspace .setup-choice strong { font-size:13px;font-weight:600; }
-:root body.sapi-workspace dialog.onboarding > .modal-top { width:100%;max-width:480px;margin:0 auto;flex-shrink:0; }
-:root body.sapi-workspace dialog.onboarding #modal-content h2 { font:600 27px/1.2 var(--sapi-font);letter-spacing:-.8px;margin:0 0 11px; }
-:root body.sapi-workspace dialog.onboarding .setup-screen { display:flex;flex:1;min-height:0;flex-direction:column;font-size:13px;line-height:1.6; }
-:root body.sapi-workspace dialog.onboarding .setup-step-content { flex:1;min-height:0;overflow:auto; }
-:root body.sapi-workspace dialog.onboarding .setup-footer { display:block;margin-top:24px;flex:none; }
-:root body.sapi-workspace dialog.onboarding .setup-intro { color:var(--sapi-muted);font-size:13px;margin:0 0 22px; }
-:root body.sapi-workspace dialog.onboarding .setup-screen .form-hint { color:var(--sapi-muted);font-size:12px;line-height:1.6; }
-:root body.sapi-workspace dialog.onboarding .setup-screen .actions { gap:10px; }
-:root body.sapi-workspace dialog.onboarding .corpora-feedback { margin-top:14px;font-size:12px;overflow-wrap:anywhere; }
-:root body.sapi-workspace dialog.onboarding .corpora-feedback:empty { display:none; }
-@media(max-height:440px) {
-  :root body.sapi-workspace dialog.onboarding { padding-top:14px;padding-bottom:14px; }
-  :root body.sapi-workspace dialog.onboarding > #modal-content { padding:16px 0 0; }
-  :root body.sapi-workspace dialog.onboarding .setup-intro { margin-bottom:12px; }
-  :root body.sapi-workspace dialog.onboarding .setup-footer { margin-top:16px;padding-top:12px; }
-}
-@media(max-width:440px) {
-  :root body.sapi-workspace dialog.onboarding { padding:18px; }
-  :root body.sapi-workspace dialog.onboarding > #modal-content { padding-top:27px; }
-  :root body.sapi-workspace dialog.onboarding #modal-content h2 { font-size:24px; }
-}
 .workspace-document { flex:1;min-width:0;overflow:auto;padding:1rem;color:var(--ink);overflow-wrap:anywhere; }
 
 :root body.sapi-workspace .setup-choice-list { display:grid;gap:8px;margin:12px 0; }
@@ -488,13 +459,8 @@
 
 :root body.sapi-workspace .setup-choice-copy { display:grid;gap:3px;flex:1;min-width:0; }
 :root body.sapi-workspace .setup-choice-copy small { color:var(--sapi-muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
-:root body.sapi-workspace dialog.onboarding .setup-choice::after { content:'';display:block;flex:none;width:14px;height:14px;border:1px solid var(--sapi-muted);border-radius:50%; }
-:root body.sapi-workspace dialog.onboarding .setup-choice[aria-pressed=true]::after { background:var(--setup-accent);border-color:var(--setup-accent);box-shadow:inset 0 0 0 3px var(--sapi-white); }
 
 :root body.sapi-workspace .setup-storage-option { position:relative; }
 :root body.sapi-workspace .setup-storage-option[data-change=true] small { padding-right:60px; }
 :root body.sapi-workspace .setup-storage-change { position:absolute;right:44px;bottom:11px;padding:0;border:0;background:transparent;color:var(--setup-accent);font:500 11px/1.6 var(--sapi-font);cursor:pointer;text-decoration:underline;text-underline-offset:3px; }
 :root body.sapi-workspace .setup-storage-change:focus-visible { outline:2px solid var(--setup-accent);outline-offset:3px; }
-
-:root body.sapi-workspace dialog.onboarding #dialog-title { flex:none; }
-:root body.sapi-workspace dialog.onboarding .corpora-feedback { flex:none;max-height:80px;overflow:auto; }

@@ -44,57 +44,14 @@ handle runtime dispatch action = case action of
         M.Computer | m.snapshot.computer.platform == "linux" -> receive d.identity (\value -> E.modifyDialog d.identity _ {content=F.computerAccess value,status=M.Editing}) $ E.api runtime m "/api/computer" "GET" D.null
         M.DecisionPrompts -> receive d.identity (\value -> E.modifyDialog d.identity _ {content=F.Prompts $ map F.prompt $ D.rows "prompts" value,fields=F.decode $ D.first $ D.rows "prompts" value,status=M.Editing}) $ E.api runtime m "/api/decision-prompts" "GET" D.null
         M.RelayList -> receive d.identity (\value -> E.modifyDialog d.identity _ {content=F.relayRegistry value,status=M.Editing}) $ C.json "/api/host/relays" "GET" D.null
-        M.Onboarding -> dispatch $ OnboardingPoll d.identity
-        M.Computer -> when m.localAvailable $ dispatch $ OnboardingPoll d.identity
         M.HostPairing -> dispatch $ HostPairPoll d.identity
         M.EditCorpora -> liftEffect $ B.focus "#corpora-dialog textarea"
         M.ConnectRemote -> liftEffect $ B.focus "#paste-invitation textarea"
         _ -> pure unit
-  OnboardingPoll id -> E.inDialog id \d -> when (A.elem d.kind [M.Onboarding,M.Computer] && not (M.dialogBusy d)) do
-    receive id (\value -> do
-      H.modify_ _ {setupStage=M.setupStep value}
-      E.modifyDialog id _ {content=F.SetupContent value,status=M.Editing}
-      E.sync runtime) $ C.json "/api/host/onboarding" "GET" D.null
   CloseDialog -> do
-    m <- H.get
-    case m.dialog of
-      Just d | not (Dialog.dismissible d) -> E.modifyDialog d.identity $ M.setDialogError "Use Continue or Skip to finish setup."
-      _ -> do
-        void $ H.fork $ H.liftAff $ C.cancelPairing runtime
-        H.modify_ Dialog.close
-        E.sync runtime
-  StorageNavigate page -> do
-    m <- H.get
-    traverse_ (\d -> when (d.kind == M.Onboarding && not (M.dialogBusy d) && M.setupStep (F.setupValue d.content) == Just M.ComputerAccessStep) do
-      E.modifyDialog d.identity \current -> current {storage=current.storage {page=page},status=M.Editing}
-      when (page == M.ChooseStorage && d.storage.current == "") $ storageRequest m d "info" "" "") m.dialog
-  StorageChoose choice -> do
-    m <- H.get
-    traverse_ (\d -> when (d.kind == M.Onboarding && d.storage.page == M.ChooseStorage && not (M.dialogBusy d)) do
-      E.modifyDialog d.identity \current -> current {storage=current.storage {choice=choice},status=M.Editing}
-      when (choice == M.ExistingStorage && d.storage.directory == "") $ dispatch StoragePick) m.dialog
-  StoragePick -> do
-    m <- H.get
-    traverse_ (\d -> when (d.kind == M.Onboarding && d.storage.page == M.ChooseStorage && not (M.dialogBusy d)) $ storageRequest m d "pick" "" "") m.dialog
-  StorageApply -> do
-    m <- H.get
-    traverse_ (\d -> when (d.kind == M.Onboarding && d.storage.page == M.ChooseStorage && not (M.dialogBusy d)) do
-      let storage = d.storage
-          unchanged = storage.choice == M.KeepStorage || storage.choice == M.ExistingStorage && storage.directory == storage.current
-      if unchanged && storage.available then E.modifyDialog d.identity \current -> current {storage=current.storage {page=M.SetupSteps},status=M.Editing}
-      else when (storage.current /= "" && (storage.choice /= M.ExistingStorage || storage.directory /= "")) $
-        storageRequest m d "apply" (if storage.choice == M.FreshStorage then "new" else "existing") (if storage.choice == M.KeepStorage then storage.current else storage.directory)) m.dialog
-  StorageReceived value -> E.inDialog (D.int $ D.get "request" value) \d -> when (d.kind == M.Onboarding && M.dialogBusy d) do
-    let kind = D.s "kind" value
-    E.modifyDialog d.identity \current ->
-      let storage = current.storage
-          next = case kind of
-            "info" -> storage {current=D.s "current" value,defaultDirectory=D.s "default" value,available=D.b "available" value}
-            "picked" -> storage {choice=M.ExistingStorage,directory=D.s "directory" value}
-            "unchanged" -> storage {page=M.SetupSteps,available=true}
-            "error" -> storage {available=D.b "available" value}
-            _ -> storage
-      in current {storage=next,status=if kind == "error" then M.Rejected (D.s "error" value) else M.Editing}
+    void $ H.fork $ H.liftAff $ C.cancelPairing runtime
+    H.modify_ Dialog.close
+    E.sync runtime
   Field key value -> do
     H.modify_ \m -> m {dialog=map (Dialog.updateField key value) m.dialog}
     when (key == F.ShowLink) do
@@ -119,12 +76,6 @@ handle runtime dispatch action = case action of
   DialogCommand command -> commandAction command
   _ -> pure unit
   where
-  -- Native operations own a dialog generation. Stale picker replies and
-  -- repeated clicks cannot apply a selection after its owner has changed.
-  storageRequest m d operation mode directory = E.inDialog d.identity \current -> do
-    let requested = current {identity=m.sequence+1,status=M.Submitting ""}
-    H.modify_ _ {dialog=Just requested,sequence=requested.identity}
-    liftEffect $ B.nativeMessage $ D.json {storage:{operation,mode,directory,request:requested.identity}}
   attach m operation = E.attempt operation \result -> E.inEpoch m.epoch \current -> do
     H.modify_ _ {uploading=max 0 $ current.uploading-1}
     traverse_ (\d -> E.modifyDialog d.identity (M.setDialogBusy false)) m.dialog
@@ -247,14 +198,6 @@ handle runtime dispatch action = case action of
       Intent.InstallPrompt -> void $ H.fork $ void $ H.liftAff $ try $ toAffE B.installPrompt
       _ -> traverse_ (\d -> unless (M.dialogBusy d) $ dialogCommand m d command) m.dialog
   dialogCommand m d command = case command of
-    Intent.Setup setupAction -> do
-      -- A mutation owns a new generation, so an older check cannot overwrite it.
-      let requested = d {identity=m.sequence+1}
-      H.modify_ _ {dialog=Just requested,sequence=requested.identity}
-      runDialog requested (\value -> do
-        H.modify_ _ {setupStage=M.setupStep value}
-        E.modifyDialog requested.identity _ {content=F.SetupContent value,status=M.Editing}
-        if requested.kind == M.Onboarding && M.setupStep value == Just M.CompleteStep then dispatch CloseDialog else E.sync runtime) $ C.json "/api/host/onboarding" "POST" $ D.json {action: setupAction}
     Intent.SuggestNames -> do
       E.modifyDialog d.identity (\s -> s {identity=s.identity+1})
       H.modify_ (\s -> s {sequence=s.sequence+1})

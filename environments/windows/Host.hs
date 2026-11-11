@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module Host (Host(..), prepareHost, startHost, restartHost, checkStorage, closeHost, activeDataDirectory, activeStorageChoice, hostRunning, serverRunning) where
+module Host (Host(..), prepareHost, startHost, checkStorage, closeHost) where
 
 import Control.Concurrent.Async
 import Control.Exception
@@ -31,14 +31,11 @@ data Host = Host
   }
 
 data ServerProcess = ServerProcess
-  { processChoice :: StorageChoice
-  , processDirectory :: FilePath
-  , processHandle :: ProcessHandle
+  { processHandle :: ProcessHandle
   , processInput :: Handle
   , processOutput :: Handle
   , processErrors :: Handle
   , errorReader :: Async ()
-  , processConfiguration :: CreateProcess
   }
 
 data HostPaths = HostPaths { dataPath :: FilePath, runtimePath :: FilePath }
@@ -81,38 +78,29 @@ startHost choice host = do
         { cwd = Just (runtimeDirectory host), std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe
         , env = Just (hostEnvironment overrides environment)
         , create_group = True, use_process_jobs = True, detach_console = True }
-  launchHost choice host command
+  launchHost host command
 
-restartHost :: ServerProcess -> Host -> IO (Host,String)
-restartHost previous host = do
-  let restored = host {dataDirectory=processDirectory previous}
-      existing (key,value) = (key,if map toUpper key=="SAPIENS_STORAGE_MODE" then "existing" else value)
-      command = (processConfiguration previous) {env=fmap (map existing) (env $ processConfiguration previous)}
-  -- Reopen initialized data, retaining the original startup configuration and
-  -- StartNew provenance used by the idempotent first-run selection contract.
-  address <- launchHost (processChoice previous) restored command
-  pure (restored,address)
-
-launchHost :: StorageChoice -> Host -> CreateProcess -> IO String
-launchHost choice host command = mask $ \restore -> do
+launchHost :: Host -> CreateProcess -> IO String
+launchHost host command = mask $ \restore -> do
   closeHost host
   (Just input, Just output, Just errors, child) <- createProcess command
-  let cleanup = terminateProcess child `finally` mapM_ closeStream [input, output, errors]
-  mapM_ (\stream -> hSetEncoding stream utf8 >> hSetNewlineMode stream universalNewlineMode) [input, output, errors] `onException` cleanup
-  errorText <- newIORef ""
-  collect <- (async $ (forever $ hGetLine errors >>= \line -> modifyIORef' errorText (\old -> let next = old ++ line ++ "\n" in drop (max 0 $ length next - 12000) next))
-    `catch` \(_ :: IOException) -> pure ()) `onException` cleanup
-  writeIORef (serverProcess host) (Just (ServerProcess choice (dataDirectory host) child input output errors collect command))
-  restore (awaitHost host output errorText) `onException` closeHost host
+  collect <- async $ (do
+    hSetEncoding errors utf8
+    hSetNewlineMode errors universalNewlineMode
+    forever (void $ hGetLine errors)
+    `catch` \(_ :: IOException) -> pure ())
+  writeIORef (serverProcess host) (Just (ServerProcess child input output errors collect))
+  (do
+    mapM_ (\stream -> hSetEncoding stream utf8 >> hSetNewlineMode stream universalNewlineMode) [input, output]
+    restore (awaitHost host output)) `onException` closeHost host
 
 checkStorage :: Host -> StorageChoice -> IO ()
 checkStorage host choice = do
-  environment <- getEnvironment
   let binary = runtimeDirectory host </> ".build/bin/sapiens4.exe"
       mode = if choice == StartNew then "new" else "existing"
   (code,_,errors) <- readCreateProcessWithExitCode
     (proc binary ["check-data",dataDirectory host,mode])
-      { cwd=Just (runtimeDirectory host), env=Just (hostEnvironment [] environment), detach_console=True } ""
+      { cwd=Just (runtimeDirectory host), detach_console=True } ""
   unless (code==ExitSuccess) $ ioError $ userError $ if null errors then "This data directory could not be opened." else errors
 
 readyAddress :: String -> Maybe URI
@@ -122,16 +110,16 @@ readyAddress line = do
   guard (uriScheme uri == "http:" && uriRegName auth == "127.0.0.1" && null (uriUserInfo auth))
   pure uri
 
-awaitAddress :: Handle -> IORef String -> IO URI
-awaitAddress output errors = do
+awaitAddress :: Handle -> IO URI
+awaitAddress output = do
   ended <- hIsEOF output
-  when ended $ readIORef errors >>= ioError . userError . startupMessage
+  when ended $ ioError $ userError startupMessage
   line <- hGetLine output
-  maybe (awaitAddress output errors) pure (readyAddress line)
+  maybe (awaitAddress output) pure (readyAddress line)
 
-awaitHost :: Host -> Handle -> IORef String -> IO String
-awaitHost host output errors = do
-  result <- timeout 35000000 (awaitAddress output errors)
+awaitHost :: Host -> Handle -> IO String
+awaitHost host output = do
+  result <- timeout 35000000 (awaitAddress output)
   uri <- maybe (ioError $ userError "Sapiens4 did not become ready within 35 seconds") pure result
   let base = uri { uriPath = "", uriQuery = "", uriFragment = "" }
   manager <- newManager defaultManagerSettings
@@ -140,15 +128,6 @@ awaitHost host output errors = do
   case decode (responseBody response) of
     Just (Object fields) | K.lookup "status" fields == Just (String "ok") -> writeIORef (origin host) (Just base) >> pure (show uri)
     _ -> ioError $ userError "Server readiness check failed"
-
-activeDataDirectory :: Host -> IO (Maybe FilePath)
-activeDataDirectory host = fmap processDirectory <$> readIORef (serverProcess host)
-
-activeStorageChoice :: Host -> IO (Maybe StorageChoice)
-activeStorageChoice host = fmap processChoice <$> readIORef (serverProcess host)
-
-hostRunning :: Host -> IO Bool
-hostRunning host = readIORef (serverProcess host) >>= serverRunning
 
 serverRunning :: Maybe ServerProcess -> IO Bool
 serverRunning = maybe (pure False) (fmap isNothing . getProcessExitCode . processHandle)

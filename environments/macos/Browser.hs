@@ -210,7 +210,7 @@ history browser tab predicate action = do
         let done = pending { tabAwaiting = False }
         save browser done; report browser done
 
-receive browser message onSetup onStorage onPreferences = do
+receive browser message onPreferences = do
     sh <- readIORef (shell browser)
     sourceView <- obj0 message "webView"
     frame <- obj0 message "frameInfo"
@@ -224,11 +224,7 @@ receive browser message onSetup onStorage onPreferences = do
         valid <- booleanArgument raw "isKindOfClass:" dictionary
         body <- if valid then jsonObject raw else pure Nothing
         forM_ body $ \input -> do
-          case field "onboarding" input of
-            Bool setup -> onSetup setup (text (field "onboardingStep" input))
-            _ -> pure ()
           if field "clientPreferences" input /= Null then onPreferences (field "clientPreferences" input)
-          else if not (T.null (text (field "operation" (field "storage" input)))) then onStorage (field "storage" input)
           else if bool (field "pickFile" input) then do
             panel <- new "NSOpenPanel"
             void (obj1 panel "setCanChooseDirectories:" (int 0)); void (obj1 panel "setAllowsMultipleSelection:" (int 1)); void (obj1 panel "setShowsHiddenFiles:" (int 1))

@@ -15,10 +15,11 @@ and attachments; newer input survives. Failed resources require explicit retry.
 Native browser reports are serialized, and corpora switching restores that
 corpora's cached preferences.
 
-The macOS shell mirrors workspace preferences and the active Corpora into a
-profile-specific NSUserDefaults suite, keyed by the canonical Data Root. It
-restores them before the UI starts on a new loopback origin, so a changed port
-does not lose drafts. Only the trusted shell can update this device-local state;
+The native shells mirror workspace preferences, appearance and active Corpora
+by canonical Data Root: macOS uses a profile-specific NSUserDefaults suite;
+Windows uses durable JSON under the configuration directory. They restore this
+state before the UI starts on a new loopback origin, so a changed port does not
+lose drafts. Windows reuses existing WebView2 shell profiles in place. Only the trusted shell can update this device-local state;
 guest pages and Corpora snapshots do not carry it.
 
 Browser/native APIs and third-party bindings live in

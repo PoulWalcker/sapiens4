@@ -66,23 +66,8 @@ handle runtime input = session input
       when (M.remote m) do
         liftEffect $ B.historyReplace $ m.env.path
         void $ H.fork $ void $ H.liftAff $ try $ toAffE $ B.registerWorker "/sw.js"
-      unless required do
-        dispatch CheckSetup
-        dispatch LoadRegistry
+      unless required $ dispatch LoadRegistry
       E.sync runtime
-    CheckSetup -> do
-      m <- H.get
-      unless (M.remote m || m.setupChecking || m.setupStage /= Nothing) do
-        H.modify_ _ {setupChecking=true}
-        E.attempt (C.json "/api/host/onboarding" "GET" D.null) \result -> do
-          H.modify_ _ {setupChecking=false}
-          case result of
-            Right value -> case M.setupStep value of
-              Nothing -> H.modify_ _ {feedback="Could not read setup. Check again."}
-              Just stage -> do
-                H.modify_ _ {setupStage=Just stage}
-                if stage == M.CompleteStep then E.sync runtime else dispatch $ OpenDialog M.Onboarding F.NoRecord
-            Left failure -> H.modify_ _ {feedback=message failure}
     Finalize -> liftEffect $ C.dispose runtime
     Poll -> E.runUpdate runtime dispatch U.Poll
     Copy text caption -> do
@@ -188,7 +173,6 @@ handle runtime input = session input
     CloseMenu -> E.runUpdate runtime dispatch U.CloseMenu
     Scroll -> E.captureScroll *> E.persistLocal
     UserScroll -> H.modify_ _ {scrollPosition=Nothing,restoringScroll=false}
-    NativeReport report | report.op == "storage" -> dispatch $ StorageReceived report.body
     NativeReport report -> E.runUpdate runtime dispatch $ U.QueueNative report
     DrainNative -> E.runUpdate runtime dispatch U.DrainNative
     Browser command -> do
