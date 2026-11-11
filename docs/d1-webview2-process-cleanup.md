@@ -88,8 +88,8 @@ Each root contains `matrix.log`, `matrix.err`, `matrix.exit`, installer identity
 Tested application commit: `d7bcbf4a1c85d998bb94f2d5956d6f3286d4b4b1`.
 The official Windows build/package script returned 0, including its recursive PE architecture/import audit and Inno Setup packaging. Final Setup:
 `C:/Build/d1-webview2-cleanup/.build/fixed-setup/Sapiens-Setup-win-x64.exe`.
-Its independently computed SHA-256 matched `SHA256SUMS`:
-`e9c8dea37e9380c8e1cf7e7354ef93ee156bd3ce67d290e5a60d8096cecc13a88a`.
+Its independently computed SHA-256 matched `.build/fixed-setup/SHA256SUMS`.
+The full digest is preserved in that manifest and in the final evidence root's `identity.txt`.
 
 Verified platform: Microsoft Windows Server 2022 Datacenter, version `10.0.20348`, 64-bit. The tested WebView2 executable was in `Microsoft/EdgeWebView/Application/157.0.4341.42`. This is local unsigned installer validation on that server configuration, not a Windows 10/11 or public-signing qualification.
 
