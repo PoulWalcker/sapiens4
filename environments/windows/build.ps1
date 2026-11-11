@@ -64,10 +64,12 @@ function Verify-Signature($Path) {
 $staging = $null
 Push-Location $repo
 try {
-    if (-not (Test-Path (Join-Path $repo 'submodules/libs4/node_modules/sharp/package.json'))) {
-        & npm ci --prefix (Join-Path $repo 'submodules/libs4')
+    if ($PublicRelease -or -not (Test-Path (Join-Path $repo 'submodules/libs4/node_modules/sharp/package.json'))) {
+        & npm ci --include=dev --prefix (Join-Path $repo 'submodules/libs4')
         if ($LASTEXITCODE -ne 0) { throw 'Icon/UI dependency installation failed' }
     }
+    $uiOutput = Join-Path $repo '.build/web'
+    if ($PublicRelease -and (Test-Path -LiteralPath $uiOutput)) { Remove-Item -LiteralPath $uiOutput -Recurse -Force }
     foreach ($icon in @(@('favicon.svg','AppIcon.ico'),@('favicon-dark.svg','AppIconDark.ico'))) {
         & node (Join-Path $repo 'submodules/libs4/tools/svg-to-ico.cjs') (Join-Path $repo ('app/shell/'+$icon[0])) (Join-Path $PSScriptRoot $icon[1])
         if ($LASTEXITCODE -ne 0) { throw 'Icon preparation failed' }
