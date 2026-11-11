@@ -29,12 +29,7 @@ RSpec.describe 'Source distribution contract' do
     @data = File.join(@folder, "existing corpora's é")
     FileUtils.mkdir_p(@data)
     File.write(File.join(@data, 'keep.txt'), 'Existing corpora data')
-    @app = File.join(@release, '.build/macos/Sapiens4.app')
-    if RUBY_PLATFORM.include?('darwin')
-      FileUtils.mkdir_p(File.join(@app, 'Contents/Resources'))
-      File.write(File.join(@app, 'Contents/Resources/obsolete-helper.py'), 'Old build artifact')
-    end
-    command = RUBY_PLATFORM.include?('darwin') ? ['sh', 'environments/macos/build.sh'] : ['runghc', 'build/Build.hs']
+    command = ['runghc', 'build/Build.hs']
     out, error, code = Contract.capture(*command, chdir: @release, timeout: 1200,
       env: {'SAPIENS_DATA_DIR' => @data})
     expect(code).to eq(0), out + error
@@ -52,19 +47,6 @@ RSpec.describe 'Source distribution contract' do
         FileUtils.remove_entry(@folder)
       end
     end
-  end
-
-  it 'builds a signed macOS launcher for existing data without changing that data', :macos do
-    skip 'macOS desktop build' unless RUBY_PLATFORM.include?('darwin')
-    out, error, code = Contract.capture('plutil', '-convert', 'json', '-o', '-', File.join(@app, 'Contents/Resources/Launcher.plist'))
-    expect(code).to eq(0), error
-    expect(JSON.parse(out)).to include('Repository' => @release, 'DataDirectory' => @data,
-      'Executable' => File.join(@release, '.build/bin/sapiens4'))
-    expect(Dir.children(@data)).to eq(['keep.txt'])
-    expect(File.read(File.join(@data, 'keep.txt'))).to eq('Existing corpora data')
-    expect(File.exist?(File.join(@app, 'Contents/Resources/obsolete-helper.py'))).to eq(false)
-    _, error, code = Contract.capture('codesign', '--verify', '--strict', @app)
-    expect(code).to eq(0), error
   end
 
   it 'boots from a source-only release and completes work using its packaged assets' do

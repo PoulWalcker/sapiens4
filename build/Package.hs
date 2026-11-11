@@ -103,16 +103,6 @@ files root = do
 
 copy :: FilePath -> FilePath -> IO ()
 copy source target = createDirectoryIfMissing True (takeDirectory target) >> copyFile source target
-copyTree :: FilePath -> FilePath -> IO ()
-copyTree source destination = do
- createDirectoryIfMissing True destination
- names <- listDirectory source
- forM_ names $ \name -> do
-  let path=source</>name;target=destination</>name
-  pathIsSymbolicLink path >>= flip when (fail "Package payload may not contain symbolic links")
-  directory <- doesDirectoryExist path
-  if directory then copyTree path target else copy path target
-
 macho :: FilePath -> IO Bool
 macho path = do
  present <- doesFileExist path
@@ -266,13 +256,14 @@ stage root destination = do
  output <- makeAbsolute destination
  when (inside output root) $ fail "Runtime destination must not contain the source checkout"
  createDirectory destination
- notices <- concat <$> mapM (files . (root</>)) ["license","submodules/libs4/license","submodules/blindly4/license"]
- prompts <- files (root</>"corpora/prompts")
- let suffix=if os=="mingw32" then ".exe" else ""
-     blindly=if os=="mingw32" then "windows/blindly4.exe" else "release/blindly4"
-     payload=nub (map assetFile allAssets++[".build/bin/sapiens4"++suffix,"submodules/blindly4/.build/"++blindly]++map (makeRelative root) (notices++prompts))
- forM_ payload $ \path -> copy (root</>path) (destination</>path)
- when (os=="mingw32") $ forM_ ["AppIcon.ico","AppIconDark.ico"] $ \icon -> copy (root</>"environments/windows"</>icon) (destination</>"environments/windows"</>icon)
+ flip onException (removePathForcibly destination) $ do
+  notices <- concat <$> mapM (files . (root</>)) ["license","submodules/libs4/license","submodules/blindly4/license"]
+  prompts <- files (root</>"corpora/prompts")
+  let suffix=if os=="mingw32" then ".exe" else ""
+      blindly=if os=="mingw32" then "windows/blindly4.exe" else "release/blindly4"
+      payload=nub (map assetFile allAssets++[".build/bin/sapiens4"++suffix,"submodules/blindly4/.build/"++blindly]++map (makeRelative root) (notices++prompts))
+  forM_ payload $ \path -> copy (root</>path) (destination</>path)
+  when (os=="mingw32") $ forM_ ["AppIcon.ico","AppIconDark.ico"] $ \icon -> copy (root</>"environments/windows"</>icon) (destination</>"environments/windows"</>icon)
 
 packageMac :: FilePath -> String -> FilePath -> Bool -> IO ()
 packageMac root version outputInput public = do

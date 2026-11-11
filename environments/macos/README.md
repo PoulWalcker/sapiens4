@@ -1,59 +1,44 @@
 # Sapiens4 for macOS
 
-An AppKit/WebKit window with a Dock icon. Requires macOS 13+, Command Line Tools,
-stable Rust, GHC 9.14.1, Cabal 3.18.2, Node.js 22.5+, npm, Git and authenticated
-Codex CLI 0.156.1 or newer.
+On macOS 13+ Apple Silicon, mount `Sapiens.dmg`, copy **Sapiens4.app** to
+Applications (or your own Applications folder), and open it. No Sapiens build
+tools are needed. The app opens without Codex; model execution requires your
+installed Codex CLI and existing `codex login`. Nothing changes Codex credentials.
 
-## Build and open
+Quit Sapiens4 before replacing or removing the app. Quit stops its owned backend;
+closing the last window keeps the app running. Replacing, removing and reinstalling
+the app retain `~/Library/Application Support/Sapiens4/{data,config}`. The backend
+log is `data/desktop-server.log`. Older Development directories remain untouched.
+Use `SAPIENS_DATA_DIR` and `SAPIENS_CONFIG_DIR` at launch for explicit isolation.
+For example, run `SAPIENS_DATA_DIR=/path/to/data /Applications/Sapiens4.app/Contents/MacOS/Sapiens4`.
 
-From the repository root:
+## Build and verify
+
+Install Command Line Tools, GHC 9.14.1, Cabal 3.18.2, Node.js 22.5+, npm,
+Git and stable Rust. Initialize pinned submodules recursively. From the root:
 
 ```sh
 git submodule update --init --recursive
-./submodules/blindly4/macos/build.sh
-./environments/macos/build.sh
-open .build/macos/Sapiens4.app
+./environments/macos/build.sh 0.1.0 .build/release-local
+(cd .build/release-local && shasum -a 256 -c SHA256SUMS)
 ```
 
-The build records the compiled backend executable, PATH, repository location
-and data directory. Keep the checkout and its build output in place.
-The app starts the local backend when needed; closing or quitting its window
-leaves the backend running so conversations can finish. It installs no login item.
-Right-click the Dock icon → Options → Keep in Dock.
+The output directory must be new. It receives only `Sapiens.dmg` and `SHA256SUMS`.
+Builds reuse compiler caches and assemble fresh temporary payloads. Local builds
+are ad-hoc signed. Each Mach-O must be ARM64, support macOS 13, and resolve all
+non-system dependencies inside the app; recursive relocation rejects basename
+collisions. The final mounted image is copied, audited and signature-verified.
 
-Data defaults to the checkout's `.sapiens4` directory. Set `SAPIENS_DATA_DIR` when
-building to retain an existing data location. The backend log is
-`desktop-server.log` inside that directory. Builds do not move or delete data.
-
-## Manual version changes
-
-Desktop update checks, update controls, managed installation, and automatic
-backup/rollback are removed. Build and open each new version manually. The
-app is locally ad-hoc signed, not notarized or portable.
-
-For an existing managed installation, first let active work finish, quit the old
-app, and gracefully stop its backend before opening the replacement. Reuse the
-exact data directory recorded by the old installation:
+For a public release, set `SAPIENS_MAC_SIGN_IDENTITY` to a Developer ID Application
+identity and `SAPIENS_MAC_NOTARY_PROFILE` to a configured `notarytool` keychain
+profile, then add `--release`:
 
 ```sh
-SAPIENS_DATA_DIR="/absolute/path/to/existing/data" ./environments/macos/build.sh
-open .build/macos/Sapiens4.app
+./environments/macos/build.sh 0.1.0 .build/release-public --release
 ```
 
-Keep the old data directory and backups. The new build does not read or modify
-old managed releases, and an old Dock shortcut still opens the old app; pin the
-new app instead. Never run two backends against the same data directory.
-
-## Workspace and verification
-
-Native tabs support links, local files, bookmarks, back/forward, reload and zoom.
-WebKit tabs keep their own browser sessions. File selection, editing shortcuts,
-external links, themes and the favicon-derived Dock icon remain available.
-
-```sh
-ruby submodules/libs4/ruby/bundle.rb exec rspec spec/distribution_spec.rb spec/workspace_accessibility_spec.rb
-codesign --verify --strict .build/macos/Sapiens4.app
-```
-
-Tests use temporary data and controlled model executables; see
-[coverage and platform requirements](../../docs/testing.md).
+Public builds require both credentials, sign nested code with Hardened Runtime,
+notarize and staple the app and DMG, then run Gatekeeper and signature checks.
+The temporary notarization ZIP is discarded. Credentials are not stored in outputs.
+Run the finished-installer [acceptance suite](../../docs/testing.md#d1-native-distribution).
+Native browser tabs, file picking and accessibility behavior retain their existing interfaces.

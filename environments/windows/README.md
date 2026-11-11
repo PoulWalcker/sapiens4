@@ -1,54 +1,45 @@
 # Sapiens4 for Windows
 
-Extract the whole portable package and run **Sapiens4.exe**. The `win-x64` package
-runs on Intel/AMD PCs and on Windows 11 ARM PCs with x64 app support. Requires
-Microsoft Edge WebView2 Evergreen Runtime. The Haskell runtime and Blindly4 are
-bundled; Python, .NET, WSL and administrator access are not required.
+Run **Sapiens-Setup.exe** on Windows 10/11 x64. Setup installs per user without
+administrator access and creates a Start menu shortcut. No Sapiens build tools
+are needed. The app uses the system WebView2 Runtime; native Install/Repair,
+Retry and Cancel controls handle a missing Runtime before starting the backend.
+No browser Runtime or Codex CLI is bundled. Model execution uses your installed
+Codex CLI and existing authentication. Native npm binaries are supported;
+`SAPIENS_CODEX_BINARY` selects an executable explicitly.
 
-Chat requires authenticated Codex CLI 0.156.1+. Run `codex login`; installed CLI
-and native npm binaries are discovered automatically. Set `SAPIENS_CODEX_BINARY`
-to a full executable path to override discovery.
+Data and configuration live in `%LOCALAPPDATA%\Sapiens4\{data,config}`, outside the
+installation. Quit stops the owned backend. Quit before replacement or uninstall;
+Setup refuses active installation processes, unowned nonempty destinations and
+protected state directories. Uninstall preserves data, configuration and unowned
+files. Process checks are preflight safeguards, not an atomic installation lock.
+The ownership marker left after uninstall allows safe reinstallation.
 
-Data lives in `%LOCALAPPDATA%\Sapiens4`, separate from the application. Closing the
-app stops its server and cancels active calls. The package is unsigned and has no
-automatic updater: replace the application directory while retaining the data.
-Licenses ship in `license/`, `runtime/submodules/blindly4/license/` and `runtime/submodules/libs4/license/`.
+## Build and verify
 
-## Build from source
-
-Install GHC 9.14.1, Cabal 3.18.2, Node.js 22.5+, npm, Git, a POSIX shell,
-GNU Make, and stable Rust with MSVC C++ build tools or LLVM-MinGW. Put GHC's
-`bin` and `mingw/bin` directories on PATH, along with the other build tools.
-Install GHC, the shell and Make in paths without spaces (or use their Windows
-short paths on PATH); their dependency build tools split paths containing spaces.
-Use x64 GHC and Node on ARM PCs. Add the matching Rust target, such as
-`x86_64-pc-windows-msvc` or `x86_64-pc-windows-gnullvm`.
+Install x64 GHC 9.14.1, Cabal 3.18.2, Node.js 22.5+, npm, Git, a POSIX shell,
+GNU Make, stable Rust and MSVC C++ tools (or LLVM-MinGW with
+`-BlindlyToolchain gnullvm`). Put GHC's `bin` and `mingw/bin`, the compiler's
+`objdump`, and an installed Inno Setup 6 `ISCC.exe` on PATH. Public builds also
+need Windows SDK `signtool.exe`. Keep shell/Make tool paths free of spaces.
 
 ```powershell
-git clone --recurse-submodules https://github.com/aleski-green/sapiens4.git
-cd sapiens4
-.\build\start.ps1 -Open
-.\environments\windows\build.ps1 -Runtime win-x64
-.\.build\Sapiens4-win-x64\Sapiens4.exe
+git submodule update --init --recursive
+.\environments\windows\build.ps1 -Version 0.1.0 -OutputDirectory .build\release-local
+Get-FileHash .build\release-local\Sapiens-Setup.exe -Algorithm SHA256
 ```
 
-`start.ps1` builds Blindly4, the Haskell host and the UI; `-SkipBuild` reuses the
-existing binaries. Packaging defaults to the GHC target and rejects a mismatched
-`-Runtime`. Native `win-arm64` packaging requires an ARM64 Windows GHC toolchain.
-Use `-BlindlyToolchain gnullvm` with LLVM-MinGW. The WebView2 loader is downloaded
-with a pinned checksum and selected for the executable's architecture.
+The output directory must be new. Only the installer and `SHA256SUMS` are
+published. All packaged PE files must be x64 and resolve imports to Windows
+inbox libraries or adjacent packaged DLLs. The WebView2 loader is hash-pinned.
 
-For desktop development, set `SAPIENS_RUNTIME_DIR` to the repository root. Other overrides are
-`SAPIENS_DATA_DIR`, `SAPIENS_BLINDLY_BINARY`, `SAPIENS_CODEX_BINARY`,
-`SAPIENS_CODEX_MODEL` and `SAPIENS_CODEX_REASONING_EFFORT`.
-The Haskell build regenerates icons from the favicons using the libs4 Node tool.
+For a public release, set `SAPIENS_WINDOWS_CERT_THUMBPRINT` to a certificate in
+the signing account's store and add `-PublicRelease`. A timestamp URL may be
+supplied with `-TimestampUrl`. Builds sign and verify application binaries,
+the installer and its embedded uninstaller. Local builds are unsigned.
+Run the finished-installer [acceptance suite](../../docs/testing.md#d1-native-distribution).
 
-## Tests and desktop access
-
-Follow [Testing](../../docs/testing.md). Set `SAPIENS_TEST_WINDOWS_PACKAGE`
-to the built package directory for packaged-runtime tests; run ARM64 and x64 on
-matching machines. Tests use temporary data and controlled model executables.
-
-Blindly4 requires an unlocked interactive desktop, accessible controls and matching
-privilege levels. Elevated apps and secure desktops are unsupported. Exact-value
-guards must remain enabled, and desktop workflows must run serially.
+For source CLI development use `.\build\start.ps1 -Open`. For the native host,
+set `SAPIENS_RUNTIME_DIR` to the checkout. `--data-dir`, `SAPIENS_DATA_DIR` and
+`SAPIENS_CONFIG_DIR` retain explicit path control. Use an unlocked interactive
+desktop with matching privilege levels for Blindly4 tests; run desktop tests serially.

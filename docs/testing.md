@@ -105,3 +105,46 @@ across an actual app quit/upgrade.
 Validate mobile installation, camera pairing, background/resume, offline launch,
 updates, keyboard/rotation and touch behavior on real devices. Visually compare
 appearance changes; behavioral tests do not prove styling equivalence.
+
+## D1 native distribution
+
+Build first using the platform guide. Acceptance consumes the finished installer;
+it does not rebuild or require Sapiens build tools on the acceptance machine.
+Use Ruby with the existing libs4 test gems and a working Blindly4 driver on an
+unlocked desktop. Set `SAPIENS_TEST_BLINDLY4` to that driver if it is outside this
+checkout. Tests create synthetic users/data and use a controlled external CLI,
+never real credentials or paid model calls. Run serially.
+
+```sh
+SAPIENS_TEST_D1=1 \
+SAPIENS_TEST_D1_INSTALLER=/absolute/path/to/Sapiens.dmg \
+ruby submodules/libs4/ruby/bundle.rb exec rspec spec/d1_distribution_spec.rb
+```
+
+On Windows, use a disposable interactive account with no existing Sapiens4
+registration/shortcut, set `SAPIENS_TEST_D1_WINDOWS_DISPOSABLE=1` and point
+`SAPIENS_TEST_D1_INSTALLER` to `Sapiens-Setup.exe`. Keep `SHA256SUMS` beside the
+installer. For public release acceptance, also set `SAPIENS_TEST_D1_PUBLIC=1` to
+require publisher signatures, notarization/stapling and Gatekeeper on macOS.
+Public Windows builds verify Authenticode on every packaged binary and sign the
+installer and uninstaller; installation acceptance verifies those installed files.
+
+Exactly two comprehensive scenarios run on each supported platform:
+
+1. Install the finished artifact, render the native UI with Codex absent, execute
+   through a controlled external CLI, verify private owned loopback readiness,
+   normal Quit and parent EOF/crash cleanup, startup failure, and preservation
+   of an unrelated listener. On Windows, also exercise native WebView2 recovery
+   with the system Runtime absent, then install/repair and Retry on the same
+   desktop. A present-Runtime run alone does not qualify missing-Runtime recovery.
+2. Seed real application state and configuration, exercise default and isolated
+   directories and same-directory lock exclusion, replace the stopped application,
+   uninstall/reinstall, and confirm state preservation. Windows additionally checks
+   registration, shortcut, active-process refusal, protected/unowned destinations,
+   and retention of unowned files.
+
+Command/installer logs are kept in `.build/d1-acceptance-*`. Repeat finished
+public installers on clean supported macOS ARM64 and Windows x64 machines without
+GHC, Node or Rust installed. Record the OS, artifact hash and whether WebView2 was
+initially present. Local unsigned/ad-hoc runs do not establish public signing or
+clean-machine qualification. macOS replacement/removal requires the app to be quit.
