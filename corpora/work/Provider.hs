@@ -121,11 +121,11 @@ codexBinary = do
    local <- fromMaybe (home </> "AppData/Local") <$> lookupEnv "LOCALAPPDATA"
    roaming <- fromMaybe (home </> "AppData/Roaming") <$> lookupEnv "APPDATA"
    installed <- if os /= "mingw32" then pure [] else do
-    app <- map (</> "codex.exe") <$> children (local </> "OpenAI/Codex/bin")
+    let app = [local </> "Programs/OpenAI/Codex/bin/codex.exe"]
     prefixes <- nub . ((roaming </> "npm"):) <$> getSearchPath
     packages <- concat <$> mapM npm prefixes
     pure (app ++ packages)
-   pure $ maybeToList path ++ installed ++ ["/Applications/" ++ app ++ ".app/Contents/Resources/" ++ binary | os == "darwin", app <- ["Codex","ChatGPT"],binary <- ["codex","codex-cli/bin/codex"]]
+   pure $ maybeToList path ++ [home </> ".local/bin/codex" | os=="darwin"] ++ installed ++ ["/Applications/" ++ app ++ ".app/Contents/Resources/" ++ binary | os == "darwin", app <- ["Codex","ChatGPT"],binary <- ["codex","codex-cli/bin/codex"]]
  existing <- filterM doesFileExist (nub (filter native candidates))
  runnable <- filterM (fmap executable . getPermissions) existing
  traverse makeAbsolute (listToMaybe runnable)
