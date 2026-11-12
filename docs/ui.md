@@ -20,6 +20,8 @@ corpora's cached preferences.
 On macOS and Windows, choose an empty folder or a complete existing Data Root.
 The backend validates it under lock. Once Workspace is ready, the launcher saves
 the path in `storage.json` for the next launch.
+Without a saved selection, existing data in the default directory opens through
+the same validation and readiness flow. An empty default directory shows setup.
 
 Browser/native APIs and third-party bindings live in
 `submodules/libs4/purescript/src/Libs4/Browser.purs` and its foreign implementation.

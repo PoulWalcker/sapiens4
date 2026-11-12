@@ -52,7 +52,15 @@ startupDataDirectory :: Maybe FilePath -> IO (Maybe FilePath)
 startupDataDirectory (Just explicit) = do
  when (null explicit) $ storageError "Data directory must not be empty"
  Just <$> makeAbsolute explicit
-startupDataDirectory Nothing = savedDataDirectory
+startupDataDirectory Nothing = do
+ saved <- savedDataDirectory
+ case saved of
+  Just directory -> pure (Just directory)
+  Nothing -> do
+   directory <- defaultDataDirectory
+   exists <- doesPathExist directory
+   names <- if exists then listDirectory directory else pure []
+   pure (if null (filter (/="host.lock") names) then Nothing else Just directory)
 
 storageChoiceForDirectory :: FilePath -> IO StorageChoice
 storageChoiceForDirectory directory = do
