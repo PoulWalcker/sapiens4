@@ -69,7 +69,7 @@ check application = do
                 unless (T.null readyAddress) (loadURL view readyAddress)
               else recoverStartup application "The application server stopped. Choose a folder to try again."
 
-startServer :: Application -> DesktopRoot -> FilePath -> FilePath -> IO (ServerProcess, Text)
+startServer :: Application -> StorageChoice -> FilePath -> FilePath -> IO (ServerProcess, Text)
 startServer application choice runtime destination = do
     configRoot <- configDirectory
     let binary = runtime </> ".build/bin/sapiens4"
@@ -244,7 +244,7 @@ reload application = do
                                 case result of
                                     Left (e :: SomeException) -> recoverStartup application (T.pack (storageMessage e))
                                     Right True -> check application
-                                    Right False -> startSelected application (Just ExistingRoot) (serverDirectory server)
+                                    Right False -> startSelected application (Just AttachExisting) (serverDirectory server)
                     writeIORef (startup application) (Just worker)
 
 showWindow :: Application -> IO ()
@@ -323,7 +323,7 @@ installMethods application = do
                     case selection of
                         Left (e :: IOException) -> showStorageError application (T.pack (storageMessage e))
                         Right Nothing -> pure ()
-                        Right (Just directory) -> startSelected application (Just ExistingRoot) directory
+                        Right (Just directory) -> startSelected application (Just AttachExisting) directory
             sh <- withBrowser (readIORef . shell)
             readyAddress <- readIORef (address application)
             trusted <- obj0 view "URL" >>= (\u -> withBrowser (sameOrigin u . origin))
@@ -543,7 +543,7 @@ receiveMessage application message = do
             raw <- obj0 message "body" >>= jsonObject
             forM_ raw $ \input -> do
               case text (field "storage" input) of
-                "new" -> (defaultDataDirectory >>= startSelected application (Just NewRoot))
+                "new" -> (defaultDataDirectory >>= startSelected application (Just StartNew))
                     `catch` \(e :: IOException) -> showStorageError application (T.pack (storageMessage e))
                 "pick" -> do
                     busy <- atomicModifyIORef' (starting application) (\old -> (True,old))
@@ -654,7 +654,7 @@ recoverStartup application message = do
                 loadBootstrap application
         writeIORef (startup application) (Just worker)
 
-startSelected :: Application -> Maybe DesktopRoot -> FilePath -> IO ()
+startSelected :: Application -> Maybe StorageChoice -> FilePath -> IO ()
 startSelected application requestedChoice directory = mask $ \unmask -> do
     closing <- readIORef (quitting application)
     busy <- atomicModifyIORef' (starting application) (\old -> (True,old))

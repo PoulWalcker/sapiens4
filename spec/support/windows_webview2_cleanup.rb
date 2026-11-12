@@ -57,3 +57,9 @@ class WindowsWebViewProcesses
     survivors
   end
 end
+
+# Preserve the original diagnostic entry point and run the installed cases in order.
+if $PROGRAM_NAME == __FILE__
+  abort 'Windows and D1_CLEANUP_SETUP required' unless Gem.win_platform? && ENV['D1_CLEANUP_SETUP'] && ENV['D1_CLEANUP_EVIDENCE']
+  exec RbConfig.ruby, Gem.bin_path('rspec-core', 'rspec'), '--tag', 'windows', '--order', 'defined', File.expand_path('../installed_distribution_spec.rb', __dir__)
+end

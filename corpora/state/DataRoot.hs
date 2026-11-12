@@ -67,6 +67,11 @@ startupDataDirectory Nothing discoverLegacy = do
      legacy <- discoverLegacy
      listToMaybe <$> discover (maybe [] (:[]) legacy)
 
+storageChoiceForDirectory :: FilePath -> IO StorageChoice
+storageChoiceForDirectory directory = do
+ names <- listDirectory directory
+ pure (if null names then StartNew else AttachExisting)
+
 saveDataDirectory :: FilePath -> IO ()
 saveDataDirectory directory = do
  path <- selectionPath

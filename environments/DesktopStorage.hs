@@ -1,4 +1,4 @@
-module DesktopStorage (WorkspaceSignal(..), saveWhenReady, awaitServerAddress, DesktopRoot(..), storageChoiceForDirectory, storageMode, preferenceScript, validPreference) where
+module DesktopStorage (WorkspaceSignal(..), saveWhenReady, awaitServerAddress, storageMode, preferenceScript, validPreference) where
 
 import Control.Exception (SomeException, try)
 import Control.Monad (forM_, guard)
@@ -10,11 +10,10 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.IO as TIO
 import qualified Data.UUID.V4 as UUID
-import DataRoot (saveDataDirectory, storageError, storageMessage, startupMessage, openingStorage, openedStorage, startupErrorPrefix)
+import DataRoot (StorageChoice(..), saveDataDirectory, storageError, storageMessage, startupMessage, openingStorage, openedStorage, startupErrorPrefix)
 import Data.List (stripPrefix)
 import Network.URI
 import System.IO (Handle, hGetLine, hIsEOF)
-import System.Directory (listDirectory)
 import System.FilePath
 import System.Timeout (timeout)
 
@@ -35,16 +34,9 @@ saveWhenReady first signal pending directory recover opened = do
           Right () -> writeIORef pending Nothing >> opened value
     _ -> pure ()
 
-data DesktopRoot = NewRoot | ExistingRoot
-
-storageChoiceForDirectory :: FilePath -> IO DesktopRoot
-storageChoiceForDirectory directory = do
- names <- listDirectory directory
- pure (if null names then NewRoot else ExistingRoot)
-
-storageMode :: DesktopRoot -> String
-storageMode NewRoot = "new"
-storageMode ExistingRoot = "existing"
+storageMode :: StorageChoice -> String
+storageMode StartNew = "new"
+storageMode _ = "existing"
 
 awaitServerAddress :: Handle -> IO URI
 awaitServerAddress output = await False

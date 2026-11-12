@@ -210,7 +210,7 @@ sign :: FilePath -> FilePath -> Maybe String -> IO ()
 sign root app identity = do
  let flags=["--force","--sign",fromMaybe "-" identity]++[value | isJust identity,value<-["--options","runtime","--timestamp"]]
  binaries app >>= mapM_ (\binary->run "codesign" (flags++[binary])) . sortOn (negate . length . splitDirectories)
- run "codesign" (flags++["--entitlements",root</>"environments/macos/macos-entitlements.plist",app])
+ run "codesign" (flags++["--entitlements",root</>"build/package/macos-entitlements.plist",app])
  run "codesign" ["--verify","--deep","--strict",app]
 
 diskImage :: FilePath -> FilePath -> Maybe String -> IO FilePath

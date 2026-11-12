@@ -298,7 +298,7 @@ desktopSession memory probe = do
                 Nothing -> post (recoverStartup $ storageMessage e)) $ unmask $ do
                   closeHost host
                   selectedDirectory <- canonicalizePath directory
-                  choice <- maybe (DesktopStorage.storageChoiceForDirectory selectedDirectory) pure requestedChoice
+                  choice <- maybe (storageChoiceForDirectory selectedDirectory) pure requestedChoice
                   let selected = host {dataDirectory=selectedDirectory}
                   guestScript <- B.readFile (runtimeDirectory host </> ".build/web/guest.js")
                   when (B.all (`elem` (" \t\r\n" :: String)) guestScript) $ ioError $ userError "The packaged guest.js is empty. Reinstall the complete Sapiens4 app."
@@ -308,7 +308,7 @@ desktopSession memory probe = do
           chooseStorage message = do
             busy <- readIORef starting
             unless busy $ case field "storage" message of
-              String "new" -> startSelected (Just DesktopStorage.NewRoot) (dataDirectory host)
+              String "new" -> startSelected (Just StartNew) (dataDirectory host)
               String "pick" -> do
                 picking <- atomicModifyIORef' starting (\value -> (True,value))
                 unless picking $ do
@@ -379,7 +379,7 @@ desktopSession memory probe = do
                           case saved of
                             Left e -> storageError (storageMessage e)
                             Right Nothing -> pure ()
-                            Right (Just directory) -> startSelected (Just DesktopStorage.ExistingRoot) directory
+                            Right (Just directory) -> startSelected (Just AttachExisting) directory
                   else do
                     selection <- readIORef selectedRoot
                     forM_ selection $ \(directory,url) -> when (current==url) $ do

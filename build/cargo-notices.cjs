@@ -21,7 +21,8 @@ visit(metadata.resolve.root);
 
 // These crate archives omit their workspace-level notices. Match the published
 // source revision so an update with different terms cannot reuse an old notice.
-// objc2's full license texts were published in ee9a7ada2131f5944b8750428e265c15632f2a19.
+// These dependencies are distributed under their MIT option.
+// objc2's MIT text was published in ee9a7ada2131f5944b8750428e265c15632f2a19.
 const workspaceNotices = {
   'https://github.com/eiz/accessibility': ['accessibility', [
     '63a4a9c4ecdc143bed1d65b989aa18bbc5fd8129'
@@ -51,7 +52,6 @@ for (const pkg of metadata.packages) {
     }
     const source = path.join(__dirname, 'package', 'cargo-notices', fallback[0]);
     for (const file of fs.readdirSync(source)) {
-      if (/^LICENSE-(APACHE|ZLIB)/.test(file) && pkg.license === 'MIT') continue;
       fs.copyFileSync(path.join(source, file), path.join(target, file));
     }
   }

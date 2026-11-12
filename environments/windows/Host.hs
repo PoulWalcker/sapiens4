@@ -2,7 +2,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Host (Host(..), prepareHost, startHost, closeHost, watchHost, desktopArgs) where
 
-import DesktopStorage (DesktopRoot, storageMode, awaitServerAddress)
+import DesktopStorage (storageMode, awaitServerAddress)
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Exception
@@ -11,7 +11,7 @@ import Data.Aeson
 import Data.Char (toUpper)
 import Data.IORef
 import Data.Maybe
-import DataRoot (configDirectory, defaultDataDirectory, containedPath)
+import DataRoot (configDirectory, defaultDataDirectory, StorageChoice(..), containedPath)
 import Network.HTTP.Client
 import Network.URI
 import Native (processId, waitProcessHandle)
@@ -76,7 +76,7 @@ prepareHost args = do
   runtime <- makeAbsolute (runtimePath paths)
   Host directory runtime <$> newIORef Nothing <*> newIORef Nothing
 
-startHost :: DesktopRoot -> Host -> IO String
+startHost :: StorageChoice -> Host -> IO String
 startHost choice host = do
   let binary = runtimeDirectory host </> ".build/bin/sapiens4.exe"
   available <- doesFileExist binary

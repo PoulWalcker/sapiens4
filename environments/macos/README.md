@@ -43,10 +43,8 @@ or empty asset reports a startup error before the backend starts.
 Quit Sapiens4 before replacing or removing the app. Quit stops its owned backend;
 closing the Workspace window keeps the app running. Closing the storage window
 cancels startup and quits. Replacing, removing and reinstalling
-the app retain `~/Library/Application Support/Sapiens4/{data,config}`. The backend log is
-`~/Library/Application Support/Sapiens4/config/desktop-server.log`. When
-`SAPIENS_CONFIG_DIR` is set, the log is `$SAPIENS_CONFIG_DIR/desktop-server.log`.
-Older Development directories remain untouched.
+the app retain `~/Library/Application Support/Sapiens4/{data,config}`. The backend
+log is `desktop-server.log` in the selected Data Root. Older Development directories remain untouched.
 Use `SAPIENS_DATA_DIR` and `SAPIENS_CONFIG_DIR` at launch for explicit isolation.
 For example, run `SAPIENS_DATA_DIR=/path/to/data /Applications/Sapiens4.app/Contents/MacOS/Sapiens4`.
 
@@ -78,12 +76,5 @@ profile, then add `--release`:
 Public builds require both credentials, sign nested code with Hardened Runtime,
 notarize and staple the app and DMG, then run Gatekeeper and signature checks.
 The temporary notarization ZIP is discarded. Credentials are not stored in outputs.
-To run the installed-app acceptance case, set `SAPIENS_TEST_DMG` to the built image
-and run the macOS example on an unlocked desktop with Accessibility permission.
-
-```sh
-SAPIENS_TEST_DMG="$PWD/.build/release-local/Sapiens.dmg" \
-  ruby submodules/libs4/ruby/bundle.rb exec rspec --tag macos spec/installed_distribution_spec.rb
-```
-
+Installer acceptance tests are deferred until the implementation is complete.
 Native browser tabs, file picking and accessibility behavior retain their existing interfaces.
