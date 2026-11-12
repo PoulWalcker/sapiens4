@@ -13,8 +13,9 @@ import Text.Read (readMaybe)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import Data.IORef
-import Data.Char (toLower)
-import Data.List (nub,sort)
+import Data.Char (isDigit, toLower)
+import Data.List (nub,sort,sortOn)
+import Data.Ord (Down(..))
 import qualified Data.Map.Strict as M
 import Data.Maybe
 import Data.Text (Text)
@@ -94,6 +95,19 @@ codexArguments :: FilePath -> CodexConfig -> [String]
 codexArguments workdir config =
  ["exec","-c","model_reasoning_effort=" ++ T.unpack (jsonText (str (codexEffort config))),"-c","model=" ++ T.unpack (jsonText (str (codexModel config))),"--skip-git-repo-check","--json","--dangerously-bypass-approvals-and-sandbox","--cd",workdir,"--color","never","-"]
 
+-- Release directories sort by numeric components; retain unversioned entries as fallbacks.
+codexVersion :: FilePath -> Maybe ([Integer], Bool, [Either Integer Text])
+codexVersion path = do
+ let name = T.pack (takeFileName path)
+     version = T.takeWhile (/='+') (fromMaybe name (T.stripPrefix "v" name))
+     (core,suffix) = T.breakOn "-" version
+     numeric part = do
+      guard (not (T.null part) && T.all isDigit part)
+      readMaybe (T.unpack part)
+     identifier part = maybe (Right part) Left (numeric part)
+ numbers <- traverse numeric (T.splitOn "." core)
+ pure (numbers, T.null suffix, map identifier (T.splitOn "." (T.drop 1 suffix)))
+
 codexBinary :: IO (Maybe FilePath)
 codexBinary = do
  override <- lookupEnv "SAPIENS_CODEX_BINARY"
@@ -123,7 +137,7 @@ codexBinary = do
     let app = [local </> "Programs/OpenAI/Codex/bin/codex.exe"]
     prefixes <- nub . ((roaming </> "npm"):) <$> getSearchPath
     packages <- concat <$> mapM npm prefixes
-    versions <- reverse <$> children (local </> "OpenAI/Codex/bin")
+    versions <- sortOn (\p -> Down (codexVersion p,p)) <$> children (local </> "OpenAI/Codex/bin")
     pure (app ++ packages ++ map (</> "codex.exe") versions)
    pure $ maybeToList path ++ [home </> ".local/bin/codex" | os=="darwin"] ++ installed ++ ["/Applications/" ++ app ++ ".app/Contents/Resources/" ++ binary | os == "darwin", app <- ["Codex","ChatGPT"],binary <- ["codex","codex-cli/bin/codex"]]
  existing <- filterM doesFileExist (nub (filter native candidates))

@@ -106,7 +106,7 @@ try {
         $arguments += '/DPublisherSign'
         $arguments += ('/Ssapiens=signtool.exe sign /sha1 '+$CertificateThumbprint+' /fd SHA256 /tr '+$TimestampUrl+' /td SHA256 $f')
     }
-    & $compiler @arguments (Join-Path $repo 'build/package/windows-installer.iss')
+    & $compiler @arguments (Join-Path $PSScriptRoot 'windows-installer.iss')
     if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compilation failed' }
     $installer = Join-Path $product $artifactName
     if ($PublicRelease) { Verify-Signature $installer }

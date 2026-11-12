@@ -38,19 +38,19 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 
 runDesktop :: Bool -> IO ()
-runDesktop probe = runInBoundThread $
+runDesktop probe = runInBoundThread retry
+ where
+  retry = attempt `catch` report
   -- COM may release callback references while its apartment is shutting down.
-  bracket newArena freeArena $ \memory ->
-    let run = bracket_ (check =<< coInitialize nullPtr 2) coUninitialize (desktopSession memory probe)
-        report (e :: SomeException) = do
-          case fromException e :: Maybe SomeAsyncException of
-            Just _ -> throwIO e
-            Nothing -> pure ()
-          action <- withWide (storageMessage e) $ \message -> withWide "Sapiens4 could not start" $ \title ->
-            messageBox nullPtr message title 0x15
-          when (action==4) retry
-        retry = run `catch` report
-    in retry
+  attempt = bracket newArena freeArena $ \memory ->
+    bracket_ (check =<< coInitialize nullPtr 2) coUninitialize (desktopSession memory probe)
+  report (e :: SomeException) = do
+    case fromException e :: Maybe SomeAsyncException of
+      Just _ -> throwIO e
+      Nothing -> pure ()
+    action <- withWide (storageMessage e) $ \message -> withWide "Sapiens4 could not start" $ \title ->
+      messageBox nullPtr message title 0x15
+    when (action==4) retry
 
 desktopSession :: Arena -> Bool -> IO ()
 desktopSession memory probe = do
@@ -298,7 +298,7 @@ desktopSession memory probe = do
                 Nothing -> post (recoverStartup $ storageMessage e)) $ unmask $ do
                   closeHost host
                   selectedDirectory <- canonicalizePath directory
-                  choice <- maybe (storageChoiceForDirectory selectedDirectory) pure requestedChoice
+                  choice <- maybe (DesktopStorage.storageChoiceForDirectory selectedDirectory) pure requestedChoice
                   let selected = host {dataDirectory=selectedDirectory}
                   guestScript <- B.readFile (runtimeDirectory host </> ".build/web/guest.js")
                   when (B.all (`elem` (" \t\r\n" :: String)) guestScript) $ ioError $ userError "The packaged guest.js is empty. Reinstall the complete Sapiens4 app."
@@ -308,7 +308,7 @@ desktopSession memory probe = do
           chooseStorage message = do
             busy <- readIORef starting
             unless busy $ case field "storage" message of
-              String "new" -> startSelected (Just StartNew) (dataDirectory host)
+              String "new" -> startSelected (Just DesktopStorage.NewRoot) (dataDirectory host)
               String "pick" -> do
                 picking <- atomicModifyIORef' starting (\value -> (True,value))
                 unless picking $ do
@@ -379,7 +379,7 @@ desktopSession memory probe = do
                           case saved of
                             Left e -> storageError (storageMessage e)
                             Right Nothing -> pure ()
-                            Right (Just directory) -> startSelected (Just AttachExisting) directory
+                            Right (Just directory) -> startSelected (Just DesktopStorage.ExistingRoot) directory
                   else do
                     selection <- readIORef selectedRoot
                     forM_ selection $ \(directory,url) -> when (current==url) $ do
