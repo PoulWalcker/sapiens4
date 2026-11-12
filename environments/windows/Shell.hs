@@ -362,10 +362,11 @@ desktopSession memory probe = do
                       Just message -> storageScript ("window.storageError(" ++ jsonString message ++ ")")
                       Nothing -> do
                         first <- atomicModifyIORef' initialStorage (\value -> (False,value))
+                        unless first $ storageScript "window.showStorageSetup?.()"
                         when first $ do
                           case saved of
                             Left e -> storageError (storageMessage e)
-                            Right Nothing -> pure ()
+                            Right Nothing -> storageScript "window.showStorageSetup?.()"
                             Right (Just directory) -> startSelected (Just AttachExisting) directory
                   else do
                     selection <- readIORef selectedRoot

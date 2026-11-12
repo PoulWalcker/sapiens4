@@ -281,12 +281,13 @@ installMethods application = do
                 problem <- atomicModifyIORef' (recoveryError application) (\old -> (Nothing,old))
                 writeIORef (starting application) False
                 forM_ problem (showStorageError application)
+                when (loaded && isNothing problem) $ script view "window.showStorageSetup?.()"
                 unless (loaded || isJust problem) $ do
                     explicit <- lookupEnv "SAPIENS_DATA_DIR"
                     selection <- try (startupDataDirectory explicit)
                     case selection of
                         Left (e :: IOException) -> showStorageError application (T.pack (storageMessage e))
-                        Right Nothing -> pure ()
+                        Right Nothing -> script view "window.showStorageSetup?.()"
                         Right (Just directory) -> startSelected application (Just AttachExisting) directory
             sh <- withBrowser (readIORef . shell)
             readyAddress <- readIORef (address application)

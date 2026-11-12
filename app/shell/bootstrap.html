@@ -12,6 +12,7 @@
 html,body{margin:0;min-height:100%;background:var(--sapi-bg)}
 body{min-height:100vh;display:flex;align-items:stretch;justify-content:center}
 main{box-sizing:border-box;width:min(100%,540px);height:100dvh;min-height:0;padding:24px 30px;display:flex;flex-direction:column}
+main[hidden]{display:none}
 .setup-stage{flex:1;display:flex;flex-direction:column;padding:clamp(25px,6vh,55px) 0 24px;min-height:0;overflow:auto}
 h1{font:600 27px/1.2 var(--sapi-font);letter-spacing:-.8px;margin:0 0 10px}
 p{color:var(--sapi-muted);font-size:13px;line-height:1.6;margin:0 0 18px}
@@ -31,7 +32,7 @@ if(matchMedia('(prefers-color-scheme:dark)').matches) document.documentElement.d
 </script>
 </head>
 <body class="sapi-workspace setup-bootstrap">
-<main>
+<main hidden>
 <header class="setup-header">
   <div class="setup-wordmark"><picture aria-hidden="true"><source media="(prefers-color-scheme: dark)" srcset="favicon-dark.svg"><img class="setup-mark" src="favicon.svg" alt=""></picture><span>Sapiens4</span></div>
   <span class="setup-kicker">SETUP</span>
@@ -106,10 +107,14 @@ function continueSetup(event) {
   postStorage({storage:storageChoice,directory:storageDirectory});
  }
 }
+function showStorageSetup() {
+ document.querySelector('main').hidden=false;
+}
 function storageError(message) {
  document.getElementById('error').textContent=message;
  storageBusy=false;
  updateStorage();
+ showStorageSetup();
 }
 function storageLoading() {
  storageBusy=true;
