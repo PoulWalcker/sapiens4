@@ -29,6 +29,8 @@ import System.IO
 import System.Process
 #ifndef mingw32_HOST_OS
 import System.Posix.Signals
+#else
+import qualified GHC.ConsoleHandler as Console
 #endif
 
 main :: IO ()
@@ -148,7 +150,7 @@ installShutdown action = do
  void (installHandler sigTERM (Catch action) Nothing)
  void (installHandler sigINT (Catch action) Nothing)
 #else
- pure ()
+ void (Console.installHandler (Console.Catch (const action)))
 #endif
 
 normalized :: [String] -> [String]
