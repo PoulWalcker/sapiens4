@@ -17,9 +17,9 @@ main = do
  helpers <- filterM (doesFileExist . (root </>) . snd)
   ([("sapiens-peer","spec/support/Peer.hs")] ++
    if os=="mingw32" then [("sapiens-windows-probe","spec/support/WindowsProbeMain.hs"),("sapiens-provider","spec/support/WindowsProviderMain.hs")] else [])
- let project = root </> "submodules/libs4/haskell"
-     cache = project </> ".cabal"
-     build = project </> (if os=="darwin" then ".build/macos-13.0" else ".build")
+ let vendor = root </> "submodules/libs4/haskell"
+     cache = vendor </> ".cabal"
+     build = root </> ".build" </> (if os=="darwin" then "haskell-macos-13.0" else "haskell")
      suffix = if os=="mingw32" then ".exe" else ""
      desktop = os=="linux" && "--desktop" `elem` args
      buildFlags = ["--flags=" ++ if desktop then "linux-desktop" else "-linux-desktop"]
@@ -28,18 +28,18 @@ main = do
  createDirectoryIfMissing True cache
  index <- doesFileExist (cache </> "packages/hackage.haskell.org/01-index.tar")
  unless index (callProcess "cabal" ["update"])
- sodium <- doesFileExist (project </> "sodium/src/libsodium/.libs/libsodium.a")
- let targetStamp = project </> "sodium/.sapiens-build-target"
+ sodium <- doesFileExist (vendor </> "sodium/src/libsodium/.libs/libsodium.a")
+ let targetStamp = vendor </> "sodium/.sapiens-build-target"
      target = os ++ "-" ++ arch ++ if os=="darwin" then "-13.0" else ""
  stamped <- doesFileExist targetStamp
  reusable <- if stamped then (==target) <$> readFile targetStamp else pure False
  unless (sodium && reusable) $ do
   when stamped (removeFile targetStamp)
-  extracted <- doesDirectoryExist (project </> "sodium")
+  extracted <- doesDirectoryExist (vendor </> "sodium")
   unless extracted $ do
-   callProcess "tar" ["-xzf",project </> "vendor/libsodium-1.0.20.tar.gz","-C",project]
-   renameDirectory (project </> "libsodium-1.0.20") (project </> "sodium")
-  let sodiumDirectory = project </> "sodium"
+   callProcess "tar" ["-xzf",vendor </> "vendor/libsodium-1.0.20.tar.gz","-C",vendor]
+   renameDirectory (vendor </> "libsodium-1.0.20") (vendor </> "sodium")
+  let sodiumDirectory = vendor </> "sodium"
   -- Autotools rejects spaces even when the compiler accepts the checkout path.
   directory <- buildPath sodiumDirectory
   withCurrentDirectory directory $ do

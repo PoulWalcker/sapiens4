@@ -3,11 +3,11 @@ RSpec.describe 'Source distribution contract' do
     @folder = File.realpath(Dir.mktmpdir('sapiens source release '))
     @release = File.join(@folder, 'source')
     files, error, code = Contract.capture('git', 'ls-files', '-z', '--recurse-submodules',
-      'build', 'corpora', 'remote', 'environments', 'app',
+      'sapiens-domain.cabal', 'build', 'corpora', 'remote', 'environments', 'app',
       'license', 'README.md', 'submodules/blindly4', 'submodules/libs4')
     expect(code).to eq(0), error
     additions, error, code = Contract.capture('git', 'ls-files', '-z', '--others', '--exclude-standard',
-      'build', 'corpora', 'remote', 'environments', 'app', 'license')
+      'sapiens-domain.cabal', 'build', 'corpora', 'remote', 'environments', 'app', 'license')
     expect(code).to eq(0), error
     (files.split("\0") + additions.split("\0")).uniq.each do |file|
       next if file.end_with?('.py', '.swift', '.cs')

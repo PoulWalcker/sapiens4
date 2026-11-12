@@ -36,6 +36,9 @@ git submodule update --init --recursive
 runghc build/Build.hs
 ```
 
+The application package is defined in `sapiens-domain.cabal`; libs4 supplies
+third-party dependencies and native bindings.
+
 The shared `build/BuildUI.hs` helper compiles and bundles the UI. After the host has
 been built, `.build/bin/sapiens4 build-ui` rebuilds only the UI.
 The pinned toolchain emits `app.js`, `sw.js` and `guest.js` into `.build/web`.

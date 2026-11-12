@@ -1,4 +1,7 @@
 **
+!sapiens-domain.cabal
+!environments/
+!environments/**
 !build/
 !build/**
 !corpora/
@@ -19,8 +22,6 @@ submodules/libs4/**
 !submodules/libs4/package.json
 !submodules/libs4/package-lock.json
 !submodules/libs4/haskell/
-!submodules/libs4/haskell/*.cabal
-!submodules/libs4/haskell/cabal.project
 !submodules/libs4/haskell/cabal.project.freeze
 !submodules/libs4/haskell/native/
 !submodules/libs4/haskell/native/**
