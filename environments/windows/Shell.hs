@@ -296,8 +296,11 @@ desktopSession memory probe = do
               String "pick" -> do
                 picking <- atomicModifyIORef' starting (\value -> (True,value))
                 unless picking $ do
-                  selected <- pickDirectory hwnd `finally` writeIORef starting False
-                  storageScript ("window.storagePicked?.(" ++ T.unpack (TE.decodeUtf8 $ L.toStrict $ encode selected) ++ ")")
+                  post $ do
+                    result <- try (pickDirectory hwnd) `finally` writeIORef starting False
+                    case result of
+                      Left (e :: SomeException) -> storageError (storageMessage e)
+                      Right selected -> storageScript ("window.storagePicked?.(" ++ T.unpack (TE.decodeUtf8 $ L.toStrict $ encode selected) ++ ")")
               String "existing" -> do
                 let directory=string (field "directory" message)
                 if isAbsolute directory then startSelected Nothing directory

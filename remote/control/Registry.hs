@@ -159,11 +159,11 @@ registryCreate registry input = do
  mainIdentity <- Service.corporaIdentity (registryService registry)
  writeJSON (folder </> "corpora-settings.json") $ obj [("name",str $ T.strip name),("scope",str $ T.strip $ text scope),("device",get mainIdentity "device"),("status",str "paused"),("revision",num 1),("operations",empty)]
  bracketOnError (registryOpenChild registry CreateCorpora folder) (\(_,_,close) -> close) $ \child@(service,bridge,_) -> do
-  ownRelay <- savedRelay bridge
-  mainRelay <- savedRelay (registryBridge registry)
-  when (ownRelay==empty && mainRelay/=empty) $ writeJSON (relayPath bridge) mainRelay
   metadata <- Service.corporaIdentity service
   registryLock registry $ mask_ $ do
+   ownRelay <- savedRelay bridge
+   mainRelay <- savedRelay (registryBridge registry)
+   when (ownRelay==empty && mainRelay/=empty) $ writeJSON (relayPath bridge) mainRelay
    saved <- readIORef (registrySaved registry)
    let updated = put "locals" (arr $ items saved "locals" ++ [str identity]) saved
    writeJSON (registryPath registry) updated

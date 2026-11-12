@@ -35,7 +35,7 @@ import Text.Regex.TDFA ((=~))
 import System.Posix.Signals
 #endif
 import Types
-import Population (readModelSettings, readProviders, ModelSelection(..), ModelSettingsDraft(..), Provider(..), ProviderModel(..), Providers(..))
+import Population (readModelSettings, readProviders, ModelSettingsDraft(..), Provider(..), ProviderModel(..), Providers(..), EventFormat(..))
 import qualified Computer as Computer
 
 data ProviderEvent
@@ -80,18 +80,18 @@ providerStep time event state activity = case event of
   ToolCompleted _ label -> put "last_action" (str label) activity
   _ -> activity
 
-runModelSettings :: Service -> Text -> IO ModelConfig
+runModelSettings :: Service -> Text -> IO ModelSelection
 runModelSettings s owner = do
  configured <- readModelSettings s
- let choice = M.findWithDefault (modelSettingsDefault configured) owner (modelSettingsOverrides configured)
- pure (ModelConfig (selectionProvider choice) (selectionModel choice) (selectionEffort choice))
+ pure (M.findWithDefault (modelSettingsDefault configured) owner (modelSettingsOverrides configured))
 
-findProvider :: FilePath -> ProviderId -> IO Provider
-findProvider root key = readProviders root >>= maybe (failure 400 "Unsupported model provider") pure . find ((==key) . providerId) . providersList
+findProvider :: Providers -> ProviderId -> IO Provider
+findProvider configured key = maybe (failure 400 "Unsupported model provider") pure (find ((==key) . providerId) (providersList configured))
 
-providerFor :: Service -> ModelConfig -> IO (Provider,FilePath)
+providerFor :: Service -> ModelSelection -> IO (Provider,FilePath)
 providerFor s config = do
- provider <- findProvider (repositoryRoot s) (configuredProvider config)
+ configured <- readProviders (repositoryRoot s)
+ provider <- findProvider configured (selectionProvider config)
  binary <- providerBinary provider >>= maybe (failure 503 (providerLabel provider <> " CLI was not found on this host.")) pure
  pure (provider,binary)
 
@@ -100,19 +100,21 @@ providersView root = do
  configured <- providersList <$> readProviders root
  pure (obj [("providers",arr [obj [("id",str (providerName (providerId provider))),("name",str (providerLabel provider)),("recommended",toJSON (providerRecommended provider)),("models",toJSON (providerModels provider))] | provider <- configured])])
 
-providerArguments :: Provider -> FilePath -> ModelConfig -> [String]
+providerArguments :: Provider -> FilePath -> ModelSelection -> [String]
 providerArguments provider workdir config = concatMap expand (providerRun provider)
  where
- effort = configuredEffort config
+ effort = selectionEffort config
  expand "{effort-args}" = if T.null effort then [] else map fill (providerEffort provider)
  expand arg = [fill arg]
- fill = T.unpack . T.replace "{workdir}" (T.pack workdir) . T.replace "{model}" (configuredModel config) . T.replace "{effort}" effort
+ fill = T.unpack . T.replace "{workdir}" (T.pack workdir) . T.replace "{model}" (selectionModel config) . T.replace "{effort}" effort
 
 validateModelSettingsDraft :: Service -> ModelSettingsDraft -> IO ()
-validateModelSettingsDraft s draft = forM_ (modelSettingsDefault draft : M.elems (modelSettingsOverrides draft)) $ \choice -> do
- provider <- findProvider (repositoryRoot s) (selectionProvider choice)
- model <- maybe (failure 400 "The selected model is not in the current provider catalog.") pure (find ((== selectionModel choice) . modelName) (providerModels provider))
- require (T.null (selectionEffort choice) || selectionEffort choice `elem` modelEfforts model) 400 "The selected effort is not supported by this model."
+validateModelSettingsDraft s draft = do
+ configured <- readProviders (repositoryRoot s)
+ forM_ (modelSettingsDefault draft : M.elems (modelSettingsOverrides draft)) $ \choice -> do
+  provider <- findProvider configured (selectionProvider choice)
+  model <- maybe (failure 400 "The selected model is not in the current provider catalog.") pure (find ((== selectionModel choice) . modelName) (providerModels provider))
+  require (T.null (selectionEffort choice) || selectionEffort choice `elem` modelEfforts model) 400 "The selected effort is not supported by this model."
 
 providerBinary :: Provider -> IO (Maybe FilePath)
 providerBinary provider = do
@@ -122,7 +124,9 @@ providerBinary provider = do
   _ -> do
    path <- findExecutable (providerCommand provider)
    home <- getHomeDirectory
-   listed <- concat <$> mapM (installed home) (providerPaths provider)
+   local <- fromMaybe (home </> "AppData/Local") <$> lookupEnv "LOCALAPPDATA"
+   roaming <- fromMaybe (home </> "AppData/Roaming") <$> lookupEnv "APPDATA"
+   listed <- concat <$> mapM (installed [("~",home),("%LOCALAPPDATA%",local),("%APPDATA%",roaming)]) (providerPaths provider)
    existing <- filterM doesFileExist (nub (maybeToList path ++ listed))
    runnable <- filterM (fmap executable . getPermissions) existing
    versions <- forM runnable $ \p -> do
@@ -137,7 +141,9 @@ providerBinary provider = do
     pure (version,p)
    pure (snd <$> listToMaybe (reverse (sortOn id (filter (not . null . fst) versions))))
  where
- installed home entry = foldM expand [""] (splitDirectories (if "~/" `isPrefixOf` entry then home </> drop 2 entry else entry))
+ installed roots entry = foldM expand [""] $ case splitDirectories entry of
+  first:rest -> fromMaybe first (lookup first roots) : rest
+  [] -> []
  expand roots part
   | '*' `elem` part = concat <$> forM roots (\root -> do
      present <- doesDirectoryExist root
@@ -146,20 +152,10 @@ providerBinary provider = do
   | otherwise = pure [root </> part | root <- roots]
  matches part name = let (before,after) = break (=='*') part in length name >= length part - 1 && before `isPrefixOf` name && drop 1 after `isSuffixOf` name
 
-class EventFormat f where
- events :: f -> Value -> IO [ProviderEvent]
-
-data CodexJson = CodexJson
-data ClaudeStream = ClaudeStream
-
-instance EventFormat CodexJson where
- events _ raw = (:[]) <$> decodeValue 500 raw
-
-instance EventFormat ClaudeStream where
- events _ = claudeEvents
-
-formats :: [(Text, Value -> IO [ProviderEvent])]
-formats = [("codex-json",events CodexJson),("claude-stream",events ClaudeStream)]
+events :: EventFormat -> Value -> IO [ProviderEvent]
+events format = case format of
+ CodexJson -> fmap (:[]) . decodeValue 500
+ ClaudeStream -> claudeEvents
 
 claudeEvents :: Value -> IO [ProviderEvent]
 claudeEvents value = case at value "type" of
@@ -217,7 +213,7 @@ invokeModel s run input = do
  (provider,binary) <- providerFor s config
  let args = providerArguments provider workdir config
      name = providerLabel provider
- readEvents <- maybe (failure 500 ("Unknown output format: " <> providerEvents provider)) pure (lookup (providerEvents provider) formats)
+ let readEvents = events (providerEvents provider)
  environment <- getEnvironment
  started <- realToFrac . (*1000) <$> getPOSIXTime :: IO Double
  writeIORef (runActivity run) (obj [("started",toJSON started),("updated",toJSON started),("phase",str "Waiting for model"),("last_action",str "")])

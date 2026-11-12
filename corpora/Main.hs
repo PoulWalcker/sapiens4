@@ -120,7 +120,7 @@ relayMain root args = do
  bind <- option "--bind" <$> (fromMaybe "127.0.0.1" <$> lookupEnv "SAPIENS_RELAY_BIND") <*> pure args
  portDefault <- fromMaybe "4180" <$> lookupEnv "PORT"
  port <- validated (parseIntegerOption "--port" portDefault args)
- dbDefault <- fromMaybe ".sapiens4/relay.sqlite3" <$> lookupEnv "SAPIENS_RELAY_DB"
+ dbDefault <- fromMaybe ".sapiens4-relay/relay.sqlite3" <$> lookupEnv "SAPIENS_RELAY_DB"
  urlEnv <- lookupEnv "SAPIENS_RELAY_ORIGIN"
  railway <- lookupEnv "RAILWAY_PUBLIC_DOMAIN"
  let database=option "--db" dbDefault args

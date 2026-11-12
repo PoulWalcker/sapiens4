@@ -142,7 +142,7 @@ catalogModel draft choice = A.find ((_ == choice.model) <<< _.model) $ catalogMo
 
 modelChoiceValid :: ModelDraft -> ModelChoice -> Boolean
 modelChoiceValid draft choice = case catalogModel draft choice of
-  Just row -> A.elem choice.effort row.efforts || choice.effort == "" && row.defaultEffort == ""
+  Just row -> choice.effort == "" || A.elem choice.effort row.efforts
   Nothing -> false
 
 modelDraftPayload :: ModelDraft -> Json

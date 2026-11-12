@@ -78,6 +78,11 @@ RSpec.describe 'Choosing and managing corpora', :desktop do
     desktop.reload
     desktop.find('Remote Studio', role: 'AXHeading')
     desktop.value('Message ChiefSapi', 'Remote draft')
+    desktop.click('Menu')
+    desktop.press('Shared computer')
+    desktop.see('This computer belongs to the remote corpora. Manage computer access on its host.')
+    expect(desktop.text).not_to include('Enable Accessibility', 'Checking computer access…', 'Check again')
+    desktop.press('Done')
     desktop.click('Remote')
     desktop.click(host.state['corpora']['name'])
     desktop.click('Close corpora menu')

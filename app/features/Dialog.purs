@@ -70,7 +70,7 @@ view m = case m.dialog of
   Just d -> V.node "dialog" [V.id $ if M.corporaDialog d.kind then "corpora-dialog" else "modal",V.cls $ if d.kind == M.AppMenu then "app-menu-sheet" else if d.kind == M.Models then "model-settings-dialog" else "",V.attr "aria-labelledby" "dialog-title",V.on "cancel" \e -> Link e CloseDialog]
     [V.div (if M.corporaDialog d.kind then "corpora-menu-heading" else "modal-top") [V.span [V.cls "tiny-label"] "SAPIENS4",V.icon (if M.corporaDialog d.kind then "Close" else "Close dialog") "×" CloseDialog]
     ,V.node "div" [V.id $ if M.corporaDialog d.kind then "corpora-dialog-body" else "modal-content"] [V.when (d.kind == M.AIProviders && not (A.null m.dialogStack)) $ V.button "ai-provider-back" "Back to model settings" CloseDialog,V.node "h2" [V.id "dialog-title",V.attr "tabindex" "-1"] [V.text $ dialogTitle d],body m d,V.textNode "p" [V.cls "corpora-feedback",V.attr "role" "status"] ((M.dialogError d))
-      ,V.when (A.elem d.kind [M.AIProviders,M.Computer] && M.dialogError d /= "") $ V.button "button" "Check again" $ OnboardingPoll d.identity]
+      ,V.when (not (M.remote m) && (M.activeRecord m).location == X.Local && A.elem d.kind [M.AIProviders,M.Computer] && M.dialogError d /= "") $ V.button "button" "Check again" $ OnboardingPoll d.identity]
     ,V.when (d.kind == M.Models) $ V.div "model-save-row"
       [V.textNode "span" [V.cls "model-hint",V.attr "role" "status",V.attr "aria-live" "polite"] $ case d.content of
         F.ModelPreview draft -> modelSettingsStatus m draft
@@ -105,6 +105,12 @@ body m d = case d.kind of
   M.AIProviders -> case d.content of
     F.Setup value -> aiProvidersView d value
     _ -> V.p "" "Checking connections…"
+  M.Computer | M.remote m || (M.activeRecord m).location == X.Remote -> V.div ""
+    [V.p "" "This computer belongs to the remote corpora. Manage computer access on its host."
+    ,V.div "settings-row"
+      [V.span [] (if m.snapshot.computer.built then "Computer helper is installed" else "Computer helper is missing")
+      ,V.span [V.cls "tag"] (if owner == "" then "Available" else "In use · " <> (M.agent m owner).name)]
+    ,V.button "button" "Done" CloseDialog]
   M.Computer | m.snapshot.computer.platform == "linux" -> linuxComputer m d
   M.Computer -> V.div ""
     [V.div "settings-row"
@@ -208,7 +214,7 @@ modelSettings m draft = V.div "model-settings"
     [maybe choice.provider _.name $ A.find ((_ == choice.provider) <<< _.id) draft.providers
     ,maybe choice.model _.label $ F.catalogModel draft choice
     ,if choice.effort == "" then "CLI default" else choice.effort]
-  efforts model = (if model.defaultEffort == "" then [{value:"",label:"CLI default"}] else []) <> map (\effort -> {value:effort,label:effort}) model.efforts
+  efforts model = [{value:"",label:"CLI default"}] <> map (\effort -> {value:effort,label:effort}) model.efforts
 
 linuxComputer :: M.Model -> M.Dialog -> V.Html
 linuxComputer m d = V.div ""

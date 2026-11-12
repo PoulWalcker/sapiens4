@@ -153,7 +153,7 @@ newTurn identity flow input created origin batchable = Turn identity flow input 
 
 data AgentState = AgentState { agentTurns :: [Turn], agentFields :: Object } deriving (Eq, Show)
 instance FromJSON AgentState where
- parseJSON = withObject "AgentState" $ \o -> AgentState <$> o .:? "turns" .!= [] <*> pure (KM.delete "turns" o)
+ parseJSON = withObject "AgentState" $ \o -> AgentState <$> o .: "turns" <*> pure (KM.delete "turns" o)
 instance ToJSON AgentState where toJSON state = Object (KM.insert "turns" (toJSON (agentTurns state)) (agentFields state))
 stateJSON :: AgentState -> Value
 stateJSON = toJSON

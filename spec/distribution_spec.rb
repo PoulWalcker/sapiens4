@@ -72,6 +72,8 @@ RSpec.describe 'Source distribution contract' do
       bin = File.join(app, 'Contents/Resources/runtime/.build/bin')
       expect(File.executable?(File.join(bin, 'sapiens4'))).to be(true)
       expect(File.exist?(File.join(bin, 'obsolete-helper.py'))).to be(false)
+      expect(File.binread(File.join(app, 'Contents/Resources/runtime/app/shell/AI-LOGOS-LICENSE.txt')))
+        .to eq(File.binread(File.join(Contract::ROOT, 'app/shell/AI-LOGOS-LICENSE.txt')))
       _, error, code = Contract.capture('codesign', '--verify', '--deep', '--strict', app)
       expect(code).to eq(0), error
     ensure

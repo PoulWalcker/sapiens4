@@ -269,7 +269,7 @@ decide s run turn state node logs = do
   i <- newId
   t <- now
   let digest = T.pack (concatMap (\b -> let v=showHex b "" in if length v==1 then '0':v else v) (BS.unpack (hash (TE.encodeUtf8 instruction))))
-      record = obj [("decisionId",str i),("callId",toJSON (turnId turn)),("node",toJSON node),("template",get source "template"),("promptHash",str digest),("templatePath",get source "path"),("renderedPrompt",str rendered),("provider",str (providerName (configuredProvider config))),("model",str (configuredModel config)),("effort",str (configuredEffort config)),("created",str t),("accepted",Bool False)]
+      record = obj [("decisionId",str i),("callId",toJSON (turnId turn)),("node",toJSON node),("template",get source "template"),("promptHash",str digest),("templatePath",get source "path"),("renderedPrompt",str rendered),("provider",str (providerName (selectionProvider config))),("model",str (selectionModel config)),("effort",str (selectionEffort config)),("created",str t),("accepted",Bool False)]
       summary = merge (select ["decisionId","callId","node","promptHash","accepted"] record) (obj [("agent",str (agentIdText (runOwner run))),("promptTemplate",get record "template")])
   saveWork s (setWorkField "decisions" (arr (workItems w "decisions"++[summary])) w)
   writeJSON (archivePath s (agentIdText (runOwner run)) ("decisions/"<>i)) record

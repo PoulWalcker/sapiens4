@@ -254,20 +254,6 @@ corporaIdentity s = do
  template <- prompt s "corpora-settings-request"
  pure $ merge (remove ["operations"] (toJSON cfg)) (obj [("id",get identity "corpora_id"),("name",toJSON (corporaName cfg) `fallback` str ("CORPORA · " <> at row "name")),("chief_id",str chief),("settings_template",str (T.strip template)),("stopping",Bool False)])
 
-data ModelSelection = ModelSelection { selectionProvider :: ProviderId, selectionModel :: Text, selectionEffort :: Text }
- deriving (Eq, Show)
-instance FromJSON ModelSelection where
- parseJSON value = do
-  onlyFields ["provider","model","effort"] value
-  withObject "Model selection" (\o -> do
-   provider <- o .: "provider"
-   model <- o .: "model"
-   effort <- o .: "effort"
-   unless (not (T.null provider) && T.length provider <= 80 && not (T.null model) && T.length model <= 200 && T.length effort <= 80) $ fail "Choose a model and effort"
-   pure (ModelSelection (ProviderId provider) model effort)) value
-instance ToJSON ModelSelection where
- toJSON choice = obj [("provider",str (providerName (selectionProvider choice))),("model",str (selectionModel choice)),("effort",str (selectionEffort choice))]
-
 data ModelSettingsDraft = ModelSettingsDraft
  { modelSettingsRevision :: Int, modelSettingsDefault :: ModelSelection, modelSettingsOverrides :: Map.Map Text ModelSelection }
  deriving (Eq, Show)
@@ -295,9 +281,16 @@ instance FromJSON ProviderModel where
 instance ToJSON ProviderModel where
  toJSON m = obj [("model",str (modelName m)),("displayName",str (modelLabel m)),("efforts",toJSON (modelEfforts m)),("defaultReasoningEffort",str (modelDefaultEffort m)),("isDefault",Bool (modelIsDefault m))]
 
+data EventFormat = CodexJson | ClaudeStream
+instance FromJSON EventFormat where
+ parseJSON = withText "Provider event format" $ \format -> case format of
+  "codex-json" -> pure CodexJson
+  "claude-stream" -> pure ClaudeStream
+  _ -> fail "Unknown provider event format"
+
 data Provider = Provider
  { providerId :: ProviderId, providerLabel :: Text, providerCommand :: FilePath, providerPaths :: [FilePath], providerLogin :: Text
- , providerStatus :: [String], providerRun :: [Text], providerEffort :: [Text], providerEvents :: Text, providerRecommended :: ModelSelection, providerModels :: [ProviderModel] }
+ , providerStatus :: [String], providerRun :: [Text], providerEffort :: [Text], providerEvents :: EventFormat, providerRecommended :: ModelSelection, providerModels :: [ProviderModel] }
 instance FromJSON Provider where
  parseJSON = withObject "Provider" $ \o -> Provider <$> (ProviderId <$> o .: "id") <*> o .: "name" <*> o .: "binary" <*> o .: "paths" <*> o .: "login"
   <*> o .: "status" <*> o .: "run" <*> o .: "effort" <*> o .: "events" <*> o .: "recommended" <*> o .: "models"
@@ -307,20 +300,16 @@ instance FromJSON Providers where
  parseJSON = withObject "Providers" $ \o -> Providers <$> o .: "default" <*> o .: "providers" <*> o .: "upcoming"
 
 readProviders :: FilePath -> IO Providers
-readProviders root = readJSON (root </> "corpora/providers.json") Null >>= decodeValue 500
+readProviders root = either (failure 500 . T.pack) pure =<< eitherDecodeFileStrict' (root </> "corpora/providers.json")
 
 saveModelSettings :: Service -> ModelSettingsDraft -> IO ModelSettingsDraft
 saveModelSettings s requested = do
- current <- readModelSettings s
- active <- activeModelSettings s
- let previous = fromMaybe (current {modelSettingsOverrides=Map.empty}) active
- saveModelSettingsFile s "model-settings.json" previous requested
-
-saveModelSettingsFile :: Service -> FilePath -> ModelSettingsDraft -> ModelSettingsDraft -> IO ModelSettingsDraft
-saveModelSettingsFile s filename current requested = do
- require (modelSettingsRevision requested == modelSettingsRevision current) 409 "Model settings changed elsewhere. Close and reopen Models before saving."
+ current <- activeModelSettings s
+ let revision = maybe 0 modelSettingsRevision current
+     overrides = maybe Map.empty modelSettingsOverrides current
+ require (modelSettingsRevision requested == revision) 409 "Model settings changed elsewhere. Close and reopen Models before saving."
  forM_ (Map.keys (modelSettingsOverrides requested)) $ \owner -> do
-  unless (Map.lookup owner (modelSettingsOverrides requested) == Map.lookup owner (modelSettingsOverrides current)) $ requireActive s owner
- let saved=requested {modelSettingsRevision=modelSettingsRevision current+1}
- writeJSON (serviceRoot s </> filename) saved
+  unless (Map.lookup owner (modelSettingsOverrides requested) == Map.lookup owner overrides) $ requireActive s owner
+ let saved=requested {modelSettingsRevision=revision+1}
+ writeJSON (serviceRoot s </> "model-settings.json") saved
  pure saved

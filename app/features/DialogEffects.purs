@@ -30,6 +30,9 @@ import Sapiens.Model as M
 import Sapiens.Navigation as N
 import Sapiens.Remote as R
 
+localSetup :: M.Model -> Boolean
+localSetup m = m.localAvailable && not (M.remote m) && (M.activeRecord m).location == X.Local
+
 setupPath :: M.Dialog -> String
 setupPath d = if d.kind == M.Computer then "/api/host/computer" else "/api/host/onboarding"
 
@@ -45,17 +48,18 @@ handle runtime dispatch action = case action of
       E.sync runtime
       case kind of
         M.Models -> loadModelSettings m d
-        M.Computer | m.snapshot.computer.platform == "linux" -> receive d.identity (\value -> E.modifyDialog d.identity _ {content=F.computerAccess value,status=M.Editing}) $ E.api runtime m "/api/computer" "GET" D.null
+        M.Computer | localSetup m && m.snapshot.computer.platform == "linux" -> receive d.identity (\value -> E.modifyDialog d.identity _ {content=F.computerAccess value,status=M.Editing}) $ E.api runtime m "/api/computer" "GET" D.null
         M.DecisionPrompts -> receive d.identity (\value -> E.modifyDialog d.identity _ {content=F.Prompts $ map F.prompt $ D.rows "prompts" value,fields=F.decode $ D.first $ D.rows "prompts" value,status=M.Editing}) $ E.api runtime m "/api/decision-prompts" "GET" D.null
         M.RelayList -> receive d.identity (\value -> E.modifyDialog d.identity _ {content=F.relayRegistry value,status=M.Editing}) $ C.json "/api/host/relays" "GET" D.null
-        M.AIProviders -> when m.localAvailable $ dispatch $ OnboardingPoll d.identity
-        M.Computer -> when m.localAvailable $ dispatch $ OnboardingPoll d.identity
+        M.AIProviders -> when (localSetup m) $ dispatch $ OnboardingPoll d.identity
+        M.Computer -> when (localSetup m) $ dispatch $ OnboardingPoll d.identity
         M.HostPairing -> dispatch $ HostPairPoll d.identity
         M.EditCorpora -> liftEffect $ B.focus "#corpora-dialog textarea"
         M.ConnectRemote -> liftEffect $ B.focus "#paste-invitation textarea"
         _ -> pure unit
   OnboardingPoll id -> E.inDialog id \d -> when (A.elem d.kind [M.AIProviders,M.Computer] && not (M.dialogBusy d)) do
-    receive id (\value -> E.modifyDialog id _ {content=F.Setup value,status=M.Editing}) $ C.json (setupPath d) "GET" D.null
+    m <- H.get
+    when (localSetup m) $ runDialog d (\value -> E.modifyDialog id _ {content=F.Setup value,status=M.Editing}) $ C.json (setupPath d) "GET" D.null
   CloseDialog -> do
     m <- H.get
     case m.dialog of
@@ -232,7 +236,7 @@ handle runtime dispatch action = case action of
     Intent.EditModel target edit -> case d.kind, d.content of
       M.Models, F.ModelPreview draft -> E.modifyDialog d.identity _ {content=F.ModelPreview $ F.editModel target edit draft}
       _, _ -> pure unit
-    Intent.Setup setupAction ->
+    Intent.Setup setupAction -> when (localSetup m && A.elem d.kind [M.Computer,M.AIProviders]) $
       runDialog d (\value -> E.modifyDialog d.identity _ {content=F.Setup value,status=M.Editing}) $ C.json (setupPath d) "POST" $ D.json {action: setupAction}
     Intent.SuggestNames -> do
       E.modifyDialog d.identity (\s -> s {identity=s.identity+1})

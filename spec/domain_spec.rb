@@ -25,10 +25,20 @@ RSpec.describe 'Domain validation through saved installation fixtures', :host do
     end
   end
 
-  it 'rejects a malformed saved turns collection' do
-    Contract.atomic_json(@file, @state.merge('turns' => 'invalid'))
-    expect(host.request('GET', '/api/state').first).to eq(500)
-    expect(host.calls).to be_empty
+  it 'rejects missing, null or malformed saved turns without rewriting history' do
+    [@state.merge('turns' => 'invalid'), @state.merge('turns' => nil), @state.reject { |key, _| key == 'turns' }].each do |state|
+      Contract.atomic_json(@file, state)
+      original = File.binread(@file)
+      expect(host.request('GET', '/api/state').first).to eq(500)
+      expect(File.binread(@file)).to eq(original)
+      expect(host.calls).to be_empty
+    end
+    host.stop
+    original = File.binread(@file)
+    _, error, code = Contract.capture(Contract::BINARY, '--port', '0', '--data-dir', host.root, env: host.environment)
+    expect(code).not_to eq(0)
+    expect(error).to include('agent state')
+    expect(File.binread(@file)).to eq(original)
   end
 
   it 'preserves unknown turn metadata when a lifecycle action saves the record' do

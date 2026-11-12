@@ -54,7 +54,9 @@ refresh runtime dispatch requested operation = do
       Right raw -> do
         let content = X.snapshotContent raw
         now <- liftEffect B.now
-        incoming <- if m.snapshotContent == Just content then pure $ Right U.KeepSnapshot else do
+        incoming <- if D.str (D.at ["corpora","id"] raw) /= (M.activeRecord requested).id then
+          pure $ Left "Invalid snapshot response: corpora identity does not match the requested workspace"
+        else if m.snapshotContent == Just content then pure $ Right U.KeepSnapshot else do
           captureScroll
           decorated <- liftEffect $ if m.snapshot.corpora.id /= "" && m.snapshot.corpora.id == D.str (D.at ["corpora","id"] raw) then pure raw else C.decorate requested.active raw
           pure $ (\snapshot -> U.ReplaceSnapshot {snapshot,content}) <$> X.decodeSnapshot decorated

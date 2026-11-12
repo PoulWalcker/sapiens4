@@ -57,10 +57,21 @@ instance Exception RunFailure
 
 newtype ProviderId = ProviderId { providerName :: Text } deriving (Eq, Ord, Show)
 
-data ModelConfig = ModelConfig { configuredProvider :: ProviderId, configuredModel :: Text, configuredEffort :: Text }
+data ModelSelection = ModelSelection { selectionProvider :: ProviderId, selectionModel :: Text, selectionEffort :: Text }
  deriving (Eq, Show)
+instance FromJSON ModelSelection where
+ parseJSON value = do
+  onlyFields ["provider","model","effort"] value
+  withObject "Model selection" (\o -> do
+   provider <- o .: "provider"
+   model <- o .: "model"
+   effort <- o .: "effort"
+   unless (not (T.null provider) && T.length provider <= 80 && not (T.null model) && T.length model <= 200 && T.length effort <= 80) $ fail "Choose a model and effort"
+   pure (ModelSelection (ProviderId provider) model effort)) value
+instance ToJSON ModelSelection where
+ toJSON choice = obj [("provider",str (providerName (selectionProvider choice))),("model",str (selectionModel choice)),("effort",str (selectionEffort choice))]
 
-data Run = Run { runOwner :: AgentId, runId :: RunId, runSlot :: Int, runCancel :: IORef Bool, runProcess :: MVar (Maybe ProcessHandle), runActivity :: IORef Value, runDeadline :: Word64, runModelConfig :: ModelConfig }
+data Run = Run { runOwner :: AgentId, runId :: RunId, runSlot :: Int, runCancel :: IORef Bool, runProcess :: MVar (Maybe ProcessHandle), runActivity :: IORef Value, runDeadline :: Word64, runModelConfig :: ModelSelection }
 data Service = Service { serviceRoot :: FilePath, repositoryRoot :: FilePath, serviceGuard :: MVar (), serviceFileLock :: FileLock, serviceStopping :: IORef Bool, serviceWorker :: MVar (Maybe (Async ())), serviceRuns :: MVar (Map RunId Run), serviceLease :: IORef (Maybe (AgentId, RunId)), serviceEndpoint :: IORef Text, servicePulse :: IORef Value, serviceActors :: MVar (Map ThreadId (Text,Maybe Text)), serviceDatabase :: MVar (Maybe Connection), serviceStates :: MVar (Map Text CachedAgentState)
  , serviceRevision :: TVar Integer, updateSubscribers :: TVar Int, snapshotFiles :: IORef (Set FilePath) }
 

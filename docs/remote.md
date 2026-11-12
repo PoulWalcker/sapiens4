@@ -33,8 +33,13 @@ Initialize submodules and build the host and UI with GHC, Cabal, Node.js and npm
 git submodule update --init --recursive
 runghc build/Build.hs
 .build/bin/sapiens4 relay \
-  --origin http://127.0.0.1:4180 --port 4180 --db .sapiens4/relay.sqlite3
+  --origin http://127.0.0.1:4180 --port 4180 --db .sapiens4-relay/relay.sqlite3
 ```
+
+The relay defaults to `.sapiens4-relay/relay.sqlite3`, separate from the source
+host's `.sapiens4` Data Root. `--db` or `SAPIENS_RELAY_DB` overrides this path;
+keep relay files outside host storage so a relay cannot make a fresh Data Root
+nonempty. Existing relay deployments should pass their database path explicitly.
 
 Loopback HTTP is for same-computer testing; a phone needs the relay's public HTTPS origin.
 

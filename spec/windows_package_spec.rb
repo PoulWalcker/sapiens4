@@ -42,6 +42,8 @@ RSpec.describe 'Packaged Windows application', :windows do
   it 'preserves remote authority across an embedded-runtime restart' do
     skip 'Windows package required' unless Gem.win_platform? && ENV['SAPIENS_TEST_WINDOWS_PACKAGE']
     runtime = File.join(ENV.fetch('SAPIENS_TEST_WINDOWS_PACKAGE'), 'runtime')
+    expect(File.binread(File.join(runtime, 'app/shell/AI-LOGOS-LICENSE.txt')))
+      .to eq(File.binread(File.join(Contract::ROOT, 'app/shell/AI-LOGOS-LICENSE.txt')))
     @host = Host.new(repo: runtime, command: [File.join(runtime, '.build/bin/sapiens4.exe')],
       environment: {'PYTHONPATH' => nil, 'PYTHONHOME' => nil})
     relay = Relay.new

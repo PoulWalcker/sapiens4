@@ -54,7 +54,7 @@ RSpec.describe 'Model settings', :desktop do
     expect(host.api('GET', '/api/model-settings').fetch('overrides')).to be_empty
   end
 
-  it 'shows CLI default for a model without efforts and keeps edits on a save conflict' do
+  it 'saves CLI default with and without catalog efforts and keeps edits on a save conflict' do
     start_desktop
     host.api('PUT', '/api/model-settings', {revision: 0, defaults: {provider: 'claude', model: 'claude-haiku-4-5-20251001', effort: ''}, overrides: {}})
     open_models
@@ -63,7 +63,13 @@ RSpec.describe 'Model settings', :desktop do
     desktop.press('Close dialog')
     host.api('PUT', '/api/model-settings', {revision: 1, defaults: {provider: 'codex', model: 'gpt-6-astra', effort: 'medium'}, overrides: {}})
     open_models
-    choose('Default effort', 1, 'high')
+    choose('Default effort', -2, 'CLI default')
+    desktop.click('Save and apply')
+    expect_saved_and_closed
+    expect(host.api('GET', '/api/model-settings').fetch('defaults').fetch('effort')).to eq('')
+    open_models
+    desktop.value('Default effort', 'CLI default')
+    choose('Default effort', 3, 'high')
     original = host.api('GET', '/api/model-settings')
     host.api('PUT', '/api/model-settings', {revision: original.fetch('revision'), defaults: {provider: 'codex', model: 'gpt-6-sol', effort: 'low'}, overrides: {}})
     desktop.click('Save and apply')
