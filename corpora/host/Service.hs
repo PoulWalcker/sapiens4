@@ -44,6 +44,13 @@ openService choice path = do
  root <- selectedPath choice path
  repo <- lookupEnv "SAPIENS_REPOSITORY" >>= maybe getCurrentDirectory pure >>= canonicalizePath
  lock <- acquireStorage choice root
+ let prepareIdentity = do
+      let identityPath=root </> "corpora-identity.json"
+      exists <- doesFileExist identityPath
+      unless exists $ do i<-UUID.toText <$> UUID.nextRandom; writeJSON identityPath (obj [("version",num 1),("corpora_id",str i)])
+      identity <- readJSON identityPath empty
+      require (get identity "version"==num 1 && maybe False ((==at identity "corpora_id") . UUID.toText) (UUID.fromText (at identity "corpora_id"))) 409 "Invalid CORPORA identity. Restore corpora-identity.json from backup."
+ prepareIdentity `onException` unlockFile lock
  database <- (DB.openDatabase root >>= newMVar . Just) `onException` unlockFile lock
  let initialize = do
       guard <- newMVar ()
@@ -61,13 +68,11 @@ openService choice path = do
       let s=Service root repo guard lock stopping worker runs lease endpoint pulse actors database states revision subscribers files
       DB.initialize s
       migrateWorkspaces s
-      let identityPath=root </> "corpora-identity.json"
-      exists <- doesFileExist identityPath
-      unless exists $ do i<-UUID.toText <$> UUID.nextRandom; writeJSON identityPath (obj [("version",num 1),("corpora_id",str i)])
-      identity <- readJSON identityPath empty
-      require (get identity "version"==num 1 && maybe False ((==at identity "corpora_id") . UUID.toText) (UUID.fromText (at identity "corpora_id"))) 409 "Invalid CORPORA identity. Restore corpora-identity.json from backup."
       rows <- DB.agents s
       when (null rows) $ void (createAgent s (obj [("name",str "ChiefSapi"),("role",str "Head of Corpora")]))
+      let marker = initializingDirectory root
+      pending <- doesDirectoryExist marker
+      when (choice `elem` [StartNew,AttachExisting] && pending) $ removeDirectory marker
       repairAvatars s
       agents <- DB.agents s
       mapM_ (ensureAgent s) agents

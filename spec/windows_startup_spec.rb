@@ -3,7 +3,7 @@ require_relative 'support/desktop'
 RSpec.describe 'Windows desktop startup recovery', :windows, :desktop do
   {
     'missing runtime' => 'Some Sapiens4 application files are missing',
-    'server exiting before readiness' => "Sapiens4 couldn't start."
+    'server exiting before readiness' => 'app.js'
   }.each do |scenario, message|
     it "shows #{scenario} and closes without leaving a running launcher" do
       skip 'Windows desktop startup contract' unless Gem.win_platform?
@@ -17,7 +17,7 @@ RSpec.describe 'Windows desktop startup recovery', :windows, :desktop do
         FileUtils.cp_r(File.join(Contract::ROOT, 'app/theme'), File.join(runtime, 'app'))
         FileUtils.cp(File.join(Contract::ROOT, '.build/web/guest.js'), File.join(runtime, '.build/web'))
         if scenario == 'server exiting before readiness'
-          # Validation can run. Serving requires the omitted workspace app.js.
+          # The backend must report the missing workspace asset to the recovery screen.
           FileUtils.cp(File.join(Contract::ROOT, '.build/bin/sapiens4.exe'),
             File.join(runtime, '.build/bin/sapiens4.exe'))
         end
@@ -26,10 +26,6 @@ RSpec.describe 'Windows desktop startup recovery', :windows, :desktop do
           env: {'SAPIENS_CONFIG_DIR' => File.join(directory, 'config')})
         begin
           @desktop = Desktop.new(process: process, ready: false)
-          if scenario == 'server exiting before readiness'
-            desktop.see('This data directory is unavailable')
-            desktop.press('Continue')
-          end
           desktop.see(message)
           expect(File).not_to exist(File.join(directory, 'config/storage.json'))
           desktop.key('alt+F4')

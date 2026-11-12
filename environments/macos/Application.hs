@@ -28,7 +28,7 @@ import Foreign.C.Error (throwErrnoIfMinus1Retry)
 import Foreign.C.Types (CInt(..), CLong)
 import Network.HTTP.Client hiding (method)
 import Network.HTTP.Types.Status (statusCode)
-import Network.URI (parseURI, URI(..), uriScheme, uriAuthority, uriRegName, uriUserInfo)
+import Network.URI (parseURI, URI(..))
 import ObjC
 import Browser
 import System.Directory
@@ -43,7 +43,7 @@ import System.Posix.Process (getProcessID, getProcessGroupIDOf)
 import System.Posix.Signals (signalProcess, signalProcessGroup, sigKILL)
 import System.Posix.Types (ProcessID, CPid(..))
 import System.IO.Error (isDoesNotExistError)
-import Data.List (stripPrefix, nub, intercalate)
+import Data.List (nub, intercalate)
 import Numeric (showHex)
 import Text.Read (readMaybe)
 
@@ -105,19 +105,9 @@ launchServer application destination command = mask $ \restore -> do
                 hPutStrLn logFile line
                 hFlush logFile) `catch` (\(_ :: IOException) -> pure ())) `finally` close errors) `onException` cleanup
     let server = ServerProcess process group input output reader Nothing destination
-        await = do
-            ended <- hIsEOF output
-            when ended $ do
-                threadDelay 100000
-                ioError (userError startupMessage)
-            line <- hGetLine output
-            case stripPrefix "Sapiens4: " line >>= parseURI of
-                Just uri | uriScheme uri == "http:", Just auth <- uriAuthority uri,
-                           uriRegName auth == "127.0.0.1", null (uriUserInfo auth) -> pure (T.pack (show uri))
-                _ -> await
     writeIORef (child application) (Just server)
     mapM_ (\h -> hSetEncoding h utf8 >> hSetNewlineMode h universalNewlineMode) [input,output] `onException` stopOwnedServer application
-    ready <- restore (timeout 35000000 await >>= maybe (ioError (userError "The application server did not start within 35 seconds. See desktop-server.log in the application configuration folder.")) pure)
+    ready <- restore (T.pack . show <$> awaitServerAddress output)
         `onException` stopOwnedServer application
     drain <- async $ (forever (void (hGetLine output))) `catch` (\(_ :: IOException) -> close output)
     let running=server {serverDrain=Just drain}
@@ -681,7 +671,6 @@ startSelected application requestedChoice directory = mask $ \unmask -> do
                 stopOwnedServer application
                 selected <- canonicalizePath directory
                 choice <- maybe (storageChoiceForDirectory selected) pure requestedChoice
-                checkStorage (runtime application) selected choice
                 guestScript <- TIO.readFile (runtime application </> ".build/web/guest.js")
                 when (T.null (T.strip guestScript)) $ ioError (userError "The packaged guest.js is empty. Reinstall the complete Sapiens4 app.")
                 mask $ \restore -> do

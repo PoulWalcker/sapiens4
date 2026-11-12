@@ -18,9 +18,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as B
 
-foreign import ccall unsafe "OpenProcess" openProcessForWait :: Word32 -> Int32 -> Word32 -> IO (Ptr ())
 foreign import ccall safe "WaitForSingleObject" waitProcessHandle :: Ptr () -> Word32 -> IO Word32
-foreign import ccall unsafe "CloseHandle" closeWaitHandle :: Ptr () -> IO Int32
 
 type Object = Ptr ()
 type Window = Ptr ()

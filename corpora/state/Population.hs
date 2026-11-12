@@ -77,13 +77,10 @@ executionSettings s a = do
 ensureAgent :: Service -> Value -> IO ()
 ensureAgent s row = do
  let a = at row "id"; root = agentRoot s a; work = workspaceRoot s a; p = root </> "state.json"
- createDirectoryIfMissing True root
  createDirectoryIfMissing True work
  ensureMemo work (at row "name") (at row "role") `catch` (\(_::APIError) -> pure ())
  seedMemoBookmark s a
- exists <- doesFileExist p
- unless exists $ writeJSON p (obj [("schema_version",num 3),("agid",str a),("revision",num 1),("turns",arr []),("chat",arr []),("events",arr []),("event_sequence",num 0),("last_output",Null)])
- v <- readJSON p empty
+ v <- readJSON p Null
  require (get v "schema_version" `elem` map num [1,2,3]) 500 "Unsupported agent state schema"
  require (at v "agid" == a) 500 "Agent ID does not match saved state"
  when (int (get v "schema_version") < 3) $ do
@@ -93,7 +90,9 @@ ensureAgent s row = do
   unless backed $ copyFile p backup
   saveState s a migrated
  d <- directory s
- unless (has d a) $ saveDirectory s (put a (obj [("parent",Null),("scope",str "")]) d)
+ unless (has d a) $ saveDirectory s (put a (obj [("parent",get v "initial_manager"),("scope",str "")]) d)
+ when (get v "schema_version"==num 3 && has v "initial_manager") $
+  writeJSON p (remove ["initial_manager"] v)
  setManifests s row
 setManifests :: Service -> Value -> IO ()
 setManifests s row = do
@@ -160,9 +159,11 @@ createAgent s d = do
      selectedColor = fromMaybe randomColor color
  time <- now
  let row = toJSON (AgentProfile (AgentId a) name role selectedColor selected time)
+ -- Reserve the fresh ID and persist its history before publishing it to readers.
+ createDirectoryIfMissing True (serviceRoot s </> "agentpy/agents")
+ createDirectory (agentRoot s a)
+ writeJSON (agentRoot s a </> "state.json") (obj [("schema_version",num 3),("agid",str a),("revision",num 1),("turns",arr []),("chat",arr []),("events",arr []),("event_sequence",num 0),("last_output",Null),("initial_manager",parent)])
  DB.addAgent s row
- dir <- directory s
- saveDirectory s (put a (obj [("parent",parent),("scope",str "")]) dir)
  ensureAgent s row
  DB.record s [a] a "sapi.created" (put "manager" parent row) "admin" Nothing
  pure row

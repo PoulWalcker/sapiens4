@@ -50,9 +50,12 @@ startHost root requested managed = do
 
 startHostWith :: StorageChoice -> FilePath -> Int -> Bool -> IO Host
 startHostWith choice root requested managed = do
+ mode <- lookupEnv "SAPIENS_STORAGE_MODE"
+ let report phase = when (not managed && mode `elem` [Just "new",Just "existing"]) (putStrLn phase)
+ report openingStorage
  service <- Service.openService choice root
  flip onException (Service.closeService service) $ do
-  start service
+  report openedStorage >> start service
  where
  start service = do
   unless managed (recoverRelays root)

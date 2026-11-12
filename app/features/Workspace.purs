@@ -126,6 +126,6 @@ sync timers m = when (m.env.native) do
         tab <- A.find (\t -> t.id == key.id && t.path /= "") workspace.tabs
         pure {path:tab.path, seq:maybe "" _.seq tab.command}
       sourceFor _ = Nothing
-  let workspaceReady = M.online m && m.snapshotContent /= Nothing && m.selected /= ""
+  let workspaceReady = m.localAvailable && A.any ((_ == X.Local) <<< _.location) m.records
   B.nativeMessage $ D.json {workspaceReady, workspaces, owner: if native m then m.selected else "", active:active.id, visible, dark: m.theme == "dark", background, foreground, captionBackground: background, rect:{x:box.x,y:box.y,width:box.width,height:box.height}}
   IdleTabs.observe timers (if visible then Just {owner:m.selected, id:active.id, epoch:m.epoch} else Nothing) sourceFor

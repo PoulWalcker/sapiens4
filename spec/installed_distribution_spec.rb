@@ -58,7 +58,7 @@ RSpec.describe 'Installed D1 distribution' do
       File.write(marker, token)
       binary = provider.environment.fetch('SAPIENS_CODEX_BINARY')
       File.write(binary, "#!#{RbConfig.ruby}\n" + File.read(File.join(__dir__, 'support/provider.rb')))
-      FileUtils.cp(File.join(__dir__, 'support/heartbeat.rb'), provider.root)
+      FileUtils.cp(File.join(__dir__, 'support/heartbeat.rb'), File.dirname(binary))
       cli_hash = Digest::SHA256.file(binary).hexdigest
       env = provider.environment.merge('HOME' => dir, 'CODEX_HOME' => File.join(dir, '.codex'),
         'SAPIENS_DATA_DIR' => data, 'SAPIENS_CONFIG_DIR' => config, 'SAPIENS_RUNTIME_DIR' => nil,

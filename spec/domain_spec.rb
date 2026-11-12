@@ -142,15 +142,20 @@ RSpec.describe 'Domain validation through saved installation fixtures', :host do
     end
   end
 
-  it 'rejects an invalid legacy turn before creating the migration backup' do
-    host.stop
-    Contract.atomic_json(@file, @state.merge('schema_version' => 2, 'turns' => [@turn.merge(status: 'unknown')]))
-    original = File.binread(@file)
-    _, error, code = Contract.capture(Contract::BINARY, 'check-data', host.root, 'existing')
-    expect(code).not_to eq(0)
-    expect(error).to include('agent state')
-    expect(File.binread(@file)).to eq(original)
-    expect(File).not_to exist(File.join(File.dirname(@file), 'legacy-state-v2.json'))
+  {
+    'unknown status' => [{id: 'broken', flow: 'chat', input: 'Saved request', status: 'unknown'}],
+    'object-valued turns' => {'broken' => 'saved history'}
+  }.each do |description, turns|
+    it "rejects legacy history with #{description} before creating a backup" do
+      host.stop
+      Contract.atomic_json(@file, @state.merge('schema_version' => 2, 'turns' => turns))
+      original = File.binread(@file)
+      _, error, code = Contract.capture(Contract::BINARY, 'check-data', host.root, 'existing')
+      expect(code).not_to eq(0)
+      expect(error).to include('agent state')
+      expect(File.binread(@file)).to eq(original)
+      expect(File).not_to exist(File.join(File.dirname(@file), 'legacy-state-v2.json'))
+    end
   end
 
   it 'migrates schema two before recovery and retains the original backup across restarts' do

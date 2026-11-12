@@ -16,7 +16,7 @@ RSpec.describe 'Linux native browser behavior' do
   end
 
   def start_browser
-    config = File.join(@fixture.root, 'config')
+    config = File.join(@fixture.fixture_dir, 'config')
     FileUtils.mkdir_p(config)
     File.write(File.join(config, 'user-dirs.dirs'), "XDG_DOWNLOAD_DIR=\"#{@fixture.root}\"\n")
     @desktop = Contract::Child.new(File.join(Contract::ROOT, '.build/bin/sapiens-linux'),

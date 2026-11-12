@@ -1,20 +1,20 @@
-module DesktopStorage (WorkspaceSignal(..), saveWhenReady, checkStorage, storageMode, preferenceScript, validPreference) where
+module DesktopStorage (WorkspaceSignal(..), saveWhenReady, awaitServerAddress, storageMode, preferenceScript, validPreference) where
 
 import Control.Exception (SomeException, try)
-import Control.Monad (forM_, unless)
+import Control.Monad (forM_, guard)
 import Data.IORef
-import Data.Aeson (Value, encode)
+import Data.Aeson (Value, encode, decodeStrict)
 import qualified Data.ByteString.Lazy as BL
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.IO as TIO
 import qualified Data.UUID.V4 as UUID
-import DataRoot (StorageChoice(..), saveDataDirectory, storageError, storageMessage)
-import System.Exit (ExitCode(..))
+import DataRoot (StorageChoice(..), saveDataDirectory, storageError, storageMessage, startupMessage, openingStorage, openedStorage, startupErrorPrefix)
+import Data.List (stripPrefix)
+import Network.URI
+import System.IO (Handle, hGetLine, hIsEOF)
 import System.FilePath
-import System.Info (os)
-import System.Process
 import System.Timeout (timeout)
 
 data WorkspaceSignal = Navigated | WorkspaceReady deriving (Eq)
@@ -38,17 +38,22 @@ storageMode :: StorageChoice -> String
 storageMode StartNew = "new"
 storageMode _ = "existing"
 
-checkStorage :: FilePath -> FilePath -> StorageChoice -> IO ()
-checkStorage runtime directory choice = do
-  let windows = os == "mingw32"
-      binary = runtime </> ".build/bin" </> if windows then "sapiens4.exe" else "sapiens4"
-      command = (proc binary ["check-data", directory, storageMode choice])
-        {cwd = Just runtime, detach_console = windows, use_process_jobs = windows}
-  result <- timeout 35000000 (readCreateProcessWithExitCode command "")
-  case result of
-    Nothing -> storageError "Storage validation did not finish within 35 seconds."
-    Just (code, _, message) -> unless (code == ExitSuccess) $
-      storageError (if null message then "This data directory could not be opened." else message)
+awaitServerAddress :: Handle -> IO URI
+awaitServerAddress output = await False
+ where
+ await opening = do
+  let next = hIsEOF output >>= \ended -> if ended then storageError startupMessage else hGetLine output
+  line <- if opening then next else timeout 35000000 next >>= maybe (storageError "The application server did not become ready within 35 seconds.") pure
+  case stripPrefix startupErrorPrefix line of
+   Just encoded -> storageError (maybe startupMessage id (decodeStrict $ TE.encodeUtf8 $ T.pack encoded))
+   Nothing | line==openingStorage -> await True
+           | line==openedStorage -> await False
+           | otherwise -> maybe (await opening) pure (address line)
+ address line = do
+  uri <- stripPrefix "Sapiens4: " line >>= parseURI
+  auth <- uriAuthority uri
+  guard (uriScheme uri=="http:" && uriRegName auth=="127.0.0.1" && null (uriUserInfo auth))
+  pure uri
 
 validPreference :: Text -> Text -> Bool
 validPreference key value =

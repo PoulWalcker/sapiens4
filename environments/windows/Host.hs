@@ -2,7 +2,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Host (Host(..), prepareHost, startHost, closeHost, watchHost, desktopArgs) where
 
-import DesktopStorage (storageMode)
+import DesktopStorage (storageMode, awaitServerAddress)
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Exception
@@ -10,13 +10,12 @@ import Control.Monad
 import Data.Aeson
 import Data.Char (toUpper)
 import Data.IORef
-import Data.List (stripPrefix)
 import Data.Maybe
-import DataRoot (configDirectory, defaultDataDirectory, StorageChoice(..), startupMessage, containedPath)
+import DataRoot (configDirectory, defaultDataDirectory, StorageChoice(..), containedPath)
 import Network.HTTP.Client
 import Network.URI
-import Native (processId, openProcessForWait, waitProcessHandle, closeWaitHandle)
-import Foreign.Ptr (nullPtr)
+import Native (processId, waitProcessHandle)
+import System.Process.Internals (ProcessHandle__(..), withProcessHandle)
 import qualified Data.ByteString as BS
 import System.Directory
 import System.Environment
@@ -120,30 +119,15 @@ launchHost host command = mask $ \restore -> do
     restore (takeMVar readiness >>= either (\e -> do
       void (timeout 250000 (waitCatch collect))
       bytes <- readIORef recent
-      unless (BS.null bytes) $ do
+      unless (BS.null bytes) $ handle (\(_ :: IOException) -> pure ()) $ do
         folder <- configDirectory
         logPath <- containedPath folder (folder </> "desktop-server.log")
         BS.writeFile logPath bytes
       throwIO e) pure)) `onException` closeHost host
 
-readyAddress :: String -> Maybe URI
-readyAddress line = do
-  uri <- stripPrefix "Sapiens4: " line >>= parseURI
-  auth <- uriAuthority uri
-  guard (uriScheme uri == "http:" && uriRegName auth == "127.0.0.1" && null (uriUserInfo auth))
-  pure uri
-
-awaitAddress :: Handle -> IO URI
-awaitAddress output = do
-  ended <- hIsEOF output
-  when ended $ ioError $ userError startupMessage
-  line <- hGetLine output
-  maybe (awaitAddress output) pure (readyAddress line)
-
 awaitHost :: Host -> Handle -> IO String
 awaitHost host output = do
-  result <- timeout 35000000 (awaitAddress output)
-  uri <- maybe (ioError $ userError "Sapiens4 did not become ready within 35 seconds") pure result
+  uri <- awaitServerAddress output
   let base = uri { uriPath = "", uriQuery = "", uriFragment = "" }
   manager <- newManager defaultManagerSettings
   request <- parseRequest (show base ++ "/api/health")
@@ -152,25 +136,35 @@ awaitHost host output = do
     Just (Object fields) | K.lookup "status" fields == Just (String "ok") -> writeIORef (origin host) (Just base) >> pure (show uri)
     _ -> ioError $ userError "Server readiness check failed"
 
-watchHost :: Host -> IO () -> IO ()
-watchHost host notify = do
- current <- readIORef (serverProcess host)
- forM_ current $ \server -> do
-  pid <- getPid (processHandle server)
-  handle <- maybe (pure nullPtr) (openProcessForWait 0x100000 0 . fromIntegral) pid
-  let revoked = writeIORef (origin host) Nothing >> notify
-  if handle==nullPtr then revoked else do
-   observer <- async $ flip finally (void $ closeWaitHandle handle) $ do
-    let wait = waitProcessHandle handle 250 >>= \result -> if result==258 then wait else revoked
-    wait
-   writeIORef (serverProcess host) (Just server {exitWatcher=Just observer})
+watchHost :: Host -> (String -> IO ()) -> IO ()
+watchHost host recover = mask_ $ do
+  server <- readIORef (serverProcess host) >>= maybe (fail "No application server to watch.") pure
+  let poll = withProcessHandle (processHandle server) $ \state -> case state of
+        OpenExtHandle root _ -> signaled root
+        OpenHandle root -> signaled root
+        ClosedHandle _ -> pure True
+      -- Poll the borrowed root handle only while process keeps it open.
+      signaled root = waitProcessHandle root 0 >>= \result -> case result of
+        0 -> pure True
+        258 -> pure False
+        _ -> fail "Could not observe the application server process."
+      awaitExit = do
+        exited <- poll
+        unless exited (threadDelay 250000 >> awaitExit)
+  observer <- async $ do
+    result <- try awaitExit
+    recover $ case result of
+      Left (e :: IOException) -> displayException e
+      Right () -> "The application server stopped. Choose a folder to reopen your workspace."
+  writeIORef (serverProcess host) (Just server {exitWatcher=Just observer})
 
 serverRunning :: Maybe ServerProcess -> IO Bool
 serverRunning = maybe (pure False) (fmap isNothing . getProcessExitCode . processHandle)
 
 closeHost :: Host -> IO ()
 closeHost host = mask_ $ do
-  current <- readIORef (serverProcess host)
+  current <- atomicModifyIORef' (serverProcess host) $ \owned ->
+    (fmap (\server -> server {exitWatcher=Nothing}) owned, owned)
   let clear = writeIORef (serverProcess host) Nothing >> writeIORef (origin host) Nothing
   case current of
     Nothing -> clear

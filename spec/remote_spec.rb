@@ -376,7 +376,8 @@ RSpec.describe 'Encrypted remote service contracts' do
     host.start
     send_frame(pack(op: 'resume'))
     expect(receive).to include('paired' => true, 'corpora' => identity)
-    other = Host.new(start: false)
+    other = Host.new
+    other.stop
     FileUtils.cp(path, File.join(other.root, 'remote-device.json'))
     other.start
     expect(other.api('GET', '/api/remote')).to include('enabled' => false, 'error' => a_string_including('invalid'))

@@ -32,7 +32,15 @@ import System.Posix.Signals
 #endif
 
 main :: IO ()
-main = run `catches` [Handler (\(code::ExitCode) -> throwIO code), Handler (\(e::SomeException) -> hPutStrLn stderr (case fromException e of Just (APIError _ message) -> T.unpack message; Nothing -> storageMessage e) >> exitFailure)]
+main = run `catches` [Handler (\(code::ExitCode) -> throwIO code), Handler report]
+ where
+ report (e::SomeException) = do
+  let detail = case fromException e of Just (APIError _ message) -> T.unpack message; Nothing -> storageMessage e
+  desktop <- elem "--desktop" <$> getArgs
+  mode <- lookupEnv "SAPIENS_STORAGE_MODE"
+  when (desktop && isJust mode) $ putStr startupErrorPrefix >> BL.putStrLn (encode detail)
+  hPutStrLn stderr detail
+  exitFailure
 run :: IO ()
 run = do
  setLocaleEncoding utf8

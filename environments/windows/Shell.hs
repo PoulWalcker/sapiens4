@@ -247,7 +247,7 @@ desktopSession memory probe = do
             let current action = readIORef storageAttempt >>= \n -> when (n==attempt) action
             writeIORef firstSignal Nothing
             writeIORef selectedRoot (Just (dataDirectory selected,url))
-            watchHost selected (post $ current $ recoverStartup "The application server stopped. Choose a folder to reopen your workspace.")
+            watchHost selected (post . current . recoverStartup)
             async (threadDelay 35000000 >> post (current $ do
               selection <- readIORef selectedRoot
               when (selection==Just (dataDirectory selected,url)) $ recoverStartup "Your workspace did not load within 35 seconds. Your saved storage selection is unchanged.")) >>= writeIORef workerRef . Just
@@ -300,7 +300,6 @@ desktopSession memory probe = do
                   selectedDirectory <- canonicalizePath directory
                   choice <- maybe (storageChoiceForDirectory selectedDirectory) pure requestedChoice
                   let selected = host {dataDirectory=selectedDirectory}
-                  DesktopStorage.checkStorage (runtimeDirectory host) selectedDirectory choice
                   guestScript <- B.readFile (runtimeDirectory host </> ".build/web/guest.js")
                   when (B.all (`elem` (" \t\r\n" :: String)) guestScript) $ ioError $ userError "The packaged guest.js is empty. Reinstall the complete Sapiens4 app."
                   url <- startHost choice selected

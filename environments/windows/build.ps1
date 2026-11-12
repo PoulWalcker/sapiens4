@@ -85,7 +85,8 @@ try {
     $staging = $candidate
     $package = Join-Path $staging 'Sapiens4'
     New-Item -ItemType Directory -Path $package | Out-Null
-    & runghc -XOverloadedStrings -XTupleSections -icorpora/host build/Package.hs stage (Join-Path $package 'runtime')
+    $rustArch = if ($Runtime -eq 'win-arm64') { 'aarch64' } else { 'x86_64' }
+    & runghc -XOverloadedStrings -XTupleSections -icorpora/host build/Package.hs stage (Join-Path $package 'runtime') "$rustArch-pc-windows-$BlindlyToolchain"
     if ($LASTEXITCODE -ne 0) { throw 'Runtime assembly failed' }
     Copy-Item -LiteralPath (Join-Path $repo '.build/bin/sapiens-windows.exe') -Destination (Join-Path $package 'Sapiens4.exe')
     Copy-Item -LiteralPath (Join-Path $repo '.build/bin/WebView2Loader.dll'),(Join-Path $repo '.build/bin/WebView2-LICENSE.txt') -Destination $package
