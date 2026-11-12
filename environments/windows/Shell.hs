@@ -38,19 +38,14 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 
 runDesktop :: Bool -> IO ()
-runDesktop probe = runInBoundThread retry
- where
-  retry = attempt `catch` report
-  -- COM may release callback references while its apartment is shutting down.
-  attempt = bracket newArena freeArena $ \memory ->
-    bracket_ (check =<< coInitialize nullPtr 2) coUninitialize (desktopSession memory probe)
-  report (e :: SomeException) = do
-    case fromException e :: Maybe SomeAsyncException of
-      Just _ -> throwIO e
-      Nothing -> pure ()
-    action <- withWide (storageMessage e) $ \message -> withWide "Sapiens4 could not start" $ \title ->
-      messageBox nullPtr message title 0x15
-    when (action==4) retry
+runDesktop probe = runInBoundThread $
+  -- Release callbacks only after COM has finished releasing its references.
+  (bracket newArena freeArena $ \memory ->
+    bracket_ (check =<< coInitialize nullPtr 2) coUninitialize (desktopSession memory probe))
+  `catch` \(e :: SomeException) -> case fromException e :: Maybe SomeAsyncException of
+    Just _ -> throwIO e
+    Nothing -> withWide (storageMessage e ++ "\n\nClose the application and relaunch after correcting the error.") $ \message ->
+      withWide "Sapiens4 could not start" $ \title -> void (messageBox nullPtr message title 0x10)
 
 desktopSession :: Arena -> Bool -> IO ()
 desktopSession memory probe = do
@@ -60,7 +55,7 @@ desktopSession memory probe = do
   configRoot <- configDirectory
   dataEnv <- lookupEnv "SAPIENS_DATA_DIR"
   let explicit = listToMaybe [value | (key,value) <- zip args (drop 1 args), key=="--data-dir"] `mplus` dataEnv
-  saved <- try (startupDataDirectory explicit legacyDataDirectory) :: IO (Either IOException (Maybe FilePath))
+  saved <- try (startupDataDirectory explicit) :: IO (Either IOException (Maybe FilePath))
   shellProfile <- containedPath configRoot (configRoot </> "WebView2/Shell")
   activeRoot <- newIORef (dataDirectory host)
   bootstrapPath <- canonicalizePath (runtimeDirectory host </> "app/shell/bootstrap.html")
@@ -80,12 +75,9 @@ desktopSession memory probe = do
   statusRef <- newIORef nullPtr
   focusRef <- newIORef nullPtr
   closing <- newIORef False
-  retrySetup <- newIORef (pure ())
-  restoreSetup <- newIORef (pure ())
   workerRef <- newIORef Nothing
   starting <- newIORef False
   generation <- newIORef (0 :: Integer)
-  compactWindow <- newIORef True
   firstSignal <- newIORef Nothing
   storageAttempt <- newIORef (0 :: Integer)
   selectedRoot <- newIORef Nothing
@@ -119,11 +111,10 @@ desktopSession memory probe = do
             maybe (readIORef shellRef >>= mapM_ (\view -> callInt (controller view) 12 0)) (`focusBrowser` previous) browser
           pure 0
         0x24 -> do
-          compact <- readIORef compactWindow
           dpi <- windowDpi hwnd
           let scaled value = round (fromIntegral value * fromIntegral (max 96 dpi) / (96 :: Double)) :: Int32
-          pokeByteOff (intPtrToPtr lparam) 24 (scaled (if compact then 560 else 860 :: Int))
-          pokeByteOff (intPtrToPtr lparam) 28 (scaled (if compact then 340 else 600 :: Int))
+          pokeByteOff (intPtrToPtr lparam) 24 (scaled (860 :: Int))
+          pokeByteOff (intPtrToPtr lparam) 28 (scaled (600 :: Int))
           pure 0
         0x05 -> resize hwnd >> pure 0
         0x47 -> do
@@ -140,7 +131,7 @@ desktopSession memory probe = do
                     Right () -> closeViews >> void (destroyWindow hwnd)
                     Left (e :: SomeException) -> do
                       writeIORef closing False
-                      readIORef restoreSetup >>= id
+                      writeIORef starting False
                       label <- readIORef statusRef
                       windowTitle label ("Quit cancelled: " ++ storageMessage e)
                       void (showWindow label 5)
@@ -150,7 +141,6 @@ desktopSession memory probe = do
         0x02 -> quitMessage 0 >> pure 0
         0x0111 -> case wparam .&. 0xffff of
           101 -> void (createProcess (proc "rundll32.exe" ["url.dll,FileProtocolHandler", "https://go.microsoft.com/fwlink/p/?LinkId=2124703"])) >> pure 0
-          102 -> readIORef retrySetup >>= id >> pure 0
           103 -> void (sendMessage hwnd 0x10 0 0) >> pure 0
           _ -> defaultProc hwnd message wparam lparam
         0x802A -> runPending >> pure 0
@@ -161,10 +151,10 @@ desktopSession memory probe = do
     instanceHandle <- moduleHandle nullPtr
     hwnd <- createMainWindow memory instanceHandle proc
     flip finally (void $ destroyWindow hwnd) $ do
-      resizeContent hwnd 560 600
+      resizeContent hwnd 1440 960
       label <- withWide "STATIC" $ \className -> withWide "Starting Sapiens4…" $ \title ->
         createWindow 0 className title 0x50000001 0 0 1440 960 hwnd nullPtr instanceHandle nullPtr
-      setupButtons <- forM [(101,"Install/Repair WebView2"),(102,"Retry"),(103,"Cancel")] $ \(ident,title) ->
+      setupButtons <- forM [(101,"Install WebView2"),(103,"Close")] $ \(ident,title) ->
         withWide "BUTTON" $ \className -> withWide title $ \caption ->
           createWindow 0 className caption 0x40010000 (20 + (ident-101)*160) 230 150 38 hwnd (intPtrToPtr (fromIntegral ident)) instanceHandle nullPtr
       writeIORef statusRef label
@@ -186,15 +176,13 @@ desktopSession memory probe = do
                   Right () -> message
             writeIORef starting False
             writeIORef focusRef nullPtr
-            windowTitle label $ "Sapiens4 could not start.\n\n" ++ detail ++ "\n\nChoose Install/Repair WebView2, Retry or Cancel.\nData: " ++ dataDirectory host
+            windowTitle label $ "Sapiens4 could not start.\n\n" ++ detail ++ "\n\nCorrect the error, close the application and relaunch.\nData: " ++ dataDirectory host
             void $ showWindow label 5
             mapM_ (\button -> void (showWindow button 5)) setupButtons
           storageScript source = readIORef shellRef >>= mapM_ (\view -> execute memory view source (const $ pure ()))
           storageError :: String -> IO ()
           storageError message = do
             closeHost host
-            writeIORef compactWindow True
-            resizeContent hwnd 560 600
             writeIORef starting False
             storageScript ("window.storageError(" ++ T.unpack (TE.decodeUtf8 $ L.toStrict $ encode message) ++ ")")
           recoverStartup message = do
@@ -213,8 +201,6 @@ desktopSession memory probe = do
                 atomicModifyIORef' browserRef (\value -> (Nothing,value)) >>= mapM_ closeBrowser
                 writeIORef initialStorage False
                 writeIORef recoveryError (Just detail)
-                writeIORef compactWindow True
-                resizeContent hwnd 560 600
                 usedLegacy <- atomicModifyIORef' legacyView (\old -> (False,old))
                 if usedLegacy then do
                   closeViews
@@ -238,8 +224,6 @@ desktopSession memory probe = do
             DesktopStorage.saveWhenReady firstSignal signal selectedRoot fst recoverStartup $ \(_,url) -> do
               atomicModifyIORef' workerRef (\old -> (Nothing,old)) >>= mapM_ cancel
               writeIORef starting False
-              writeIORef compactWindow False
-              resizeContent hwnd 1440 960
               storageScript "window.dispatchEvent(new Event('sapiens-preferences-ready'))"
               when probe $ putStrLn "TITLE: Sapiens4" >> putStrLn ("Sapiens4: " ++ url)
           installStorage selected url = do
@@ -387,7 +371,7 @@ desktopSession memory probe = do
                 else when (code/=14) $ post $ active $ do
                   base <- readIORef (origin host)
                   case base of
-                    Nothing -> failStart "We couldn't open the storage screen. Choose Retry. Your saved data is unchanged."
+                    Nothing -> failStart "We couldn't open the storage screen. Close and relaunch. Your saved data is unchanged."
                     Just _ -> recoverStartup "We couldn't open your workspace. Your saved storage selection is unchanged. Choose a folder to try again."
                 when probe $ do
                   identity <- getValue event 5 :: IO Word64
@@ -400,13 +384,13 @@ desktopSession memory probe = do
                 active action = valid >>= flip when action
                 failed message = post $ active $ failStart message
             complete <- and <$> mapM doesFileExist [bootstrapPath, runtimeDirectory host </> ".build/bin/sapiens4.exe"]
-            if not complete then failed "Some Sapiens4 application files are missing. Extract the complete downloaded application, then choose Retry. Your saved data is unchanged."
+            if not complete then failed "Some Sapiens4 application files are missing. Extract the complete downloaded application and relaunch. Your saved data is unchanged."
             else do
               available <- try webViewRuntimeAvailable
               case available of
                 Left (e :: SomeException) -> failed (storageMessage e)
                 Right False -> post $ active $ do
-                  windowTitle label "Microsoft Edge WebView2 is required.\n\nChoose Install/Repair WebView2 to open Microsoft's official installer.\nRun the downloaded installer, then choose Retry.\nCancel closes Sapiens4 without starting its server."
+                  windowTitle label "Microsoft Edge WebView2 is required.\n\nChoose Install WebView2 to open Microsoft's official installer.\nAfter installation, close and relaunch Sapiens4."
                   mapM_ (\button -> void (showWindow button 5)) setupButtons
                   writeIORef starting False
                 Right True -> post $ active $ do
@@ -425,10 +409,6 @@ desktopSession memory probe = do
                 attempt <- atomicModifyIORef' generation (\value -> (value+1,value+1))
                 asyncWithUnmask (\unmask -> unmask (launch attempt)) >>= writeIORef workerRef . Just
       hSetBuffering stdout LineBuffering
-      writeIORef retrySetup begin
-      writeIORef restoreSetup $ do
-        writeIORef starting False
-        mapM_ (\button -> void (showWindow button 5)) setupButtons
       begin
       void $ showWindow hwnd 5
       void $ updateWindow hwnd
@@ -449,7 +429,7 @@ createMainWindow memory instanceHandle procedure = do
     when (registered == 0) $ ioError $ userError "Cannot register desktop window"
     retain memory (withWide "Sapiens4HaskellWindow" $ \name -> void $ unregisterClass name instanceHandle)
     (left,upper,screenWidth,screenHeight) <- workArea
-    let width=min 560 screenWidth; height=min 340 screenHeight
+    let width=min 1440 screenWidth; height=min 960 screenHeight
     createWindow 0 className title 0x00CF0000 (left+(screenWidth-width) `div` 2) (upper+(screenHeight-height) `div` 2) width height nullPtr nullPtr instanceHandle nullPtr
   when (hwnd == nullPtr) $ ioError $ userError "Cannot create desktop window"
   pure hwnd

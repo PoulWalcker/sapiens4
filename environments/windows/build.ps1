@@ -60,15 +60,16 @@ function Verify-Signature($Path) {
 $staging = $null
 Push-Location $repo
 try {
-    if ($PublicRelease -or -not (Test-Path (Join-Path $repo 'submodules/libs4/node_modules/sharp/package.json'))) {
+    if ($PublicRelease -or -not (Test-Path (Join-Path $repo 'submodules/libs4/node_modules/purescript/package.json'))) {
         & npm ci --include=dev --prefix (Join-Path $repo 'submodules/libs4')
-        if ($LASTEXITCODE -ne 0) { throw 'Icon/UI dependency installation failed' }
+        if ($LASTEXITCODE -ne 0) { throw 'UI dependency installation failed' }
     }
     $uiOutput = Join-Path $repo '.build/web'
     if ($PublicRelease -and (Test-Path -LiteralPath $uiOutput)) { Remove-Item -LiteralPath $uiOutput -Recurse -Force }
-    foreach ($icon in @(@('favicon.svg','AppIcon.ico'),@('favicon-dark.svg','AppIconDark.ico'))) {
-        & node (Join-Path $repo 'submodules/libs4/tools/svg-to-ico.cjs') (Join-Path $repo ('app/shell/'+$icon[0])) (Join-Path $PSScriptRoot $icon[1])
-        if ($LASTEXITCODE -ne 0) { throw 'Icon preparation failed' }
+    foreach ($line in Get-Content -LiteralPath (Join-Path $PSScriptRoot 'icons.sha256')) {
+        $expected, $path = $line -split '  ', 2
+        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $repo $path)).Hash
+        if ($actual -ne $expected) { throw 'Icon resources changed. Run environments/windows/regenerate-icons.ps1 and commit both ICO files and icons.sha256.' }
     }
     & runghc build/Build.hs
     if ($LASTEXITCODE -ne 0) { throw 'Haskell application build failed' }

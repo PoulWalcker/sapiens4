@@ -51,9 +51,6 @@ run = do
  setEnv "SAPIENS_REPOSITORY" root
  case args of
   ["build-ui"] -> buildUI root
-  ["check-data",directory,"new"] -> checkDataRoot StartNew directory
-  ["check-data",directory,"existing"] -> checkDataRoot AttachExisting directory
-  "check-data":_ -> failure 400 "Usage: sapiens4 check-data DIRECTORY new|existing"
   ["control",config,payload] -> jsonCommand $ do
    value <- either (failure 400 . T.pack) pure (eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack payload))))
    require (case value of Object _ -> True; _ -> False) 400 "Expected a JSON object"

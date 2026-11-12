@@ -13,13 +13,9 @@ import Data.Maybe
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
 import Assets (allAssets, assetFile)
+#ifdef darwin_HOST_OS
 import Foreign.C.Types (CInt(..), CUInt(..))
-#ifdef mingw32_HOST_OS
-import Control.Concurrent (runInBoundThread)
-import Foreign.Ptr (Ptr, castPtr)
-#else
 import Foreign.C.Error (throwErrnoIfMinus1_)
 import Foreign.C.String (CString)
 import GHC.Foreign (withCString)
@@ -52,39 +48,14 @@ exists path = doesPathExist path >>= \present -> if present then pure True else 
 inside :: FilePath -> FilePath -> Bool
 inside root path = let relative=makeRelative root path in not (isAbsolute relative) && ".." `notElem` splitDirectories relative
 
-renameNew :: FilePath -> FilePath -> IO ()
-#ifdef mingw32_HOST_OS
-foreign import ccall unsafe "MoveFileExW" moveFileNew :: Ptr () -> Ptr () -> CUInt -> IO CInt
-foreign import ccall unsafe "GetLastError" lastFileError :: IO CUInt
-renameNew source destination = runInBoundThread $ wide source $ \from -> wide destination $ \to -> do
- result <- moveFileNew from to 0
- when (result==0) $ do
-  code <- lastFileError
-  fail ("Cannot publish "++source++" to "++destination++" (Windows error "++show code++")")
- where
- wide path action = do
-  parent <- canonicalizePath (takeDirectory path)
-  let absolute=parent</>takeFileName path
-      extended | "\\\\?\\" `isPrefixOf` absolute = absolute
-               | "\\\\" `isPrefixOf` absolute = "\\\\?\\UNC\\"++drop 2 absolute
-               | otherwise = "\\\\?\\"++absolute
-  B.useAsCString (TE.encodeUtf16LE (T.pack extended)<>B.pack [0,0]) (action . castPtr)
-#else
 #ifdef darwin_HOST_OS
 foreign import ccall unsafe "renamex_np" renameExclusive :: CString -> CString -> CUInt -> IO CInt
-#elif defined(linux_HOST_OS)
-foreign import ccall unsafe "renameat2" renameExclusiveAt :: CInt -> CString -> CInt -> CString -> CUInt -> IO CInt
-#endif
+
+renameNew :: FilePath -> FilePath -> IO ()
 renameNew source destination = do
  encoding <- getFileSystemEncoding
  withCString encoding source $ \from -> withCString encoding destination $ \to ->
-#ifdef darwin_HOST_OS
   throwErrnoIfMinus1_ ("publish "++destination) (renameExclusive from to 4)
-#elif defined(linux_HOST_OS)
-  throwErrnoIfMinus1_ ("publish "++destination) (renameExclusiveAt (-100) from (-100) to 1)
-#else
-  fail "Exclusive package publication is unsupported on this platform"
-#endif
 #endif
 
 files :: FilePath -> IO [FilePath]
@@ -261,6 +232,7 @@ stage root destination = do
   writeFile (destination</>"package-manifest.json") "{\"channel\":\"stable\",\"appId\":\"com.sapiens4.desktop\"}\n"
 
 packageMac :: FilePath -> String -> FilePath -> Bool -> IO ()
+#ifdef darwin_HOST_OS
 packageMac root version outputInput public = do
  unless (os=="darwin" && arch=="aarch64") $ fail "macOS ARM64 build host required"
  unless (length (splitVersion version)==3 && all (\v -> not (null v) && all isDigit v) (splitVersion version)) $ fail "Version must be MAJOR.MINOR.PATCH"
@@ -289,13 +261,6 @@ packageMac root version outputInput public = do
   relocate app
   audit app
   sign root app identity
-  forM_ profile $ \credential -> do
-   let submitted=temporary</>"notarization.zip"
-   run "ditto" ["-c","-k","--keepParent",app,submitted]
-   run "xcrun" ["notarytool","submit",submitted,"--keychain-profile",credential,"--wait"]
-   run "xcrun" ["stapler","staple",app]
-   run "xcrun" ["stapler","validate",app]
-   run "spctl" ["--assess","--type","execute","--verbose=2",app]
   image <- diskImage app temporary identity
   let artifact=product</>"Sapiens.dmg"
   renameFile image artifact
@@ -303,3 +268,6 @@ packageMac root version outputInput public = do
   writeFile (product</>"SHA256SUMS") (take 64 checksum++"  Sapiens.dmg\n")
   renameNew product output
   putStrLn ("Installer "++output</>"Sapiens.dmg")
+#else
+packageMac _ _ _ _ = fail "macOS ARM64 build host required"
+#endif

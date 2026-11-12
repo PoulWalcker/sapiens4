@@ -8,7 +8,6 @@ import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
 import Data.Aeson
-import Data.Aeson.Types (parseMaybe)
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Aeson.Key as Key
 import qualified Crypto.Hash.SHA256 as SHA256
@@ -27,8 +26,6 @@ import Foreign hiding (void, new)
 import Foreign.C.Error (throwErrnoIfMinus1Retry)
 import Foreign.C.Types (CInt(..), CLong)
 import Network.HTTP.Client hiding (method)
-import Network.HTTP.Types.Status (statusCode)
-import Network.URI (parseURI, URI(..))
 import ObjC
 import Browser
 import System.Directory
@@ -48,7 +45,7 @@ import Numeric (showHex)
 import Text.Read (readMaybe)
 
 
-data Application = Application { native :: Obj, browser :: IORef Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: IORef (Maybe ServerProcess), address :: IORef Text, startup :: IORef (Maybe (Async ())), starting :: IORef Bool, localLoaded :: IORef Bool, runtime :: FilePath, selectedRoot :: IORef (Maybe FilePath), recoveryError :: IORef (Maybe Text), firstSignal :: IORef (Maybe WorkspaceSignal), attemptNumber :: IORef Integer, recovering :: IORef Bool, baselineRoot :: Maybe FilePath, clientPreferences :: Obj, quitting :: IORef Bool }
+data Application = Application { native :: Obj, browser :: IORef Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: IORef (Maybe ServerProcess), address :: IORef Text, startup :: IORef (Maybe (Async ())), starting :: IORef Bool, localLoaded :: IORef Bool, runtime :: FilePath, selectedRoot :: IORef (Maybe FilePath), recoveryError :: IORef (Maybe Text), firstSignal :: IORef (Maybe WorkspaceSignal), attemptNumber :: IORef Integer, recovering :: IORef Bool, clientPreferences :: Obj, quitting :: IORef Bool }
 
 data ServerProcess = ServerProcess { serverHandle :: ProcessHandle, serverSession :: ProcessID, serverInput :: Handle, serverOutput :: Handle, serverErrors :: Async (), serverDrain :: Maybe (Async ()), serverDirectory :: FilePath }
 
@@ -204,48 +201,15 @@ prompt message buttons = do
         mapM_ (\title -> str title >>= void . obj1 panel "addButtonWithTitle:") buttons
         long panel "runModal"
 
-serverHealthy :: Application -> Text -> IO Bool
-serverHealthy application destination = do
-    current <- readIORef (child application)
-    alive <- maybe (pure False) (fmap not . serverExited . serverHandle) current
-    if not alive || T.null destination then pure False else do
-        let probe = (bracket (newManager defaultManagerSettings) closeManager $ \http -> do
-                let endpoint = fmap (\uri -> uri {uriPath="/api/health",uriQuery="",uriFragment=""}) (parseURI (T.unpack destination))
-                request <- parseRequest (maybe "" show endpoint)
-                response <- httpLbs request {responseTimeout=responseTimeoutMicro 2000000,redirectCount=0} http
-                pure (statusCode (responseStatus response)==200 &&
-                    (decode (responseBody response) >>= fieldStatus)==Just ("ok" :: Text)))
-                `catch` (\(_ :: IOException) -> pure False)
-                `catch` (\(_ :: HttpException) -> pure False)
-        fromMaybe False <$> timeout 5000000 (do
-            healthy <- probe
-            if healthy then pure True else threadDelay 250000 >> probe)
-    where fieldStatus = parseMaybe (withObject "health" (.: "status"))
-
 reload :: Application -> IO ()
 reload application = do
     closing <- readIORef (quitting application)
-    unless closing $ if fixture application then readIORef (browser application) >>= readIORef . shell >>= void . (`obj0` "reload") else do
-        busy <- readIORef (starting application)
-        unless busy $ do
+    busy <- readIORef (starting application)
+    unless (closing || busy) $
+        if fixture application then readIORef (browser application) >>= readIORef . shell >>= void . (`obj0` "reload")
+        else do
             destination <- readIORef (address application)
-            current <- readIORef (child application)
-            if T.null destination then loadBootstrap application else case current of
-                Nothing -> recoverStartup application "The application server stopped. Choose a folder to try again."
-                Just server -> do
-                    writeIORef (starting application) True
-                    attempt <- readIORef (attemptNumber application)
-                    worker <- async $ do
-                        result <- try (serverHealthy application destination)
-                        postAttempt application attempt $ do
-                            closing <- readIORef (quitting application)
-                            unless closing $ do
-                                writeIORef (starting application) False
-                                case result of
-                                    Left (e :: SomeException) -> recoverStartup application (T.pack (storageMessage e))
-                                    Right True -> check application
-                                    Right False -> startSelected application (Just AttachExisting) (serverDirectory server)
-                    writeIORef (startup application) (Just worker)
+            if T.null destination then loadBootstrap application else check application
 
 showWindow :: Application -> IO ()
 showWindow application = do win <- readIORef (windowRef application); void (obj1 win "deminiaturize:" nullPtr); void (obj1 win "makeKeyAndOrderFront:" nullPtr); void (obj1 (native application) "activateIgnoringOtherApps:" (int 1))
@@ -319,7 +283,7 @@ installMethods application = do
                 forM_ problem (showStorageError application)
                 unless (loaded || isJust problem) $ do
                     explicit <- lookupEnv "SAPIENS_DATA_DIR"
-                    selection <- try (startupDataDirectory explicit (pure $ baselineRoot application))
+                    selection <- try (startupDataDirectory explicit)
                     case selection of
                         Left (e :: IOException) -> showStorageError application (T.pack (storageMessage e))
                         Right Nothing -> pure ()
@@ -409,10 +373,12 @@ initialize application target address = do
     writeIORef (windowRef application) win
     setText win "setTitle:" (if fixture application then "Sapiens4 behavior fixture" else "Sapiens4")
     void (obj1 win "setContentView:" container); void (obj1 win "setReleasedWhenClosed:" (int 0))
-    unless (fixture application) $ do
-        size win "setMinSize:" 560 340
-        size win "setContentSize:" 560 600
     void (obj0 win "center")
+    unless (fixture application) $ do
+        size win "setMinSize:" 720 540
+        name <- str "Sapiens4Workspace"
+        void (booleanArgument win "setFrameUsingName:" name)
+        setText win "setFrameAutosaveName:" "Sapiens4Workspace"
     showWindow application
     timerClass <- cls "NSTimer"; timerSelector <- sel "scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:"; tick <- sel "tick:"
     timer <- callTimer timerClass timerSelector 0.05 target tick nullPtr 1
@@ -442,28 +408,21 @@ runSession isFixture initialAddress = do
     executable <- getExecutablePath
     let packaged = takeDirectory executable </> "../Resources/runtime"
     bundled <- doesDirectoryExist packaged
-    (runtime,baseline) <- if bundled then (,Nothing) <$> canonicalizePath packaged else do
-        bundle <- cls "NSBundle" >>= (`obj0` "mainBundle")
-        resource <- str "Launcher"; extension <- str "plist"
-        path <- obj2 bundle "pathForResource:ofType:" resource extension
-        when (takeExtension (takeDirectory (takeDirectory (takeDirectory executable))) == ".app" && path == nullPtr) $
+    runtime <- if bundled then canonicalizePath packaged else do
+        when (takeExtension (takeDirectory (takeDirectory (takeDirectory executable))) == ".app") $
             ioError (userError "The installed app is missing its runtime. Reinstall the complete Sapiens4 package.")
-        configuration <- cls "NSDictionary" >>= \c -> obj1 c "dictionaryWithContentsOfFile:" path
-        key <- str "Repository"
-        root <- obj1 configuration "objectForKey:" key >>= string
-        pathKey <- str "Path"
-        search <- obj1 configuration "objectForKey:" pathKey >>= string
-        unless (T.null search) (setEnv "PATH" (T.unpack search))
-        directory <- canonicalizePath =<< if T.null root then getCurrentDirectory else pure (T.unpack root)
+        supplied <- lookupEnv "SAPIENS_REPOSITORY"
+        directory <- maybe getCurrentDirectory pure supplied >>= canonicalizePath
         source <- doesFileExist (directory </> "corpora/Main.hs")
-        unless source $ ioError (userError "The source launcher cannot find its checkout. Reinstall the complete Sapiens4 app.")
-        dataKey <- str "DataDirectory"
-        previous <- obj1 configuration "objectForKey:" dataKey >>= string
-        pure (directory, Just (if T.null previous then directory </> ".sapiens4" else T.unpack previous))
+        unless source $ ioError (userError "The source launcher cannot find its checkout. Set SAPIENS_REPOSITORY to the source directory.")
+        pure directory
     application <- cls "NSApplication" >>= \c -> obj0 c "sharedApplication"
-    http <- newManager defaultManagerSettings
     guestScript <- if isFixture then
-        (do r <- parseRequest (T.unpack (T.dropWhileEnd (== '/') initialAddress <> "/workspace/guest.js")); response <- httpLbs r http; pure (TE.decodeUtf8With (\_ _ -> Just '\xfffd') (L.toStrict (responseBody response)))) `catch` (\(_ :: HttpException) -> pure "")
+        (bracket (newManager defaultManagerSettings) closeManager $ \http -> do
+            r <- parseRequest (T.unpack (T.dropWhileEnd (== '/') initialAddress <> "/workspace/guest.js"))
+            response <- httpLbs r http
+            pure (TE.decodeUtf8With (\_ _ -> Just '\xfffd') (L.toStrict (responseBody response))))
+          `catch` (\(_ :: HttpException) -> pure "")
       else pure ""
     b <- newBrowser (if isFixture then initialAddress else "about:blank") guestScript >>= newIORef
     win <- newIORef nullPtr; tasks <- newIORef []
@@ -477,7 +436,7 @@ runSession isFixture initialAddress = do
         let hex byte = let value=showHex byte "" in replicate (2-length value) '0' ++ value
             suite="com.sapiens4.client." <> T.pack (concatMap hex (BS.unpack (SHA256.hash (TE.encodeUtf8 (T.pack config)))))
         allocated "NSUserDefaults" >>= \o -> str suite >>= obj1 o "initWithSuiteName:"
-    let state = Application application b win tasks isFixture process address worker busy loaded runtime selection problem signal generation recovery baseline preferences closing
+    let state = Application application b win tasks isFixture process address worker busy loaded runtime selection problem signal generation recovery preferences closing
     (do
         target <- installMethods state
         initialize state target initialAddress
@@ -647,10 +606,6 @@ recoverStartup application message = do
                 void (replaceBrowser application "about:blank" "")
                 writeIORef (recoveryError application) (Just detail)
                 writeIORef (localLoaded application) True
-                win <- readIORef (windowRef application)
-                setText win "setFrameAutosaveName:" ""
-                size win "setMinSize:" 560 340
-                size win "setContentSize:" 560 600
                 loadBootstrap application
         writeIORef (startup application) (Just worker)
 
@@ -692,13 +647,3 @@ commitWorkspace application signal =
     saveWhenReady (firstSignal application) signal (selectedRoot application) id (recoverStartup application . T.pack) $ \_ -> do
         atomicModifyIORef' (startup application) (\old -> (Nothing,old)) >>= mapM_ cancel
         writeIORef (starting application) False
-        workspaceWindow application
-
-workspaceWindow :: Application -> IO ()
-workspaceWindow application = do
-    win <- readIORef (windowRef application)
-    size win "setMinSize:" 720 540
-    size win "setContentSize:" 1180 820
-    name <- str "Sapiens4Workspace"
-    void (booleanArgument win "setFrameUsingName:" name)
-    setText win "setFrameAutosaveName:" "Sapiens4Workspace"

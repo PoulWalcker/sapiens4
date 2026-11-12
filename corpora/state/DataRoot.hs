@@ -11,7 +11,6 @@ import Data.Aeson hiding (pairs)
 import qualified Data.Aeson.KeyMap as K
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
-import Data.Maybe (listToMaybe)
 import Data.List (isPrefixOf)
 import Data.Char (isAscii, isAlphaNum)
 import qualified Data.Text as T
@@ -49,23 +48,11 @@ savedDataDirectory = do
    Object fields | Just (Number 1) <- K.lookup "version" fields, Just (String folder) <- K.lookup "directory" fields, isAbsolute (T.unpack folder) -> pure (Just (T.unpack folder))
    _ -> ioError (userError "Saved storage settings are incompatible. Choose your data directory again.")
 
-startupDataDirectory :: Maybe FilePath -> IO (Maybe FilePath) -> IO (Maybe FilePath)
-startupDataDirectory (Just explicit) _ = do
+startupDataDirectory :: Maybe FilePath -> IO (Maybe FilePath)
+startupDataDirectory (Just explicit) = do
  when (null explicit) $ storageError "Data directory must not be empty"
  Just <$> makeAbsolute explicit
-startupDataDirectory Nothing discoverLegacy = do
- saved <- savedDataDirectory
- case saved of
-  Just _ -> pure saved
-  Nothing -> do
-   current <- defaultDataDirectory
-   let discover = filterM (\root -> or <$> mapM (doesPathExist . (root </>)) ["corpora-identity.json","corpora.sqlite3","agentpy"])
-   candidates <- discover [current]
-   case candidates of
-    root:_ -> pure (Just root)
-    [] -> do
-     legacy <- discoverLegacy
-     listToMaybe <$> discover (maybe [] (:[]) legacy)
+startupDataDirectory Nothing = savedDataDirectory
 
 storageChoiceForDirectory :: FilePath -> IO StorageChoice
 storageChoiceForDirectory directory = do
@@ -130,13 +117,6 @@ childPath root ident = do
  unless ((UUID.toText <$> UUID.fromText ident) == Just ident) $ storageError "Invalid registered Corpora identity."
  folder <- containedPath root (root </> "corporas")
  containedPath folder (folder </> T.unpack ident)
-
-checkDataRoot :: StorageChoice -> FilePath -> IO ()
-checkDataRoot choice directory = do
- root <- selectedPath choice directory
- when (choice==StartNew) $ checkWritableParent root
- exists <- doesPathExist root
- unless (choice==StartNew && not exists) $ withExistingLock root (validateDataRoot choice root)
 
 checkWritableParent :: FilePath -> IO ()
 checkWritableParent path = do

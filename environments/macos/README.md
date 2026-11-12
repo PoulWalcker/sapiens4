@@ -1,16 +1,8 @@
 # Sapiens4 for macOS
 
-If you are replacing the earlier checkout-backed Mac launcher, quit Sapiens4
-and record its Data Root before replacing the app. This command reads the
-location from the old launcher. Adjust the app path if it is installed elsewhere.
-
-~~~sh
-/usr/libexec/PlistBuddy -c 'Print DataDirectory' /Applications/Sapiens4.app/Contents/Resources/Launcher.plist
-~~~
-
-On the first launch after replacement, select **Use another folder**, choose
-that directory, then select **Continue**. In the folder picker use **⌘⇧G** to
-enter a hidden path such as the checkout’s `.sapiens4`.
+To open data from an earlier installation, select **Use another folder**, choose
+the existing Data Root, then select **Continue**. In the folder picker, **⌘⇧G**
+can open a hidden path such as a checkout's `.sapiens4`.
 
 On macOS 13+ Apple Silicon, mount `Sapiens.dmg`, copy **Sapiens4.app** to
 Applications (or your own Applications folder), and open it. No Sapiens build
@@ -31,20 +23,18 @@ Before starting the backend, a fresh installation opens Welcome + Storage.
 Start fresh initializes the empty default directory. Use another folder opens a
 complete existing Data Root in place or initializes an empty selected folder.
 The selected directory is validated first and saved only after Workspace loads;
-later launches validate and reuse it. Missing, invalid or locked data returns to
+later launches validate and reuse it. Without a saved selection or explicit\n`SAPIENS_DATA_DIR` override, storage always requires confirmation. Missing, invalid or locked data returns to
 the storage screen without creating replacement data.
 
-The native window stays responsive; Quit can cancel backend startup.
-Workspace loading failures return to the storage screen. View > Reload App
-reuses a healthy owned backend or validates the selected root and starts a
-replacement after confirmed exit. Early startup errors appear in a native alert.
+Onboarding and Workspace share one resizable window.\nThe native window stays responsive; Quit can cancel backend startup.
+Workspace loading failures return to the storage screen. View > Reload App\nreloads the page while the owned backend is alive. An exited backend returns\nto storage recovery; reopening a selected folder starts its replacement. Early startup errors appear in a native alert.
 Guest document integration loads from the app's packaged `guest.js`; a missing
 or empty asset reports a startup error before the backend starts.
 Quit Sapiens4 before replacing or removing the app. Quit stops its owned backend;
 closing the Workspace window keeps the app running. Closing the storage window
 cancels startup and quits. Replacing, removing and reinstalling
 the app retain `~/Library/Application Support/Sapiens4/{data,config}`. The backend
-log is `desktop-server.log` in the selected Data Root. Older Development directories remain untouched.
+log is `desktop-server.log` in the configuration directory, including when\n`SAPIENS_CONFIG_DIR` is set. Older Development directories remain untouched.
 Use `SAPIENS_DATA_DIR` and `SAPIENS_CONFIG_DIR` at launch for explicit isolation.
 For example, run `SAPIENS_DATA_DIR=/path/to/data /Applications/Sapiens4.app/Contents/MacOS/Sapiens4`.
 
@@ -74,7 +64,7 @@ profile, then add `--release`:
 ```
 
 Public builds require both credentials, sign nested code with Hardened Runtime,
-notarize and staple the app and DMG, then run Gatekeeper and signature checks.
-The temporary notarization ZIP is discarded. Credentials are not stored in outputs.
-Installer acceptance tests are deferred until the implementation is complete.
+notarize and staple the final DMG, then verify the installed app copy with
+Gatekeeper and signature checks. Credentials are not stored in outputs.
+The installed-app acceptance case is `spec/installed_distribution_spec.rb`.\nIt requires `SAPIENS_TEST_DMG` to point to the image and an unlocked desktop\nwith Accessibility permission.
 Native browser tabs, file picking and accessibility behavior retain their existing interfaces.

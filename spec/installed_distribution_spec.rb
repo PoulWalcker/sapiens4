@@ -156,39 +156,33 @@ RSpec.describe 'Installed D1 distribution' do
       FileUtils.mkdir_p(File.dirname(profile))
       File.write(profile, token)
     end
-    launch(host, env, dir, observation: observation) do |desktop, process|
-      sleep 2
-      observation.snapshot('two-seconds-after-launch')
-      if %w[A B C].include?(scenario)
-        recovery = -> { Contract.wait(timeout: 60, description: 'native startup recovery') { desktop.text.include?('Sapiens4 could not start') } }
-        recovery.call
-        observation.snapshot('first-recovery')
-        desktop.find('Retry', role: 'AXButton')
-        if scenario == 'B'
-          desktop.press('Retry')
-          sleep 1
-          observation.snapshot('retry-launched')
-          recovery.call
-          observation.snapshot('second-recovery')
+    attempts = %w[B C].include?(scenario) ? 2 : 1
+    attempts.times do |attempt|
+      launch(host, env, dir, observation: observation) do |desktop, process|
+        sleep 2
+        observation.snapshot("two-seconds-after-launch-#{attempt}")
+        failing = %w[A B C].include?(scenario) && (scenario != 'C' || attempt.zero?)
+        if failing
+          Contract.wait(timeout: 60, description: 'native startup recovery') { desktop.text.include?('Sapiens4 could not start') }
+          observation.snapshot(attempt.zero? ? 'first-recovery' : 'second-recovery')
+          expect(File.read(profile)).to eq(token)
+          desktop.press('Close')
+        else
+          desktop.press('Start fresh')
+          desktop.press('Continue')
+          desktop.see('Message ChiefSapi')
+          observation.snapshot(scenario == 'C' ? 'recovered-startup' : 'successful-startup')
+          yield desktop
+          desktop.key('alt+F4')
         end
-        expect(File.read(profile)).to eq(token)
-        File.unlink(profile) if scenario == 'C'
-        desktop.press(scenario == 'C' ? 'Retry' : 'Cancel')
+        out, err, code = process.finish(35)
+        File.open(File.join(dir, 'host.log'), 'a') { |log| log.write("attempt=#{attempt} exit=#{code}\n#{out}\n#{err}") }
+        expect(code).to eq(0), out + err
       end
-      unless %w[A B].include?(scenario)
-        desktop.press('Start fresh')
-        desktop.press('Continue')
-        desktop.see('Message ChiefSapi')
-        observation.snapshot(scenario == 'C' ? 'recovered-startup' : 'successful-startup')
-        yield desktop
-        desktop.key('alt+F4')
-      end
-      out, err, code = process.finish(35)
-      File.write(File.join(dir, 'host.log'), "exit=#{code}\n#{out}\n#{err}")
-      expect(code).to eq(0), out + err
+      sleep 5
+      observation.snapshot("five-seconds-after-host-exit-#{attempt}")
+      File.unlink(profile) if scenario == 'C' && attempt.zero?
     end
-    sleep 5
-    observation.snapshot('five-seconds-after-host-exit')
   end
 
   def windows_install(dir, setup, label, provider = nil)

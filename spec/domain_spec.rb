@@ -133,7 +133,7 @@ RSpec.describe 'Domain validation through saved installation fixtures', :host do
       db.execute('DROP TABLE scheduled_routines')
       db.execute('PRAGMA user_version=7')
     end
-    _, error, code = Contract.capture(Contract::BINARY, 'check-data', host.root, 'existing')
+    _, error, code = Contract.capture(Contract::BINARY, '--port', '0', '--data-dir', host.root, env: host.environment)
     expect(code).not_to eq(0)
     expect(error).to include('scheduled_routines')
     SQLite3::Database.open(database, readonly: true) do |db|
@@ -146,7 +146,7 @@ RSpec.describe 'Domain validation through saved installation fixtures', :host do
     host.stop
     Contract.atomic_json(@file, @state.merge('schema_version' => 2, 'turns' => [@turn.merge(status: 'unknown')]))
     original = File.binread(@file)
-    _, error, code = Contract.capture(Contract::BINARY, 'check-data', host.root, 'existing')
+    _, error, code = Contract.capture(Contract::BINARY, '--port', '0', '--data-dir', host.root, env: host.environment)
     expect(code).not_to eq(0)
     expect(error).to include('agent state')
     expect(File.binread(@file)).to eq(original)

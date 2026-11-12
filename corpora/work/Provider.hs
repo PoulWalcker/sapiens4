@@ -29,6 +29,7 @@ import System.Exit
 import System.FilePath
 import System.Info
 import System.IO
+import System.Timeout (timeout)
 import System.Process hiding (runProcess)
 #ifndef mingw32_HOST_OS
 import System.Posix.Signals
@@ -95,10 +96,10 @@ codexArguments :: FilePath -> CodexConfig -> [String]
 codexArguments workdir config =
  ["exec","-c","model_reasoning_effort=" ++ T.unpack (jsonText (str (codexEffort config))),"-c","model=" ++ T.unpack (jsonText (str (codexModel config))),"--skip-git-repo-check","--json","--dangerously-bypass-approvals-and-sandbox","--cd",workdir,"--color","never","-"]
 
--- Release directories sort by numeric components; retain unversioned entries as fallbacks.
-codexVersion :: FilePath -> Maybe ([Integer], Bool, [Either Integer Text])
-codexVersion path = do
- let name = T.pack (takeFileName path)
+-- Compare the CLI-reported numeric version, including prerelease identifiers.
+codexVersion :: String -> Maybe ([Integer], Bool, [Either Integer Text])
+codexVersion value = do
+ let name = T.pack value
      version = T.takeWhile (/='+') (fromMaybe name (T.stripPrefix "v" name))
      (core,suffix) = T.breakOn "-" version
      numeric part = do
@@ -106,6 +107,7 @@ codexVersion path = do
       readMaybe (T.unpack part)
      identifier part = maybe (Right part) Left (numeric part)
  numbers <- traverse numeric (T.splitOn "." core)
+ guard (length numbers==3)
  pure (numbers, T.null suffix, map identifier (T.splitOn "." (T.drop 1 suffix)))
 
 codexBinary :: IO (Maybe FilePath)
@@ -137,12 +139,22 @@ codexBinary = do
     let app = [local </> "Programs/OpenAI/Codex/bin/codex.exe"]
     prefixes <- nub . ((roaming </> "npm"):) <$> getSearchPath
     packages <- concat <$> mapM npm prefixes
-    versions <- sortOn (\p -> Down (codexVersion p,p)) <$> children (local </> "OpenAI/Codex/bin")
+    versions <- children (local </> "OpenAI/Codex/bin")
     pure (app ++ packages ++ map (</> "codex.exe") versions)
    pure $ maybeToList path ++ [home </> ".local/bin/codex" | os=="darwin"] ++ installed ++ ["/Applications/" ++ app ++ ".app/Contents/Resources/" ++ binary | os == "darwin", app <- ["Codex","ChatGPT"],binary <- ["codex","codex-cli/bin/codex"]]
  existing <- filterM doesFileExist (nub (filter native candidates))
  runnable <- filterM (fmap executable . getPermissions) existing
- traverse makeAbsolute (listToMaybe runnable)
+ selected <- case override of
+  Just p | not (null p) -> pure (listToMaybe runnable)
+  _ -> do
+   versions <- forM runnable $ \p -> do
+    result <- try (timeout 10000000 (readCreateProcessWithExitCode (proc p ["--version"]) {detach_console=os=="mingw32",use_process_jobs=os=="mingw32"} "")) :: IO (Either IOException (Maybe (ExitCode,String,String)))
+    let version = case result of
+         Right (Just (ExitSuccess,out,_)) -> listToMaybe [v | (label,number) <- zip (words out) (drop 1 (words out)), label=="codex-cli", Just v <- [codexVersion number]]
+         _ -> Nothing
+    pure (version,p)
+   pure $ listToMaybe [p | (Just _,p) <- sortOn (Down . fst) versions]
+ traverse makeAbsolute selected
 
 killTree :: ProcessHandle -> IO ()
 killTree ph = do

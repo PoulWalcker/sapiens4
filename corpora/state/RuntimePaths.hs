@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module RuntimePaths (configDirectory, defaultDataDirectory, legacyDataDirectory, externalStoragePath, containedPath) where
+module RuntimePaths (configDirectory, defaultDataDirectory, externalStoragePath, containedPath) where
 
 import Data.Aeson
 import Control.Monad
@@ -18,8 +18,6 @@ instance FromJSON Profile where
   channel <- o .: "channel"
   identity <- o .: "appId"
   case (channel :: String, identity :: String) of
-   ("development","com.poulwalcker.sapiens4.development") -> pure (Profile "Sapiens4 Development")
-   ("stable","com.poulwalcker.sapiens4") -> pure (Profile "Sapiens4")
    ("stable","com.sapiens4.desktop") -> pure (Profile "Sapiens4")
    _ -> fail "Invalid package channel/identity"
 
@@ -97,8 +95,3 @@ defaultDataDirectory = do
  supplied <- lookupEnv "SAPIENS_DATA_DIR"
  when (supplied==Just "") $ fail "SAPIENS_DATA_DIR must not be empty"
  maybe ((</> "data") <$> profileRoot) makeAbsolute supplied >>= externalStoragePath
-
-legacyDataDirectory :: IO (Maybe FilePath)
-legacyDataDirectory = do
- root <- profileRoot
- pure (if os=="mingw32" && takeFileName root=="Sapiens4" then Just root else Nothing)
