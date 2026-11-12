@@ -43,16 +43,14 @@ Local Workspace windows receive change notifications over a same-origin WebSocke
 
 ## Configuration
 
-Default model: `gpt-6-sol`, reasoning `high`; Deep work uses `xhigh`. A call's
+Default model: `gpt-6-astra`, reasoning `medium`, until Models settings are saved. A call's
 30-minute limit is shared across its decision steps. Environment overrides:
 
 | Variable | Purpose |
 | --- | --- |
 | `SAPIENS_DATA_DIR` | Data directory |
 | `SAPIENS_CONFIG_DIR` | Configuration directory exposed to native hosts and integrations |
-| `SAPIENS_CODEX_BINARY` | Codex executable |
-| `SAPIENS_CODEX_MODEL` | Model |
-| `SAPIENS_CODEX_REASONING_EFFORT` | Reasoning effort |
+| `SAPIENS_<ID>_BINARY` | Provider executable, for example `SAPIENS_CODEX_BINARY` |
 | `SAPIENS_BLINDLY_BINARY` | Blindly4 executable |
 
 Decision templates live in `corpora/prompts/`. **Edit decision prompts** saves local
@@ -106,3 +104,17 @@ a supplied Origin must match the loopback Host. Common entrypoints:
 Group notes, messages, attachments, tasks and calls use `/api/groups/<id>`.
 Updates require the relevant revision. [RSpec scenarios](../spec) exercise the
 public contracts; see [Testing](testing.md) to run them.
+
+### Models and providers
+
+`GET /api/model-settings` returns the corpora default and per-Sapi overrides;
+`PUT /api/model-settings` saves them with the current revision (a stale revision
+gets 409). Until the first save, GET returns the default from
+`corpora/providers.json`. A run captures its model and effort when it starts.
+
+`corpora/providers.json` lists each provider CLI: executable, extra install paths,
+login and status commands, run arguments, output format, the recommended model and
+effort picked when a provider is chosen, and models with efforts.
+`GET /api/providers` returns them. An empty effort sends no effort flag. The
+executable is `SAPIENS_<ID>_BINARY`, else PATH, else the listed paths. Sign-in
+stays in each CLI. A new output format needs one `EventFormat` instance.

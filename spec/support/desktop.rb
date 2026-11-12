@@ -215,7 +215,7 @@ class Desktop
 
   def value(text, expected)
     Contract.wait(description: "#{text.inspect} value #{expected.inspect}") do
-      node = find(text, role: %w[AXTextField AXTextArea AXComboBox])
+      node = find(text, role: %w[AXTextField AXTextArea AXComboBox AXPopUpButton])
       node['value'] if node['value'] == expected
     end
   end

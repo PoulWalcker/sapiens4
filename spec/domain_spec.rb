@@ -60,12 +60,6 @@ RSpec.describe 'Domain validation through saved installation fixtures', :host do
     expect(JSON.parse(File.read(@file))['turns'].last['id']).to eq('fixture-call')
   end
 
-  it 'reports an unknown saved execution mode instead of silently choosing normal mode' do
-    Contract.atomic_json(File.join(File.dirname(@file), 'run-settings.json'), {mode: 'deeep'})
-    expect(host.request('GET', '/api/state').first).to eq(500)
-    expect(host.calls).to be_empty
-  end
-
   def saved_workload(**fields)
     call = {callId: 'saved-call', addressedTo: @owner, node: 'Outcome', state: 'Completed',
       request: 'Saved request', causedBy: nil, output: 'Saved answer', extension: {kept: true}}.merge(fields)

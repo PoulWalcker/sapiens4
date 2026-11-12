@@ -5,10 +5,10 @@ require_relative 'support/whisper'
 RSpec.describe 'Local service contracts' do
   include VoiceAudio
 
-  it 'persists identity, replies, drafts and execution mode without replaying completed work' do
+  it 'persists identity, replies and drafts without replaying completed work' do
     agent = host.agent
     original = host.state
-    host.api('PUT', "/api/agents/#{agent}", name: 'Researcher', role: 'Research', execution: {mode: 'deep'})
+    host.api('PUT', "/api/agents/#{agent}", name: 'Researcher', role: 'Research')
     turn = host.submit(agent, 'Hello 😎 — quote " and newline\n')
     expect(host.turn(turn)).to include('output' => 'Contract test reply')
     host.api('PUT', '/api/preferences', {selected: agent, drafts: {agent => 'Keep this'}, panes: {chat: false}})
@@ -18,10 +18,8 @@ RSpec.describe 'Local service contracts' do
       expect(state['corpora']).to eq(original['corpora'])
       expect(state['agents']).to eq(original['agents'])
       expect(state['preferences']).to include('selected' => agent, 'drafts' => {agent => 'Keep this'})
-      expect(state['orchestration'][agent]['execution']).to include('mode' => 'deep', 'timeout_seconds' => 1800)
       expect(host.turn(turn)['output']).to eq('Contract test reply')
       expect(host.calls.size).to eq(1)
-      expect(host.calls.first['args']).to include('model_reasoning_effort="xhigh"')
     end
   end
 

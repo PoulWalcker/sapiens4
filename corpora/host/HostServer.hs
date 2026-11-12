@@ -8,6 +8,7 @@ import Assets
 import HTTP
 import Bridge
 import Registry
+import qualified Onboarding as O
 import Voice (startTranscriber)
 import Control.Concurrent
 import Control.Concurrent.STM hiding (check)
@@ -67,16 +68,18 @@ startHostWith choice root requested managed = do
         host <- startHostWith selection path 0 True
         pure (hostService host,hostBridge host,hostStop host)
    registry <- if managed then pure Nothing else Just <$> newRegistry service bridge child
+   onboarding <- if managed then pure Nothing else Just <$> O.openOnboarding (repositoryRoot service)
    shutdown <- newEmptyMVar
    ready <- newEmptyMVar
    let settings = setServerName "Sapiens4" $ setPort port $ setHost "127.0.0.1" $ setGracefulCloseTimeout1 1000 $ setGracefulShutdownTimeout (Just 5) $ setInstallShutdownHandler (putMVar shutdown) $ setBeforeMainLoop (putMVar ready ()) defaultSettings
-   worker <- async $ withAsync (watchSnapshotFiles service) $ \watcher -> link watcher >> runSettingsSocket settings socket (application service bridge registry port)
+   worker <- async $ withAsync (watchSnapshotFiles service) $ \watcher -> link watcher >> runSettingsSocket settings socket (application service bridge registry onboarding port)
    void (race (wait worker) (takeMVar ready))
    Service.startService service
    -- Stop transcription and its network request before closing the database it uses.
    stopTranscriber <- startTranscriber service
    stopped <- newMVar False
    let stop = modifyMVar_ stopped $ \done -> if done then pure True else do
+        mapM_ O.closeOnboarding onboarding
         mapM_ closeRegistry registry
         closeBridge bridge
         readMVar shutdown >>= id
@@ -96,8 +99,8 @@ localRequest port write headers = do
  check (originHeader==Nothing || originHeader==(("http://" <>) <$> host)) 403 "Same-origin request required"
  when write (check (lookup "X-Sapiens-Local" headers==Just "1" && fmap (B.takeWhile (/=59)) (lookup hContentType headers)==Just "application/json") 403 "Local JSON request required")
 
-application :: Service -> Bridge -> Maybe Registry -> Int -> Application
-application service bridge registry port req respond
+application :: Service -> Bridge -> Maybe Registry -> Maybe O.Onboarding -> Int -> Application
+application service bridge registry onboarding port req respond
  | ["api","host","corpora",owner,"api","updates"] <- pathInfo req = do
     let headers = requestHeaders req
     result <- try $ do
@@ -111,7 +114,7 @@ application service bridge registry port req respond
      Left (APIError code message) -> respond (jsonResponse code (obj [("error",str message)]))
      Right s -> websocketsOr WS.defaultConnectionOptions {WS.connectionMessageDataSizeLimit=WS.SizeLimit 1024}
       (updatesSocket s) (\_ send -> send (jsonResponse 400 (obj [("error",str "WebSocket upgrade required")]))) req respond
- | otherwise = httpApplication service bridge registry port req respond
+ | otherwise = httpApplication service bridge registry onboarding port req respond
 
 -- One metadata sampler per service, asleep when no window is subscribed.
 watchSnapshotFiles :: Service -> IO ()
@@ -139,8 +142,8 @@ updatesSocket s pending = do
  bracket_ (count (+1)) (count (subtract 1)) $ WS.withPingThread conn 25 (pure ()) $
   race_ (send (-1)) (void (WS.receiveDataMessage conn))
 
-httpApplication :: Service -> Bridge -> Maybe Registry -> Int -> Application
-httpApplication service bridge registry port req respond = respond =<< respondError (do
+httpApplication :: Service -> Bridge -> Maybe Registry -> Maybe O.Onboarding -> Int -> Application
+httpApplication service bridge registry onboarding port req respond = respond =<< respondError (do
  let method = TE.decodeUtf8 (requestMethod req)
      path = TE.decodeUtf8 (rawPathInfo req)
      target = requestTarget req
@@ -153,6 +156,9 @@ httpApplication service bridge registry port req respond = respond =<< respondEr
   stopping <- readIORef (serviceStopping service)
   when write (require (not stopping) 503 "Host is shutting down")
   case (method,T.splitOn "/" path) of
+   ("GET",["","api","host","computer"]) -> maybe (failure 404 "Local setup unavailable") (fmap (jsonResponse 200) . O.computerView) onboarding
+   ("POST",["","api","host","computer"]) -> maybe (failure 404 "Local setup unavailable") (fmap (jsonResponse 200) . flip O.computerAction data_) onboarding
+   ("GET",["","api","host","onboarding"]) -> maybe (failure 404 "Local setup unavailable") (fmap (jsonResponse 200) . O.onboardingView) onboarding
    ("GET",["","api","host"]) -> jsonResponse 200 <$> registryRecords r
    ("GET",["","api","host","relays"]) -> jsonResponse 200 <$> relayView r Nothing
    ("GET",["","api","host","relays",ident]) -> jsonResponse 200 <$> relayView r (Just ident)

@@ -284,14 +284,12 @@ activity value =
   }
 
 type Orchestration =
-  { manager :: String, notes :: Notes, mode :: String, timeout :: Number }
+  { manager :: String, notes :: Notes }
 
 orchestration :: Json -> Orchestration
 orchestration value =
   { manager: D.s "manager" value
   , notes: notes $ D.get "notes" value
-  , mode: D.str $ D.at ["execution","mode"] value
-  , timeout: D.num $ D.at ["execution","timeout_seconds"] value
   }
 
 type Routine =

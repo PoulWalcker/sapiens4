@@ -30,6 +30,9 @@ import Sapiens.Model as M
 import Sapiens.Navigation as N
 import Sapiens.Remote as R
 
+setupPath :: M.Dialog -> String
+setupPath d = if d.kind == M.Computer then "/api/host/computer" else "/api/host/onboarding"
+
 handle :: C.Runtime -> E.Dispatch -> Action -> E.UI Unit
 handle runtime dispatch action = case action of
   OpenDialog kind record -> do
@@ -41,17 +44,28 @@ handle runtime dispatch action = case action of
       when (kind == M.ConnectRemote && M.remote m) $ liftEffect $ B.historyPush $ D.json {dialog: true}
       E.sync runtime
       case kind of
+        M.Models -> loadModelSettings m d
         M.Computer | m.snapshot.computer.platform == "linux" -> receive d.identity (\value -> E.modifyDialog d.identity _ {content=F.computerAccess value,status=M.Editing}) $ E.api runtime m "/api/computer" "GET" D.null
         M.DecisionPrompts -> receive d.identity (\value -> E.modifyDialog d.identity _ {content=F.Prompts $ map F.prompt $ D.rows "prompts" value,fields=F.decode $ D.first $ D.rows "prompts" value,status=M.Editing}) $ E.api runtime m "/api/decision-prompts" "GET" D.null
         M.RelayList -> receive d.identity (\value -> E.modifyDialog d.identity _ {content=F.relayRegistry value,status=M.Editing}) $ C.json "/api/host/relays" "GET" D.null
+        M.AIProviders -> when m.localAvailable $ dispatch $ OnboardingPoll d.identity
+        M.Computer -> when m.localAvailable $ dispatch $ OnboardingPoll d.identity
         M.HostPairing -> dispatch $ HostPairPoll d.identity
         M.EditCorpora -> liftEffect $ B.focus "#corpora-dialog textarea"
         M.ConnectRemote -> liftEffect $ B.focus "#paste-invitation textarea"
         _ -> pure unit
+  OnboardingPoll id -> E.inDialog id \d -> when (A.elem d.kind [M.AIProviders,M.Computer] && not (M.dialogBusy d)) do
+    receive id (\value -> E.modifyDialog id _ {content=F.Setup value,status=M.Editing}) $ C.json (setupPath d) "GET" D.null
   CloseDialog -> do
-    void $ H.fork $ H.liftAff $ C.cancelPairing runtime
-    H.modify_ Dialog.close
-    E.sync runtime
+    m <- H.get
+    case m.dialog of
+      Just d | d.kind == M.AIProviders && maybe false (\previous -> previous.kind == M.Models) (A.last m.dialogStack) -> do
+        H.modify_ Dialog.back
+        E.sync runtime
+      _ -> do
+        void $ H.fork $ H.liftAff $ C.cancelPairing runtime
+        H.modify_ Dialog.close
+        E.sync runtime
   Field key value -> do
     H.modify_ \m -> m {dialog=map (Dialog.updateField key value) m.dialog}
     when (key == F.ShowLink) do
@@ -98,6 +112,13 @@ handle runtime dispatch action = case action of
   runDialog d done operation = do
     E.modifyDialog d.identity _ {status=M.Submitting ""}
     receive d.identity done operation
+  loadModelSettings m d = runDialog d (acceptModelSettings d.identity) do
+    providers <- E.api runtime m "/api/providers" "GET" D.null
+    settings <- E.api runtime m "/api/model-settings" "GET" D.null
+    pure {providers,settings}
+  acceptModelSettings identity value = E.modifyDialog identity \current -> case current.content of
+    F.ModelPreview draft -> current {content=F.ModelPreview $ F.savedModelDraft value.settings draft {providers=F.modelProviders value.providers},status=M.Editing}
+    _ -> current
   saved caption _ = dispatch CloseDialog *> E.notify caption *> dispatch Poll
   submit m d = case d.kind of
     kind | kind == M.AgentSettings || kind == M.GroupSettings -> case Dialog.saveEntity d of
@@ -198,6 +219,21 @@ handle runtime dispatch action = case action of
       Intent.InstallPrompt -> void $ H.fork $ void $ H.liftAff $ try $ toAffE B.installPrompt
       _ -> traverse_ (\d -> unless (M.dialogBusy d) $ dialogCommand m d command) m.dialog
   dialogCommand m d command = case command of
+    Intent.ManageModelConnections -> when (d.kind == M.Models && not (M.dialogBusy d) && not (M.remote m) && (M.activeRecord m).location == X.Local) do
+      let next = Dialog.make M.AIProviders F.NoRecord m
+      H.modify_ \current -> (Dialog.push next current) {dialog=Just next}
+      E.sync runtime
+      dispatch $ OnboardingPoll next.identity
+    Intent.ReloadModelSettings -> when (d.kind == M.Models) $ loadModelSettings m d
+    Intent.SaveModelSettings -> case d.kind, d.content of
+      M.Models, F.ModelPreview draft | F.modelDraftValid draft && F.modelDraftChanged draft ->
+        runDialog d (saved "Model settings saved.") $ E.api runtime m "/api/model-settings" "PUT" (F.modelDraftPayload draft)
+      _, _ -> pure unit
+    Intent.EditModel target edit -> case d.kind, d.content of
+      M.Models, F.ModelPreview draft -> E.modifyDialog d.identity _ {content=F.ModelPreview $ F.editModel target edit draft}
+      _, _ -> pure unit
+    Intent.Setup setupAction ->
+      runDialog d (\value -> E.modifyDialog d.identity _ {content=F.Setup value,status=M.Editing}) $ C.json (setupPath d) "POST" $ D.json {action: setupAction}
     Intent.SuggestNames -> do
       E.modifyDialog d.identity (\s -> s {identity=s.identity+1})
       H.modify_ (\s -> s {sequence=s.sequence+1})

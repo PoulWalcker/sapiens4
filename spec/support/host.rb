@@ -21,10 +21,9 @@ class Host
     config = File.join(fixture_dir, 'config')
     FileUtils.mkdir_p(config)
     Contract.atomic_json(File.join(config, 'storage.json'), version: 1, directory: root)
-    @environment = {'SAPIENS_CONFIG_DIR' => config, 'SAPIENS_CODEX_BINARY' => binary, 'SAPIENS_CONTRACT_ENV' => fixture_dir,
+    @environment = {'SAPIENS_CONFIG_DIR' => config, 'SAPIENS_CODEX_BINARY' => binary, 'SAPIENS_CLAUDE_BINARY' => binary, 'SAPIENS_CONTRACT_ENV' => fixture_dir,
       'SAPIENS_CONTRACT_RUBY' => RbConfig.ruby, 'SAPIENS_CONTRACT_PROVIDER' => File.join(__dir__, 'provider.rb'),
-      'NO_COLOR' => '1', 'SAPIENS_WHISPER_URL' => 'http://127.0.0.1:9', 'SAPIENS_CODEX_MODEL' => 'gpt-6-sol',
-      'SAPIENS_CODEX_REASONING_EFFORT' => 'high'}.merge(environment)
+      'NO_COLOR' => '1', 'SAPIENS_WHISPER_URL' => 'http://127.0.0.1:9'}.merge(environment)
     self.start if start
   rescue Exception
     close

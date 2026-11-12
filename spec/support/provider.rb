@@ -10,6 +10,14 @@ if ARGV.include?('--version')
   exit
 end
 
+if ARGV.first == 'auth'
+  exit(config['claude_signed_out'] ? 1 : 0) if ARGV[1] == 'status'
+  exit 2
+end
+
+exit 0 if ARGV.include?('login') && ARGV.include?('status')
+
+claude = ARGV.include?('--print')
 text = STDIN.read
 context = text.include?("\nContext:\n") ? JSON.parse(text.split("\nContext:\n", 2).last) : {}
 node = text[/decision at node (\w+)/, 1] || (text.start_with?('You are acting as yourself inside') ? 'group' :
@@ -19,7 +27,7 @@ key = "#{owner}:#{node}"
 rule = config.fetch('rules', {}).fetch(key, config.fetch('rules', {}).fetch(node, {}))
 matching = config.fetch('messages', []).find { |item| context.fetch('originalIntent', text).include?(item.fetch('contains')) }
 rule = rule.merge(matching.fetch('rule')) if matching
-record = {owner: owner, node: node, prompt: text, args: ARGV, cwd: Dir.pwd,
+record = {provider: claude ? 'claude' : 'codex', owner: owner, node: node, prompt: text, args: ARGV, cwd: Dir.pwd,
           pid: Process.pid, started: Time.now.to_f, agency_run: ENV['SAPIENS_AGENCY_RUN']}
 path = File.join(root, 'calls', SecureRandom.hex(12) + '.json')
 if rule['child']
@@ -75,5 +83,15 @@ reply = rule.fetch('response') do
   end
 end
 reply = JSON.generate(reply) unless reply.is_a?(String)
-puts JSON.generate(type: 'thread.started', thread_id: 'fixture-session')
-puts JSON.generate(type: 'item.completed', item: {type: 'agent_message', text: reply})
+if claude
+  puts JSON.generate(type: 'system', subtype: 'init', session_id: 'fixture-claude-session')
+  puts JSON.generate(type: 'assistant', message: {content: [{type: 'text', text: 'Intermediate text must not complete the turn'}]})
+  unless config['claude_missing_result']
+    failed = config.fetch('claude_result_error', false)
+    puts JSON.generate(type: 'result', subtype: failed ? 'error_during_execution' : 'success',
+      is_error: failed, result: reply, errors: failed ? ['Fixture Claude error'] : [])
+  end
+else
+  puts JSON.generate(type: 'thread.started', thread_id: 'fixture-session')
+  puts JSON.generate(type: 'item.completed', item: {type: 'agent_message', text: reply})
+end

@@ -4,7 +4,7 @@
 -- Pure domain data and codecs shared by the host and native shells.
 module Domain
  ( Wire(..), AgentId(..), TaskId(..), RunId(..), parseWire, TurnStatus(..), Flow(..)
- , ExecutionMode(..), ExecutionSettings(..), CorporaStatus(..), CorporaConfig(..), Frequency(..)
+ , CorporaStatus(..), CorporaConfig(..), Frequency(..)
  , periodMillis, Pulse(..), pulseIdentity, TaskState(..), GroupAccess(..), BrowserAction(..)
  , BrowserCommand(..), BrowserTransition(..), browserTransition, TurnAction(..), Turn(..)
  , turnField, withTurnFields, batchLeader, retryTurn, TurnControlError(..), validateTurnAction
@@ -63,15 +63,6 @@ data Flow = Chat | Computer deriving (Eq, Ord, Show, Enum, Bounded)
 instance Wire Flow where wireName flow = case flow of Chat -> "chat"; Computer -> "computer"
 instance FromJSON Flow where parseJSON = parseWire
 instance ToJSON Flow where toJSON = String . wireName
-data ExecutionMode = Normal | Deep deriving (Eq, Ord, Show, Enum, Bounded)
-instance Wire ExecutionMode where wireName mode = case mode of Normal -> "normal"; Deep -> "deep"
-instance FromJSON ExecutionMode where parseJSON = parseWire
-instance ToJSON ExecutionMode where toJSON = String . wireName
-newtype ExecutionSettings = ExecutionSettings { executionMode :: ExecutionMode } deriving (Eq, Show)
-instance FromJSON ExecutionSettings where
- parseJSON = withObject "Execution settings" $ \o -> ExecutionSettings <$> o .:? "mode" .!= Normal
-instance ToJSON ExecutionSettings where
- toJSON settings = object ["mode" .= executionMode settings, "timeout_seconds" .= (1800 :: Int)]
 data CorporaStatus = Active | Paused | Archived deriving (Eq, Ord, Show, Enum, Bounded)
 instance Wire CorporaStatus where wireName status = case status of Active -> "active"; Paused -> "paused"; Archived -> "archived"
 instance FromJSON CorporaStatus where parseJSON = parseWire

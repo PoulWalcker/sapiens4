@@ -1,29 +1,28 @@
 module Sapiens.Form where
 
 import Prelude
-import Data.Argonaut.Core (Json)
+import Data.Argonaut.Core (Json, toObject)
 import Data.Array as A
-import Data.Maybe (Maybe(..))
+import Data.Maybe (Maybe(..), fromMaybe, maybe)
 import Sapiens.Domain as X
 import Foreign.Object as O
 import Sapiens.Data as D
 
-data Field = Name | Role | Manager | Mode | Description | Lead | Title | Body | Assignee | State | Value | Node | Path | Content | Scope | Message | Connection | Invitation | Code | Pending | Link | Expiration | Qr | Accepted | Archived | ShowLink
+data Field = Name | Role | Manager | Description | Lead | Title | Body | Assignee | State | Value | Node | Path | Content | Scope | Message | Connection | Invitation | Code | Pending | Link | Expiration | Qr | Accepted | Archived | ShowLink
 derive instance eqField :: Eq Field
 
 type Fields =
-  { name :: String, role :: String, manager :: String, mode :: String, description :: String, lead :: String, title :: String, body :: String, assignee :: String, state :: String, value :: String, node :: String, path :: String, content :: String, scope :: String, message :: String, connection :: String, invitation :: String, code :: String, pending :: String, link :: String, expiration :: String, qr :: String, accepted :: String, archived :: String, showLink :: String, members :: Array String, revision :: Number, scanning :: Boolean, dates :: O.Object String }
+  { name :: String, role :: String, manager :: String, description :: String, lead :: String, title :: String, body :: String, assignee :: String, state :: String, value :: String, node :: String, path :: String, content :: String, scope :: String, message :: String, connection :: String, invitation :: String, code :: String, pending :: String, link :: String, expiration :: String, qr :: String, accepted :: String, archived :: String, showLink :: String, members :: Array String, revision :: Number, scanning :: Boolean, dates :: O.Object String }
 
 decode :: Json -> Fields
 decode value =
-  { name: D.s "name" value, role: D.s "role" value, manager: D.s "manager" value, mode: D.s "mode" value, description: D.s "description" value, lead: D.s "lead" value, title: D.s "title" value, body: D.s "body" value, assignee: D.s "assignee" value, state: D.s "state" value, value: D.s "value" value, node: D.s "node" value, path: D.s "path" value, content: D.s "content" value, scope: D.s "scope" value, message: D.s "message" value, connection: D.s "connection" value, invitation: D.s "invitation" value, code: D.s "code" value, pending: D.s "pending" value, link: D.s "link" value, expiration: D.s "expiration" value, qr: D.s "qr" value, accepted: D.s "accepted" value, archived: D.s "archived" value, showLink: D.s "showLink" value, members:D.strings $ D.get "members" value, revision:D.n "revision" value, scanning:D.b "scanning" value, dates:D.objectStrings $ D.get "dates" value }
+  { name: D.s "name" value, role: D.s "role" value, manager: D.s "manager" value, description: D.s "description" value, lead: D.s "lead" value, title: D.s "title" value, body: D.s "body" value, assignee: D.s "assignee" value, state: D.s "state" value, value: D.s "value" value, node: D.s "node" value, path: D.s "path" value, content: D.s "content" value, scope: D.s "scope" value, message: D.s "message" value, connection: D.s "connection" value, invitation: D.s "invitation" value, code: D.s "code" value, pending: D.s "pending" value, link: D.s "link" value, expiration: D.s "expiration" value, qr: D.s "qr" value, accepted: D.s "accepted" value, archived: D.s "archived" value, showLink: D.s "showLink" value, members:D.strings $ D.get "members" value, revision:D.n "revision" value, scanning:D.b "scanning" value, dates:D.objectStrings $ D.get "dates" value }
 
 name :: Field -> String
 name = case _ of
   Name -> "name"
   Role -> "role"
   Manager -> "manager"
-  Mode -> "mode"
   Description -> "description"
   Lead -> "lead"
   Title -> "title"
@@ -52,7 +51,6 @@ fieldValue field form = case field of
   Name -> form.name
   Role -> form.role
   Manager -> form.manager
-  Mode -> form.mode
   Description -> form.description
   Lead -> form.lead
   Title -> form.title
@@ -81,7 +79,6 @@ update field text form = case field of
   Name -> form {name=text}
   Role -> form {role=text}
   Manager -> form {manager=text}
-  Mode -> form {mode=text}
   Description -> form {description=text}
   Lead -> form {lead=text}
   Title -> form {title=text}
@@ -117,8 +114,68 @@ type PairStatus = {available :: Boolean, paired :: Boolean, enabled :: Boolean, 
 
 type Access = {built :: Boolean, trusted :: Boolean, foregroundAvailable :: Boolean, error :: String}
 
-data Content = NoContent | ComputerAccess Access | Prompts (Array Prompt) | RelayRegistry Relays | Pairing PairStatus
+data Content = NoContent | ComputerAccess Access | Prompts (Array Prompt) | RelayRegistry Relays | Pairing PairStatus | ModelPreview ModelDraft | Setup Json
 derive instance eqContent :: Eq Content
+
+type ModelChoice = {provider :: String, model :: String, effort :: String}
+type CatalogModel = {model :: String, label :: String, isDefault :: Boolean, defaultEffort :: String, efforts :: Array String}
+type ModelProvider = {id :: String, name :: String, recommended :: ModelChoice, models :: Array CatalogModel}
+type ModelDraft = {providers :: Array ModelProvider, defaults :: ModelChoice, overrides :: O.Object ModelChoice, loaded :: Boolean, revision :: Number, saved :: Json}
+data ModelTarget = CorporaDefault | SapiOverride String
+data ModelEdit = InheritDefault | ChooseProvider String | ChooseModel String | ChooseEffort String
+
+modelDraft :: ModelDraft
+modelDraft = {providers:[],defaults:{provider:"",model:"",effort:""},overrides:O.empty,loaded:false,revision:0.0,saved:D.null}
+
+modelProviders :: Json -> Array ModelProvider
+modelProviders value = map provider $ D.rows "providers" value
+  where
+  provider row = {id:D.s "id" row,name:D.s "name" row,recommended:choice (D.get "recommended" row),models:map model $ D.rows "models" row}
+  choice raw = {provider:D.s "provider" raw,model:D.s "model" raw,effort:D.s "effort" raw}
+  model row = {model:D.s "model" row,label:D.s "displayName" row,isDefault:D.b "isDefault" row,defaultEffort:D.s "defaultReasoningEffort" row,efforts:D.strings $ D.get "efforts" row}
+
+catalogModels :: ModelDraft -> String -> Array CatalogModel
+catalogModels draft provider = fromMaybe [] $ _.models <$> A.find ((_ == provider) <<< _.id) draft.providers
+
+catalogModel :: ModelDraft -> ModelChoice -> Maybe CatalogModel
+catalogModel draft choice = A.find ((_ == choice.model) <<< _.model) $ catalogModels draft choice.provider
+
+modelChoiceValid :: ModelDraft -> ModelChoice -> Boolean
+modelChoiceValid draft choice = case catalogModel draft choice of
+  Just row -> A.elem choice.effort row.efforts || choice.effort == "" && row.defaultEffort == ""
+  Nothing -> false
+
+modelDraftPayload :: ModelDraft -> Json
+modelDraftPayload draft = D.json {revision:draft.revision,defaults:draft.defaults,overrides:draft.overrides}
+
+modelDraftValid :: ModelDraft -> Boolean
+modelDraftValid draft = draft.loaded && A.all (modelChoiceValid draft) (A.cons draft.defaults $ O.values draft.overrides)
+
+modelDraftChanged :: ModelDraft -> Boolean
+modelDraftChanged draft = modelDraftPayload draft /= draft.saved
+
+savedModelDraft :: Json -> ModelDraft -> ModelDraft
+savedModelDraft value draft = draft {defaults=choice (D.get "defaults" value),overrides=map choice $ fromMaybe O.empty $ toObject $ D.get "overrides" value,revision=D.n "revision" value,saved=value,loaded=true}
+  where
+  choice raw = {provider:D.s "provider" raw,model:D.s "model" raw,effort:D.s "effort" raw}
+
+editModel :: ModelTarget -> ModelEdit -> ModelDraft -> ModelDraft
+editModel target edit draft = case target, edit of
+  SapiOverride id, InheritDefault -> draft {overrides=O.delete id draft.overrides}
+  CorporaDefault, _ -> draft {defaults=change draft.defaults}
+  SapiOverride id, _ -> draft {overrides=O.insert id (change $ fromMaybe draft.defaults $ O.lookup id draft.overrides) draft.overrides}
+  where
+  pick provider row = {provider,model:row.model,effort:row.defaultEffort}
+  change choice = case edit of
+    ChooseProvider provider -> case A.find (modelChoiceValid draft) $ _.recommended <$> A.filter ((_ == provider) <<< _.id) draft.providers of
+      Just best -> best
+      Nothing -> let rows = catalogModels draft provider in
+        maybe choice (pick provider) $ case A.find _.isDefault rows of
+          Just row -> Just row
+          Nothing -> A.head rows
+    ChooseModel model -> maybe choice (pick choice.provider) $ catalogModel draft (choice {model=model})
+    ChooseEffort effort -> choice {effort=effort}
+    InheritDefault -> choice
 
 computerAccess :: Json -> Content
 computerAccess value = ComputerAccess

@@ -79,6 +79,7 @@ data Action
   | ScanFrame Int
   | UploadQR
   | StopScan
+  | OnboardingPoll Int
   | HostPairPoll Int
   | Install
   | Submit Event Action
@@ -88,7 +89,12 @@ data Action
 data Success = Refresh | CloseAndRefresh String | SavedPrompt String
 
 data DialogIntent
-  = SuggestNames
+  = ManageModelConnections
+  | Setup String
+  | SuggestNames
+  | EditModel F.ModelTarget F.ModelEdit
+  | ReloadModelSettings
+  | SaveModelSettings
   | CreateAgent
   | MentionGroup X.Entity
   | ResetRelay

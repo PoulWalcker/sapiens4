@@ -30,7 +30,7 @@ strip "$payload/.build/domain/sapiens-domain"
 install -m 755 "$driver/blindly4" "$payload/submodules/blindly4/.build/release/"
 for asset in app.js guest.js sw.js; do install -m 644 "$root/.build/web/$asset" "$payload/.build/web/"; done
 cp -R "$root/app" "$root/license" "$payload/"
-cp -R "$root/corpora/prompts" "$payload/corpora/"
+cp -R "$root/corpora/prompts" "$root/corpora/providers.json" "$payload/corpora/"
 cp -R "$root/submodules/libs4/web" "$root/submodules/libs4/license" "$payload/submodules/libs4/"
 cp -R "$root/submodules/blindly4/license" "$payload/submodules/blindly4/"
 install -m 644 "$root/submodules/blindly4/linux/README.md" "$root/submodules/blindly4/linux/Cargo.lock" "$payload/submodules/blindly4/linux/"

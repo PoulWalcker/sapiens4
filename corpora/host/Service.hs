@@ -32,6 +32,7 @@ import Workspace
 import Voice (receivePiece, cancelRecording, retryTranscription, draftable)
 import Memo
 import qualified Management as Mgt
+import qualified Provider as Provider
 import qualified Execution as E
 import qualified Delegation as D
 import qualified Routines as R
@@ -145,9 +146,8 @@ snapshotUnlocked s = do
  dir <- directory s
  orchestration <- forM rows $ \row -> do
   let a=at row "id"
-  policy <- executionSettings s a
   notes <- memoMetadata (workspaceRoot s a)
-  pure (a,obj [("manager",get (get dir a) "parent"),("execution",toJSON policy),("notes",notes)])
+  pure (a,obj [("manager",get (get dir a) "parent"),("notes",notes)])
  runs <- M.elems <$> readMVar (serviceRuns s)
  activity <- forM runs $ \run -> do
   value <- readIORef (runActivity run)
@@ -189,6 +189,11 @@ savePreferences s d = do
  DB.saveSingleton s DB.Preferences current
  pure (obj [("saved",Bool True),("preferences",current)])
 dispatch :: Service -> Text -> Text -> Maybe Value -> IO (Int,BL.ByteString,Text)
+dispatch s "PUT" "/api/model-settings" body = do
+ requested <- decodeValue 400 (fromMaybe Null body)
+ Provider.validateModelSettingsDraft s requested
+ saved <- locked s (saveModelSettings s requested)
+ pure (200,encode saved,"application/json; charset=utf-8")
 dispatch s method target body = locked s $ do
  let (path,query)=T.breakOn "?" target; parts=filter (not . T.null) (T.splitOn "/" path); write=method `elem` ["POST","PUT"]; d=fromMaybe Null body
  when write $ require (case d of Object _->True; _->False) 400 "Expected a JSON object"
@@ -197,6 +202,8 @@ dispatch s method target body = locked s $ do
  let json code action = do value<-action; when write (notifyChange s); pure (code,encode value,"application/json; charset=utf-8")
      owner kind a=if kind=="groups" then void (G.getGroup s a False) else void (DB.agent s a)
  case (method,parts) of
+  ("GET",["api","model-settings"]) -> json 200 (toJSON <$> readModelSettings s)
+  ("GET",["api","providers"]) -> json 200 (Provider.providersView (repositoryRoot s))
   ("GET",["api","health"]) -> json 200 (pure (obj [("status",str "ok"),("provider",str "codex")]))
   ("GET",["api","state"]) -> json 200 (snapshotUnlocked s)
   ("GET",["api","computer"]) -> json 200 (Computer.computerStatus (repositoryRoot s))

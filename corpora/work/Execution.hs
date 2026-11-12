@@ -66,9 +66,8 @@ submitTurn s a d = do
  attachments <- resolveAttachments s a (get d "attachments" `fallback` arr []) True
  require (not (T.null input) || not (null attachments)) 400 "Write a message or attach a file"
  flow <- decodeValue 400 flowValue
- binary <- codexBinary
- require (isJust binary) 503 "Codex CLI is missing. Install it and run codex login."
- when (flow==Computer) $ blindly s >>= doesFileExist >>= \built -> require built 503 "Blindly4 is not built. Run ./build/start.sh to build it."
+ runModelSettings s a >>= void . providerFor s
+ when (flow==Computer) $ blindly s >>= doesFileExist >>= \built -> require built 503 "Computer helper is missing. Reinstall Sapiens to repair it."
  stopped <- readIORef (serviceStopping s)
  require (not stopped) 503 "Server is shutting down"
  requireActive s a
@@ -201,6 +200,7 @@ reserveBatch batch tick slot batching state = (marked,snapshot,execution)
 
 launch :: Service -> Text -> NonEmpty Turn -> Pulse -> Int -> Bool -> IO ()
 launch s a batch tick slot batching = do
+ config <- runModelSettings s a
  state <- agentState s a
  let (marked,snapshot,execution) = reserveBatch batch tick slot batching state
      i=turnId (NE.head batch)
@@ -209,7 +209,7 @@ launch s a batch tick slot batching = do
  process <- newMVar Nothing
  activity <- newIORef empty
  deadline <- (+1800000000000) <$> getMonotonicTimeNSec
- let run=Run (AgentId a) i slot cancel process activity deadline
+ let run=Run (AgentId a) i slot cancel process activity deadline config
  modifyMVar_ (serviceRuns s) (pure . M.insert i run)
  DB.pulseCall s tick a "chatInput" slot (nub [at (turnField t "origin") "group" | t <- NE.toList batch,has (turnField t "origin") "group"])
  DB.project s a
