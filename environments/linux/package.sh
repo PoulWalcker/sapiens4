@@ -34,8 +34,32 @@ cp -R "$root/corpora/prompts" "$payload/corpora/"
 cp -R "$root/submodules/libs4/web" "$root/submodules/libs4/license" "$payload/submodules/libs4/"
 cp -R "$root/submodules/blindly4/license" "$payload/submodules/blindly4/"
 install -m 644 "$root/submodules/blindly4/linux/README.md" "$root/submodules/blindly4/linux/Cargo.lock" "$payload/submodules/blindly4/linux/"
-node "$root/build/cargo-notices.cjs" "$root/submodules/blindly4/linux/Cargo.toml" x86_64-unknown-linux-gnu \
-    "$payload/submodules/blindly4/license/dependencies"
+cargo metadata --locked --offline --format-version 1 --filter-platform x86_64-unknown-linux-gnu \
+    --manifest-path "$root/submodules/blindly4/linux/Cargo.toml" > "$temporary/cargo.json"
+python3 - "$temporary/cargo.json" "$payload/submodules/blindly4/license/dependencies" <<'PY'
+import json
+import shutil
+import sys
+from pathlib import Path
+
+destination = Path(sys.argv[2])
+destination.mkdir()
+packages = [p for p in json.loads(Path(sys.argv[1]).read_text())['packages'] if p.get('source')]
+for package in packages:
+    target = destination / (package['name'] + '-' + package['version'])
+    target.mkdir()
+    for source in Path(package['manifest_path']).parent.iterdir():
+        if source.name.lower().startswith(('license', 'copying', 'notice')):
+            if source.is_dir():
+                shutil.copytree(source, target / source.name)
+            else:
+                shutil.copyfile(source, target / source.name)
+    if not any(target.iterdir()):
+        raise SystemExit('Dependency notice missing: ' + package['name'])
+inventory = [{key: package.get(key) for key in ('name', 'version', 'license', 'repository')} for package in packages]
+(destination / 'inventory.json').write_text(json.dumps(inventory, indent=2) + '\n')
+PY
+rm "$temporary/cargo.json"
 install -m 644 "$root/environments/linux/README.md" "$payload/README.md"
 cat > "$temporary/usr/bin/sapiens4" <<'EOF'
 #!/bin/sh

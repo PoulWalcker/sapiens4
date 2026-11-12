@@ -38,14 +38,10 @@ main = do
  args <- getArgs
  root <- getCurrentDirectory >>= canonicalizePath
  case args of
-  ["stage", destination] -> do
-   compiler <- capture "rustc" ["-vV"]
-   target <- maybe (fail "rustc did not report its host target") pure (listToMaybe [drop 6 line | line <- lines compiler, "host: " `isPrefixOf` line])
-   stage root destination target
-  ["stage", destination, target] -> stage root destination target
+  ["stage", destination] -> stage root destination
   ["macos", version, output] -> packageMac root version output False
   ["macos", version, output,"--release"] -> packageMac root version output True
-  _ -> fail "Usage: Package.hs stage NEW_RUNTIME [RUST_TARGET] | macos VERSION NEW_OUTPUT_DIRECTORY"
+  _ -> fail "Usage: Package.hs stage NEW_RUNTIME | macos VERSION NEW_OUTPUT_DIRECTORY"
 
 run :: FilePath -> [String] -> IO ()
 run = callProcess
@@ -248,8 +244,8 @@ withTemporary parent action = do
  let temporary=parent</>(".sapiens-package."++show nonce)
  bracket (createDirectory temporary >> pure temporary) removePathForcibly action
 
-stage :: FilePath -> FilePath -> String -> IO ()
-stage root destination target = do
+stage :: FilePath -> FilePath -> IO ()
+stage root destination = do
  exists destination >>= flip when (fail "Runtime destination must be new")
  output <- makeAbsolute destination
  when (inside output root) $ fail "Runtime destination must not contain the source checkout"
@@ -261,11 +257,6 @@ stage root destination target = do
       blindly=if os=="mingw32" then "windows/blindly4.exe" else "release/blindly4"
       payload=nub (map assetFile allAssets++["app/shell/bootstrap.html","app/shell/client-preferences.js",".build/bin/sapiens4"++suffix,"submodules/blindly4/.build/"++blindly]++map (makeRelative root) (notices++prompts))
   forM_ payload $ \path -> copy (root</>path) (destination</>path)
-  let platform = case os of
-       "mingw32" -> "windows"
-       "darwin" -> "macos"
-       _ -> os
-  run "node" [root</>"build/cargo-notices.cjs",root</>"submodules/blindly4"</>platform</>"Cargo.toml",target,destination</>"submodules/blindly4/license/dependencies"]
   when (os=="mingw32") $ forM_ ["AppIcon.ico","AppIconDark.ico"] $ \icon -> copy (root</>"environments/windows"</>icon) (destination</>"environments/windows"</>icon)
   writeFile (destination</>"package-manifest.json") "{\"channel\":\"stable\",\"appId\":\"com.sapiens4.desktop\"}\n"
 
@@ -286,7 +277,7 @@ packageMac root version outputInput public = do
   createDirectoryIfMissing True resources
   createDirectory macos
   copy (root</>".build/bin/sapiens-macos") (macos</>"Sapiens4")
-  stage root (resources</>"runtime") "aarch64-apple-darwin"
+  stage root (resources</>"runtime")
   let iconset=temporary</>"AppIcon.iconset"
   createDirectory iconset
   run (root</>".build/bin/sapiens-macos") ["--icon",iconset,root</>"app/shell/favicon.svg"]
