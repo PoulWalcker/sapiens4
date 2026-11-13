@@ -7,10 +7,16 @@ executable telemetry
   main-is: Main.hs
   other-modules: Auth
   build-depends:
+    aeson >= 2.1.2 && < 2.4,
     base >= 4.20 && < 4.21,
     crypton == 2.2.6,
+    http-types >= 0.12 && < 0.13,
     ram == 0.22.1,
     bytestring >= 0.12 && < 0.13,
+    unix >= 2.8 && < 2.9,
     uuid == 1.3.16.1,
+    wai >= 3.2.4 && < 3.3,
+    warp >= 3.4 && < 3.5,
     wireform-parquet == 0.1.0.0
   default-language: GHC2021
+  ghc-options: -Wall -threaded
