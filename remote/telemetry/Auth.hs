@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module Auth
     ( ServerKey
     , ServerKeyError(..)
@@ -6,6 +8,8 @@ module Auth
     , InstallationId
     , newInstallationId
     , installationIdText
+    , BasicPassword
+    , derivePassword
     ) where
 
 import Control.Exception (IOException, try)
@@ -16,9 +20,14 @@ import System.IO (IOMode(ReadMode), withBinaryFile)
 import Data.UUID (UUID)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUIDv4
+import Crypto.Hash (SHA256)
+import Crypto.MAC.HMAC (HMAC, hmac)
+import Data.ByteArray.Encoding (Base(Base64URLUnpadded), convertToBase)
+import qualified Data.ByteString.Lazy as BL
 
 newtype InstallationId = InstallationId UUID
 newtype ServerKey = ServerKey ScrubbedBytes
+newtype BasicPassword = BasicPassword ScrubbedBytes
 
 data ServerKeyError
   = KeyReadFailed
@@ -48,3 +57,13 @@ loadServerKey path = do
       case mkServerKey (BA.convert bytes) of
         Nothing -> Left InvalidKeyLength
         Just key -> Right key
+
+derivePassword :: ServerKey -> InstallationId -> BasicPassword
+derivePassword (ServerKey key) (InstallationId uuid) =
+    BasicPassword (BA.convert ("v1." <> encoded))
+    where
+        message =
+            "sapiens4.telemetry.basic.v1\0"
+            <> BL.toStrict (UUID.toByteString uuid)
+        mac = hmac key message :: HMAC SHA256
+        encoded = convertToBase Base64URLUnpadded mac :: BS.ByteString
