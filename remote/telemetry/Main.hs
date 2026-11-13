@@ -2,7 +2,16 @@
 
 module Main where
 
-import Auth (ServerKey, ServerKeyError (..), enrollmentJSON, issueCredentials, loadServerKey)
+import Auth
+  ( AuthError (..)
+  , AuthPrincipal
+  , ServerKey
+  , ServerKeyError (..)
+  , enrollmentJSON
+  , issueCredentials
+  , loadServerKey
+  , verifyBasic
+  )
 import Data.Aeson (Value, encode, object, (.=))
 import Data.Aeson.Decoding.ByteString (bsToTokens)
 import Data.Aeson.Decoding.Tokens
@@ -14,6 +23,7 @@ import qualified Data.ByteString as BS
 import Network.HTTP.Types
   ( Status
   , hAllow
+  , hAuthorization
   , hCacheControl
   , hContentType
   , status201
@@ -29,6 +39,7 @@ import Network.Wai
   , getRequestBodyChunk
   , mapResponseHeaders
   , pathInfo
+  , requestHeaders
   , requestMethod
   , responseLBS
   )
@@ -57,6 +68,16 @@ application key request respond = do
       _ ->
         pure (failure status400 "bad_request")
   respond response
+
+authenticateRequest :: ServerKey -> Request -> Either AuthError AuthPrincipal
+authenticateRequest key request =
+  case [value | (name, value) <- requestHeaders request, name == hAuthorization] of
+    [] ->
+      Left MissingBasic
+    [value] ->
+      verifyBasic key value
+    _ ->
+      Left InvalidBasic
 
 enroll :: ServerKey -> Request -> IO Response
 enroll key request = do
