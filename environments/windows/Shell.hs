@@ -322,6 +322,8 @@ desktopSession memory probe = do
                     currentAttempt <- readIORef generation
                     when (not dead && currentAttempt==attempt && maybe False ((==core view) . core) current) action
                   on index iid action = onEvent memory (core view) index iid (\event -> active (action event))
+              -- Child documents must not borrow the trusted parent's native channel.
+              on 17 "{9ADBE429-F36D-432B-9DDC-F8881FBD76E3}" $ \event -> callInt event 8 1
               on 7 "{9ADBE429-F36D-432B-9DDC-F8881FBD76E3}" $ \event -> do
                 destination <- getString event 3
                 base <- readIORef (origin host)
