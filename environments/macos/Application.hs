@@ -264,11 +264,8 @@ installMethods application = do
     on2 "userContentController:didReceiveScriptMessage:" (\_ message -> receiveMessage application message)
     on3 "webView:decidePolicyForNavigationAction:decisionHandler:" (\view action completion -> withBrowser $ \b -> do
         connected <- not . T.null <$> readIORef (address application)
-        if connected || fixture application then navigation b view action completion else do
-            u <- obj0 action "request" >>= (`obj0` "URL")
-            path <- textProp u "path"
-            scheme <- textProp u "scheme"
-            invokeLong completion (if scheme=="file" && path==T.pack (bootstrapPath application) then 1 else 0))
+        if connected || fixture application then navigation b view action completion
+          else bootstrapNavigation (bootstrapPath application) action completion)
     on2 "webView:didCommitNavigation:" (\view _ -> withBrowser $ \b -> finished b view)
     on2 "webView:didFinishNavigation:" $ \view _ -> do
         withBrowser $ \b -> finished b view
@@ -462,6 +459,14 @@ createShell application target = do
 
 bootstrapPath :: Application -> FilePath
 bootstrapPath application = runtime application </> "app/shell/bootstrap.html"
+
+bootstrapNavigation :: FilePath -> Obj -> Obj -> IO ()
+bootstrapNavigation path action completion = do
+    mainFrame <- mainFrameNavigation action
+    source <- obj0 action "request" >>= (`obj0` "URL")
+    expected <- fileURL (T.pack path)
+    allowed <- booleanArgument source "isEqual:" expected
+    invokeLong completion (if mainFrame && allowed then 1 else 0)
 
 loadBootstrap :: Application -> IO ()
 loadBootstrap application = do

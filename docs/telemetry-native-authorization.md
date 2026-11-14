@@ -5,17 +5,18 @@ Reviewed against `f5ed98937acafbac4bb794b2eec6efb3e24cb535` on
 reviews the boundary before ticket 09 adds consent controls. It adds no consent
 endpoint, UI control, event hook, credential exposure or IPC service.
 
-**B3 remains open.** The macOS review found a real limitation of main-frame
-attribution and verified a narrow navigation fix. Windows runtime evidence and
-targeted review of the trusted-content/explicit-action assumptions are still
-required before consent mutation wiring. No whole-platform PASS is claimed.
+**macOS gate: PASS for ticket 08. Windows gate: pending actual verification.**
+The follow-up to `1f8fdf4` verifies the trusted-content boundary, blocks child
+document navigation in shell/bootstrap, and exercises the actual bundled UI.
+macOS consent wiring may proceed in ticket 09 under the adapter contract below;
+the real consent-write/UI checks belong to 09. Windows is not closed by this result.
 
 ## Existing native contexts
 
 | Context | Source-grounded checks and handling |
 | --- | --- |
-| macOS bootstrap | `Application.receiveMessage` checks the live shell view, main frame, exact expected bundled file URL and the shell's current URL through `Browser.trustedShellMessage`. Only storage actions currently exist. |
-| macOS workspace | `Browser.receive` checks the live shell view, main frame, source and current origin, and the allowed workspace paths. The source view/frame information comes from `WKScriptMessage`, not its JSON body. |
+| macOS bootstrap | `bootstrapNavigation` permits only the main frame and exact expected file. `Application.receiveMessage` checks the live shell view, main frame, source and current bundled URL through `Browser.trustedShellMessage`. Only storage actions currently exist. |
+| macOS workspace | `shellNavigation` rejects child document navigation. `Browser.receive` checks the live shell view, main frame, source/current origin and workspace paths. Source view/frame information comes from `WKScriptMessage`, not its JSON body. |
 | macOS guest | `Browser.createTab` uses a separate configuration with no `browser` script-message handler. The shared delegate alone does not expose that handler to guests. |
 | Windows bootstrap | `Shell` registers on the current shell core. Its callback checks closing state, generation and active core. Both message Source and current core Source must match `bootstrapSource`, which rejects credentials/authority, query/fragment and an incorrect file path. |
 | Windows workspace | The same callback checks both Source and current Source with `Navigation.trusted`: expected scheme/authority, no credentials, allowed workspace path. Arbitrary other paths, views or origins are not authority. |
@@ -33,7 +34,7 @@ recommends checking current Source and validating specific messages in its
 The macOS change extracts one shared predicate for bootstrap/workspace and checks
 both the sending document and current loaded document. Previously the handlers
 checked only the sending URL. Bootstrap now compares full NSURLs rather than
-only scheme/path. Net implementation growth is four nonblank source lines;
+only scheme/path. Net ticket-08 implementation growth is eight nonblank source lines;
 there is no new module or dependency.
 
 ## Observed limitation: parent handler borrowing
@@ -50,19 +51,32 @@ candidate was **not shipped** as a complete remedy. Bootstrap's existing CSP is
 also not evidence that all inline descendant script is isolated: it permits
 inline script and its frame restriction is inherited from `default-src`.
 
-These are controlled adversarial documents, not a demonstrated reachable exploit
-in the shipped UI. Source inspection found no app iframe renderer: guest pages
-use separate native views, the workspace routes serve fixed bundled assets, and
-the inspected native-message calls do not forward arbitrary window messages.
-Nevertheless, main-frame metadata cannot support an unconditional claim that
-every child caller is excluded. Consent writes are not wired today.
+The fix rejects child document navigation in the native shell and bootstrap
+delegates. Actual WebKit navigation checks block ordinary same/cross-origin,
+about:blank/srcdoc, data and blob child loads before their script runs. Separate
+guest views keep their existing navigation behavior and have no shell handler.
 
-Targeted review must resolve whether the verified fixed-bundle/native-guest-only
-invariant establishes the required authority, or whether stronger separation is
-needed for the future consent action. It must also ground the explicit operator
-action in the actual onboarding/Settings handler. A JSON boolean such as
-`userInitiated`, a claimed actor, or a generic forwarded message is not proof.
-Do not silently replace this review with a new authentication/IPC framework.
+The remaining boundary is trusted bundled code, not arbitrary JavaScript injected
+into that code's principal. A deliberate top-level fixture script can still run
+a `javascript:` URL in an initially empty child and borrow the parent handler;
+that path does not invoke the navigation delegate. The fixture already holds the
+same parent authority it is borrowing. No protection against compromised bundled
+JavaScript or a modified runtime is claimed.
+
+Source review and actual host/UI observations establish why untrusted product
+data cannot request that operation: fixed asset routes supply the shell;
+`Memo.validateMemoMedia` rejects iframe/object/SVG embedded content before it
+reaches the renderer; `Workspace.memoNode` renders only structural tags and copies
+only prefixed IDs, dropping scripts/event attributes. `memoLink` excludes script
+URLs. Other text previews remain text. The app creates no iframe, srcdoc or
+javascript-URL child, and its inspected native calls do not proxy arbitrary
+window messages. Guest pages use independent native views with no shell channel.
+
+This resolves the macOS trusted-content question for the current application.
+Revisit this boundary before adding a new active HTML/iframe renderer. In 09,
+only the explicit onboarding choice/Continue and Settings-toggle callbacks may
+produce the dedicated consent action. A JSON `userInitiated` boolean, claimed
+actor, generic snapshot or forwarded message is not operator authority.
 
 ## Narrow adapter contract for ticket 09
 
@@ -124,6 +138,40 @@ Temporary probe sources, observations and build instructions are retained outsid
 the repository in `sapiens4-worktrees/telemetry08-native-evidence-20261114` for
 targeted review. No permanent probe or test suite is added to the product.
 
+## macOS completion follow-up
+
+The original controlled iframe scenario failed before the native navigation fix
+and passed using the actual `shellNavigation` afterward. Twelve focused guard
+assertions, six production-navigation checks and seven actual host/bundled-UI
+observations passed. These cover the original loaded-child attack, source/current
+checks, separate guest behavior and successful native workspace readiness.
+
+The production bootstrap function allowed its exact file, rejected another file
+and query, and prevented ordinary and srcdoc child handler calls. WebKit can
+still update the current URL on an in-document fragment navigation; the current
+NSURL then fails the exact bootstrap-message predicate, so that fragment cannot
+authorize a native operation. This is not claimed as a guaranteed URL-bar rollback.
+
+Actual host requests rejected embedded iframe/srcdoc/javascript-iframe/object/SVG
+Notes examples with 409. A freshly built actual workspace loaded an accepted note
+containing script/attribute markup, reached native readiness and emitted no
+attacker callback or child navigation. Attribute filtering is also established
+by the structural renderer source; no DOM assertion or synthetic user click is
+claimed. The remaining fixture-only javascript-URL case described above is
+recorded explicitly and is not counted as a blocked arbitrary-root-script attack.
+
+| Criterion | macOS result |
+| --- | --- |
+| O14-A01 | PASS: view/frame/source/current/navigation context and explicit-action contract recorded. |
+| O14-A02 | PASS within the verified fixed-bundle/data/guest boundary: source review, actual native negatives and public HTTP/encrypted-caller observations. |
+| O14-A03 | PASS: narrow choice/notice/expected-epoch CAS adapter and safe read result specified; no mutable public consent API. |
+| O14-A04 | PASS for macOS 08: context uncertainty resolved and scope recorded; actual consent UI/writes remain 09 checks. |
+
+Host/macOS builds, UI build and diff whitespace checks passed. Windows transport
+fixes imported independently from `a92438b` and `b144e9d` do not change this macOS
+authority verdict. Completion evidence is retained separately in
+`sapiens4-worktrees/telemetry08-macos-completion-evidence-20261114`.
+
 ## Required Windows observations and remaining gate
 
 The separate verification session is asked to check 06/07/08 at published
@@ -133,7 +181,7 @@ view/origin/path/file/query/fragment, current-navigation mismatch, stale generat
 guest, direct child and parent-handler borrowing cases, including srcdoc.
 Do not infer frame isolation from the documented top-level event alone.
 
-Before 09 is approved, resolve the trusted-content/action review above and obtain
-the actual Windows verdict. After the adapter exists, repeat disallowed-caller
+Windows consent wiring requires the actual Windows verdict. After each platform's
+adapter exists, repeat disallowed-caller
 checks against **real consent writes**, including generic payloads, local HTTP,
 Remote Control and failed-withdrawal behavior. No ticket status file is changed.

@@ -300,15 +300,17 @@ navigation browser view action completion = do
                     when (mainFrame && scheme `notElem` ["about","blob","data"]) $ fileAddress address >>= \normal -> save browser tab { tabRequested = Just normal }
                     invokeLong completion 1
 
+mainFrameNavigation :: Obj -> IO Bool
+mainFrameNavigation action = obj0 action "targetFrame" >>= (`booleanValue` "isMainFrame")
+
 shellNavigation browser action completion = do
     u <- obj0 action "request" >>= \r -> obj0 r "URL"
-    frame <- obj0 action "targetFrame"
-    mainFrame <- if frame == nullPtr then pure Nothing else Just <$> booleanValue frame "isMainFrame"
+    mainFrame <- mainFrameNavigation action
     local <- sameOrigin u (origin browser)
     address <- textProp u "absoluteString"; scheme <- textProp u "scheme"
-    let allowed = local || (mainFrame == Just True && address == "about:blank") || (mainFrame == Just False && (address `elem` ["about:blank","about:srcdoc"] || scheme `elem` ["http","https","blob","data"]))
+    let allowed = mainFrame && (local || address == "about:blank")
     if allowed then invokeLong completion 1 else do
-        when (scheme `elem` ["http","https","mailto"]) $ cls "NSWorkspace" >>= \c -> obj0 c "sharedWorkspace" >>= \w -> void (obj1 w "openURL:" u)
+        when (mainFrame && scheme `elem` ["http","https","mailto"]) $ cls "NSWorkspace" >>= \c -> obj0 c "sharedWorkspace" >>= \w -> void (obj1 w "openURL:" u)
         invokeLong completion 0
 
 finished browser view = withTab browser view $ \tab -> do
