@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module RuntimePaths (configDirectory, defaultDataDirectory, externalStoragePath, containedPath) where
+module RuntimePaths (configDirectory, defaultConfigDirectory, defaultDataDirectory, externalStoragePath, containedPath) where
 
 import Data.Aeson
 import Control.Monad
@@ -88,7 +88,10 @@ configDirectory :: IO FilePath
 configDirectory = do
  supplied <- lookupEnv "SAPIENS_CONFIG_DIR"
  when (supplied==Just "") $ fail "SAPIENS_CONFIG_DIR must not be empty"
- maybe ((</> "config") <$> profileRoot) makeAbsolute supplied >>= externalStoragePath
+ maybe defaultConfigDirectory (\path -> makeAbsolute path >>= externalStoragePath) supplied
+
+defaultConfigDirectory :: IO FilePath
+defaultConfigDirectory = ((</> "config") <$> profileRoot) >>= externalStoragePath
 
 defaultDataDirectory :: IO FilePath
 defaultDataDirectory = do

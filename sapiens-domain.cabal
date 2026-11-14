@@ -16,9 +16,13 @@ common runtime
     directory, filepath, process, time, async, stm, scientific, vector,
     sqlite-simple, filelock, uuid, base64-bytestring, network-uri, regex-tdfa,
     http-client, http-client-tls, http-types, network, wai, warp, wai-websockets,
-    websockets, wuss, cryptohash-sha256, random, tagsoup ==0.14.8
+    websockets, wuss, cryptohash-sha256, random, tagsoup ==0.14.8, memory
   if !os(windows)
     build-depends: unix
+  else
+    build-depends: Win32 >=2.13
+    other-modules: TelemetryWindows
+    extra-libraries: advapi32
 
 executable sapiens-domain
   main-is: Main.hs
@@ -34,6 +38,8 @@ common host
     Command,
     Domain,
     RuntimePaths,
+    TelemetryProfile,
+    TelemetryCommand,
     DataRoot,
     Assets,
     BuildUI,

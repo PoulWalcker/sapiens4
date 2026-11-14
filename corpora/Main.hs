@@ -9,6 +9,7 @@ import BuildUI
 import Computer
 import Server
 import Setup
+import qualified TelemetryCommand
 import Control.Concurrent
 import Control.Exception
 import Control.Monad
@@ -53,6 +54,7 @@ run = do
  setEnv "SAPIENS_REPOSITORY" root
  case args of
   ["build-ui"] -> buildUI root
+  "telemetry":rest -> TelemetryCommand.run rest
   ["control",config,payload] -> jsonCommand $ do
    value <- either (failure 400 . T.pack) pure (eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack payload))))
    require (case value of Object _ -> True; _ -> False) 400 "Expected a JSON object"

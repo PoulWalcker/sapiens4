@@ -14,6 +14,9 @@ DerivedData/
 # Logs
 *.log
 
+# Cabal host build output
+/build/dist-newstyle/
+
 # Local UI database, runtime state, agent artifacts and Python caches
 .sapiens4/
 .sapiens4-relay/
