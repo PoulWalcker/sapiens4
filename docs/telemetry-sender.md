@@ -1,31 +1,33 @@
 # Shared background telemetry sender
 
-## OPEN: Windows HTTPS readiness blocker — B9
+## Windows HTTPS prerequisite — B9 focused verification passed
 
-Reported 2026-11-14 after `b144e9d` (integrated as `b2ccdbf`). **Do not declare
-full Windows readiness.** Current Windows evidence does not establish a working
-valid HTTPS exchange through the new backend:
+The no-TCP localhost failure reported 2026-11-14 was investigated on actual
+Windows Server 2022 / GHC 9.14.1 at `cf94f221ec1d9cd5acac8f5ee6a5c3d7af1cbe6e`.
+The fixture listened only on IPv4, while the actual backend resolved localhost
+to IPv6 first. Its IPv6 connect remained pending until the two-second connection
+budget expired, without reaching the IPv4 listener. A matching IPv6 listener
+and an IPv4-literal fixture with matching SAN both succeeded. The reason that
+pending connect did not fail earlier and reach fallback remains unknown.
 
-> The new Windows transport has not been verified with local HTTPS: the test
-> times out, and the server observes no TCP connection. The cause is unresolved;
-> either the transport or the test fixture may be at fault.
->
-> Consequently, invalid-certificate and hostname rejection and the five-second
-> slow-response-body deadline remain unproven. Full Windows readiness must not
-> be declared.
+Actual Windows observations with normal certificate and hostname validation:
+valid localhost HTTPS 130.911 ms with server-observed TCP/TLS 1.2/HTTP;
+untrusted CA rejected in 46.3604 ms and wrong hostname in 27.4874 ms, both with
+TCP/TLS-failure evidence and no HTTP; slow body cancelled at 5011.1874 ms.
+Sender stop with its emitter retained returned in 0.2143 ms during a body read
+and 0.1386 ms with a pooled connection; the server observed connection release
+within 436 ms and 108 ms respectively. The private TLS fixture used an explicit
+test CA through SSL_CERT_FILE, never disabled validation, and removed its
+certificates afterward. Normal system trust also delivered to the synthetic
+collector through a valid public HTTPS tunnel.
 
-Close this only with actual Windows evidence: identify the transport/fixture
-cause; demonstrate valid-certificate/hostname HTTPS with server-observed TCP/TLS;
-then demonstrate invalid-certificate and hostname rejection and measure the
-five-second whole-operation limit against a slow response body. A timeout before
-TCP proves neither TLS rejection nor the body deadline. Record exact revisions,
-runtime versions and bounded timings without credentials or bodies. macOS/Linux
-results do not substitute for these Windows cases. This blocks Windows sender
-and dependent delivery-completion claims, independently of native caller review.
-
-The same open item is recorded in the local telemetry ticket 05, task index and
-blockers list. Those `.claude` planning files are ignored by Git; this section is
-the shared record available to verification sessions after pulling the branch.
+These observations satisfy B9's focused prerequisites without a transport source
+change. They do not establish general dual-stack fallback correctness or full
+Windows readiness. The independent Windows native gate remains OPEN. Exact
+commands, server observations, runtime versions and limitations are in the
+[Windows report](telemetry-platform-windows-2026-11-15.md) and
+[verification index](telemetry-platform-verification-2026-11-15.md).
+Ignored `.claude` ticket/status files were not changed.
 
 ## Scope
 
@@ -203,7 +205,8 @@ macOS arm64 observed:
 No test suite or production hook is committed here. A temporary TLS fixture
 injects settings for its self-signed development certificate; the application
 uses normal certificate validation and has no flag to disable it.
-Actual Windows/Linux execution, native consent adapters and full feature E2E
-remain open in their owning tickets. The earlier Windows private-storage gate
-is not closed by these macOS observations. No production collection or
-deployment was performed.
+Subsequent [actual Windows/Linux focused verification](telemetry-platform-verification-2026-11-15.md)
+records transport, host-created Windows private storage, 06/07 and independently
+read Parquet separately. Native consent adapters and full feature E2E remain in
+their owning tickets; the Windows native gate remains OPEN. No production
+collection or deployment was performed.

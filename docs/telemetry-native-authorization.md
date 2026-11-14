@@ -5,7 +5,7 @@ Reviewed against `f5ed98937acafbac4bb794b2eec6efb3e24cb535` on
 reviews the boundary before ticket 09 adds consent controls. It adds no consent
 endpoint, UI control, event hook, credential exposure or IPC service.
 
-**macOS gate: PASS for ticket 08. Windows gate: pending actual verification.**
+**macOS gate: PASS for ticket 08. Windows gate: OPEN after actual verification.**
 The follow-up to `1f8fdf4` verifies the trusted-content boundary, blocks child
 document navigation in shell/bootstrap, and exercises the actual bundled UI.
 macOS consent wiring may proceed in ticket 09 under the adapter contract below;
@@ -20,7 +20,7 @@ the real consent-write/UI checks belong to 09. Windows is not closed by this res
 | macOS guest | `Browser.createTab` uses a separate configuration with no `browser` script-message handler. The shared delegate alone does not expose that handler to guests. |
 | Windows bootstrap | `Shell` registers on the current shell core. Its callback checks closing state, generation and active core. Both message Source and current core Source must match `bootstrapSource`, which rejects credentials/authority, query/fragment and an incorrect file path. |
 | Windows workspace | The same callback checks both Source and current Source with `Navigation.trusted`: expected scheme/authority, no credentials, allowed workspace path. Arbitrary other paths, views or origins are not authority. |
-| Windows frames/guests | Registration is on `ICoreWebView2`, rather than a frame message handler. Guest views have separate cores. Actual frame/parent-handler behavior still needs the Windows probes below. |
+| Windows frames/guests | Registration is on `ICoreWebView2`, rather than a frame message handler. Guest views have separate cores. The Windows follow-up below records actual parent borrowing and adds shell child-navigation cancellation. |
 
 Apple exposes the source webview and frame through
 [WKScriptMessage](https://developer.apple.com/documentation/webkit/wkscriptmessage?language=objc).
@@ -174,14 +174,39 @@ authority verdict. Completion evidence is retained separately in
 
 ## Required Windows observations and remaining gate
 
-The separate verification session is asked to check 06/07/08 at published
-`f5ed989`. It must record actual OS/WebView2/compiler versions and runtime results
-separately from this macOS review. Repeat allowed bootstrap/workspace, wrong
-view/origin/path/file/query/fragment, current-navigation mismatch, stale generation,
-guest, direct child and parent-handler borrowing cases, including srcdoc.
-Do not infer frame isolation from the documented top-level event alone.
+The separate verification ran at published
+`cf94f221ec1d9cd5acac8f5ee6a5c3d7af1cbe6e` on Windows Server 2022,
+WebView2 157.0.4341.46 and GHC 9.14.1. The
+[Windows report](telemetry-platform-windows-2026-11-15.md) records the complete
+PASS/FAIL/NOT RUN table and retained temporary probe sources.
 
-Windows consent wiring requires the actual Windows verdict. After each platform's
+Baseline actual srcdoc/initially blank child code could call
+`window.parent.chrome.webview.postMessage`, producing an accepted message
+attributed to the trusted parent. Direct child posts did not reach the shell.
+The separate fix `ca94d63` cancels FrameNavigationStarting in shell/bootstrap.
+Actual same/cross-origin, srcdoc and about:blank navigation were cancelled after
+the fix; the freshly built workspace and an independently created guest worked.
+A real retained bootstrap event was rejected when processed after navigation to
+workspace because its source and current context differed. Generic consent-shaped
+native/window messages, local HTTP and actual encrypted Remote Control did not
+gain consent-write authority before 09.
+
+The deliberately trusted parent fixture can still evaluate code in an initially
+empty workspace child and borrow the parent channel. This is the same limitation
+described for macOS: arbitrary JavaScript already in the trusted principal is
+not isolated from that principal. Fixed-bundle/data-renderer source review found
+no reachable product-data path; actual malicious renderer cases were not repeated
+on Windows and are NOT RUN, not inherited macOS PASS results.
+
+An existing-root/legacy-WebView-profile scenario causes a generated-code access
+violation (exit 11), reproduced with both the uninstrumented baseline WindowsMain
+and the fixed ordinary WindowsMain, using pinned native C. The cause remains
+unknown. It interrupted the obsolete-generation/wrong-current-core probes;
+those runtime negatives, closing-state, bootstrap query/fragment and workspace
+delayed mismatch remain unproven. Do not infer their PASS from the source guards.
+No speculative crash fix is included.
+
+**Windows consent wiring remains blocked by this OPEN native verdict.** After each platform's
 adapter exists, repeat disallowed-caller
 checks against **real consent writes**, including generic payloads, local HTTP,
 Remote Control and failed-withdrawal behavior. No ticket status file is changed.
