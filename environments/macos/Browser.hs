@@ -220,15 +220,23 @@ history browser tab predicate action = do
         let done = pending { tabAwaiting = False }
         save browser done; report browser done
 
-receive browser message onPreferences onReady = do
+trustedShellMessage :: Browser -> Obj -> (Obj -> IO Bool) -> IO Bool
+trustedShellMessage browser message allowed = do
     sh <- readIORef (shell browser)
     sourceView <- obj0 message "webView"
     frame <- obj0 message "frameInfo"
     mainFrame <- booleanValue frame "isMainFrame"
-    source <- obj0 frame "request" >>= \r -> obj0 r "URL"
-    trusted <- sameOrigin source (origin browser)
-    path <- textProp source "path"
-    when (sourceView == sh && mainFrame && trusted && path `elem` ["/workspace","/workspace/","/workspace/index.html"]) $ do
+    if sh == nullPtr || sourceView /= sh || not mainFrame then pure False else do
+        source <- obj0 frame "request" >>= (`obj0` "URL")
+        current <- obj0 sh "URL"
+        (&&) <$> allowed source <*> allowed current
+
+receive browser message onPreferences onReady = do
+    trusted <- trustedShellMessage browser message $ \source -> do
+        local <- sameOrigin source (origin browser)
+        path <- textProp source "path"
+        pure (local && path `elem` ["/workspace","/workspace/","/workspace/index.html"])
+    when trusted $ do
         raw <- obj0 message "body"
         dictionary <- cls "NSDictionary"
         valid <- booleanArgument raw "isKindOfClass:" dictionary

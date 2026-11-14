@@ -8,6 +8,9 @@ Ticket 06 subsequently connects [root and child creation](telemetry-creation.md)
 to this shared sender. Ticket 07 connects [accepted external requests](telemetry-requests.md);
 the remaining event hooks retain their original tickets.
 
+Ticket 08 records the [native consent authority review](telemetry-native-authorization.md)
+and its remaining gate before ticket 09 wires the controls.
+
 ## Ownership and configuration
 
 `HostServer.startHost` owns one telemetry queue, worker and reusable TLS manager.

@@ -492,14 +492,10 @@ receiveMessage application message = do
         if live then receive b message (saveClientPreferences application) (commitWorkspace application WorkspaceReady)
           else recoverStartup application "The application server stopped. Choose a folder to reopen your workspace."
       else do
-        sh <- readIORef (shell b)
-        sourceView <- obj0 message "webView"
-        frame <- obj0 message "frameInfo"
-        mainFrame <- booleanValue frame "isMainFrame"
-        source <- obj0 frame "request" >>= (`obj0` "URL")
-        path <- textProp source "path"
-        scheme <- textProp source "scheme"
-        when (sourceView==sh && mainFrame && scheme=="file" && path==T.pack (bootstrapPath application)) $ do
+        expected <- fileURL (T.pack (bootstrapPath application))
+        trusted <- trustedShellMessage b message $ \source -> booleanArgument source "isEqual:" expected
+        when trusted $ do
+            sh <- readIORef (shell b)
             raw <- obj0 message "body" >>= jsonObject
             forM_ raw $ \input -> do
               case text (field "storage" input) of
