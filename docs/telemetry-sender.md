@@ -1,5 +1,34 @@
 # Shared background telemetry sender
 
+## OPEN: Windows HTTPS readiness blocker — B9
+
+Reported 2026-11-14 after `b144e9d` (integrated as `b2ccdbf`). **Do not declare
+full Windows readiness.** Current Windows evidence does not establish a working
+valid HTTPS exchange through the new backend:
+
+> The new Windows transport has not been verified with local HTTPS: the test
+> times out, and the server observes no TCP connection. The cause is unresolved;
+> either the transport or the test fixture may be at fault.
+>
+> Consequently, invalid-certificate and hostname rejection and the five-second
+> slow-response-body deadline remain unproven. Full Windows readiness must not
+> be declared.
+
+Close this only with actual Windows evidence: identify the transport/fixture
+cause; demonstrate valid-certificate/hostname HTTPS with server-observed TCP/TLS;
+then demonstrate invalid-certificate and hostname rejection and measure the
+five-second whole-operation limit against a slow response body. A timeout before
+TCP proves neither TLS rejection nor the body deadline. Record exact revisions,
+runtime versions and bounded timings without credentials or bodies. macOS/Linux
+results do not substitute for these Windows cases. This blocks Windows sender
+and dependent delivery-completion claims, independently of native caller review.
+
+The same open item is recorded in the local telemetry ticket 05, task index and
+blockers list. Those `.claude` planning files are ignored by Git; this section is
+the shared record available to verification sessions after pulling the branch.
+
+## Scope
+
 Ticket 05 implements delivery infrastructure. Production event hooks remain in
 tickets 06, 07, 09 and 10. There is no debug ingestion endpoint, new consent
 route, persistent spool, final shutdown flush or extra event type.
