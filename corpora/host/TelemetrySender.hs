@@ -1,6 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# OPTIONS_GHC -Wno-deprecations #-}
 
 module TelemetrySender
   ( HostTelemetry (..)
@@ -16,7 +15,7 @@ import Control.Concurrent.Async (async, cancel)
 import Control.Concurrent.STM
 import Control.Exception
   ( Handler (..), IOException, SomeAsyncException, SomeException, catch, catches
-  , fromException, mask, onException, throwIO, try
+  , finally, fromException, mask, onException, throwIO, try
   )
 import Control.Monad (void, when)
 import Data.Aeson (Value (..), eitherDecodeStrict)
@@ -24,19 +23,15 @@ import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as B8
 import Data.Char (toLower)
-import Data.Default.Class (def)
+import Data.IORef (IORef, readIORef)
 import Data.Maybe (isJust)
 import qualified Data.Text as T
 import Data.Time (defaultTimeLocale, diffUTCTime, getCurrentTime, parseTimeM)
 import Data.Version (showVersion)
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
-import Network.Connection (TLSSettings (..))
 import Network.HTTP.Client
-import Network.HTTP.Client.TLS (mkManagerSettings)
 import Network.HTTP.Types (hAuthorization, hContentType, hRetryAfter, statusCode)
-import Network.TLS (Supported (..), Version (TLS12, TLS13))
-import Network.TLS.Extra.Cipher (ciphersuite_default)
 import Network.URI (URI (..), URIAuth (..), parseURI)
 import qualified Paths_sapiens_domain as Package
 import System.Environment (lookupEnv)
@@ -45,6 +40,7 @@ import System.Random (randomRIO)
 import System.Timeout (timeout)
 import Telemetry
 import TelemetryIdentity (preparePublicCorporaId)
+import qualified TelemetryHTTP
 import TelemetryProfile
 import TelemetryWire
 import Text.Read (readMaybe)
@@ -96,7 +92,7 @@ data PendingBatch = PendingBatch ConsentEpoch NoticeVersion DeviceId BasicCreden
 
 data Sender = Sender
   { config :: SenderConfig
-  , manager :: Manager
+  , manager :: IORef (Maybe Manager)
   , queue :: TBQueue QueuedIntent
   , cached :: TVar (Maybe Grant)
   , alive :: TVar Bool
@@ -111,15 +107,9 @@ startConfiguredTelemetry runtime = recover $ do
   location <- resolveProfileLocation (if runtime == NativeDesktop then DesktopProfile else HeadlessProfile)
   let system = case os of "darwin" -> Just MacOS; "mingw32" -> Just Windows; "linux" -> Just Linux; _ -> Nothing
   case (endpoint >>= mkHttpsEndpoint, mkAppVersion (T.pack (showVersion Package.version)), system, location) of
-    (Just target, Just version, Just platform, Right profile) ->
-      let tls = TLSSettingsSimple
-            { settingDisableCertificateValidation = False
-            , settingDisableSession = False
-            , settingUseServerName = True
-            , settingClientSupported = def
-                { supportedVersions = [TLS13, TLS12], supportedCiphers = ciphersuite_default }
-            }
-      in startTelemetry (mkManagerSettings tls Nothing) (SenderConfig profile target version platform runtime)
+    (Just target, Just version, Just platform, Right profile) -> do
+      settings <- TelemetryHTTP.managerSettings
+      startTelemetry settings (SenderConfig profile target version platform runtime)
     _ -> pure disabled
   where
     disabled = HostTelemetry (const (pure ())) writeConsent (pure ())
@@ -133,9 +123,8 @@ startConfiguredTelemetry runtime = recover $ do
 
 startTelemetry :: ManagerSettings -> SenderConfig -> IO HostTelemetry
 startTelemetry settings configuration = mask $ \restore -> do
-  client <- newManager settings {managerResponseTimeout = responseTimeoutMicro 2000000, managerRetryableException = const False}
-  -- Release connections even when a caller retains the stopped emit closure.
-  let cleanup = closeManager client
+  (client, cleanup) <- TelemetryHTTP.newManagedClient settings
+    {managerResponseTimeout = responseTimeoutMicro 2000000, managerRetryableException = const False}
   flip onException cleanup $ do
     sender <- Sender configuration client <$> newTBQueueIO 128 <*> newTVarIO Nothing
       <*> newTVarIO True <*> newEmptyTMVarIO <*> newMVar (Control Nothing FollowProfile Nothing)
@@ -148,8 +137,7 @@ startTelemetry settings configuration = mask $ \restore -> do
           Nothing -> pure ())]
     let stop = do
           atomically (writeTVar (alive sender) False >> disable sender)
-          cancel worker
-          cleanup
+          cancel worker `finally` cleanup
     pure (HostTelemetry (capture sender) (changeConsent sender) stop)
 
 disable :: Sender -> STM ()
@@ -371,27 +359,30 @@ retryDelay attempt reply = do
   pure (min 30000000 (max retryAfter ((if attempt == 0 then 1000000 else 3000000) + jitter)))
 
 post :: Sender -> String -> Maybe BasicCredentials -> BS.ByteString -> IO (Maybe Reply)
-post sender route credentials bytes = transport $ timeout 5000000 $ do
-  let HttpsEndpoint origin = senderEndpoint (config sender)
-  initial <- parseRequest (origin <> route)
-  let request = initial
-        { method = "POST", redirectCount = 0, cookieJar = Nothing
-        , requestHeaders = [(hContentType, "application/json")]
-            <> maybe [] (\secret -> [(hAuthorization, basicAuthorization secret)]) credentials
-        , requestBody = RequestBodyBS bytes
-        , responseTimeout = responseTimeoutMicro 2000000
-        , checkResponse = \_ _ -> pure (), decompress = const False
-        }
-  withResponse request (manager sender) $ \response -> do
-    let code = statusCode (responseStatus response)
-        json = case lookup hContentType (responseHeaders response) of
-          Just value -> B8.map toLower (B8.takeWhile (/= ';') value) == "application/json"
-          Nothing -> False
-    body <- if code `elem` [201, 202] && json then boundedBody (responseBody response) 4096 [] else pure BS.empty
-    let retryAfter = lookup hRetryAfter (responseHeaders response) >>= \value ->
-          if BS.length value <= 64 then Just value else Nothing
-    pure (code, retryAfter, body)
+post sender route credentials bytes = do
+  client <- readIORef (manager sender)
+  maybe (pure Nothing) requestWith client
   where
+    requestWith client = transport $ timeout 5000000 $ do
+      let HttpsEndpoint origin = senderEndpoint (config sender)
+      initial <- parseRequest (origin <> route)
+      let request = initial
+            { method = "POST", redirectCount = 0, cookieJar = Nothing
+            , requestHeaders = [(hContentType, "application/json")]
+                <> maybe [] (\secret -> [(hAuthorization, basicAuthorization secret)]) credentials
+            , requestBody = RequestBodyBS bytes
+            , responseTimeout = responseTimeoutMicro 2000000
+            , checkResponse = \_ _ -> pure (), decompress = const False
+            }
+      withResponse request client $ \response -> do
+        let code = statusCode (responseStatus response)
+            json = case lookup hContentType (responseHeaders response) of
+              Just value -> B8.map toLower (B8.takeWhile (/= ';') value) == "application/json"
+              Nothing -> False
+        body <- if code `elem` [201, 202] && json then boundedBody (responseBody response) 4096 [] else pure BS.empty
+        let retryAfter = lookup hRetryAfter (responseHeaders response) >>= \value ->
+              if BS.length value <= 64 then Just value else Nothing
+        pure (code, retryAfter, body)
     transport action = action `catches`
       [ Handler (\(_ :: HttpException) -> pure Nothing)
       , Handler (\(_ :: IOException) -> pure Nothing)

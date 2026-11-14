@@ -32,6 +32,16 @@ indication. The pinned TLS library also enables older versions by default, so
 its unmodified defaults are insufficient for the telemetry contract. These
 direct imports use dependencies already present in the selected libs4 freeze.
 
+On Windows, `TelemetryWindowsHTTP` uses nonblocking Winsock IO and cancellable
+`GetAddrInfoExW` resolution. The pinned `network` implementation's synchronous
+Winsock calls cannot be interrupted promptly by `System.Timeout` or worker
+cancellation. TLS still uses the shared library policy and system certificate
+store, including hostname validation; HTTPS CONNECT proxies use the same IO
+backend. `TelemetryHTTP` tracks live connections explicitly because the pinned
+http-client's `closeManager` is a no-op. Stop closes pooled connections and drops
+the manager reference even when a caller retains the stopped emitter. The
+library's empty pool reaper can finish on its next five-second GC/reaper cycle.
+
 The app version comes from Cabal's generated package metadata. Runtime is
 `native_desktop` for the desktop-managed host and Linux native entrypoint;
 ordinary standalone host use is `headless`. Profile scope follows that runtime:

@@ -36,6 +36,10 @@ executable sapiens-domain
 common host
   hs-source-dirs: corpora, corpora/state, corpora/work, corpora/work/schedule, corpora/host, remote/relay, remote/control, remote/protocol, build
   build-depends: crypton-connection, data-default-class, tls
+  if os(windows)
+    other-modules: TelemetryWindowsHTTP
+    c-sources: corpora/host/TelemetryWindowsIO.c
+    extra-libraries: ws2_32
   autogen-modules: Paths_sapiens_domain
   other-modules:
     Paths_sapiens_domain,
@@ -47,6 +51,7 @@ common host
     TelemetryCommand,
     TelemetryWire,
     TelemetrySender,
+    TelemetryHTTP,
     DataRoot,
     Assets,
     BuildUI,
