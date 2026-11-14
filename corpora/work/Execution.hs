@@ -20,6 +20,7 @@ import qualified Data.Text as T
 import GHC.Clock
 import System.Directory
 import Types
+import qualified Telemetry
 import qualified Store as DB
 import Population
 import Workspace
@@ -87,6 +88,8 @@ submitTurn s a d = do
      agentState s a >>= saveState s a . enqueueTurn (RunId i) flow message time
      pure i
    DB.message s i input attachments
+   forM_ (Telemetry.corporaRef (serviceRoot s)) $ \reference ->
+    serviceEmit s (Telemetry.IRequestAccepted reference Telemetry.AgentMessage)
    DB.forgetDrafts s a attachments
    DB.project s a
    trimConversation s a

@@ -5,7 +5,8 @@ tickets 06, 07, 09 and 10. There is no debug ingestion endpoint, new consent
 route, persistent spool, final shutdown flush or extra event type.
 
 Ticket 06 subsequently connects [root and child creation](telemetry-creation.md)
-to this shared sender; the remaining event hooks retain their original tickets.
+to this shared sender. Ticket 07 connects [accepted external requests](telemetry-requests.md);
+the remaining event hooks retain their original tickets.
 
 ## Ownership and configuration
 

@@ -12,6 +12,7 @@ import Data.Text (Text)
 import Data.Time (UTCTime, getCurrentTime)
 import qualified Data.Text as T
 import Types
+import qualified Telemetry
 import qualified Store as DB
 import GroupModel
 
@@ -143,6 +144,9 @@ startTask s gid tid revision actor root = do
  request <- newRequest entry (agentIdText task.assignee) root
  let call=mergeFields [("task",str tid),("task_revision",num changed.revision)] request
  void (saveGroup s (append "requests" call (append "messages" entry (replace "tasks" (toJSON changed) group))) actor "task started" (str tid))
+ when (actor == "admin") $
+  forM_ (Telemetry.corporaRef (serviceRoot s)) $ \reference ->
+   serviceEmit s (Telemetry.IRequestAccepted reference Telemetry.GroupTaskRun)
  pure (toJSON changed)
 
 newRequest :: Value -> Text -> Text -> IO Value
