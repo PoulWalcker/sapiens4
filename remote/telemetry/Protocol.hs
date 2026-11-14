@@ -25,14 +25,12 @@ module Protocol
   , decodeWire
   , deviceIdText
   , eventIdText
-  , mkValidBatch
   , noticeVersionNumber
   , publicCorporaIdText
   , rowsForBatch
-  , validateIngest
   ) where
 
-import Auth (AuthPrincipal, InstallationId, principalInstallationId)
+import Auth (AuthPrincipal, InstallationId, isUUIDv4, principalInstallationId)
 import Control.Monad (unless, when)
 import Data.Aeson (FromJSON (parseJSON), Object, Value (..), eitherDecodeStrict, withObject, withText, (.:))
 import Data.Aeson.Decoding.ByteString (bsToTokens)
@@ -40,7 +38,6 @@ import Data.Aeson.Decoding.Tokens (TkArray (..), TkRecord (..), Tokens (..))
 import Data.Aeson.Key (Key)
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (Parser, parseEither)
-import Data.Bits ((.&.))
 import Data.ByteArray.Encoding (Base (Base64URLUnpadded), convertFromBase, convertToBase)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as B8
@@ -216,9 +213,6 @@ data WireError
   = BadJSON
   | UnknownField
   | InvalidEvent
-  | InvalidContext
-  | InvalidTime
-  | TooManyEvents
   | PayloadTooLarge
   deriving (Eq, Show)
 
@@ -332,13 +326,6 @@ eventColumns (RequestAccepted corpora kind) =
 eventColumns (RemotePaired corpora) =
   (ERemotePaired, Just corpora, Nothing)
 
-mkValidBatch
-  :: NonEmpty (EventRecord TelemetryEvent)
-  -> Either WireError ValidBatch
-mkValidBatch events
-  | NE.length events <= 20 = Right (ValidBatch events)
-  | otherwise = Left TooManyEvents
-
 parseClientContext :: Object -> Parser ClientContext
 parseClientContext fields =
   ClientContext
@@ -381,10 +368,8 @@ parseEventRecord = withObject "event" $ \fields -> do
 parseEvents :: Value -> Parser ValidBatch
 parseEvents value = do
   values <- parseJSON value :: Parser (NonEmpty Value)
-  events <- traverse parseEventRecord values
-  case mkValidBatch events of
-    Left _ -> fail "Invalid events"
-    Right batch -> pure batch
+  when (NE.length values > 20) $ fail "Invalid events"
+  ValidBatch <$> traverse parseEventRecord values
 
 parseOccurredAt :: Value -> Parser UTCTime
 parseOccurredAt = withText "occurred_at" $ \value -> do
@@ -403,24 +388,13 @@ parseOccurredAt = withText "occurred_at" $ \value -> do
 parseUUIDv4 :: Value -> Parser UUID
 parseUUIDv4 = withText "UUIDv4" $ \value ->
   case UUID.fromText value of
-    Nothing -> fail "Invalid UUIDv4"
-    Just identifier ->
-      let (_, versionWord, variantWord, _) = UUID.toWords identifier
-          canonical = UUID.toText identifier == value
-          version4 = (versionWord .&. 0xf000) == 0x4000
-          rfcVariant = (variantWord .&. 0xc0000000) == 0x80000000
-      in
-        if canonical && version4 && rfcVariant
-          then pure identifier
-          else fail "Invalid UUIDv4"
+    Just identifier
+      | UUID.toText identifier == value && isUUIDv4 identifier ->
+          pure identifier
+    _ -> fail "Invalid UUIDv4"
 
 parseWireBatch :: Value -> Parser WireBatch
 parseWireBatch = withObject "batch" $ \fields -> do
-  rejectUnknownFields
-    [ "schema_version", "device_id", "app_version"
-    , "os", "runtime_kind", "notice_version", "events"
-    ]
-    fields
   schemaVersion <- fields .: "schema_version" :: Parser Int
   unless (schemaVersion == 1) $
     fail "Unsupported schema_version"
@@ -432,14 +406,6 @@ parseWireBatch = withObject "batch" $ \fields -> do
       && any ((== AppOpened) . eventBody) records) $
     fail "Invalid event runtime"
   pure (WireBatch context batch)
-
-validateIngest
-  :: AuthPrincipal
-  -> UTCTime
-  -> BS.ByteString
-  -> Either WireError ValidatedIngest
-validateIngest principal receivedAt bytes =
-  ValidatedIngest principal receivedAt <$> decodeWire bytes
 
 rowsForBatch :: ValidatedIngest -> NonEmpty ParquetRow
 rowsForBatch ingest =

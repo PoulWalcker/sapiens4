@@ -62,8 +62,6 @@ dispatch service request =
     (_, ["healthz"]) -> pure (methodNotAllowed "GET")
     _ -> pure (failure status400 "bad_request")
 
--- Fixed-size global budget; deployment IP/proxy limits belong to ticket 11.
--- Runs before authentication, independently of credential validity.
 rateLimited :: Service -> IO Response -> IO Response
 rateLimited service action = do
   second <- fmap (flip div 1000000000) getMonotonicTimeNSec

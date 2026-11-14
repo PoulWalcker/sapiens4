@@ -14,7 +14,7 @@ import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.STM
 import Control.Exception
   ( Exception, IOException, SomeAsyncException, SomeException, bracket
-  , bracketOnError, catch, evaluate, fromException, throwIO
+  , bracketOnError, catch, evaluate, finally, fromException, throwIO
   )
 import Control.Monad (unless, when)
 import qualified Data.ByteString as BS
@@ -75,7 +75,9 @@ withCollector root action = do
       hClose handle
       removeFile path
     collector <- Collector <$> newTBQueueIO (fromIntegral maxRows) <*> newTVarIO True
-    withAsync (runWriter root collector) $ \_ -> action collector
+    finally
+      (withAsync (runWriter root collector) $ \_ -> action collector)
+      (atomically (writeTVar (publisherHealthy collector) False))
 
 collectorReady :: Collector -> STM Bool
 collectorReady collector = do
@@ -99,16 +101,15 @@ runWriter :: FilePath -> Collector -> IO ()
 runWriter root collector =
   runWriterWith (publishRows root) collector maxBufferAgeMicros
 
--- The publication action is the IO boundary: failures at encode, close or
--- rename all pass through the same readiness/admission transition.
 runWriterWith :: (NonEmpty ParquetRow -> IO ()) -> Collector -> Int -> IO ()
 runWriterWith publish collector maxAge =
-  catch (writerLoopWith publish (intakeQueue collector) maxAge) $ \(err :: SomeException) ->
+  catch
+    (finally
+      (writerLoopWith publish (intakeQueue collector) maxAge)
+      (atomically (writeTVar (publisherHealthy collector) False))) $ \(err :: SomeException) ->
     case fromException err :: Maybe SomeAsyncException of
       Just _ -> throwIO err
-      Nothing -> do
-        atomically (writeTVar (publisherHealthy collector) False)
-        hPutStrLn stderr "Telemetry publisher unavailable"
+      Nothing -> hPutStrLn stderr "Telemetry publisher unavailable"
 
 writerLoopWith :: (NonEmpty ParquetRow -> IO ()) -> TBQueue ParquetRow -> Int -> IO ()
 writerLoopWith publish queue maxAge = loop

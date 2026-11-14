@@ -121,6 +121,47 @@ DuckDB was read with TimeZone='UTC' and hive_partitioning=false when verifying
 the physical column list. Hive readers may otherwise add received_date as a
 virtual partition column; the files themselves contain fourteen columns.
 
+## Independent audit follow-up: 2026-11-14
+
+An independent read-only audit of b3196ce found a publisher lifecycle defect:
+an unexpected async/runtime exception could terminate the writer while its
+health flag stayed true. A temporary probe reproduced this with StackOverflow:
+the worker stopped, but readiness remained true and another row was admitted.
+
+The follow-up fix sets health false in a finally around the
+writer loop, before exception handling/rethrow. A second owner-scope finally
+also closes the state when withCollector exits, including cancellation before
+the worker has actually started. Async exceptions still propagate normally.
+
+The same temporary probe was observed failing before the fix and passing
+afterwards for StackOverflow, HeapOverflow, ThreadKilled and IOException.
+It also checked an active healthy writer, explicit cancellation, normal scope
+exit and lock release. A WAI-level probe confirmed that a stopped writer makes
+both health and subsequent valid ingestion return fixed no-store 503.
+
+The cleanup removed the unused validateIngest wrapper and exports, unused
+error variants, and the duplicate batch-field check. The private event parser
+now checks the 20-row bound directly before traversal. Auth and Protocol share
+the UUID version/variant predicate while retaining their separate canonical
+byte/text checks. Event-specific field checks and all wire limits remain.
+
+The independent reviewer found no concrete defect in the follow-up diff by
+static inspection. Further execution checks passed:
+
+- Build with -Wall -Werror.
+- 55 HTTP response checks, including signed invalid UUIDs, canonical Base64,
+  missing/duplicate headers, row-count boundaries, unknown/scope-field status
+  distinctions and raw/chunked size boundaries.
+- Independent DuckDB reading of 32 admitted rows in one published file,
+  checking the exact schema, trusted fields, both timestamp annotations and
+  nullable values.
+
+Using the audit's unchanged counting method, production Haskell source went
+from 1008 to 975 nonempty lines excluding lines beginning with --, including
+the lifecycle fix. Physical source lines went from 1129 to 1095, relative to
+the audited working tree. These changes do not establish that the complete
+collector can safely fit the plan's 355–630-line estimate.
+
 Actual server OS/filesystem/native-library verification, encryption-at-rest,
 public TLS/IP controls, target peak-RSS evidence and Windows results have not
 been inferred from this Mac run. They remain the explicit target/platform

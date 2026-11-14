@@ -4,17 +4,14 @@ module Auth
   ( AuthError (..)
   , AuthPrincipal
   , BasicCredentials
-  , BasicPassword
   , InstallationId
   , ServerKey
   , ServerKeyError (..)
-  , derivePassword
   , enrollmentJSON
   , installationIdText
   , issueCredentials
+  , isUUIDv4
   , loadServerKey
-  , mkServerKey
-  , newInstallationId
   , principalInstallationId
   , verifyBasic
   ) where
@@ -107,6 +104,12 @@ isPrivateKeyFile owner status =
     && fileOwner status == owner
     && fileMode status .&. 0o077 == 0
 
+isUUIDv4 :: UUID -> Bool
+isUUIDv4 identifier =
+  let (_, version, variant, _) = UUID.toWords identifier
+  in version .&. 0xf000 == 0x4000
+      && variant .&. 0xc0000000 == 0x80000000
+
 issueCredentials :: ServerKey -> IO BasicCredentials
 issueCredentials key = do
   identifier <- newInstallationId
@@ -158,16 +161,10 @@ parseBasicPayload encoded = do
 parseInstallationId :: BS.ByteString -> Either AuthError InstallationId
 parseInstallationId username =
   case UUID.fromASCIIBytes username of
-    Nothing -> Left InvalidBasic
-    Just identifier ->
-      let (_, versionWord, variantWord, _) = UUID.toWords identifier
-          canonical = UUID.toASCIIBytes identifier == username
-          version4 = (versionWord .&. 0xf000) == 0x4000
-          rfcVariant = (variantWord .&. 0xc0000000) == 0x80000000
-      in
-        if canonical && version4 && rfcVariant
-          then Right (InstallationId identifier)
-          else Left InvalidBasic
+    Just identifier
+      | UUID.toASCIIBytes identifier == username && isUUIDv4 identifier ->
+          Right (InstallationId identifier)
+    _ -> Left InvalidBasic
 
 principalInstallationId :: AuthPrincipal -> InstallationId
 principalInstallationId (AuthenticatedInstallation identifier) = identifier
