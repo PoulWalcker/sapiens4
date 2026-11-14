@@ -13,12 +13,15 @@ module TelemetryProfile
   , ProfileError (..)
   , ProfileLocation
   , ProfileScope (..)
+  , basicAuthorization
   , commitConsent
   , commitEnrollmentIfEmpty
   , consentStatusJSON
+  , deviceIdText
   , loadProfile
   , mkBasicCredentials
   , mkNoticeVersion
+  , noticeVersionNumber
   , parseConsentEpoch
   , profileConsent
   , profileDevice
@@ -51,6 +54,7 @@ import Data.ByteArray.Encoding
   , convertToBase
   )
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Base64 as Base64
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import Data.UUID (UUID)
@@ -91,6 +95,20 @@ newtype InstallationId = InstallationId UUID
 newtype BasicPassword = BasicPassword ScrubbedBytes
 
 data BasicCredentials = BasicCredentials InstallationId BasicPassword
+
+instance Eq BasicCredentials where
+  BasicCredentials left (BasicPassword a) == BasicCredentials right (BasicPassword b) =
+    left == right && BA.constEq a b
+
+basicAuthorization :: BasicCredentials -> BS.ByteString
+basicAuthorization (BasicCredentials (InstallationId identifier) (BasicPassword password)) =
+  "Basic " <> Base64.encode (TE.encodeUtf8 (UUID.toText identifier) <> ":" <> BA.convert password)
+
+deviceIdText :: DeviceId -> Text
+deviceIdText (DeviceId identifier) = UUID.toText identifier
+
+noticeVersionNumber :: NoticeVersion -> Int
+noticeVersionNumber (NoticeVersion version) = version
 
 data Profile = Profile
   { profileConsent :: Maybe ConsentRecord

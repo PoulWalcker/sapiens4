@@ -4,6 +4,9 @@ import Types
 import DataRoot
 import System.Environment (lookupEnv)
 import qualified Service as Service
+import Telemetry (Emit)
+import qualified TelemetrySender as Telemetry
+import TelemetryWire (RuntimeKind)
 import Assets
 import HTTP
 import Bridge
@@ -43,19 +46,22 @@ listenLoopback port = Socket.withSocketsDo $ do
   Socket.listen sock 128
   Socket.SockAddrInet assigned _ <- Socket.getSocketName sock
   pure (sock,fromIntegral assigned)
-startHost :: FilePath -> Int -> Bool -> IO Host
-startHost root requested managed = do
+startHost :: RuntimeKind -> FilePath -> Int -> Bool -> IO Host
+startHost runtime root requested managed = mask $ \restore -> do
  mode <- lookupEnv "SAPIENS_STORAGE_MODE"
  exists <- doesFileExist (root </> "corpora-identity.json")
- startHostWith (if managed || mode==Just "existing" || mode==Nothing && exists then AttachExisting else StartNew) root requested managed
+ telemetry <- Telemetry.startConfiguredTelemetry runtime
+ host <- restore (startHostWith (Telemetry.hostEmit telemetry)
+   (if managed || mode==Just "existing" || mode==Nothing && exists then AttachExisting else StartNew) root requested managed)
+   `onException` Telemetry.hostTelemetryStop telemetry
+ pure host {hostStop = Telemetry.hostTelemetryStop telemetry `finally` hostStop host}
 
-startHostWith :: StorageChoice -> FilePath -> Int -> Bool -> IO Host
-startHostWith choice root requested managed = do
+startHostWith :: Emit -> StorageChoice -> FilePath -> Int -> Bool -> IO Host
+startHostWith emit choice root requested managed = do
  mode <- lookupEnv "SAPIENS_STORAGE_MODE"
  let report phase = when (not managed && mode `elem` [Just "new",Just "existing"]) (putStrLn phase)
  report openingStorage
- service <- Service.openService choice root
- flip onException (Service.closeService service) $ do
+ bracketOnError (Service.openService emit choice root) Service.closeService $ \service -> do
   report openedStorage >> start service
  where
  start service = do
@@ -63,33 +69,34 @@ startHostWith choice root requested managed = do
   (socket,port) <- listenLoopback requested
   flip onException (Socket.close socket) $ do
    Service.attachEndpoint service ("http://127.0.0.1:"<>T.pack (show port))
-   bridge <- newBridge service
-   let child selection path = do
-        host <- startHostWith selection path 0 True
-        pure (hostService host,hostBridge host,hostStop host)
-   registry <- if managed then pure Nothing else Just <$> newRegistry service bridge child
-   onboarding <- if managed then pure Nothing else Just <$> O.openOnboarding (repositoryRoot service)
-   shutdown <- newEmptyMVar
-   ready <- newEmptyMVar
-   let settings = setServerName "Sapiens4" $ setPort port $ setHost "127.0.0.1" $ setGracefulCloseTimeout1 1000 $ setGracefulShutdownTimeout (Just 5) $ setInstallShutdownHandler (putMVar shutdown) $ setBeforeMainLoop (putMVar ready ()) defaultSettings
-   worker <- async $ withAsync (watchSnapshotFiles service) $ \watcher -> link watcher >> runSettingsSocket settings socket (application service bridge registry onboarding port)
-   void (race (wait worker) (takeMVar ready))
-   Service.startService service
-   -- Stop transcription and its network request before closing the database it uses.
-   stopTranscriber <- startTranscriber service
-   stopped <- newMVar False
-   let stop = modifyMVar_ stopped $ \done -> if done then pure True else do
-        mapM_ O.closeOnboarding onboarding
-        mapM_ closeRegistry registry
-        closeBridge bridge
-        readMVar shutdown >>= id
-        stopTranscriber
-        -- Children can retain Windows socket handles until their work is stopped.
-        Service.closeService service
-        void (waitCatch worker)
-        Socket.close socket
-        pure True
-   pure (Host port service bridge stop)
+   bracketOnError (newBridge service) closeBridge $ \bridge -> do
+    let child selection path = do
+         host <- startHostWith emit selection path 0 True
+         pure (hostService host,hostBridge host,hostStop host)
+    bracketOnError (if managed then pure Nothing else Just <$> newRegistry service bridge child)
+      (mapM_ closeRegistry) $ \registry ->
+     bracketOnError (if managed then pure Nothing else Just <$> O.openOnboarding (repositoryRoot service))
+       (mapM_ O.closeOnboarding) $ \onboarding -> do
+      shutdown <- newEmptyMVar
+      ready <- newEmptyMVar
+      let settings = setServerName "Sapiens4" $ setPort port $ setHost "127.0.0.1" $ setGracefulCloseTimeout1 1000 $ setGracefulShutdownTimeout (Just 5) $ setInstallShutdownHandler (putMVar shutdown) $ setBeforeMainLoop (putMVar ready ()) defaultSettings
+      bracketOnError (async $ withAsync (watchSnapshotFiles service) $ \watcher -> link watcher >> runSettingsSocket settings socket (application service bridge registry onboarding port)) cancel $ \worker -> do
+       void (race (wait worker) (takeMVar ready))
+       Service.startService service
+       bracketOnError (startTranscriber service) id $ \stopTranscriber -> do
+        stopped <- newMVar False
+        let stop = do
+             first <- modifyMVar stopped (\done -> pure (True, not done))
+             when first $
+              mapM_ O.closeOnboarding onboarding `finally`
+               (mapM_ closeRegistry registry `finally`
+                (closeBridge bridge `finally`
+                 ((readMVar shutdown >>= id) `finally`
+                  -- Stop transcription before closing the database it uses.
+                  (stopTranscriber `finally`
+                   (Service.closeService service `finally`
+                    (void (waitCatch worker) `finally` Socket.close socket))))))
+        pure (Host port service bridge stop)
 localRequest :: Int -> Bool -> RequestHeaders -> Validation ()
 localRequest port write headers = do
  let host = lookup hHost headers

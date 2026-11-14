@@ -24,6 +24,7 @@ import System.FileLock
 import System.FilePath
 import System.Info
 import Types
+import Telemetry (Emit)
 import DataRoot
 import qualified Computer
 import qualified Store as DB
@@ -40,8 +41,8 @@ import qualified Groups as G
 import qualified GroupChat as GC
 import qualified GroupWork as GW
 
-openService :: StorageChoice -> FilePath -> IO Service
-openService choice path = do
+openService :: Emit -> StorageChoice -> FilePath -> IO Service
+openService emit choice path = do
  root <- selectedPath choice path
  repo <- lookupEnv "SAPIENS_REPOSITORY" >>= maybe getCurrentDirectory pure >>= canonicalizePath
  lock <- acquireStorage choice root
@@ -66,7 +67,7 @@ openService choice path = do
       revision <- newTVarIO 0
       subscribers <- newTVarIO 0
       files <- newIORef Set.empty
-      let s=Service root repo guard lock stopping worker runs lease endpoint pulse actors database states revision subscribers files
+      let s=Service root repo guard lock stopping worker runs lease endpoint pulse actors database states revision subscribers files emit
       DB.initialize s
       migrateWorkspaces s
       rows <- DB.agents s

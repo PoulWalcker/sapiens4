@@ -10,6 +10,7 @@ import Computer
 import Server
 import Setup
 import qualified TelemetryCommand
+import TelemetryWire (RuntimeKind (..))
 import Control.Concurrent
 import Control.Exception
 import Control.Monad
@@ -102,7 +103,7 @@ hostMain root args = do
     else defaultDataDirectory
  void (asset root "/")
  void (asset root "/workspace/app.js")
- bracket (startHost directory port False) hostStop $ \host -> do
+ bracket (startHost (if "--desktop" `elem` args then NativeDesktop else Headless) directory port False) hostStop $ \host -> do
   let url="http://127.0.0.1:"<>show (hostPort host)<>"/workspace/"
   putStrLn ("Sapiens4: "<>url<>"\nUI database: "<>directory</>"corpora.sqlite3")
   finished <- newEmptyMVar
