@@ -1,8 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Auth
-  ( AuthPrincipal
-  , AuthError (..)
+  ( AuthError (..)
+  , AuthPrincipal
   , BasicCredentials
   , BasicPassword
   , InstallationId
@@ -15,6 +15,7 @@ module Auth
   , loadServerKey
   , mkServerKey
   , newInstallationId
+  , principalInstallationId
   , verifyBasic
   ) where
 
@@ -88,7 +89,6 @@ derivePassword key identifier =
   where
     encoded =
       convertToBase Base64URLUnpadded (deriveMac key identifier) :: BS.ByteString
-
 
 enrollmentJSON :: BasicCredentials -> Value
 enrollmentJSON (BasicCredentials identifier (BasicPassword password)) =
@@ -168,6 +168,9 @@ parseInstallationId username =
         if canonical && version4 && rfcVariant
           then Right (InstallationId identifier)
           else Left InvalidBasic
+
+principalInstallationId :: AuthPrincipal -> InstallationId
+principalInstallationId (AuthenticatedInstallation identifier) = identifier
 
 verifyBasic :: ServerKey -> BS.ByteString -> Either AuthError AuthPrincipal
 verifyBasic key header
