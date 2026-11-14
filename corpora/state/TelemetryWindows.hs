@@ -2,12 +2,15 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 
 module TelemetryWindows
-  ( checkPrivate, createPrivateDirectory, createPrivateLock, replaceProfile
+  ( checkPrivate, createPrivateDirectory, createPrivateLock, createPrivateTempFile
+  , replaceProfile
   ) where
 
-import Control.Exception (IOException, bracket, catch)
+import Control.Exception (IOException, bracket, bracketOnError, catch, mask_, onException)
 import Control.Monad (forM, unless, void)
 import Data.Bits ((.&.), (.|.))
+import qualified Data.UUID as UUID
+import qualified Data.UUID.V4 as UUIDv4
 import Data.Word (Word8, Word16, Word32)
 import Foreign
   ( Ptr, alloca, allocaArray, allocaBytes, castPtr, nullPtr, peek, peekByteOff
@@ -15,6 +18,9 @@ import Foreign
   )
 import Foreign.C.String (CWString, peekCWString, withCWString)
 import Foreign.C.Types (CInt (..))
+import System.Directory (removeFile)
+import System.FilePath ((</>))
+import System.IO (Handle, IOMode (WriteMode), openBinaryFile)
 import System.IO.Error (isAlreadyExistsError)
 import qualified System.Win32.File as Win
 import System.Win32.Types (DWORD, HANDLE)
@@ -99,6 +105,25 @@ createPrivateLock :: FilePath -> IO ()
 createPrivateLock path = withUser $ \user -> withAttributes user $ \attributes ->
   bracket (openFile path (Just attributes) Win.oPEN_ALWAYS)
     Win.closeHandle (const (pure ()))
+
+-- Create with an explicit owner as well as a private DACL. Elevated Windows
+-- tokens can otherwise assign their default group owner to temporary files.
+createPrivateTempFile :: FilePath -> IO (FilePath, Handle)
+createPrivateTempFile root = mask_ $ withUser $ \user -> withAttributes user $ \attributes -> do
+  nonce <- UUIDv4.nextRandom
+  let path = root </> (".telemetry-writing-" ++ UUID.toString nonce)
+      cleanup = removeFile path `catch` \err -> ignore (err :: IOException)
+      ignore _ = pure ()
+  bracketOnError
+    (do
+      file <- Win.createFile path Win.gENERIC_WRITE 0 (Just attributes)
+        Win.cREATE_NEW Win.fILE_ATTRIBUTE_NORMAL Nothing
+      Win.closeHandle file `onException` cleanup
+      pure path)
+    (const cleanup) $ \created -> do
+      -- Only this user can access the private parent and this new file.
+      stream <- openBinaryFile created WriteMode
+      pure (created, stream)
 
 openFile :: FilePath -> Maybe Win.LPSECURITY_ATTRIBUTES -> Win.CreateMode -> IO HANDLE
 openFile path attributes mode = Win.createFile path

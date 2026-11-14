@@ -126,7 +126,74 @@ ticket 12. Observations on macOS arm64:
 - A macOS ACL reproduction first accepted an unsafe ACL with `0700`/`0600`;
   after the fix it rejects that profile and accepts it after deliberate repair.
 
-Actual Windows build/runtime, effective ACL access by another principal and
-Windows concurrent locking/replacement/failure observations have **not** run.
-They remain ticket 03's B4 completion gate. A macOS check does not close those
-criteria. No production collection/deployment is performed by these checks.
+Actual Windows observations on 2026-11-14 used Windows Server 2022 Datacenter
+x64 (10.0.20348), GHC 9.14.1 and cabal-install 3.18.2.0. The implementation
+revision was `6ee25abf09f613dc4b327b8a17a8068568abe1aa`, based on ticket 03's
+`f660beda181911575e8c9466a70290bd94f046b8`. All data and credentials were
+temporary and synthetic; no collector or HTTP enrollment was contacted.
+
+The original revision rejected an elevated Administrator's first grant:
+`openBinaryTempFile` assigned the Administrators group as owner even though its
+DACL allowed only TokenUser. Windows temporary files now use `CREATE_NEW` with
+the same explicit TokenUser owner and protected private DACL as the directory
+and lock. The existing owner/DACL checks remain strict. The closed file is
+reopened for binary writing inside the private parent; creation and handle
+acquisition remain masked and handled failures clean up the new path.
+
+Those observations predate the ticket 04 `TelemetryStorage` extraction and the
+sender work in `6aafc29`. The adaptation retains the verified Windows helper
+and selects it in `TelemetryStorage.atomicWritePrivate`, shared by consent and
+Corpora identity publication. It preserves `beforePublish`, privacy checks,
+locking, cleanup and the `.telemetry-writing-` prefix. Results for the earlier
+revision do not establish verification of the adapted shared path.
+
+The isolated adaptation based on `6aafc29` compiles on macOS with the selected
+dependency freeze. Focused synthetic process/file observations pass for grant,
+shared identity publication and independent HMAC comparison, preserved unknown
+fields/private modes, failed `beforePublish` rollback and temporary cleanup,
+denial and stale-epoch rejection. The POSIX temporary-file operation is
+unchanged. The adapted Windows consent/identity publication still requires a
+fresh actual-platform observation; no regression suite is implied by these
+focused checks.
+
+Native Windows compilation and manual process/file/API observations covered:
+
+- The real `TelemetryCommand.run` fixture and the full Haskell host entry point
+  `corpora/Main.hs` (40 modules), compiled with GHC against the existing package
+  database and static sodium library without changing that dependency store.
+- First grant, owner/DACL checks for directory/lock/open temporary/final files,
+  CAS, locked re-read, four-case recovery, identity/enrollment retention,
+  configuration isolation and output redaction under both elevated Administrator
+  and a temporary standard user: 44 completed observations per principal.
+- Eleven additional observations per principal covered symbolic links, unsafe
+  lock ACLs, competing initial grants, stale enrollment after withdrawal,
+  denied-notice parsing, empty configuration and private-data cleanup.
+- Actual access denial to a different principal for all four storage objects,
+  including the final file after replacement. This checks ordinary access; it
+  does not claim protection against an administrator exercising ACL-bypass
+  privileges.
+- Two concurrent writers, and independent readers during 30 replacements per
+  principal: 179 complete JSON snapshots, no invalid/partial JSON or read/write
+  errors. Replacement retained the private owner/DACL.
+- Lock sharing failures, denied temporary creation and a destination held open
+  without `FILE_SHARE_DELETE`: fixed errors, unchanged committed bytes and no
+  leftover temporary files.
+- A temporary, process-local fault-injection DLL used only by the fixture
+  intercepted the actual CRT `_write` and `_close` of the temporary stream.
+  Injected disk-full/write and close errors returned `profile_io_error`, kept the
+  prior committed hash and left no temporary file. The close probe released the
+  real descriptor before reporting its injected error. A separate injected
+  `CloseHandle` failure covered the initial private-file creation handle.
+  These are injected API failures, not physical disk or power-loss tests; no
+  fault hooks or new C files are part of the product.
+- The full host started with corrupt telemetry JSON and unsafe telemetry ACLs;
+  its local `/api/host` returned HTTP 200. Lock and replacement failures did not
+  disrupt it, and both host runs shut down with exit 0. A copy of an existing
+  compiled `app.js` supplied the startup asset: this was a host/core check, not
+  a UI rebuild or GUI behavior check.
+
+The Windows installer/native GUI package and final feature E2E were not built
+or run by these observations. No permanent test suite was added and no
+regression suite was run. GUI consent wiring remains tickets 08–09 and final
+E2E remains ticket 12. These manual observations do not establish power-loss
+durability or authorize production collection/deployment.

@@ -28,7 +28,7 @@ import Network.URI (parseURI, uriPath, uriScheme)
 import System.Directory (canonicalizePath, pathIsSymbolicLink, removeFile)
 import System.FileLock (SharedExclusive (Exclusive), withFileLock)
 import System.FilePath (takeDirectory, takeFileName)
-import System.IO (Handle, hClose, openBinaryTempFile)
+import System.IO (Handle, hClose)
 import System.IO.Error (isDoesNotExistError)
 import System.Info (os)
 #ifdef mingw32_HOST_OS
@@ -38,6 +38,7 @@ import qualified TelemetryWindows as Windows
 import Control.Exception (bracket, mask_, onException)
 import Data.Bits ((.&.))
 import System.Directory (renameFile)
+import System.IO (openBinaryTempFile)
 import System.IO.Error (isAlreadyExistsError)
 import qualified System.Posix.Directory as Posix
 import qualified System.Posix.Files as Posix
@@ -107,7 +108,7 @@ atomicWritePrivate :: FilePath -> BL.ByteString -> IO () -> IO ()
 atomicWritePrivate destination bytes beforePublish = mask $ \restore -> do
   let root = takeDirectory destination
   checkPrivate root True
-  bracketOnError (openBinaryTempFile root ".telemetry-writing-") cleanup $ \(path, stream) -> do
+  bracketOnError (openPrivateTemp root) cleanup $ \(path, stream) -> do
     restore $ do
       checkPrivate path False
       BL.hPut stream bytes
@@ -124,6 +125,9 @@ atomicWritePrivate destination bytes beforePublish = mask $ \restore -> do
       removeFile path `catch` \(_ :: IOException) -> pure ()
 
 #ifdef mingw32_HOST_OS
+openPrivateTemp :: FilePath -> IO (FilePath, Handle)
+openPrivateTemp = Windows.createPrivateTempFile
+
 checkPrivate :: FilePath -> Bool -> IO ()
 checkPrivate path directory = do
   safe <- Windows.checkPrivate path directory
@@ -141,6 +145,9 @@ createPrivateLock path = Windows.createPrivateLock path >> checkPrivate path Fal
 replacePrivateFile :: FilePath -> FilePath -> IO ()
 replacePrivateFile = Windows.replaceProfile
 #else
+openPrivateTemp :: FilePath -> IO (FilePath, Handle)
+openPrivateTemp root = openBinaryTempFile root ".telemetry-writing-"
+
 checkPrivate :: FilePath -> Bool -> IO ()
 checkPrivate path directory = do
   Posix.getSymbolicLinkStatus path >>= checkPrivateStatus directory
