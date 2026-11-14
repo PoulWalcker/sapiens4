@@ -42,6 +42,7 @@ import Telemetry (Emit)
 #ifdef mingw32_HOST_OS
 import Foreign.C
 import System.IO.Error (isPermissionError)
+import qualified TelemetryWindows as Private
 foreign import ccall unsafe "_wopen" syncOpen :: CWString -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "_commit" syncCommit :: CInt -> IO CInt
 foreign import ccall unsafe "_close" syncClose :: CInt -> IO CInt
@@ -174,7 +175,16 @@ readJSON p def = do
 atomicBytes :: FilePath -> BL.ByteString -> IO ()
 atomicBytes p bytes = do
  createDirectoryIfMissing True (takeDirectory p)
- bracketOnError (openBinaryTempFile (takeDirectory p) ".writing-") (\(f,h) -> do
+#ifdef mingw32_HOST_OS
+ -- Initial business identity publication must satisfy the same private-file
+ -- authority as later telemetry updates, including an elevated token's owner.
+ private <- isTelemetryPrivatePath p
+ let temporary = if private then Private.createPrivateTempFile (takeDirectory p)
+                 else openBinaryTempFile (takeDirectory p) ".writing-"
+#else
+ let temporary = openBinaryTempFile (takeDirectory p) ".writing-"
+#endif
+ bracketOnError temporary (\(f,h) -> do
   hClose h `catch` (\(_::IOException) -> pure ())
   removeFile f `catch` (\(_::IOException) -> pure ())) $ \(f,h) -> do
   BL.hPut h bytes

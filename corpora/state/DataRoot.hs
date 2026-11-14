@@ -27,6 +27,9 @@ import System.IO
 import System.IO.Error (ioeGetErrorString, isAlreadyExistsError, isUserError)
 import System.Info (os)
 import TelemetryStorage (isTelemetryPrivatePath)
+#ifdef mingw32_HOST_OS
+import qualified TelemetryStorage as Private
+#endif
 #ifndef mingw32_HOST_OS
 import qualified System.Posix.Directory as Posix
 #endif
@@ -99,7 +102,7 @@ sqliteURI native = "file:" ++ escapeURIString (\c -> isUnreserved c || c=='/' ||
 
 makePrivateDirectory :: FilePath -> IO ()
 #ifdef mingw32_HOST_OS
-makePrivateDirectory = createDirectory
+makePrivateDirectory = Private.createPrivateDirectory
 #else
 makePrivateDirectory path = Posix.createDirectory path 0o700
 #endif
