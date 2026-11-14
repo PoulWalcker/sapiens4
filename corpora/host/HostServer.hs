@@ -4,7 +4,7 @@ import Types
 import DataRoot
 import System.Environment (lookupEnv)
 import qualified Service as Service
-import Telemetry (Emit)
+import Telemetry (Emit, EventIntent (ICorporaCreated), corporaRef)
 import qualified TelemetrySender as Telemetry
 import TelemetryWire (RuntimeKind)
 import Assets
@@ -96,6 +96,8 @@ startHostWith emit choice root requested managed = do
                   (stopTranscriber `finally`
                    (Service.closeService service `finally`
                     (void (waitCatch worker) `finally` Socket.close socket))))))
+        when (choice == StartNew && not managed) $
+         forM_ (corporaRef (serviceRoot service)) (emit . ICorporaCreated)
         pure (Host port service bridge stop)
 localRequest :: Int -> Bool -> RequestHeaders -> Validation ()
 localRequest port write headers = do

@@ -4,6 +4,9 @@ Ticket 05 implements delivery infrastructure. Production event hooks remain in
 tickets 06, 07, 09 and 10. There is no debug ingestion endpoint, new consent
 route, persistent spool, final shutdown flush or extra event type.
 
+Ticket 06 subsequently connects [root and child creation](telemetry-creation.md)
+to this shared sender; the remaining event hooks retain their original tickets.
+
 ## Ownership and configuration
 
 `HostServer.startHost` owns one telemetry queue, worker and reusable TLS manager.
