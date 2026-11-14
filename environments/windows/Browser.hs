@@ -18,6 +18,7 @@ import Native
 import qualified Navigation as Navigation
 import System.Directory (doesFileExist)
 import System.FilePath
+import TelemetryStorage (isTelemetryPrivateURL)
 import qualified Crypto.Hash.SHA256 as SHA
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
@@ -142,7 +143,8 @@ createTab browser owner identity done = do
         modifyIORef' (tabVisit tab) (+1)
         url <- getString args 3
         base <- readIORef (origin $ host browser)
-        let permitted = Navigation.guest base url
+        private <- isTelemetryPrivateURL url
+        let permitted = Navigation.guest base url && not private
         unless permitted $ callInt args 8 1
         writeIORef (tabLoading tab) permitted
         writeIORef (tabError tab) $ if permitted then "" else "Navigation blocked: use an HTTP(S) URL or a local file."

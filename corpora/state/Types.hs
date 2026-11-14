@@ -37,6 +37,7 @@ import System.FileLock
 import System.FilePath
 import System.IO
 import System.Process
+import TelemetryStorage (isTelemetryPrivatePath)
 #ifdef mingw32_HOST_OS
 import Foreign.C
 import System.IO.Error (isPermissionError)
@@ -165,7 +166,10 @@ fresh prefix = (prefix <>) . T.take 12 <$> newId
 readJSON :: FromJSON a => FilePath -> a -> IO a
 readJSON p def = do
  exists <- doesFileExist p
- if exists then either (throwIO . userError) pure . eitherDecode =<< BL.readFile p else pure def
+ if not exists then pure def else do
+  private <- isTelemetryPrivatePath p
+  let diagnostic = if private then const "Invalid private application JSON" else id
+  either (throwIO . userError . diagnostic) pure . eitherDecode =<< BL.readFile p
 atomicBytes :: FilePath -> BL.ByteString -> IO ()
 atomicBytes p bytes = do
  createDirectoryIfMissing True (takeDirectory p)

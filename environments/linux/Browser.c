@@ -7,6 +7,8 @@
 #include <json-glib/json-glib.h>
 #include <math.h>
 
+extern int sapiens_telemetry_private_url(const char *address);
+
 typedef struct { Browser *browser; char *owner; GtkFileChooserNative *dialog; } FilePick;
 
 struct Browser {
@@ -51,6 +53,7 @@ static gboolean boolean(JsonObject *parent, const char *name) {
 }
 
 static gboolean guest_allowed(Browser *browser, const char *address) {
+    if (!address || sapiens_telemetry_private_url(address)) return FALSE;
     if (!g_strcmp0(address, "about:blank")) return TRUE;
     GUri *uri = g_uri_parse(address, G_URI_FLAGS_NONE, NULL);
     GUri *origin = g_uri_parse(browser->origin, G_URI_FLAGS_NONE, NULL);

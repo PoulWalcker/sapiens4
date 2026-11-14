@@ -1,5 +1,3 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
@@ -26,12 +24,10 @@ module TelemetryProfile
   , profileDevice
   , profileEnrollment
   , resolveProfileLocation
+  , withGrantedConsent
   ) where
 
-import Control.Exception
-  ( Exception, Handler (..), IOException, bracketOnError, catch, catches
-  , mask, throwIO
-  )
+import Control.Exception (Exception, Handler (..), IOException, catches, throwIO)
 import Control.Monad (guard, unless, when)
 import Data.Aeson
   ( Object
@@ -55,42 +51,19 @@ import Data.ByteArray.Encoding
   , convertToBase
   )
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as BL
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import Data.UUID (UUID)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUIDv4
 import RuntimePaths (configDirectory, defaultConfigDirectory, externalStoragePath)
-import System.Directory
-  ( canonicalizePath, createDirectoryIfMissing, getHomeDirectory, makeAbsolute
-  , pathIsSymbolicLink, removeFile
-  )
+import System.Directory (canonicalizePath, createDirectoryIfMissing, getHomeDirectory, makeAbsolute)
 import System.Environment (lookupEnv)
-import System.FileLock (SharedExclusive (Exclusive), withFileLock)
 import System.FilePath ((</>), equalFilePath, takeDirectory)
-import System.IO (Handle, hClose, openBinaryTempFile)
-import System.IO.Error (isDoesNotExistError)
-#ifdef mingw32_HOST_OS
-import System.IO (IOMode (ReadMode), withBinaryFile)
-import qualified TelemetryWindows as Windows
-#else
-import Control.Exception (bracket, mask_, onException)
-import System.Directory (renameFile)
-import System.IO.Error (isAlreadyExistsError)
-import qualified System.Posix.Directory as Posix
-import qualified System.Posix.Files as Posix
-import qualified System.Posix.IO as Posix
-import System.Posix.User (getEffectiveUserID)
-#endif
-#ifdef darwin_HOST_OS
-import Control.Monad (void)
-import Foreign (Ptr, alloca, nullPtr)
-import Foreign.C.Error
-  ( eINVAL, eNOENT, getErrno, throwErrno, throwErrnoIfMinus1_ )
-import Foreign.C.String (CString, withCString)
-import Foreign.C.Types (CInt (..))
-#endif
+import TelemetryStorage
+  ( PrivateFileError (..), atomicWritePrivate, checkPrivate, createPrivateDirectory
+  , privatePathExists, readPrivateFile, withPrivateLock
+  )
 
 newtype NoticeVersion = NoticeVersion Int
   deriving (Eq, Show)
@@ -282,6 +255,9 @@ consentStatusJSON profile = object
 profileAction :: IO a -> IO (Either ProfileError a)
 profileAction action = (Right <$> action) `catches`
   [ Handler (\(err :: ProfileError) -> pure (Left err))
+  , Handler (\(err :: PrivateFileError) -> pure (Left (case err of
+      InsecurePrivateFile -> InsecureProfile
+      PrivateFileTooLarge -> InvalidProfile)))
   , Handler (\(_ :: IOException) -> pure (Left ProfileIOError))
   ]
 
@@ -299,7 +275,7 @@ resolveRoot scope = do
     shared <- defaultConfigDirectory
     when (any (equalFilePath root) (ancestors shared) || equalFilePath root home)
       (throwIO InsecureProfile)
-  inCorpora <- or <$> mapM (pathExists . (</> "corpora-identity.json")) (ancestors root)
+  inCorpora <- or <$> mapM (privatePathExists . (</> "corpora-identity.json")) (ancestors root)
   when inCorpora (throwIO InsecureProfile)
   dataRoot <- lookupEnv "SAPIENS_DATA_DIR"
   case dataRoot of
@@ -320,49 +296,45 @@ checkLocation (ProfileLocation scope root) = do
   resolved <- externalStoragePath root
   unless (equalFilePath resolved root) (throwIO InsecureProfile)
 
-pathExists :: FilePath -> IO Bool
-pathExists path = (True <$ pathIsSymbolicLink path) `catch` \(err :: IOException) ->
-  if isDoesNotExistError err then pure False else throwIO err
-
 emptyProfile :: Profile
 emptyProfile = Profile Nothing Nothing Nothing
 
 loadProfile :: ProfileLocation -> IO (Either ProfileError Profile)
 loadProfile location@(ProfileLocation _ root) = profileAction $ do
   checkLocation location
-  exists <- pathExists root
+  exists <- privatePathExists root
   if exists then checkPrivate root True >> readProfile root else pure emptyProfile
 
 readProfile :: FilePath -> IO Profile
 readProfile root = do
   let path = root </> "telemetry.json"
-  exists <- pathExists path
+  exists <- privatePathExists path
   if not exists then pure emptyProfile else do
-    checkPrivate path False
-    bytes <- readPrivateBytes path
+    bytes <- readPrivateFile path
     either throwIO pure (decodeProfile bytes)
-
-readProfileBytes :: Handle -> IO BS.ByteString
-readProfileBytes stream = do
-  bytes <- BS.hGet stream (64 * 1024 + 1)
-  when (BS.length bytes > 64 * 1024) (throwIO InvalidProfile)
-  pure bytes
 
 withProfileLock :: ProfileLocation -> IO a -> IO a
 withProfileLock location@(ProfileLocation _ root) action = do
   checkLocation location
-  exists <- pathExists root
+  exists <- privatePathExists root
   unless exists $ do
     createDirectoryIfMissing True (takeDirectory root)
     createPrivateDirectory root
   checkPrivate root True
   let lockPath = root </> "telemetry.lock"
-  createPrivateLock lockPath
-  withFileLock lockPath Exclusive $ \_ -> do
+  withPrivateLock lockPath $ do
     checkLocation location
     checkPrivate root True
-    checkPrivate lockPath False
     action
+
+withGrantedConsent :: ProfileLocation -> ConsentEpoch -> IO a
+                   -> IO (Either ProfileError (Maybe a))
+withGrantedConsent location@(ProfileLocation _ root) expected action = profileAction $
+  withProfileLock location $ do
+    current <- readProfile root
+    case profileConsent current of
+      Just (ConsentRecord (Granted _) epoch) | epoch == expected -> Just <$> action
+      _ -> pure Nothing
 
 commitConsent :: ProfileLocation -> Maybe ConsentEpoch -> Consent
               -> IO (Either ProfileError Profile)
@@ -386,7 +358,6 @@ commitConsent location@(ProfileLocation _ root) expected choice = profileAction 
         publishProfile location updated
         pure updated
 
--- HTTP enrollment is performed by the caller, outside this short lock.
 commitEnrollmentIfEmpty :: ProfileLocation -> ConsentEpoch -> BasicCredentials
                         -> IO (Either ProfileError (Maybe BasicCredentials))
 commitEnrollmentIfEmpty location@(ProfileLocation _ root) expected credentials = profileAction $
@@ -402,118 +373,6 @@ commitEnrollmentIfEmpty location@(ProfileLocation _ root) expected credentials =
       _ -> pure Nothing
 
 publishProfile :: ProfileLocation -> Profile -> IO ()
-publishProfile location@(ProfileLocation _ root) profile = mask $ \restore ->
-  bracketOnError (openBinaryTempFile root ".telemetry-writing-") cleanup $ \(path, stream) -> do
-    restore $ do
-      checkPrivate path False
-      BL.hPut stream (encode (profileJSON profile))
-      hClose stream
-    checkLocation location
-    checkPrivate root True
-    checkPrivate path False
-    let destination = root </> "telemetry.json"
-    exists <- pathExists destination
-    when exists (checkPrivate destination False)
-    replaceProfile path destination
-  where
-    cleanup (path, stream) = do
-      hClose stream `catch` \(_ :: IOException) -> pure ()
-      removeFile path `catch` \(_ :: IOException) -> pure ()
-
-#ifdef mingw32_HOST_OS
-checkPrivate :: FilePath -> Bool -> IO ()
-checkPrivate path directory = do
-  safe <- Windows.checkPrivate path directory
-  unless safe (throwIO InsecureProfile)
-
-readPrivateBytes :: FilePath -> IO BS.ByteString
-readPrivateBytes path = withBinaryFile path ReadMode readProfileBytes
-
-createPrivateDirectory :: FilePath -> IO ()
-createPrivateDirectory path = Windows.createPrivateDirectory path >> checkPrivate path True
-
-createPrivateLock :: FilePath -> IO ()
-createPrivateLock path = Windows.createPrivateLock path >> checkPrivate path False
-
-replaceProfile :: FilePath -> FilePath -> IO ()
-replaceProfile = Windows.replaceProfile
-#else
-checkPrivate :: FilePath -> Bool -> IO ()
-checkPrivate path directory = do
-  Posix.getSymbolicLinkStatus path >>= checkPrivateStatus directory
-#ifdef darwin_HOST_OS
-  withCString path $ \name -> withoutExtendedACL (aclGetFile name 0x100)
-#endif
-
-checkPrivateStatus :: Bool -> Posix.FileStatus -> IO ()
-checkPrivateStatus directory status = do
-  owner <- getEffectiveUserID
-  let validType = if directory then Posix.isDirectory status
-                  else Posix.isRegularFile status && Posix.linkCount status == 1
-  unless (validType && Posix.fileOwner status == owner
-      && Posix.fileMode status .&. 0o077 == 0) (throwIO InsecureProfile)
-
-readPrivateBytes :: FilePath -> IO BS.ByteString
-readPrivateBytes path = bracket open hClose readProfileBytes
-  where
-    open = mask_ $ do
-      fd <- Posix.openFd path Posix.ReadOnly Posix.defaultFileFlags
-        { Posix.nofollow = True, Posix.nonBlock = True, Posix.cloexec = True }
-      (do
-        Posix.getFdStatus fd >>= checkPrivateStatus False
-#ifdef darwin_HOST_OS
-        withoutExtendedACL (aclGetFd (fromIntegral fd) 0x100)
-#endif
-        Posix.fdToHandle fd) `onException` Posix.closeFd fd
-
-createPrivateDirectory :: FilePath -> IO ()
-createPrivateDirectory path = Posix.createDirectory path 0o700 `catch` \(err :: IOException) ->
-  unless (isAlreadyExistsError err) (throwIO err)
-
-createPrivateLock :: FilePath -> IO ()
-createPrivateLock path = do
-  exists <- pathExists path
-  unless exists $
-    bracket (Posix.openFd path Posix.ReadWrite Posix.defaultFileFlags
-      { Posix.creat = Just 0o600, Posix.exclusive = True, Posix.cloexec = True })
-      Posix.closeFd (const (pure ()))
-      `catch` \(err :: IOException) -> unless (isAlreadyExistsError err) (throwIO err)
-  checkPrivate path False
-
-replaceProfile :: FilePath -> FilePath -> IO ()
-replaceProfile = renameFile
-#endif
-
-#ifdef darwin_HOST_OS
-foreign import ccall unsafe "acl_get_file"
-  aclGetFile :: CString -> CInt -> IO (Ptr ())
-foreign import ccall unsafe "acl_get_fd_np"
-  aclGetFd :: CInt -> CInt -> IO (Ptr ())
-foreign import ccall unsafe "acl_valid"
-  aclValid :: Ptr () -> IO CInt
-foreign import ccall unsafe "acl_get_entry"
-  aclGetEntry :: Ptr () -> CInt -> Ptr (Ptr ()) -> IO CInt
-foreign import ccall unsafe "acl_free"
-  aclFree :: Ptr () -> IO CInt
-
--- Support mode-based private storage only; extended ACLs need deliberate repair.
--- Darwin ACL_TYPE_EXTENDED = 0x100; acl_get_entry returns EINVAL at the end.
-withoutExtendedACL :: IO (Ptr ()) -> IO ()
-withoutExtendedACL acquire =
-  bracket open release $ \acl -> unless (acl == nullPtr) $ do
-      throwErrnoIfMinus1_ "telemetry ACL" (aclValid acl)
-      alloca $ \entry -> do
-        result <- aclGetEntry acl 0 entry
-        if result == 0 then throwIO InsecureProfile else do
-          err <- getErrno
-          unless (err == eINVAL) (throwErrno "telemetry ACL")
-  where
-    open = do
-      acl <- acquire
-      when (acl == nullPtr) $ do
-        err <- getErrno
-        -- Darwin returns ENOENT for an existing object with no extended ACL.
-        unless (err == eNOENT) (throwErrno "telemetry ACL")
-      pure acl
-    release acl = unless (acl == nullPtr) (void (aclFree acl))
-#endif
+publishProfile location@(ProfileLocation _ root) profile =
+  atomicWritePrivate (root </> "telemetry.json") (encode (profileJSON profile))
+    (checkLocation location)

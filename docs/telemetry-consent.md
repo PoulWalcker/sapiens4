@@ -91,6 +91,11 @@ package and direct Haskell FFI for owner/DACL checks and private creation;
 unknown ACE forms fail closed. Both platforms share the same consent logic.
 No new C source is used.
 
+Ticket 04 moves these filesystem primitives into shared `TelemetryStorage` and
+uses the same consent lock to authorize background Corpora identity preparation.
+See [private Corpora telemetry identity](telemetry-identity.md) for its lifecycle,
+file-access guards and migration limitations.
+
 Publication promises atomic visibility, not power-loss durability. A failed
 write/close/rename leaves the preceding committed profile and returns an error;
 the caller must remain locally disabled until reconciliation. Temporary files

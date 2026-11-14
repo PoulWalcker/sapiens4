@@ -20,6 +20,7 @@ import ObjC
 import Domain (BrowserCommand(..), BrowserAction(..))
 import System.Directory (doesFileExist)
 import System.FilePath
+import TelemetryStorage (isTelemetryPrivatePath, isTelemetryPrivateURL)
 
 field name (Object value) = fromMaybe Null (M.lookup (K.fromText name) value)
 field _ _ = Null
@@ -93,6 +94,15 @@ returnFocus browser view = do
         when (responder == view || descendant) $ void (obj1 win "makeFirstResponder:" sh)
 
 load browser tab address = do
+    private <- isTelemetryPrivateURL (T.unpack address)
+    if private then do
+        let denied = tab { tabRequested = Just address, tabAwaiting = False, tabError = "Private application files cannot be opened." }
+        save browser denied
+        loadURL (tabView tab) "about:blank"
+        report browser denied
+      else loadPublic browser tab address
+
+loadPublic browser tab address = do
     u <- url address
     scheme <- textProp u "scheme"
     let pending = tab { tabDocument = Nothing, tabRequested = Just address, tabAwaiting = True }
@@ -311,6 +321,8 @@ serveFile browser view task = do
     path <- textProp u "path"
     found <- lookupView browser view
     result <- try $ if maybe False (Set.member path . tabFiles) found then do
+        private <- isTelemetryPrivatePath (T.unpack path)
+        when private (ioError (userError "Private application file"))
         content <- TE.decodeUtf8' <$> B.readFile (T.unpack path)
         either throwIO (\t -> pure (TE.encodeUtf8 (textDocument t (T.pack (takeFileName (T.unpack path)))))) content
       else ioError (userError "Permission denied")
