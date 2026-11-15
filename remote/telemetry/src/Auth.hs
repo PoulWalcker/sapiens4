@@ -18,12 +18,9 @@ import Data.ByteArray (ScrubbedBytes)
 import Data.ByteArray.Encoding (Base (Base64URLUnpadded), convertFromBase, convertToBase)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as B8
-import qualified Data.ByteString.Lazy as BL
 import Data.Char (toLower)
 import qualified Data.Set as Set
-import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import System.IO (hClose)
 import System.Posix.Files (fileMode, fileOwner, getFdStatus, isRegularFile, linkCount)
@@ -33,11 +30,12 @@ import TelemetryCredential
 import TelemetryJSON (decodeJSON, exactFields)
 
 data Key = Key BS.ByteString ScrubbedBytes
-data Auth = Auth Key (Maybe Key) (Set.Set T.Text)
+data Auth = Auth Key (Maybe Key) (Set.Set InstallationId)
 -- Only verified principals can be handed to the ingestion parser.
-data Principal = Principal T.Text Bool
+data KeyAge = ActiveKey | PreviousKey
+data Principal = Principal InstallationId KeyAge
 
-principalInstallation :: Principal -> T.Text
+principalInstallation :: Principal -> InstallationId
 principalInstallation (Principal identifier _) = identifier
 
 parseKey :: Value -> Parser Key
@@ -64,9 +62,10 @@ parseAuth = withObject "auth" $ \fields -> do
     Just (Key oldKid oldKey) -> when (kid == oldKid || BA.constEq key oldKey) (fail "Duplicate key")
     Nothing -> pure ()
   revoked <- fields .: "revoked_installations"
-  unless (all (maybe False (const True) . parseUUIDv4) revoked
-    && Set.size (Set.fromList revoked) == length revoked) (fail "Invalid revocations")
-  pure (Auth active previous (Set.fromList revoked))
+  identifiers <- traverse (\value -> maybe (fail "Invalid revocation") pure
+    (parseUUIDv4 value >>= installationFromUUID)) revoked
+  unless (Set.size (Set.fromList identifiers) == length identifiers) (fail "Duplicate revocation")
+  pure (Auth active previous (Set.fromList identifiers))
 
 loadAuth :: FilePath -> IO (Either String Auth)
 loadAuth path = do
@@ -88,21 +87,22 @@ loadAuth path = do
           (ioError (userError "Insecure auth configuration"))
         fdToHandle fd) `onException` closeFd fd
 
-sign :: Key -> T.Text -> Token
-sign (Key kid key) identifier =
-  case UUID.fromText identifier of
-    Nothing -> error "Internal installation identifier"
-    Just uuid ->
-      let message = "sapiens4.telemetry.credential\0" <> kid <> BL.toStrict (UUID.toByteString uuid)
-          tag = convertToBase Base64URLUnpadded (hmac key message :: HMAC SHA256)
-      in case parseToken (kid <> "." <> TE.encodeUtf8 identifier <> "." <> tag) of
-          Just token -> token
-          Nothing -> error "Internal credential encoding"
+deriveMac :: Key -> InstallationId -> HMAC SHA256
+deriveMac (Key kid key) identifier = hmac key
+  ("sapiens4.telemetry.credential\0" <> kid <> installationBytes identifier)
+
+sign :: Key -> InstallationId -> Maybe Token
+sign key@(Key kid _) identifier = parseToken
+  (kid <> "." <> TE.encodeUtf8 (installationIdText identifier) <> "."
+    <> convertToBase Base64URLUnpadded (deriveMac key identifier))
 
 issueCredential :: Auth -> IO (Either String Token)
 issueCredential (Auth key _ revoked) = do
-  identifier <- UUID.toText <$> UUID.nextRandom
-  pure $ if Set.member identifier revoked then Left "Issuance failed" else Right (sign key identifier)
+  generated <- UUID.nextRandom
+  pure $ case installationFromUUID generated of
+    Just identifier | not (Set.member identifier revoked) ->
+      maybe (Left "Issuance failed") Right (sign key identifier)
+    _ -> Left "Issuance failed"
 
 verifyAuthorization :: Auth -> [BS.ByteString] -> Maybe Principal
 verifyAuthorization (Auth active@(Key activeKid _) previous revoked) headers = do
@@ -116,11 +116,14 @@ verifyAuthorization (Auth active@(Key activeKid _) previous revoked) headers = d
   key <- if kid == activeKid then Just active else case previous of
     Just candidate@(Key oldKid _) | kid == oldKid -> Just candidate
     _ -> Nothing
-  guardMaybe (BA.constEq (BS.drop 54 bytes) (BS.drop 54 (tokenBytes (sign key identifier))))
+  supplied <- either (const Nothing) Just
+    (convertFromBase Base64URLUnpadded (BS.drop 54 bytes) :: Either String BS.ByteString)
+  guardMaybe (BA.constEq supplied (deriveMac key identifier))
   guardMaybe (not (Set.member identifier revoked))
-  pure (Principal identifier (kid /= activeKid))
+  pure (Principal identifier (if kid == activeKid then ActiveKey else PreviousKey))
   where guardMaybe True = Just (); guardMaybe False = Nothing
 
 replacementCredential :: Auth -> Principal -> Maybe Token
-replacementCredential (Auth active _ _) (Principal identifier old) =
-  if old then Just (sign active identifier) else Nothing
+replacementCredential (Auth active _ _) (Principal identifier age) = case age of
+  ActiveKey -> Nothing
+  PreviousKey -> sign active identifier

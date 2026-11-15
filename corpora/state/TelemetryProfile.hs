@@ -23,11 +23,11 @@ import RuntimePaths (configDirectory, defaultConfigDirectory, externalStoragePat
 import System.Directory (canonicalizePath, createDirectoryIfMissing, getHomeDirectory, makeAbsolute)
 import System.Environment (lookupEnv)
 import System.FilePath ((</>), equalFilePath, takeDirectory)
+import Telemetry (NoticeVersion, mkNoticeVersion, noticeVersionNumber)
 import TelemetryCredential
 import TelemetryJSON (decodeJSON, exactFields)
 import TelemetryStorage
 
-newtype NoticeVersion = NoticeVersion Int deriving (Eq, Show)
 data Consent = Denied | Granted NoticeVersion deriving (Eq, Show)
 newtype ConsentEpoch = ConsentEpoch UUID deriving (Eq, Show)
 data ConsentRecord = ConsentRecord
@@ -46,12 +46,6 @@ consentEpochText :: ConsentEpoch -> Text
 consentEpochText (ConsentEpoch uuid) = UUID.toText uuid
 parseConsentEpoch :: Text -> Maybe ConsentEpoch
 parseConsentEpoch input = ConsentEpoch <$> parseUUIDv4 input
-mkNoticeVersion :: Int -> Maybe NoticeVersion
-mkNoticeVersion 1 = Just (NoticeVersion 1)
-mkNoticeVersion _ = Nothing
-noticeVersionNumber :: NoticeVersion -> Int
-noticeVersionNumber (NoticeVersion number) = number
-
 parseConsent :: Value -> Parser ConsentRecord
 parseConsent = withObject "consent" $ \fields -> do
   state <- fields .: "state" :: Parser Text
