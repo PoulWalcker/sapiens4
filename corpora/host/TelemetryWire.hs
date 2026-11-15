@@ -55,6 +55,7 @@ data TelemetryEvent
   | CorporaCreated PublicCorporaId
   | RequestAccepted PublicCorporaId RequestKind
   | RemotePaired PublicCorporaId
+  | SchedulerHeartbeat
 
 eventJSON :: EventRecord TelemetryEvent -> Value
 eventJSON (EventRecord (EventId identifier) occurred body) = object $
@@ -62,6 +63,7 @@ eventJSON (EventRecord (EventId identifier) occurred body) = object $
   , "occurred_at" .= formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S%3QZ" occurred
   ] <> case body of
     AppOpened -> ["event_type" .= ("app_opened" :: Text)]
+    SchedulerHeartbeat -> ["event_type" .= ("scheduler_heartbeat" :: Text)]
     CorporaCreated corpora -> scoped "corpora_created" corpora
     RemotePaired corpora -> scoped "remote_paired" corpora
     RequestAccepted corpora kind -> scoped "request_accepted" corpora

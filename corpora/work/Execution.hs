@@ -289,14 +289,15 @@ advanceDeadline frequency time due = (elapsed,due+elapsed*interval)
 
 milliseconds :: IO Int
 milliseconds = fromIntegral . (`div` 1000000) <$> getMonotonicTimeNSec
-startExecution :: Service -> IO ()
-startExecution s = modifyMVar_ (serviceWorker s) $ \existing -> case existing of
+startExecution :: Maybe (IO ()) -> Service -> IO ()
+startExecution heartbeat s = modifyMVar_ (serviceWorker s) $ \existing -> case existing of
  Just _ -> pure existing
  Nothing -> Just <$> async loop
  where
  loop = do
   t <- milliseconds
   deadlines <- newIORef (M.fromList [(f,t+periodMillis f) | f <- [minBound..maxBound]])
+  heartbeatDeadline <- newIORef (t+3600000)
   let step = do
        stopped <- readIORef (serviceStopping s)
        unless stopped $ do
@@ -317,6 +318,12 @@ startExecution s = modifyMVar_ (serviceWorker s) $ \existing -> case existing of
            writeIORef (servicePulse s) (put "numbers" numbers current)
            DB.saveSingleton s DB.SystemPulse (obj [("pulse",str identity),("numbers",numbers)])
            onPulse s (Pulse identity frequency number)
+           when (frequency==Bph60) $ forM_ heartbeat $ \emit -> do
+            currentTime <- milliseconds
+            deadline <- readIORef heartbeatDeadline
+            when (currentTime>=deadline) $ do
+             writeIORef heartbeatDeadline (currentTime+3600000)
+             emit
         threadDelay 50000
         step
   step

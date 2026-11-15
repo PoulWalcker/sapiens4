@@ -28,7 +28,7 @@ import qualified Service as Service
 import System.Directory (doesFileExist, getModificationTime)
 import System.Environment (lookupEnv)
 import System.FilePath ((</>))
-import Telemetry (Emit, EventIntent (ICorporaCreated), corporaRef)
+import Telemetry (Emit, EventIntent (ICorporaCreated, ISchedulerHeartbeat), corporaRef)
 import qualified TelemetrySender as Telemetry
 import TelemetryWire (RuntimeKind)
 import Types
@@ -80,7 +80,7 @@ startHostWith emit choice root requested managed = do
       let settings = setServerName "Sapiens4" $ setPort port $ setHost "127.0.0.1" $ setGracefulCloseTimeout1 1000 $ setGracefulShutdownTimeout (Just 5) $ setInstallShutdownHandler (putMVar shutdown) $ setBeforeMainLoop (putMVar ready ()) defaultSettings
       bracketOnError (async $ withAsync (watchSnapshotFiles service) $ \watcher -> link watcher >> runSettingsSocket settings socket (application service bridge registry onboarding port)) cancel $ \worker -> do
        void (race (wait worker) (takeMVar ready))
-       Service.startService service
+       Service.startService (if managed then Nothing else Just (emit ISchedulerHeartbeat)) service
        bracketOnError (startTranscriber service) id $ \stopTranscriber -> do
         stopped <- newMVar False
         let stop = do

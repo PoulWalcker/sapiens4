@@ -29,5 +29,6 @@ data EventIntent
   | ICorporaCreated CorporaRef
   | IRequestAccepted CorporaRef RequestKind
   | IRemotePaired CorporaRef
+  | ISchedulerHeartbeat
 
 type Emit = EventIntent -> IO ()

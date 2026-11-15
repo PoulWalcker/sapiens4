@@ -154,6 +154,7 @@ data EventType
   | ECorporaCreated
   | ERequestAccepted
   | ERemotePaired
+  | ESchedulerHeartbeat
   deriving (Eq, Show)
 
 data TelemetryEvent
@@ -161,6 +162,7 @@ data TelemetryEvent
   | CorporaCreated PublicCorporaId
   | RequestAccepted PublicCorporaId RequestKind
   | RemotePaired PublicCorporaId
+  | SchedulerHeartbeat
   deriving (Eq, Show)
 
 data EventRecord a = EventRecord
@@ -321,6 +323,8 @@ eventColumns (RequestAccepted corpora kind) =
   (ERequestAccepted, Just corpora, Just kind)
 eventColumns (RemotePaired corpora) =
   (ERemotePaired, Just corpora, Nothing)
+eventColumns SchedulerHeartbeat =
+  (ESchedulerHeartbeat, Nothing, Nothing)
 
 parseClientContext :: Object -> Parser ClientContext
 parseClientContext fields =
@@ -339,6 +343,9 @@ parseEventBody fields = do
     "app_opened" -> do
       rejectUnknownFields common fields
       pure AppOpened
+    "scheduler_heartbeat" -> do
+      rejectUnknownFields common fields
+      pure SchedulerHeartbeat
     "corpora_created" -> do
       rejectUnknownFields (common ++ ["corpora_id"]) fields
       CorporaCreated <$> fields .: "corpora_id"

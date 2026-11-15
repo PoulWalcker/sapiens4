@@ -101,7 +101,7 @@ attachEndpoint :: Service -> Text -> IO ()
 attachEndpoint s url = locked s $ do
  writeIORef (serviceEndpoint s) url
  DB.agents s >>= mapM_ (Mgt.prepare s . (`at` "id"))
-startService :: Service -> IO ()
+startService :: Maybe (IO ()) -> Service -> IO ()
 startService = E.startExecution
 closeService :: Service -> IO ()
 closeService s = do

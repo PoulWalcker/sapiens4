@@ -251,6 +251,7 @@ eventTypeText EAppOpened = "app_opened"
 eventTypeText ECorporaCreated = "corpora_created"
 eventTypeText ERequestAccepted = "request_accepted"
 eventTypeText ERemotePaired = "remote_paired"
+eventTypeText ESchedulerHeartbeat = "scheduler_heartbeat"
 
 requestKindText :: RequestKind -> T.Text
 requestKindText AgentMessage = "agent_message"

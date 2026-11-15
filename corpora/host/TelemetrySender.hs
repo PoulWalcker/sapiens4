@@ -313,6 +313,7 @@ materialize sender expected@(Grant epoch _ _ _) deadline (QueuedIntent captured 
       ICorporaCreated reference -> scoped reference CorporaCreated
       IRequestAccepted reference kind -> scoped reference (\public -> RequestAccepted public kind)
       IRemotePaired reference -> scoped reference RemotePaired
+      ISchedulerHeartbeat -> pure (Just (fmap (const SchedulerHeartbeat) record))
 
 collect :: Sender -> Grant -> QueuedIntent -> IO ()
 collect sender expected@(Grant epoch notice device (Just credentials)) first@(QueuedIntent _ captured _) = gather [] first
