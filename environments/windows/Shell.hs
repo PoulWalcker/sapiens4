@@ -248,6 +248,8 @@ desktopSession memory probe = do
                     Right view -> do
                       active <- valid
                       if not active then closeView view else do
+                        -- Closing can re-enter the window procedure after releasing the controller.
+                        writeIORef shellRef Nothing
                         closeView bootstrap
                         writeIORef legacyView True
                         loaded gen (installWorkspace selected url current) (Right view)
