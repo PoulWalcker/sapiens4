@@ -128,16 +128,12 @@ instance FromJSON PublicCorporaId where
 
 data RequestKind
   = AgentMessage
-  | GroupMessage
-  | GroupTaskRun
   deriving (Eq, Show)
 
 instance FromJSON RequestKind where
   parseJSON = withText "request_kind" $ \value ->
     case value of
       "agent_message" -> pure AgentMessage
-      "group_message" -> pure GroupMessage
-      "group_task_run" -> pure GroupTaskRun
       _ -> fail "Invalid request_kind"
 
 data RuntimeKind = NativeDesktop | Headless

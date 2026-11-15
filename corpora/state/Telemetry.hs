@@ -22,7 +22,7 @@ corporaRef path
 corporaDirectory :: CorporaRef -> FilePath
 corporaDirectory (CorporaRef path) = path
 
-data RequestKind = AgentMessage | GroupMessage | GroupTaskRun
+data RequestKind = AgentMessage
 
 data EventIntent
   = IAppOpened

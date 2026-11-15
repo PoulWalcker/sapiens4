@@ -67,8 +67,6 @@ eventJSON (EventRecord (EventId identifier) occurred body) = object $
     RequestAccepted corpora kind -> scoped "request_accepted" corpora
       <> [ "request_kind" .= case kind of
             AgentMessage -> ("agent_message" :: Text)
-            GroupMessage -> "group_message"
-            GroupTaskRun -> "group_task_run"
          ]
   where
     scoped name corpora = ["event_type" .= (name :: Text), "corpora_id" .= publicCorporaIdText corpora]

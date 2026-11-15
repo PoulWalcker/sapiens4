@@ -22,7 +22,6 @@ import qualified Routines as Routine
 import qualified Store as DB
 import System.Directory
 import System.FilePath
-import qualified Telemetry
 import Types
 import qualified Workspace as Workspace
 
@@ -74,9 +73,6 @@ submitGroup s gid input actor = do
    root <- activeRoot s gid actor
    calls <- mapM (\target -> newRequest entry target root) (filter (/= actor) (nub addressed))
    void (saveGroup s (put "requests" (arr (items group "requests" ++ calls)) (append "messages" entry group)) actor "message" (get entry "id"))
-   when (actor == "admin") $
-    forM_ (Telemetry.corporaRef (serviceRoot s)) $ \reference ->
-     serviceEmit s (Telemetry.IRequestAccepted reference Telemetry.GroupMessage)
    when (actor == "admin") $ DB.forgetDrafts s gid attachments
    dispatchGroups s
    pure entry

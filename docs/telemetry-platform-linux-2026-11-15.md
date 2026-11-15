@@ -1,5 +1,9 @@
 # Linux headless telemetry verification
 
+Scope update (2026-11-15): group telemetry was subsequently removed. Results
+below describe the recorded revisions; current accepted-use scope is
+[agent messages only](telemetry-requests.md).
+
 See the [verification index](telemetry-platform-verification-2026-11-15.md) for
 revisions, independent Parquet evidence and interpretation of captures.
 Windows native ticket 08 is N/A here. These results do not close Windows B9 or

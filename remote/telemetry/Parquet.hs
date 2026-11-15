@@ -254,8 +254,6 @@ eventTypeText ERemotePaired = "remote_paired"
 
 requestKindText :: RequestKind -> T.Text
 requestKindText AgentMessage = "agent_message"
-requestKindText GroupMessage = "group_message"
-requestKindText GroupTaskRun = "group_task_run"
 
 osText :: OsFamily -> T.Text
 osText MacOS = "macos"

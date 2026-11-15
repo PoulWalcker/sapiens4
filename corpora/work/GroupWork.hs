@@ -13,7 +13,6 @@ import qualified Data.Text as T
 import Data.Time (UTCTime, getCurrentTime)
 import GroupModel
 import qualified Store as DB
-import qualified Telemetry
 import Types
 
 -- Parsing preserves the established wire format; decisions below use typed values.
@@ -144,9 +143,6 @@ startTask s gid tid revision actor root = do
  request <- newRequest entry (agentIdText task.assignee) root
  let call=mergeFields [("task",str tid),("task_revision",num changed.revision)] request
  void (saveGroup s (append "requests" call (append "messages" entry (replace "tasks" (toJSON changed) group))) actor "task started" (str tid))
- when (actor == "admin") $
-  forM_ (Telemetry.corporaRef (serviceRoot s)) $ \reference ->
-   serviceEmit s (Telemetry.IRequestAccepted reference Telemetry.GroupTaskRun)
  pure (toJSON changed)
 
 newRequest :: Value -> Text -> Text -> IO Value

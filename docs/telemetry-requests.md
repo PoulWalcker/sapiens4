@@ -1,37 +1,51 @@
 # Accepted external requests
 
-Ticket 07 connects the existing `IRequestAccepted` intent to three business
-acceptance boundaries. It adds eleven source lines across three existing Work
-modules, with no new event type, module, dependency, origin abstraction or API.
+`request_accepted` records only `agent_message`. The capture is in
+`Execution.submitTurn`, after the new turn or clarification and required message
+persistence, before optional draft cleanup, projection and trimming. Routine
+acknowledgments, rejected requests, internal delegation and scheduled work do
+not count. Remote Control reaches the same hook through `Service.dispatch`;
+a saved receipt returns its reply without repeating capture.
 
-| Request kind | Capture boundary | Exclusions |
-| --- | --- | --- |
-| `agent_message` | `Execution.submitTurn`, after the new turn or clarification and required `Store.message` persistence, before draft cleanup, projection and trimming | Routine acknowledgment, failed validation/provider/setup/acceptance, internal delegation and scheduled work |
-| `group_message` | Normal `GroupChat.submitGroup`, after `saveGroup`, before draft cleanup and downstream dispatch; actor must be server-selected `admin` | Routine acknowledgment, internal GroupControl, scheduled work and failed validation/save |
-| `group_task_run` | `GroupWork.startTask`, after `saveGroup`; actor must be server-selected `admin` | Creation/editing, invalid revision, pending rejection, internal GroupTaskRun, scheduled work, worker execution and settlement |
+Group messages and task runs have no telemetry hooks. Their request kinds were
+removed from the host ADT, JSON codec, collector parser and Parquet writer on
+2026-11-15. The collector rejects retired request kinds, including an entire
+mixed batch containing one. The four event names and fourteen physical Parquet
+columns are unchanged. Previously published files are not rewritten.
 
-The external Service routes select the actor themselves. Group-message JSON
-cannot supply actor/origin/agencyRun flags; unknown fields are rejected. Extra
-task-run fields cannot replace the actor selected by the route. Internal
-GroupControl uses the actual agent identity, while scheduled work persists its
-own occurrence without calling these external capture boundaries.
+Capture passes only an opaque local Corpora reference and the closed request
+kind to the shared nonblocking sender. The sender owns consent, EventId/time,
+identity preparation and delivery. This is best-effort RAM telemetry, not a
+transactional business audit.
 
-There is no HTTP success middleware: a routine acknowledgment can return 202
-without new accepted use, and an accepted operation can later fail during
-unrelated projection or dispatch. Capture follows the required business writes;
-it does not imply that subsequent model work succeeds. The existing remote
-receipt path returns a saved encrypted response without repeating dispatch,
-business persistence or capture.
+## Agent-only scope checks, 2026-11-15
 
-Each capture passes only the local opaque Corpora reference and closed
-`RequestKind` to the shared nonblocking `Emit`. The sender owns EventId/time,
-consent, private identity preparation, bounded RAM and delivery. Two independently
-accepted requests create two EventIds; retrying a serialized batch preserves its
-bytes and IDs. Events carry no message, attachment, task, group or agent details.
-This remains best-effort RAM telemetry, not transactional business auditing:
-process interruption or telemetry failure can lose an accepted-use event.
+Following `11a27a6`, the host, macOS executable and standalone collector built
+with the existing dependency freezes. Focused macOS process/HTTP observations
+used private temporary storage and the existing scripted provider:
 
-## Development observations
+- A group message and group task run returned 202 and settled, with zero new
+  telemetry after a twelve-second delivery window.
+- A subsequent external agent message produced one accepted-use event through
+  the actual host sender and collector.
+- Both retired request kinds and a mixed agent/group batch returned
+  `422 invalid_event`. The complete batch is validated before admission.
+- DuckDB 1.5.5 independently read the two published rows: one root creation and
+  one `agent_message`, fourteen physical columns, two distinct EventIds and no
+  additional rows. Wire and saved values matched.
+
+Port 8081 belonged to another session. The checks loaded the current collector
+HTTP application and real publisher through Cabal GHCi on a private alternate
+loopback port; no production port option was added. Initial launcher/HTTP-status
+expectation errors were corrected in temporary fixtures, without application
+changes. The successful host observations were retained rather than rerun.
+Windows/Linux, broad regressions and feature E2E were not rerun.
+
+Sanitized evidence is retained locally at
+`/Users/pashvel/Desktop/personal/sapiens4-worktrees/telemetry-agent-only-macos-pl6dazrz/`.
+Owned host/collector/proxy processes and private profiles/keys were cleaned.
+
+## Historical observations before the scope reduction
 
 On 2026-11-14, macOS arm64 / GHC 9.10.3, following
 `c90c51fcd9fb8b6dc069f097022f23fe5d1e1f47` on `telemetry/d4`, temporary

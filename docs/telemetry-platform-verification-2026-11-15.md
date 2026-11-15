@@ -1,5 +1,9 @@
 # Telemetry 06/07/08 platform verification
 
+Scope update (2026-11-15): group telemetry was subsequently removed. Results
+below describe the recorded revisions; current accepted-use scope is
+[agent messages only](telemetry-requests.md).
+
 > Follow-up: the [Windows native gate completion](telemetry-windows-native-gate-2026-11-15.md)
 > closes ticket 08 at `e2cca20b211d84e2e5cf94502a16ca966356cd46`. This document
 > retains the earlier cf94 verification and its OPEN verdict as historical evidence.

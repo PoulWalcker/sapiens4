@@ -12,11 +12,18 @@ This is best-effort RAM telemetry: interruption between the business commit and
 capture can lose an event. It is not a transactional pairing audit.
 
 Forwarded requests still use `executeRemote` → `Service.dispatch` and ticket 07's
-three acceptance hooks. A matching saved receipt returns its encrypted reply
-before dispatch. No capture hook, sender or consent authority was added to the
+agent-message acceptance hook. A matching saved receipt returns its encrypted
+reply before dispatch. No capture hook, sender or consent authority was added to the
 Relay or controlling client. No module, dependency or event type was added.
 
-## Focused macOS observations, 2026-11-15
+## Scope update, 2026-11-15
+
+Accepted-request telemetry now covers only agent messages. Group-message and
+task-run telemetry was removed after the observations below. Those observations
+remain evidence for their pinned revision, not current event requirements. See
+[current scope verification](telemetry-requests.md#agent-only-scope-checks-2026-11-15).
+
+## Historical focused macOS observations, 2026-11-15
 
 The selected source follows `3b12492913e41299b963f07759b20b3e64ee0eb0` on
 `telemetry/d4`. The changed Bridge source SHA-256 is
