@@ -3,43 +3,43 @@
 {-# LANGUAGE CPP #-}
 module Service (Service, APIError(..), openService, startService, closeService, serviceRoot, attachEndpoint, dispatch, snapshot, corporaIdentity) where
 
+import qualified Computer
 import Control.Concurrent
-import Control.Concurrent.STM (newTVarIO, readTVarIO)
 import Control.Concurrent.Async
+import Control.Concurrent.STM (newTVarIO, readTVarIO)
 import Control.Exception
 import Control.Monad
 import Data.Aeson hiding (pairs)
 import qualified Data.ByteString.Lazy as BL
 import Data.IORef
 import qualified Data.Map.Strict as M
-import qualified Data.Set as Set
 import Data.Maybe
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
+import DataRoot
+import qualified Delegation as D
+import qualified Execution as E
+import qualified GroupChat as GC
+import qualified GroupWork as GW
+import qualified Groups as G
+import qualified Management as Mgt
+import Memo
+import Population
+import qualified Provider as Provider
+import qualified Routines as R
+import qualified Store as DB
 import System.Directory
 import System.Environment
 import System.FileLock
 import System.FilePath
 import System.Info
-import Types
 import Telemetry (Emit)
-import DataRoot
-import qualified Computer
-import qualified Store as DB
-import Population
-import Workspace
+import Types
 import Voice (receivePiece, cancelRecording, retryTranscription, draftable)
-import Memo
-import qualified Management as Mgt
-import qualified Provider as Provider
-import qualified Execution as E
-import qualified Delegation as D
-import qualified Routines as R
-import qualified Groups as G
-import qualified GroupChat as GC
-import qualified GroupWork as GW
+import Workspace
 
 openService :: Emit -> StorageChoice -> FilePath -> IO Service
 openService emit choice path = do

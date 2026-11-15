@@ -6,9 +6,9 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
 
 typedef INT (WSAAPI *TelemetryDNSCancel)(LPHANDLE);
 typedef INT (WSAAPI *TelemetryDNSResult)(LPOVERLAPPED);
@@ -87,17 +87,21 @@ int sapiens_telemetry_nonblocking(uintptr_t socket) {
     u_long enabled = 1;
     return ioctlsocket((SOCKET)socket, FIONBIO, &enabled) == 0 ? 0 : -WSAGetLastError();
 }
+
 int sapiens_telemetry_connect(uintptr_t socket, const void *address, int length) {
     return connect((SOCKET)socket, address, length) == 0 ? 0 : -WSAGetLastError();
 }
+
 int sapiens_telemetry_recv(uintptr_t socket, void *buffer, int length) {
     int received = recv((SOCKET)socket, buffer, length, 0);
     return received == SOCKET_ERROR ? -WSAGetLastError() : received;
 }
+
 int sapiens_telemetry_send(uintptr_t socket, const void *buffer, int length) {
     int sent = send((SOCKET)socket, buffer, length, 0);
     return sent == SOCKET_ERROR ? -WSAGetLastError() : sent;
 }
+
 int sapiens_telemetry_write_ready(uintptr_t socket) {
     fd_set writable, failed;
     struct timeval immediate = {0, 0};

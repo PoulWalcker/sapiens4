@@ -1,18 +1,12 @@
 {-# LANGUAGE CPP #-}
 module Registry where
 
-import Types
-import Telemetry (EventIntent (ICorporaCreated), corporaRef)
-import DataRoot
-import System.FileLock (unlockFile)
-import qualified Service as Service
 import Bridge
 import Client
-import Crypto (confirmationCode)
-import Setup
 import Control.Concurrent
 import Control.Exception
 import Control.Monad
+import Crypto (confirmationCode)
 import Data.Aeson hiding (pairs)
 import qualified Data.ByteString.Lazy as BL
 import Data.IORef
@@ -23,9 +17,15 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
+import DataRoot
+import qualified Service as Service
+import Setup
 import System.Directory
+import System.FileLock (unlockFile)
 import System.FilePath
 import System.Info
+import Telemetry (EventIntent (ICorporaCreated), corporaRef)
+import Types
 
 data Registry = Registry
  { registryService :: Service, registryBridge :: Bridge

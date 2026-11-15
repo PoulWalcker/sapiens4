@@ -6,15 +6,15 @@ module GroupWork where
 import Control.Monad
 import Data.Aeson hiding (pairs)
 import qualified Data.Aeson.KeyMap as KM
-import Data.Maybe (fromMaybe, isNothing, isJust)
 import Data.Aeson.Types (parseEither, parseMaybe)
+import Data.Maybe (fromMaybe, isNothing, isJust)
 import Data.Text (Text)
-import Data.Time (UTCTime, getCurrentTime)
 import qualified Data.Text as T
-import Types
-import qualified Telemetry
-import qualified Store as DB
+import Data.Time (UTCTime, getCurrentTime)
 import GroupModel
+import qualified Store as DB
+import qualified Telemetry
+import Types
 
 -- Parsing preserves the established wire format; decisions below use typed values.
 data GroupTask = GroupTask

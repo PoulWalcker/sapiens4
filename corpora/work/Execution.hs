@@ -17,17 +17,17 @@ import qualified Data.Map.Strict as M
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
-import GHC.Clock
-import System.Directory
-import Types
-import qualified Telemetry
-import qualified Store as DB
-import Population
-import Workspace
 import qualified Delegation as D
-import qualified Routines as R
-import Provider
+import GHC.Clock
 import qualified GroupChat as G
+import Population
+import Provider
+import qualified Routines as R
+import qualified Store as DB
+import System.Directory
+import qualified Telemetry
+import Types
+import Workspace
 
 data ConversationArchive = ConversationArchive Text [Value]
 data Retention = Retention Value [ConversationArchive]

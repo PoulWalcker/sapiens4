@@ -5,10 +5,10 @@ module TelemetryHTTP (managerSettings, newManagedClient) where
 
 import Control.Concurrent.MVar
 import Control.Exception (IOException, bracketOnError, catch, finally, mask_)
+import Data.Default.Class (def)
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Unique (newUnique)
-import Data.Default.Class (def)
 import Network.HTTP.Client (Manager, ManagerSettings (..), newManager)
 import Network.HTTP.Client.Internal (Connection (..), managerTlsProxyConnection)
 import Network.TLS (Supported (..), Version (TLS12, TLS13))
@@ -20,7 +20,6 @@ import Network.Connection (TLSSettings (..))
 import Network.HTTP.Client.TLS (mkManagerSettings)
 #endif
 
--- Keep the TLS policy identical across the platform-specific IO backends.
 managerSettings :: IO ManagerSettings
 managerSettings =
 #ifdef mingw32_HOST_OS
@@ -32,9 +31,8 @@ managerSettings =
     supported = def
       { supportedVersions = [TLS13, TLS12], supportedCiphers = ciphersuite_default }
 
--- http-client 0.7.19's closeManager is a no-op. Keep explicit ownership of
--- connections, and release the Manager reference even if emit/stop are retained.
--- Entries are removed on normal close, so this ledger does not grow over time.
+-- http-client 0.7.19's closeManager is a no-op, so close tracked connections
+-- explicitly and release the Manager even if emit/stop are retained.
 newManagedClient :: ManagerSettings -> IO (IORef (Maybe Manager), IO ())
 newManagedClient settings = do
   connections <- newMVar Map.empty

@@ -2,7 +2,10 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 
 module TelemetryWindows
-  ( checkPrivate, createPrivateDirectory, createPrivateLock, createPrivateTempFile
+  ( checkPrivate
+  , createPrivateDirectory
+  , createPrivateLock
+  , createPrivateTempFile
   , replaceProfile
   ) where
 
@@ -121,7 +124,6 @@ createPrivateTempFile root = mask_ $ withUser $ \user -> withAttributes user $ \
       Win.closeHandle file `onException` cleanup
       pure path)
     (const cleanup) $ \created -> do
-      -- Only this user can access the private parent and this new file.
       stream <- openBinaryFile created WriteMode
       pure (created, stream)
 

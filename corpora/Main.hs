@@ -1,34 +1,34 @@
 {-# LANGUAGE CPP #-}
 module Main where
 
-import Types
-import DataRoot
-import HostServer
 import Assets
 import BuildUI
 import Computer
-import Server
-import Setup
-import qualified TelemetryCommand
-import TelemetryWire (RuntimeKind (..))
 import Control.Concurrent
 import Control.Exception
 import Control.Monad
 import Data.Aeson hiding (pairs)
 import qualified Data.ByteString.Lazy.Char8 as BL
-import qualified Data.String
 import Data.Maybe
-import GHC.IO.Encoding (setLocaleEncoding)
+import qualified Data.String
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import DataRoot
+import GHC.IO.Encoding (setLocaleEncoding)
+import HostServer
 import Network.Wai.Handler.Warp hiding (run)
+import Server
+import Setup
 import System.Directory
 import System.Environment
 import System.Exit
 import System.FilePath
-import System.Info
 import System.IO
+import System.Info
 import System.Process
+import qualified TelemetryCommand
+import TelemetryWire (RuntimeKind (..))
+import Types
 #ifndef mingw32_HOST_OS
 import System.Posix.Signals
 #else

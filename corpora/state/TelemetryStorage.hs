@@ -14,8 +14,7 @@ module TelemetryStorage
   , withPrivateLock
   ) where
 
-import Control.Exception
-  ( Exception, IOException, bracketOnError, catch, mask, throwIO )
+import Control.Exception (Exception, IOException, bracketOnError, catch, mask, throwIO)
 import Control.Monad (unless, when)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
@@ -69,10 +68,11 @@ privatePathExists path = (True <$ pathIsSymbolicLink path) `catch` \(err :: IOEx
 isTelemetryPrivatePath :: FilePath -> IO Bool
 isTelemetryPrivatePath path = do
   resolved <- canonicalizePath path `catch` \(_ :: IOException) -> pure path
-  let reserved value = let raw = map toLower (takeFileName value)
-                           name = if os == "mingw32"
-                             then dropWhileEnd (`elem` (" ." :: String)) (takeWhile (/= ':') raw)
-                             else raw
+  let reserved value =
+        let raw = map toLower (takeFileName value)
+            name = if os == "mingw32"
+              then dropWhileEnd (`elem` (" ." :: String)) (takeWhile (/= ':') raw)
+              else raw
         in name `elem` ["corpora-identity.json", "telemetry.json"]
           || ".telemetry-writing-" `isPrefixOf` name
   pure (reserved path || reserved resolved)
@@ -158,8 +158,9 @@ checkPrivate path directory = do
 checkPrivateStatus :: Bool -> Posix.FileStatus -> IO ()
 checkPrivateStatus directory status = do
   owner <- getEffectiveUserID
-  let validType = if directory then Posix.isDirectory status
-                  else Posix.isRegularFile status && Posix.linkCount status == 1
+  let validType = if directory
+        then Posix.isDirectory status
+        else Posix.isRegularFile status && Posix.linkCount status == 1
   unless (validType && Posix.fileOwner status == owner
       && Posix.fileMode status .&. 0o077 == 0) (throwIO InsecurePrivateFile)
 
@@ -219,12 +220,12 @@ foreign import ccall unsafe "acl_free"
 withoutExtendedACL :: IO (Ptr ()) -> IO ()
 withoutExtendedACL acquire =
   bracket open release $ \acl -> unless (acl == nullPtr) $ do
-      throwErrnoIfMinus1_ "telemetry ACL" (aclValid acl)
-      alloca $ \entry -> do
-        result <- aclGetEntry acl 0 entry
-        if result == 0 then throwIO InsecurePrivateFile else do
-          err <- getErrno
-          unless (err == eINVAL) (throwErrno "telemetry ACL")
+    throwErrnoIfMinus1_ "telemetry ACL" (aclValid acl)
+    alloca $ \entry -> do
+      result <- aclGetEntry acl 0 entry
+      if result == 0 then throwIO InsecurePrivateFile else do
+        err <- getErrno
+        unless (err == eINVAL) (throwErrno "telemetry ACL")
   where
     open = do
       acl <- acquire

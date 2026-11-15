@@ -3,47 +3,46 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Application where
 
+import Browser
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
-import Data.Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
-import qualified Data.Aeson.Key as Key
 import qualified Crypto.Hash.SHA256 as SHA256
+import Data.Aeson
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy as L
-import DataRoot
-import DesktopStorage
-import qualified Data.Text.IO as TIO
 import Data.IORef
+import Data.List (nub, intercalate)
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import qualified Data.Text.IO as TIO
+import DataRoot
+import DesktopStorage
 import Foreign hiding (void, new)
 import Foreign.C.Error (throwErrnoIfMinus1Retry)
 import Foreign.C.Types (CInt(..), CLong)
 import Network.HTTP.Client hiding (method)
+import Numeric (showHex)
 import ObjC
-import Browser
 import System.Directory
 import System.Environment
+import System.Exit (ExitCode(..))
 import System.FilePath
 import System.IO
-import System.Process hiding (shell)
-import System.Process.Internals (withProcessHandle, ProcessHandle(waitpidLock), ProcessHandle__(..))
-import System.Timeout
-import System.Exit (ExitCode(..))
+import System.IO.Error (isDoesNotExistError)
 import System.Posix.Process (getProcessID, getProcessGroupIDOf)
 import System.Posix.Signals (signalProcess, signalProcessGroup, sigKILL)
 import System.Posix.Types (ProcessID, CPid(..))
-import System.IO.Error (isDoesNotExistError)
-import Data.List (nub, intercalate)
-import Numeric (showHex)
+import System.Process hiding (shell)
+import System.Process.Internals (withProcessHandle, ProcessHandle(waitpidLock), ProcessHandle__(..))
+import System.Timeout
 import Text.Read (readMaybe)
-
 
 data Application = Application { native :: Obj, browser :: IORef Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: IORef (Maybe ServerProcess), address :: IORef Text, startup :: IORef (Maybe (Async ())), starting :: IORef Bool, localLoaded :: IORef Bool, runtime :: FilePath, selectedRoot :: IORef (Maybe FilePath), recoveryError :: IORef (Maybe Text), firstSignal :: IORef (Maybe WorkspaceSignal), attemptNumber :: IORef Integer, recovering :: IORef Bool, clientPreferences :: Obj, quitting :: IORef Bool }
 

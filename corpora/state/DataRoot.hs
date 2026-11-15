@@ -3,16 +3,14 @@
 {-# LANGUAGE CPP #-}
 module DataRoot (module DataRoot, module RuntimePaths) where
 
-import Types (writeJSON, migrateAgentState, validateValue, pairs, get)
-import RuntimePaths
 import Control.Exception
 import Control.Monad
 import Data.Aeson hiding (pairs)
 import qualified Data.Aeson.KeyMap as K
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
-import Data.List (isPrefixOf)
 import Data.Char (isAscii, isAlphaNum)
+import Data.List (isPrefixOf)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.UUID as UUID
@@ -20,13 +18,15 @@ import qualified Data.UUID.V4 as UUIDv4
 import Database.SQLite.Simple
 import Domain (CorporaConfig)
 import Network.URI (escapeURIString, isUnreserved)
+import RuntimePaths
 import System.Directory
-import System.FilePath
 import System.FileLock
+import System.FilePath
 import System.IO
 import System.IO.Error (ioeGetErrorString, isAlreadyExistsError, isUserError)
 import System.Info (os)
 import TelemetryStorage (isTelemetryPrivatePath)
+import Types (writeJSON, migrateAgentState, validateValue, pairs, get)
 #ifdef mingw32_HOST_OS
 import qualified TelemetryStorage as Private
 #endif

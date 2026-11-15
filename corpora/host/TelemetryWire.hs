@@ -33,10 +33,12 @@ mkAppVersion :: Text -> Maybe AppVersion
 mkAppVersion text
   | not (T.null text) && T.length text <= 40 && T.all valid text = Just (AppVersion text)
   | otherwise = Nothing
-  where valid c = isAscii c && (isAlphaNum c || c `elem` ("._+-" :: String))
+  where
+    valid c = isAscii c && (isAlphaNum c || c `elem` ("._+-" :: String))
 
 data OsFamily = MacOS | Windows | Linux
-data RuntimeKind = NativeDesktop | Headless deriving (Eq)
+data RuntimeKind = NativeDesktop | Headless
+  deriving (Eq)
 
 data ClientContext = ClientContext DeviceId AppVersion OsFamily RuntimeKind NoticeVersion
 
@@ -63,11 +65,13 @@ eventJSON (EventRecord (EventId identifier) occurred body) = object $
     CorporaCreated corpora -> scoped "corpora_created" corpora
     RemotePaired corpora -> scoped "remote_paired" corpora
     RequestAccepted corpora kind -> scoped "request_accepted" corpora
-      <> ["request_kind" .= case kind of
+      <> [ "request_kind" .= case kind of
             AgentMessage -> ("agent_message" :: Text)
             GroupMessage -> "group_message"
-            GroupTaskRun -> "group_task_run"]
-  where scoped name corpora = ["event_type" .= (name :: Text), "corpora_id" .= publicCorporaIdText corpora]
+            GroupTaskRun -> "group_task_run"
+         ]
+  where
+    scoped name corpora = ["event_type" .= (name :: Text), "corpora_id" .= publicCorporaIdText corpora]
 
 encodeBatch :: ClientContext -> [EventRecord TelemetryEvent] -> Maybe BS.ByteString
 encodeBatch (ClientContext device (AppVersion version) system runtime notice) events

@@ -39,8 +39,8 @@ import System.Info (os)
 import System.Random (randomRIO)
 import System.Timeout (timeout)
 import Telemetry
-import TelemetryIdentity (preparePublicCorporaId)
 import qualified TelemetryHTTP
+import TelemetryIdentity (preparePublicCorporaId)
 import TelemetryProfile
 import TelemetryWire
 import Text.Read (readMaybe)
@@ -105,7 +105,11 @@ startConfiguredTelemetry :: RuntimeKind -> IO HostTelemetry
 startConfiguredTelemetry runtime = recover $ do
   endpoint <- lookupEnv "SAPIENS_TELEMETRY_ENDPOINT"
   location <- resolveProfileLocation (if runtime == NativeDesktop then DesktopProfile else HeadlessProfile)
-  let system = case os of "darwin" -> Just MacOS; "mingw32" -> Just Windows; "linux" -> Just Linux; _ -> Nothing
+  let system = case os of
+        "darwin" -> Just MacOS
+        "mingw32" -> Just Windows
+        "linux" -> Just Linux
+        _ -> Nothing
   case (endpoint >>= mkHttpsEndpoint, mkAppVersion (T.pack (showVersion Package.version)), system, location) of
     (Just target, Just version, Just platform, Right profile) -> do
       settings <- TelemetryHTTP.managerSettings
@@ -117,9 +121,10 @@ startConfiguredTelemetry runtime = recover $ do
       location <- resolveProfileLocation (if runtime == NativeDesktop then DesktopProfile else HeadlessProfile)
       either (pure . Left) (\profile -> commitConsent profile expected choice) location
     recover action = action `catches`
-      [Handler (\(err :: SomeException) -> case fromException err :: Maybe SomeAsyncException of
+      [ Handler (\(err :: SomeException) -> case fromException err :: Maybe SomeAsyncException of
         Just _ -> throwIO err
-        Nothing -> pure disabled)]
+        Nothing -> pure disabled)
+      ]
 
 startTelemetry :: ManagerSettings -> SenderConfig -> IO HostTelemetry
 startTelemetry settings configuration = mask $ \restore -> do
@@ -130,11 +135,12 @@ startTelemetry settings configuration = mask $ \restore -> do
       <*> newTVarIO True <*> newEmptyTMVarIO <*> newMVar (Control Nothing FollowProfile Nothing)
       <*> newTVarIO 0
     worker <- async $ restore (workerLoop sender) `catches`
-      [Handler (\(err :: SomeException) -> do
+      [ Handler (\(err :: SomeException) -> do
         atomically (disable sender)
         case fromException err :: Maybe SomeAsyncException of
           Just _ -> throwIO err
-          Nothing -> pure ())]
+          Nothing -> pure ())
+      ]
     let stop = do
           atomically (writeTVar (alive sender) False >> disable sender)
           cancel worker `finally` cleanup
@@ -169,7 +175,9 @@ refreshLocked sender previous = do
       refused = case current of
         Just (Grant _ _ _ credentials) | credentials /= rejected previous -> Nothing
         _ -> rejected previous
-      blocked = case decision of FailedConsent _ -> True; FollowProfile -> False
+      blocked = case decision of
+        FailedConsent _ -> True
+        FollowProfile -> False
       permitted = if blocked || isJust refused then Nothing else current
       changed = case (observed previous, current) of
         (Just (Grant oldEpoch oldNotice oldDevice oldCredentials), Just (Grant epoch notice device credentials)) ->
@@ -285,8 +293,9 @@ materialize sender expected@(Grant epoch _ _ _) deadline (QueuedIntent captured 
             Just (Right public) -> Just (fmap (const (constructor public)) record)
             _ -> Nothing
     in case intent of
-      IAppOpened | senderRuntime (config sender) == NativeDesktop -> pure (Just (fmap (const AppOpened) record))
-                 | otherwise -> pure Nothing
+      IAppOpened
+        | senderRuntime (config sender) == NativeDesktop -> pure (Just (fmap (const AppOpened) record))
+        | otherwise -> pure Nothing
       ICorporaCreated reference -> scoped reference CorporaCreated
       IRequestAccepted reference kind -> scoped reference (\public -> RequestAccepted public kind)
       IRemotePaired reference -> scoped reference RemotePaired
@@ -322,9 +331,9 @@ sendPending sender attempt pending@(PendingBatch epoch notice device credentials
     reply <- post sender "/v1/events" (Just credentials) bytes
     case reply of
       Just (202, _, body) | acceptedResponse count body -> pure ()
-      Just (401, _, _) -> modifyMVar (control sender) (\previous -> do
+      Just (401, _, _) -> modifyMVar (control sender) $ \previous -> do
         atomically (disable sender)
-        pure (previous {rejected = Just credentials}, ()))
+        pure (previous {rejected = Just credentials}, ())
       _ | attempt < 2, retryable reply -> do
         delay <- retryDelay attempt reply
         valid <- pause sender expected delay
@@ -367,12 +376,15 @@ post sender route credentials bytes = do
       let HttpsEndpoint origin = senderEndpoint (config sender)
       initial <- parseRequest (origin <> route)
       let request = initial
-            { method = "POST", redirectCount = 0, cookieJar = Nothing
+            { method = "POST"
+            , redirectCount = 0
+            , cookieJar = Nothing
             , requestHeaders = [(hContentType, "application/json")]
                 <> maybe [] (\secret -> [(hAuthorization, basicAuthorization secret)]) credentials
             , requestBody = RequestBodyBS bytes
             , responseTimeout = responseTimeoutMicro 2000000
-            , checkResponse = \_ _ -> pure (), decompress = const False
+            , checkResponse = \_ _ -> pure ()
+            , decompress = const False
             }
       withResponse request client $ \response -> do
         let code = statusCode (responseStatus response)

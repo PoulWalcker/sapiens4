@@ -6,13 +6,13 @@ import Control.Exception (bracket)
 import Control.Monad (unless, when)
 import Foreign.C
 import HostServer
-import TelemetryWire (RuntimeKind (NativeDesktop))
 import System.Directory
 import System.Environment
 import System.Exit (exitSuccess)
 import System.FilePath
 import System.IO
 import System.Posix.Process (executeFile, getProcessID)
+import TelemetryWire (RuntimeKind (NativeDesktop))
 
 foreign import ccall safe "sapiens_linux_available" available :: IO CInt
 foreign import ccall safe "sapiens_linux_run" desktop :: CString -> CString -> IO CInt

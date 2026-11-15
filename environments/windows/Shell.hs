@@ -2,40 +2,40 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Shell (runDesktop) where
 
+import Browser
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
+import qualified Crypto.Hash.SHA256 as SHA
 import Data.Aeson hiding (Object)
 import qualified Data.Aeson as JSON
+import qualified Data.Aeson.Key as K
+import qualified Data.Aeson.KeyMap as KM
 import Data.Bits
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as B
+import qualified Data.ByteString.Lazy as L
 import Data.IORef
 import Data.Int
 import Data.Maybe (isNothing, listToMaybe)
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import Data.Word
-import Types (readJSON, writeJSON)
-import qualified Data.Aeson.KeyMap as KM
-import qualified Data.Aeson.Key as K
-import qualified Crypto.Hash.SHA256 as SHA
 import DataRoot
 import qualified DesktopStorage
-import Network.URI (URI(..), URIAuth(..), parseURI, escapeURIString, isUnreserved, unEscapeString)
-import System.Directory (canonicalizePath, doesFileExist, doesDirectoryExist)
 import Foreign hiding (void)
-import Numeric
-import Browser
 import Host
 import Native
 import qualified Navigation as Navigation
+import Network.URI (URI(..), URIAuth(..), parseURI, escapeURIString, isUnreserved, unEscapeString)
+import Numeric
+import System.Directory (canonicalizePath, doesFileExist, doesDirectoryExist)
 import System.Environment
 import System.FilePath
 import System.IO
 import System.Process (createProcess, proc)
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as B
-import qualified Data.ByteString.Lazy as L
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
+import Types (readJSON, writeJSON)
 
 runDesktop :: Bool -> IO ()
 runDesktop probe = runInBoundThread $
@@ -322,7 +322,7 @@ desktopSession memory probe = do
                     currentAttempt <- readIORef generation
                     when (not dead && currentAttempt==attempt && maybe False ((==core view) . core) current) action
                   on index iid action = onEvent memory (core view) index iid (\event -> active (action event))
-              -- Child documents must not borrow the trusted parent's native channel.
+              -- Block child document loads within the trusted shell.
               on 17 "{9ADBE429-F36D-432B-9DDC-F8881FBD76E3}" $ \event -> callInt event 8 1
               on 7 "{9ADBE429-F36D-432B-9DDC-F8881FBD76E3}" $ \event -> do
                 destination <- getString event 3

@@ -11,20 +11,20 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Char
 import Data.List (find,isPrefixOf)
 import qualified Data.Map.Strict as Map
-import qualified Data.Set as Set
 import Data.Maybe
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import qualified Memo
 import Network.URI
+import qualified Store as DB
 import System.Directory
 import System.FilePath
-import System.Info (os)
 import System.IO (IOMode(ReadMode), withBinaryFile)
-import Types
-import qualified Memo
-import qualified Store as DB
+import System.Info (os)
 import TelemetryStorage (isTelemetryPrivatePath)
+import Types
 
 requirePublicFile :: FilePath -> IO ()
 requirePublicFile path = do

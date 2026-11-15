@@ -1,8 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 module RuntimePaths (configDirectory, defaultConfigDirectory, defaultDataDirectory, externalStoragePath, containedPath) where
 
-import Data.Aeson
 import Control.Monad
+import Data.Aeson
 import Data.Char (toLower)
 import Data.List (find)
 import Data.Maybe (catMaybes)

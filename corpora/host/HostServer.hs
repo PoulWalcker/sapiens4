@@ -1,40 +1,38 @@
 module HostServer where
 
-import Types
-import DataRoot
-import System.Environment (lookupEnv)
-import qualified Service as Service
-import Telemetry (Emit, EventIntent (ICorporaCreated), corporaRef)
-import qualified TelemetrySender as Telemetry
-import TelemetryWire (RuntimeKind)
 import Assets
-import HTTP
 import Bridge
-import Registry
-import qualified Onboarding as O
-import Voice (startTranscriber)
 import Control.Concurrent
+import Control.Concurrent.Async
 import Control.Concurrent.STM hiding (check)
 import qualified Control.Concurrent.STM as STM
-import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
+import Data.Aeson (encode)
 import qualified Data.ByteString as B
 import Data.IORef
 import qualified Data.Map.Strict as M
-import Data.Aeson (encode)
-import System.Directory (getModificationTime)
-import Network.Wai.Handler.WebSockets (websocketsOr)
-import qualified Network.WebSockets as WS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import System.Directory (doesFileExist)
-import System.FilePath ((</>))
+import DataRoot
+import HTTP
 import Network.HTTP.Types
+import qualified Network.Socket as Socket
 import Network.Wai
 import Network.Wai.Handler.Warp
-import qualified Network.Socket as Socket
-
+import Network.Wai.Handler.WebSockets (websocketsOr)
+import qualified Network.WebSockets as WS
+import qualified Onboarding as O
+import Registry
+import qualified Service as Service
+import System.Directory (doesFileExist, getModificationTime)
+import System.Environment (lookupEnv)
+import System.FilePath ((</>))
+import Telemetry (Emit, EventIntent (ICorporaCreated), corporaRef)
+import qualified TelemetrySender as Telemetry
+import TelemetryWire (RuntimeKind)
+import Types
+import Voice (startTranscriber)
 
 data Host = Host { hostPort :: Int, hostService :: Service, hostBridge :: Bridge, hostStop :: IO () }
 listenLoopback :: Int -> IO (Socket.Socket,Int)

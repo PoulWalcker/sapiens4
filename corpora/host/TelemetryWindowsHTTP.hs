@@ -61,8 +61,10 @@ connectionFailure = ioError (userError "Telemetry TLS connection failed")
 -- would otherwise escape the same connection deadline before a socket exists.
 resolve :: String -> Int -> IO [Socket.SockAddr]
 resolve host port = withCWString host $ \name -> withCWString (show port) $ \service ->
-  bracket (do query <- dnsStart name service
-              if query == nullPtr then connectionFailure else pure query)
+  bracket
+    (do
+      query <- dnsStart name service
+      if query == nullPtr then connectionFailure else pure query)
     dnsFree $ \query -> do
       let wait = do
             allowInterrupt
@@ -82,7 +84,7 @@ withSocket :: String -> Int -> (Socket.Socket -> IO a) -> IO a
 withSocket host port action = Socket.withSocketsDo $ do
   addresses <- resolve (filter (`notElem` ("[]" :: String)) host) port
   let open [] = connectionFailure
-      open (address:rest) = attempt `catch` \(_ :: IOException) -> open rest
+      open (address : rest) = attempt `catch` \(_ :: IOException) -> open rest
         where
           family = case address of
             Socket.SockAddrInet {} -> Socket.AF_INET
@@ -98,7 +100,7 @@ withSocket host port action = Socket.withSocketsDo $ do
                   pokeSocketAddress buffer address
                   result <- connectSocket (fromIntegral fd) buffer (fromIntegral (sizeOfSocketAddress address))
                   when (result /= 0) $ do
-                    unless (result `elem` [-10035,-10036,-10037]) connectionFailure
+                    unless (result `elem` [-10035, -10036, -10037]) connectionFailure
                     waitWrite socket
               action socket
   open addresses
@@ -135,7 +137,7 @@ receiveSome socket count = Bytes.createAndTrim count $ \buffer ->
 sendAll :: Socket.Socket -> BS.ByteString -> IO ()
 sendAll socket bytes = unless (BS.null bytes) $ do
   allowInterrupt
-  sent <- BS.useAsCStringLen bytes $ \(buffer,count) -> Socket.withFdSocket socket $ \fd ->
+  sent <- BS.useAsCStringLen bytes $ \(buffer, count) -> Socket.withFdSocket socket $ \fd ->
     sendSocket (fromIntegral fd) (castPtr buffer) (fromIntegral count)
   if sent > 0 then sendAll socket (BS.drop (fromIntegral sent) bytes) else do
     if sent == -10035 then threadDelay 10000 >> sendAll socket bytes else connectionFailure

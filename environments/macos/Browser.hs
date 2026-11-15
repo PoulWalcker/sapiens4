@@ -15,9 +15,9 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import Domain (BrowserCommand(..), BrowserAction(..))
 import Foreign hiding (void, new)
 import ObjC
-import Domain (BrowserCommand(..), BrowserAction(..))
 import System.Directory (doesFileExist)
 import System.FilePath
 import TelemetryStorage (isTelemetryPrivatePath, isTelemetryPrivateURL)

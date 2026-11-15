@@ -13,18 +13,18 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
-import System.Directory
-import System.FilePath
-import Types
-import qualified Telemetry
-import qualified Store as DB
-import qualified Population as Population
-import qualified Routines as Routine
-import qualified Workspace as Workspace
-import Memo
-import Provider
 import GroupModel
 import GroupWork
+import Memo
+import qualified Population as Population
+import Provider
+import qualified Routines as Routine
+import qualified Store as DB
+import System.Directory
+import System.FilePath
+import qualified Telemetry
+import Types
+import qualified Workspace as Workspace
 
 mentions :: Service -> Value -> Text -> IO [Text]
 mentions s group content = DB.agents s >>= validated . mentionedMembers group content
