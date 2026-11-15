@@ -1,5 +1,9 @@
 # Telemetry 06/07/08 platform verification
 
+> Follow-up: the [Windows native gate completion](telemetry-windows-native-gate-2026-11-15.md)
+> closes ticket 08 at `e2cca20b211d84e2e5cf94502a16ca966356cd46`. This document
+> retains the earlier cf94 verification and its OPEN verdict as historical evidence.
+
 Actual Windows and Linux observations, 2026-11-14 UTC / 2026-11-15 Dubai.
 Required baseline: `cf94f221ec1d9cd5acac8f5ee6a5c3d7af1cbe6e`.
 

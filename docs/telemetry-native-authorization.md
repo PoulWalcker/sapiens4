@@ -5,11 +5,17 @@ Reviewed against `f5ed98937acafbac4bb794b2eec6efb3e24cb535` on
 reviews the boundary before ticket 09 adds consent controls. It adds no consent
 endpoint, UI control, event hook, credential exposure or IPC service.
 
-**macOS gate: PASS for ticket 08. Windows gate: OPEN after actual verification.**
+**macOS gate: PASS for ticket 08. Windows gate: CLOSED for ticket 08.**
+The [Windows completion follow-up](telemetry-windows-native-gate-2026-11-15.md)
+reproduces and fixes the legacy-profile crash, and completes the actual lifecycle,
+context and product-data observations. The historical Windows OPEN findings below
+remain as the record of the earlier run; they are superseded by that follow-up.
+The parent-authority limitation and narrow ticket-09 contract remain unchanged.
 The follow-up to `1f8fdf4` verifies the trusted-content boundary, blocks child
 document navigation in shell/bootstrap, and exercises the actual bundled UI.
 macOS consent wiring may proceed in ticket 09 under the adapter contract below;
-the real consent-write/UI checks belong to 09. Windows is not closed by this result.
+the real consent-write/UI checks belong to 09. That macOS result alone did not close Windows; the separate Windows follow-up
+above does.
 
 ## Existing native contexts
 
@@ -206,7 +212,10 @@ those runtime negatives, closing-state, bootstrap query/fragment and workspace
 delayed mismatch remain unproven. Do not infer their PASS from the source guards.
 No speculative crash fix is included.
 
-**Windows consent wiring remains blocked by this OPEN native verdict.** After each platform's
+**That was the original Windows OPEN verdict.** The
+[completion follow-up](telemetry-windows-native-gate-2026-11-15.md) closes the
+ticket-08 native gate at `e2cca20b211d84e2e5cf94502a16ca966356cd46`; ticket 09
+has not been started. After each platform's
 adapter exists, repeat disallowed-caller
 checks against **real consent writes**, including generic payloads, local HTTP,
 Remote Control and failed-withdrawal behavior. No ticket status file is changed.
