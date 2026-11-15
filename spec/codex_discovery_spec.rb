@@ -26,7 +26,9 @@ RSpec.describe 'Codex executable discovery' do
   after { @host&.close }
 
   def candidate(location, output, status: 0)
-    path = if Gem.win_platform? && location == 'npm'
+    path = if Gem.win_platform? && location == 'installer'
+      File.join(@local, 'Programs/OpenAI/Codex/bin/codex.exe')
+    elsif Gem.win_platform? && location == 'npm'
       File.join(host.environment.fetch('APPDATA'), 'npm/node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/codex/codex.exe')
     elsif Gem.win_platform?
       File.join(@local, 'OpenAI/Codex/bin', location, 'codex.exe')
@@ -55,7 +57,8 @@ RSpec.describe 'Codex executable discovery' do
 
   it 'prefers the numerically newest working version among multiple installations' do
     candidate(Gem.win_platform? ? '0.99.0' : 'path', 'codex-cli 998.99.0')
-    newest = candidate(Gem.win_platform? ? 'npm' : '0.156.1', 'codex-cli 998.156.1')
+    candidate('npm', 'codex-cli 998.100.0') if Gem.win_platform?
+    newest = candidate(Gem.win_platform? ? 'installer' : '0.156.1', 'codex-cli 998.156.1')
     expect(selected).to eq(File.realpath(newest))
   end
 
