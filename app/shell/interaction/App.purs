@@ -93,7 +93,7 @@ handle runtime input = session input
           failure = D.s "error" value
           disabled = D.b "locally_disabled" value
           detail = case failure of
-            "" -> if disabled then "A previous choice could not be saved. Reporting is off in this app until you retry." else ""
+            "" -> if disabled then "Usage reporting is paused in this app. Refresh or restart to try again." else ""
             "conflicting_consent_revision" -> "Your choice changed in another window or process. Review it and choose again."
             "invalid_credentials" -> "Usage reporting is paused because its credential was rejected. Start a new telemetry installation to resume."
             "credential_update_failed" -> "The credential update could not be saved. Reporting can continue with the saved credential."

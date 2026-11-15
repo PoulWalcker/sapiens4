@@ -116,7 +116,7 @@ resolveRoot scope = do
       directory <- makeAbsolute path >>= canonicalizePath
       when (any (equalFilePath directory) (ancestors root)) (throwIO InsecureProfile)
     _ -> pure ()
-  pure root
+  pure (root </> "telemetry")
 
 ancestors :: FilePath -> [FilePath]
 ancestors path = path : if parent == path then [] else ancestors parent

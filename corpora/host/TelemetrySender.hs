@@ -111,13 +111,14 @@ refreshLocked :: Sender -> Control -> IO (Control, Maybe Grant)
 refreshLocked sender (Control previous rejected diagnostic) = do
   profile <- load sender
   let current = either (const Nothing) grantOf profile
-      token = either (const Nothing) profileToken profile
-      refused = if rejected == token then rejected else Nothing
+      refused = case profile of
+        Right value | profileToken value /= rejected -> Nothing
+        _ -> rejected
       changed = case (previous, current) of
         (Just (Grant oldEpoch oldNotice oldToken), Just (Grant epoch notice newToken)) ->
           oldEpoch /= epoch || oldNotice /= notice || isJust oldToken && oldToken /= newToken
         _ -> True
-      detail = if rejected /= refused then Nothing else diagnostic
+      detail = if current /= previous || rejected /= refused then Nothing else diagnostic
   permitted <- atomically $ do
     blocked <- readTVar (locallyBlocked sender)
     dead <- readTVar (stopped sender)
@@ -261,9 +262,10 @@ enroll sender transport expected@(Grant _ _ Nothing) = do
   case reply of
     Just (Reply 201 _ (Just bytes)) | Right token <- decodeCredentialResponse bytes ->
       install sender expected token
-    _ -> atomically $ do
-      current <- readTVar (cached sender)
-      when (current == Just expected) (void (flushTBQueue (queue sender)))
+    _ -> pure ()
+  atomically $ do
+    current <- readTVar (cached sender)
+    when (current == Just expected) (void (flushTBQueue (queue sender)))
 enroll _ _ _ = pure ()
 
 install :: Sender -> Grant -> Token -> IO ()
