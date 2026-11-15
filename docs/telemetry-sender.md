@@ -23,7 +23,9 @@ collector through a valid public HTTPS tunnel.
 
 These observations satisfy B9's focused prerequisites without a transport source
 change. They do not establish general dual-stack fallback correctness or full
-Windows readiness. The independent Windows native gate remains OPEN. Exact
+Windows readiness. The independent Windows native gate was subsequently
+[closed for ticket 08](telemetry-windows-native-gate-2026-11-15.md) within its
+documented trusted-bundle/product-data boundary; consent UI/writes remain 09. Exact
 commands, server observations, runtime versions and limitations are in the
 [Windows report](telemetry-platform-windows-2026-11-15.md) and
 [verification index](telemetry-platform-verification-2026-11-15.md).
@@ -208,5 +210,6 @@ uses normal certificate validation and has no flag to disable it.
 Subsequent [actual Windows/Linux focused verification](telemetry-platform-verification-2026-11-15.md)
 records transport, host-created Windows private storage, 06/07 and independently
 read Parquet separately. Native consent adapters and full feature E2E remain in
-their owning tickets; the Windows native gate remains OPEN. No production
+their owning tickets. The subsequent Windows ticket-08 native completion is
+recorded separately above. No production
 collection or deployment was performed.

@@ -14,8 +14,8 @@ The parent-authority limitation and narrow ticket-09 contract remain unchanged.
 The follow-up to `1f8fdf4` verifies the trusted-content boundary, blocks child
 document navigation in shell/bootstrap, and exercises the actual bundled UI.
 macOS consent wiring may proceed in ticket 09 under the adapter contract below;
-the real consent-write/UI checks belong to 09. That macOS result alone did not close Windows; the separate Windows follow-up
-above does.
+the real consent-write/UI checks belong to 09. That macOS result alone did not
+close Windows; the separate Windows follow-up above does.
 
 ## Existing native contexts
 
@@ -178,7 +178,10 @@ fixes imported independently from `a92438b` and `b144e9d` do not change this mac
 authority verdict. Completion evidence is retained separately in
 `sapiens4-worktrees/telemetry08-macos-completion-evidence-20261114`.
 
-## Required Windows observations and remaining gate
+## Historical Windows observations and subsequent gate closure
+
+The following records the earlier OPEN findings. The linked completion report
+above supersedes their crash diagnosis and missing runtime observations.
 
 The separate verification ran at published
 `cf94f221ec1d9cd5acac8f5ee6a5c3d7af1cbe6e` on Windows Server 2022,
