@@ -23,6 +23,7 @@ import Data.Text (Text)
 import Database.SQLite.Simple
 import System.Directory
 import System.FilePath
+import Telemetry (EventIntent (IRemotePaired), corporaRef)
 
 
 data Bridge = Bridge { bridgeService :: Service, bridgeConfig :: MVar Value, bridgeError :: IORef Text, bridgeContact :: IORef Value, bridgeConnections :: IORef (S.Set Text), bridgeThread :: MVar (Maybe (Async ())) }
@@ -135,6 +136,8 @@ approvePairing b input = modifyMVar (bridgeConfig b) $ \config -> do
  accept <- replyFrame paired (approvalRequest approval) (obj [("paired",Bool True),("corpora",identity)])
  let updated = put "accept" accept paired
  saveConfig b updated
+ forM_ (corporaRef (serviceRoot (bridgeService b))) $
+  serviceEmit (bridgeService b) . IRemotePaired
  pure (updated,obj [("approved",Bool True)])
 deleteRoom :: Value -> IO Bool
 deleteRoom config = (request (at config "relay") ("/api/rooms/"<>at config "room") (at config "token") "DELETE" Nothing >> pure True)
