@@ -101,9 +101,9 @@ body m d = case d.kind of
       ,V.p "model-hint" "Share usage statistics. No messages or files."
       ,V.node "details" []
         [V.textNode "summary" [] "Details"
-        ,V.p "model-hint" "Reports cover app opens, Corpora creation, accepted agent requests, remote pairing and hourly scheduler activity. They include pseudonymous IDs, app version, OS and timestamps. No messages, files, paths or provider details."
-        ,V.p "model-hint" "Turning this off stops new reporting attempts and clears queued events. An attempt already authorized may still start or finish afterward. Earlier reports remain; reports may be lost or duplicated."
-        ,V.p "model-hint" "Development preview: retention and deletion rules are pending. Not approved for real-user collection."
+        ,V.p "model-hint" "Reports include app activity, pseudonymous IDs, version, OS and timestamps. No messages, files, paths or provider details."
+        ,V.p "model-hint" "Opt-out clears queued events. Authorized requests may still start or finish; received reports remain. Reports may be lost or duplicated."
+        ,V.p "model-hint" "Development preview: retention and erasure rules are pending. Not approved for real-user collection."
         ,V.p "model-hint" "Example report"
         ,V.textNode "pre" [] telemetryExample]
       ,V.p "corpora-feedback" (if m.telemetry.busy then "Saving or reading your choice…" else m.telemetry.error)
