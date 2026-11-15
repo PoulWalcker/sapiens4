@@ -9,9 +9,8 @@ module Protocol
   ) where
 
 import Auth (Principal, principalInstallation)
-import Control.Monad (unless, when)
-import Data.Aeson (Value (..), withObject, withText, (.:))
-import qualified Data.Aeson.KeyMap as KM
+import Control.Monad (when)
+import Data.Aeson (Value, withObject, withText, (.:))
 import Data.Aeson.Types (Parser, parseEither)
 import qualified Data.ByteString as BS
 import Data.List.NonEmpty (NonEmpty)
@@ -33,7 +32,7 @@ data Row = Row
   , rowNotice :: NoticeVersion
   }
 
-data WireError = BadJSON | UnknownField | InvalidEvent | PayloadTooLarge
+data WireError = BadJSON | InvalidEvent | PayloadTooLarge
   deriving (Eq, Show)
 
 decodeRows :: Principal -> UTCTime -> BS.ByteString -> Either WireError (NonEmpty Row)
@@ -41,12 +40,12 @@ decodeRows principal received bytes
   | BS.length bytes > 64 * 1024 = Left PayloadTooLarge
   | otherwise = do
       value <- either (const (Left BadJSON)) Right (decodeJSON (64 * 1024) bytes)
-      knownFields value
       case parseEither parseBatch value of
         Left _ -> Left InvalidEvent
         Right rows -> Right rows
   where
     parseBatch = withObject "batch" $ \fields -> do
+      exactFields ["app_version", "os", "runtime_kind", "notice_version", "events"] fields
       version <- fields .: "app_version" >>= require mkAppVersion
       os <- fields .: "os" >>= enum [("macos", MacOS), ("windows", Windows), ("linux", Linux)]
       runtime <- fields .: "runtime_kind" >>= enum [("native_desktop", NativeDesktop), ("headless", Headless)]
@@ -80,15 +79,3 @@ decodeRows principal received bytes
         Just time | T.length value == 24
           && T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S%3QZ" time) == value -> pure time
         _ -> fail "Invalid timestamp"
-
-knownFields :: Value -> Either WireError ()
-knownFields (Object fields) = do
-  allowed ["app_version", "os", "runtime_kind", "notice_version", "events"] fields
-  case KM.lookup "events" fields of
-    Just (Array events) -> mapM_ eventFields events
-    _ -> Right ()
-  where
-    eventFields (Object event) = allowed ["event_id", "occurred_at", "event_type", "corpora_id"] event
-    eventFields _ = Right ()
-    allowed names object = unless (all (`elem` names) (KM.keys object)) (Left UnknownField)
-knownFields _ = Right ()

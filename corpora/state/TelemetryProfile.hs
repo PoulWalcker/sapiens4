@@ -34,7 +34,7 @@ data ConsentRecord = ConsentRecord
   { consentChoice :: Consent, consentEpoch :: ConsentEpoch } deriving (Eq, Show)
 data Profile = Profile
   { profileConsent :: Maybe ConsentRecord, profileToken :: Maybe Token }
-data ProfileError = InvalidProfile | InsecureProfile | UnsupportedProfileVersion
+data ProfileError = InvalidProfile | InsecureProfile
   | ProfileIOError | ConflictingConsentRevision | ResetNotApplicable
   deriving (Eq, Show)
 instance Exception ProfileError

@@ -128,7 +128,6 @@ readBody limit request = do
 wireFailure :: WireError -> Response
 wireFailure PayloadTooLarge = failure status413 "payload_too_large"
 wireFailure BadJSON = failure status400 "bad_request"
-wireFailure UnknownField = failure status400 "bad_request"
 wireFailure InvalidEvent = failure status422 "invalid_event"
 methodNotAllowed :: BS.ByteString -> Response
 methodNotAllowed allowed = mapResponseHeaders ((hAllow, allowed) :) (failure status405 "method_not_allowed")

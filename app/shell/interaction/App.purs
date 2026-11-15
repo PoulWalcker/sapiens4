@@ -100,7 +100,6 @@ handle runtime input = session input
             "reset_not_applicable" -> "There is no saved reporting choice to reset."
             "invalid_profile" -> "Usage reporting is off. Repair the saved telemetry profile before opting in."
             "insecure_profile" -> "Usage reporting is off. Repair the local profile permissions before opting in."
-            "unsupported_profile_version" -> "Usage reporting is off. This app cannot update the saved profile version."
             "native_channel_unavailable" -> "Could not confirm the change. Reporting may still be enabled. Refresh and retry."
             _ -> "Could not save or read your choice. Reporting is off in this app. Refresh and retry."
       H.modify_ \s -> s {telemetry=

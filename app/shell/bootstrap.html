@@ -121,7 +121,7 @@ function continueSetup(event) {
 function sapiensTelemetryEvent(result) {
  telemetryEpoch=result.consent?.consent_epoch ?? null;
  telemetryBusy=false;
- telemetryReady=!['invalid_profile','insecure_profile','unsupported_profile_version','native_channel_unavailable','profile_io_error'].includes(result.error);
+ telemetryReady=!['invalid_profile','insecure_profile','native_channel_unavailable','profile_io_error'].includes(result.error);
  document.getElementById('usage-reporting').checked=result.consent?.state==='granted' && !result.locally_disabled;
  document.getElementById('usage-feedback').textContent=result.error ? 'Your reporting choice could not be confirmed. A previously saved choice may still apply. You can continue setup and review usage reporting in Settings.' : '';
  updateStorage();

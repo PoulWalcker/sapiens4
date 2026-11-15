@@ -64,7 +64,6 @@ profileErrorCode :: ProfileError -> Text
 profileErrorCode err = case err of
   InvalidProfile -> "invalid_profile"
   InsecureProfile -> "insecure_profile"
-  UnsupportedProfileVersion -> "unsupported_profile_version"
   ProfileIOError -> "profile_io_error"
   ConflictingConsentRevision -> "conflicting_consent_revision"
   ResetNotApplicable -> "reset_not_applicable"
