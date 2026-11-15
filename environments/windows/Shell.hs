@@ -2,40 +2,42 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Shell (runDesktop) where
 
+import Browser
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
+import qualified Crypto.Hash.SHA256 as SHA
 import Data.Aeson hiding (Object)
 import qualified Data.Aeson as JSON
+import qualified Data.Aeson.Key as K
+import qualified Data.Aeson.KeyMap as KM
 import Data.Bits
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as B
+import qualified Data.ByteString.Lazy as L
 import Data.IORef
 import Data.Int
 import Data.Maybe (isNothing, listToMaybe)
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import Data.Word
-import Types (readJSON, writeJSON)
-import qualified Data.Aeson.KeyMap as KM
-import qualified Data.Aeson.Key as K
-import qualified Crypto.Hash.SHA256 as SHA
 import DataRoot
 import qualified DesktopStorage
-import Network.URI (URI(..), URIAuth(..), parseURI, escapeURIString, isUnreserved, unEscapeString)
-import System.Directory (canonicalizePath, doesFileExist, doesDirectoryExist)
+import qualified DesktopTelemetry as Telemetry
 import Foreign hiding (void)
-import Numeric
-import Browser
 import Host
 import Native
 import qualified Navigation as Navigation
+import Network.URI (URI(..), URIAuth(..), parseURI, escapeURIString, isUnreserved, unEscapeString)
+import Numeric
+import System.Directory (canonicalizePath, doesFileExist, doesDirectoryExist)
 import System.Environment
 import System.FilePath
 import System.IO
 import System.Process (createProcess, proc)
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as B
-import qualified Data.ByteString.Lazy as L
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
+import TelemetryControl (isConsentMessage, parseConsentAction)
+import Types (readJSON, writeJSON)
 
 runDesktop :: Bool -> IO ()
 runDesktop probe = runInBoundThread $
@@ -79,6 +81,7 @@ desktopSession memory probe = do
   starting <- newIORef False
   generation <- newIORef (0 :: Integer)
   firstSignal <- newIORef Nothing
+  telemetryOpened <- newIORef False
   storageAttempt <- newIORef (0 :: Integer)
   selectedRoot <- newIORef Nothing
   preferenceScript <- newIORef Nothing
@@ -180,6 +183,17 @@ desktopSession memory probe = do
             void $ showWindow label 5
             mapM_ (\button -> void (showWindow button 5)) setupButtons
           storageScript source = readIORef shellRef >>= mapM_ (\view -> execute memory view source (const $ pure ()))
+          changeTelemetry context message = forM_ (parseConsentAction message) $ \action -> do
+            attempt <- readIORef storageAttempt
+            view <- readIORef shellRef
+            channel <- telemetryChannel host
+            void $ forkIO $ do
+              result <- Telemetry.consent context channel action
+              post $ do
+                currentAttempt <- readIORef storageAttempt
+                current <- readIORef shellRef
+                when (attempt == currentAttempt && fmap core view == fmap core current) $
+                  storageScript ("window.sapiensTelemetryEvent?.(" ++ T.unpack (TE.decodeUtf8 $ L.toStrict $ encode result) ++ ")")
           storageError :: String -> IO ()
           storageError message = do
             closeHost host
@@ -224,6 +238,7 @@ desktopSession memory probe = do
             DesktopStorage.saveWhenReady firstSignal signal selectedRoot fst recoverStartup $ \(_,url) -> do
               atomicModifyIORef' workerRef (\old -> (Nothing,old)) >>= mapM_ cancel
               writeIORef starting False
+              telemetryChannel host >>= Telemetry.opened telemetryOpened
               storageScript "window.dispatchEvent(new Event('sapiens-preferences-ready'))"
               when probe $ putStrLn "TITLE: Sapiens4" >> putStrLn ("Sapiens4: " ++ url)
           installStorage selected url = do
@@ -248,6 +263,8 @@ desktopSession memory probe = do
                     Right view -> do
                       active <- valid
                       if not active then closeView view else do
+                        -- Closing can re-enter the window procedure after releasing the controller.
+                        writeIORef shellRef Nothing
                         closeView bootstrap
                         writeIORef legacyView True
                         loaded gen (installWorkspace selected url current) (Right view)
@@ -322,6 +339,8 @@ desktopSession memory probe = do
                     currentAttempt <- readIORef generation
                     when (not dead && currentAttempt==attempt && maybe False ((==core view) . core) current) action
                   on index iid action = onEvent memory (core view) index iid (\event -> active (action event))
+              -- Block child document loads within the trusted shell.
+              on 17 "{9ADBE429-F36D-432B-9DDC-F8881FBD76E3}" $ \event -> callInt event 8 1
               on 7 "{9ADBE429-F36D-432B-9DDC-F8881FBD76E3}" $ \event -> do
                 destination <- getString event 3
                 base <- readIORef (origin host)
@@ -340,7 +359,10 @@ desktopSession memory probe = do
                 case decodeStrict (TE.encodeUtf8 $ T.pack raw) of
                   Nothing -> pure ()
                   Just message
-                    | isNothing base && bootstrapSource source && bootstrapSource current -> chooseStorage message
+                    | isNothing base && bootstrapSource source && bootstrapSource current ->
+                        if isConsentMessage message then changeTelemetry Telemetry.BootstrapConsent message else chooseStorage message
+                    | Navigation.trusted base source && Navigation.trusted base current && isConsentMessage message ->
+                        changeTelemetry Telemetry.WorkspaceConsent message
                     | Navigation.trusted base source && Navigation.trusted base current -> do
                         when (field "workspaceReady" message==Bool True) $ commitWorkspace DesktopStorage.WorkspaceReady
                         applyWindowTheme hwnd light dark lastTheme message

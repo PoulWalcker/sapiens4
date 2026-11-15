@@ -4,7 +4,7 @@
 module TelemetrySender (HostTelemetry (..), startConfiguredTelemetry) where
 
 import Control.Concurrent (MVar, forkIO, newMVar, modifyMVar, withMVar)
-import Control.Concurrent.Async (async, cancel)
+import Control.Concurrent.Async (asyncWithUnmask, cancel)
 import Control.Concurrent.STM
 import Control.Exception (SomeException, SomeAsyncException, IOException, catch, fromException, throwIO)
 import Control.Monad (void, when)
@@ -67,7 +67,7 @@ startConfiguredTelemetry kind = do
   sender <- Sender (if kind == NativeDesktop then DesktopProfile else HeadlessProfile) kind
     <$> newTBQueueIO 128 <*> newTVarIO Nothing <*> newTVarIO False
     <*> newTVarIO False <*> newEmptyTMVarIO <*> newMVar (Control Nothing Nothing Nothing)
-  worker <- async $ background sender `catch` \(err :: SomeException) -> do
+  worker <- asyncWithUnmask $ \unmask -> unmask (background sender) `catch` \(err :: SomeException) -> do
     atomically (writeTVar (stopped sender) True >> closeAdmission sender)
     case fromException err :: Maybe SomeAsyncException of
       Just _ -> throwIO err

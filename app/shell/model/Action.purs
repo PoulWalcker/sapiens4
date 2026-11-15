@@ -46,6 +46,10 @@ data Action
   | GlobalEvent String Event
   | DrainNative
   | NativeReport Browser.NativeReport
+  | ReadTelemetry
+  | ResetTelemetryIdentity
+  | SetTelemetry Boolean
+  | TelemetryReport Json
   | MentionChoice Int
   | MentionCursor
   | RefreshTheme

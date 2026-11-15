@@ -39,6 +39,7 @@ common host
   other-modules:
     Paths_sapiens_domain,
     TelemetrySender,
+    TelemetryCommand,
     Command,
     Domain,
     RuntimePaths,
@@ -102,6 +103,7 @@ executable sapiens-macos
     RuntimePaths,
     DataRoot,
     DesktopStorage,
+    DesktopTelemetry,
     Types,
     Application,
     Browser,
@@ -122,6 +124,7 @@ common windows-host
     RuntimePaths,
     DataRoot,
     DesktopStorage,
+    DesktopTelemetry,
     Types,
     Browser,
     Host,

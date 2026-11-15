@@ -149,10 +149,14 @@ type SessionState =
   , records :: Array X.Corpora, active :: String, connection :: ConnectionState
   , localAvailable :: Boolean, showArchived :: Boolean, installRequired :: Boolean
   , preferencesSaved :: String, voice :: Maybe VoiceSession, outboxes :: O.Object Outbox
+  , telemetry :: { granted :: Boolean, epoch :: Maybe String, ready :: Boolean, busy :: Boolean, error :: String }
   )
 
 fastPoll :: Number
 fastPoll = 750.0
+
+telemetryAvailable :: Model -> Boolean
+telemetryAvailable m = m.env.native && D.matches "^(Mac|Win)" m.env.platform
 
 initial :: Environment -> Model
 initial env =
@@ -164,6 +168,7 @@ initial env =
   , records:[], active:"", connection:Offline, localAvailable:false, showArchived:false
   , toast:"", feedback:"", theme:if env.dark then "dark" else "light", installRequired:false
   , dialogStack:[], preview:NotAsked, address:"", addressOpen:false, scrollPosition:Nothing, restoringScroll:false, preferencesSaved:""
+  , telemetry:{granted:false, epoch:Nothing, ready:false, busy:false, error:""}
   }
 
 agent :: Model -> String -> X.Entity

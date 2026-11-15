@@ -84,8 +84,8 @@ runConsentAction readStatus write reset action = case action of
     mutationReply result = case result of
       Right profile -> pure (reply (Right profile) False Nothing)
       Left err -> do
-        (current, _, _) <- readStatus
-        pure (reply current True (Just (profileErrorCode err)))
+        (current, disabled, _) <- readStatus
+        pure (reply current disabled (Just (profileErrorCode err)))
     reply current disabled failure = object
       [ "consent" .= case current of
           Right profile -> case consentStatusJSON profile of

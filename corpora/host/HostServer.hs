@@ -1,6 +1,8 @@
 module HostServer where
 
 import Types
+import Telemetry (Emit, RuntimeKind, EventIntent (ICorporaCreated, ISchedulerHeartbeat), corporaRef)
+import qualified TelemetrySender as Telemetry
 import DataRoot
 import System.Environment (lookupEnv)
 import qualified Service as Service
@@ -33,7 +35,7 @@ import Network.Wai.Handler.Warp
 import qualified Network.Socket as Socket
 
 
-data Host = Host { hostPort :: Int, hostService :: Service, hostBridge :: Bridge, hostStop :: IO () }
+data Host = Host { hostPort :: Int, hostService :: Service, hostBridge :: Bridge, hostStop :: IO (), hostTelemetry :: Maybe Telemetry.HostTelemetry }
 listenLoopback :: Int -> IO (Socket.Socket,Int)
 listenLoopback port = Socket.withSocketsDo $ do
  sock <- Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol
@@ -43,18 +45,22 @@ listenLoopback port = Socket.withSocketsDo $ do
   Socket.listen sock 128
   Socket.SockAddrInet assigned _ <- Socket.getSocketName sock
   pure (sock,fromIntegral assigned)
-startHost :: FilePath -> Int -> Bool -> IO Host
-startHost root requested managed = do
+startHost :: RuntimeKind -> FilePath -> Int -> Bool -> IO Host
+startHost runtime root requested managed = mask $ \restore -> do
  mode <- lookupEnv "SAPIENS_STORAGE_MODE"
  exists <- doesFileExist (root </> "corpora-identity.json")
- startHostWith (if managed || mode==Just "existing" || mode==Nothing && exists then AttachExisting else StartNew) root requested managed
+ telemetry <- Telemetry.startConfiguredTelemetry runtime
+ host <- restore (startHostWith (Telemetry.hostEmit telemetry)
+   (if managed || mode==Just "existing" || mode==Nothing && exists then AttachExisting else StartNew) root requested managed)
+   `onException` Telemetry.hostTelemetryStop telemetry
+ pure host { hostStop = Telemetry.hostTelemetryStop telemetry `finally` hostStop host, hostTelemetry = Just telemetry }
 
-startHostWith :: StorageChoice -> FilePath -> Int -> Bool -> IO Host
-startHostWith choice root requested managed = do
+startHostWith :: Emit -> StorageChoice -> FilePath -> Int -> Bool -> IO Host
+startHostWith emit choice root requested managed = do
  mode <- lookupEnv "SAPIENS_STORAGE_MODE"
  let report phase = when (not managed && mode `elem` [Just "new",Just "existing"]) (putStrLn phase)
  report openingStorage
- service <- Service.openService choice root
+ service <- Service.openService emit choice root
  flip onException (Service.closeService service) $ do
   report openedStorage >> start service
  where
@@ -65,7 +71,7 @@ startHostWith choice root requested managed = do
    Service.attachEndpoint service ("http://127.0.0.1:"<>T.pack (show port))
    bridge <- newBridge service
    let child selection path = do
-        host <- startHostWith selection path 0 True
+        host <- startHostWith emit selection path 0 True
         pure (hostService host,hostBridge host,hostStop host)
    registry <- if managed then pure Nothing else Just <$> newRegistry service bridge child
    onboarding <- if managed then pure Nothing else Just <$> O.openOnboarding (repositoryRoot service)
@@ -74,7 +80,7 @@ startHostWith choice root requested managed = do
    let settings = setServerName "Sapiens4" $ setPort port $ setHost "127.0.0.1" $ setGracefulCloseTimeout1 1000 $ setGracefulShutdownTimeout (Just 5) $ setInstallShutdownHandler (putMVar shutdown) $ setBeforeMainLoop (putMVar ready ()) defaultSettings
    worker <- async $ withAsync (watchSnapshotFiles service) $ \watcher -> link watcher >> runSettingsSocket settings socket (application service bridge registry onboarding port)
    void (race (wait worker) (takeMVar ready))
-   Service.startService service
+   Service.startService (if managed then Nothing else Just (emit ISchedulerHeartbeat)) service
    -- Stop transcription and its network request before closing the database it uses.
    stopTranscriber <- startTranscriber service
    stopped <- newMVar False
@@ -89,7 +95,9 @@ startHostWith choice root requested managed = do
         void (waitCatch worker)
         Socket.close socket
         pure True
-   pure (Host port service bridge stop)
+   when (choice == StartNew && not managed) $
+    forM_ (corporaRef (serviceRoot service)) (emit . ICorporaCreated)
+   pure (Host port service bridge stop Nothing)
 localRequest :: Int -> Bool -> RequestHeaders -> Validation ()
 localRequest port write headers = do
  let host = lookup hHost headers

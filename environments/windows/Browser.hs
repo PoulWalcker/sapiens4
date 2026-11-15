@@ -4,30 +4,31 @@ module Browser (Browser, newBrowser, syncBrowser, positionGuest, closeBrowser, f
 
 import Control.Exception
 import Control.Monad
-import Data.Aeson hiding (pairs)
-import Data.Bits
-import Data.IORef
-import Data.Int
-import Data.Maybe
-import Foreign hiding (void)
-import Numeric
-import Domain (BrowserCommand(..), BrowserAction(..), BrowserTransition(..), browserTransition)
-import Host
-import DataRoot (containedPath)
-import Native
-import qualified Navigation as Navigation
-import System.Directory (doesFileExist)
-import System.FilePath
 import qualified Crypto.Hash.SHA256 as SHA
+import Data.Aeson hiding (pairs)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
+import Data.Bits
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
+import Data.IORef
+import Data.Int
 import qualified Data.Map.Strict as M
+import Data.Maybe
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.IO as TIO
 import qualified Data.Vector as V
+import DataRoot (containedPath)
+import Domain (BrowserCommand(..), BrowserAction(..), BrowserTransition(..), browserTransition)
+import Foreign hiding (void)
+import Host
+import Native
+import qualified Navigation as Navigation
+import Numeric
+import System.Directory (doesFileExist)
+import System.FilePath
+import TelemetryStorage (isTelemetryPrivateURL)
 
 data Tab = Tab { tabOwner :: String, tabId :: String, tabView :: View, tabSequence :: IORef String, tabLoading :: IORef Bool, tabError :: IORef String, tabFocused :: IORef Bool, tabAlive :: IORef Bool, tabVisit :: IORef Int }
 data Browser = Browser { arena :: Arena, window :: Window, shell :: View, host :: Host, tabs :: IORef (M.Map String Tab), latest :: IORef Value, revision :: IORef Int, syncing :: IORef Bool, disposed :: IORef Bool, shellTop :: IORef Int, guestScript :: String }
@@ -142,7 +143,8 @@ createTab browser owner identity done = do
         modifyIORef' (tabVisit tab) (+1)
         url <- getString args 3
         base <- readIORef (origin $ host browser)
-        let permitted = Navigation.guest base url
+        private <- isTelemetryPrivateURL url
+        let permitted = Navigation.guest base url && not private
         unless permitted $ callInt args 8 1
         writeIORef (tabLoading tab) permitted
         writeIORef (tabError tab) $ if permitted then "" else "Navigation blocked: use an HTTP(S) URL or a local file."

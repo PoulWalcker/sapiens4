@@ -5,41 +5,44 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Types (module Types, module Domain) where
 
-import Domain
-
 import Control.Concurrent
-import Control.Concurrent.STM (TVar, atomically, modifyTVar')
 import Control.Concurrent.Async
+import Control.Concurrent.STM (TVar, atomically, modifyTVar')
 import Control.Exception
 import Control.Monad
 import Data.Aeson hiding (pairs)
-import Data.Aeson.Types (Parser, parseEither)
 import qualified Data.Aeson.KeyMap as KM
-import qualified Data.ByteString.Lazy as BL
+import Data.Aeson.Types (Parser, parseEither)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
 import Data.IORef
 import Data.List (find)
 import Data.Map.Strict (Map)
-import Data.Set (Set)
 import qualified Data.Map.Strict as M
 import Data.Maybe
+import Data.Set (Set)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time
 import Data.Typeable
-import Data.Word (Word64)
-import Database.SQLite.Simple (Connection)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
+import Data.Word (Word64)
+import Database.SQLite.Simple (Connection)
+import Domain
 import System.Directory
 import System.FileLock
 import System.FilePath
 import System.IO
 import System.Process
+import Telemetry (Emit)
+import TelemetryStorage (isTelemetryPrivatePath)
 #ifdef mingw32_HOST_OS
 import Foreign.C
 import System.IO.Error (isPermissionError)
+import qualified TelemetryWindows as Private
+
 foreign import ccall unsafe "_wopen" syncOpen :: CWString -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "_commit" syncCommit :: CInt -> IO CInt
 foreign import ccall unsafe "_close" syncClose :: CInt -> IO CInt
@@ -73,7 +76,7 @@ instance ToJSON ModelSelection where
 
 data Run = Run { runOwner :: AgentId, runId :: RunId, runSlot :: Int, runCancel :: IORef Bool, runProcess :: MVar (Maybe ProcessHandle), runActivity :: IORef Value, runDeadline :: Word64, runModelConfig :: ModelSelection }
 data Service = Service { serviceRoot :: FilePath, repositoryRoot :: FilePath, serviceGuard :: MVar (), serviceFileLock :: FileLock, serviceStopping :: IORef Bool, serviceWorker :: MVar (Maybe (Async ())), serviceRuns :: MVar (Map RunId Run), serviceLease :: IORef (Maybe (AgentId, RunId)), serviceEndpoint :: IORef Text, servicePulse :: IORef Value, serviceActors :: MVar (Map ThreadId (Text,Maybe Text)), serviceDatabase :: MVar (Maybe Connection), serviceStates :: MVar (Map Text CachedAgentState)
- , serviceRevision :: TVar Integer, updateSubscribers :: TVar Int, snapshotFiles :: IORef (Set FilePath) }
+ , serviceRevision :: TVar Integer, updateSubscribers :: TVar Int, snapshotFiles :: IORef (Set FilePath), serviceEmit :: Emit }
 
 notifyChange :: Service -> IO ()
 notifyChange s = atomically $ modifyTVar' (serviceRevision s) (+1)
@@ -165,11 +168,23 @@ fresh prefix = (prefix <>) . T.take 12 <$> newId
 readJSON :: FromJSON a => FilePath -> a -> IO a
 readJSON p def = do
  exists <- doesFileExist p
- if exists then either (throwIO . userError) pure . eitherDecode =<< BL.readFile p else pure def
+ if not exists then pure def else do
+  private <- isTelemetryPrivatePath p
+  let diagnostic = if private then const "Invalid private application JSON" else id
+  either (throwIO . userError . diagnostic) pure . eitherDecode =<< BL.readFile p
 atomicBytes :: FilePath -> BL.ByteString -> IO ()
 atomicBytes p bytes = do
  createDirectoryIfMissing True (takeDirectory p)
- bracketOnError (openBinaryTempFile (takeDirectory p) ".writing-") (\(f,h) -> do
+#ifdef mingw32_HOST_OS
+ -- Initial business identity publication must satisfy the same private-file
+ -- authority as later telemetry updates, including an elevated token's owner.
+ private <- isTelemetryPrivatePath p
+ let temporary = if private then Private.createPrivateTempFile (takeDirectory p)
+                 else openBinaryTempFile (takeDirectory p) ".writing-"
+#else
+ let temporary = openBinaryTempFile (takeDirectory p) ".writing-"
+#endif
+ bracketOnError temporary (\(f,h) -> do
   hClose h `catch` (\(_::IOException) -> pure ())
   removeFile f `catch` (\(_::IOException) -> pure ())) $ \(f,h) -> do
   BL.hPut h bytes

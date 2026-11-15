@@ -15,11 +15,13 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import Domain (BrowserCommand(..), BrowserAction(..))
 import Foreign hiding (void, new)
 import ObjC
-import Domain (BrowserCommand(..), BrowserAction(..))
 import System.Directory (doesFileExist)
 import System.FilePath
+import TelemetryControl (isConsentMessage, parseConsentAction)
+import TelemetryStorage (isTelemetryPrivatePath, isTelemetryPrivateURL)
 
 field name (Object value) = fromMaybe Null (M.lookup (K.fromText name) value)
 field _ _ = Null
@@ -93,6 +95,15 @@ returnFocus browser view = do
         when (responder == view || descendant) $ void (obj1 win "makeFirstResponder:" sh)
 
 load browser tab address = do
+    private <- isTelemetryPrivateURL (T.unpack address)
+    if private then do
+        let denied = tab { tabRequested = Just address, tabAwaiting = False, tabError = "Private application files cannot be opened." }
+        save browser denied
+        loadURL (tabView tab) "about:blank"
+        report browser denied
+      else loadPublic browser tab address
+
+loadPublic browser tab address = do
     u <- url address
     scheme <- textProp u "scheme"
     let pending = tab { tabDocument = Nothing, tabRequested = Just address, tabAwaiting = True }
@@ -210,20 +221,30 @@ history browser tab predicate action = do
         let done = pending { tabAwaiting = False }
         save browser done; report browser done
 
-receive browser message onPreferences onReady = do
+trustedShellMessage :: Browser -> Obj -> (Obj -> IO Bool) -> IO Bool
+trustedShellMessage browser message allowed = do
     sh <- readIORef (shell browser)
     sourceView <- obj0 message "webView"
     frame <- obj0 message "frameInfo"
     mainFrame <- booleanValue frame "isMainFrame"
-    source <- obj0 frame "request" >>= \r -> obj0 r "URL"
-    trusted <- sameOrigin source (origin browser)
-    path <- textProp source "path"
-    when (sourceView == sh && mainFrame && trusted && path `elem` ["/workspace","/workspace/","/workspace/index.html"]) $ do
+    if sh == nullPtr || sourceView /= sh || not mainFrame then pure False else do
+        source <- obj0 frame "request" >>= (`obj0` "URL")
+        current <- obj0 sh "URL"
+        (&&) <$> allowed source <*> allowed current
+
+receive browser message onPreferences onReady onTelemetry = do
+    trusted <- trustedShellMessage browser message $ \source -> do
+        local <- sameOrigin source (origin browser)
+        path <- textProp source "path"
+        pure (local && path `elem` ["/workspace","/workspace/","/workspace/index.html"])
+    when trusted $ do
         raw <- obj0 message "body"
         dictionary <- cls "NSDictionary"
         valid <- booleanArgument raw "isKindOfClass:" dictionary
         body <- if valid then jsonObject raw else pure Nothing
-        forM_ body $ \input -> do
+        forM_ body $ \input -> if isConsentMessage input then
+          forM_ (parseConsentAction input) onTelemetry
+        else do
           when (bool (field "workspaceReady" input)) onReady
           if field "clientPreferences" input /= Null then onPreferences (field "clientPreferences" input)
           else if bool (field "pickFile" input) then do
@@ -282,15 +303,17 @@ navigation browser view action completion = do
                     when (mainFrame && scheme `notElem` ["about","blob","data"]) $ fileAddress address >>= \normal -> save browser tab { tabRequested = Just normal }
                     invokeLong completion 1
 
+mainFrameNavigation :: Obj -> IO Bool
+mainFrameNavigation action = obj0 action "targetFrame" >>= (`booleanValue` "isMainFrame")
+
 shellNavigation browser action completion = do
     u <- obj0 action "request" >>= \r -> obj0 r "URL"
-    frame <- obj0 action "targetFrame"
-    mainFrame <- if frame == nullPtr then pure Nothing else Just <$> booleanValue frame "isMainFrame"
+    mainFrame <- mainFrameNavigation action
     local <- sameOrigin u (origin browser)
     address <- textProp u "absoluteString"; scheme <- textProp u "scheme"
-    let allowed = local || (mainFrame == Just True && address == "about:blank") || (mainFrame == Just False && (address `elem` ["about:blank","about:srcdoc"] || scheme `elem` ["http","https","blob","data"]))
+    let allowed = mainFrame && (local || address == "about:blank")
     if allowed then invokeLong completion 1 else do
-        when (scheme `elem` ["http","https","mailto"]) $ cls "NSWorkspace" >>= \c -> obj0 c "sharedWorkspace" >>= \w -> void (obj1 w "openURL:" u)
+        when (mainFrame && scheme `elem` ["http","https","mailto"]) $ cls "NSWorkspace" >>= \c -> obj0 c "sharedWorkspace" >>= \w -> void (obj1 w "openURL:" u)
         invokeLong completion 0
 
 finished browser view = withTab browser view $ \tab -> do
@@ -311,6 +334,8 @@ serveFile browser view task = do
     path <- textProp u "path"
     found <- lookupView browser view
     result <- try $ if maybe False (Set.member path . tabFiles) found then do
+        private <- isTelemetryPrivatePath (T.unpack path)
+        when private (ioError (userError "Private application file"))
         content <- TE.decodeUtf8' <$> B.readFile (T.unpack path)
         either throwIO (\t -> pure (TE.encodeUtf8 (textDocument t (T.pack (takeFileName (T.unpack path)))))) content
       else ioError (userError "Permission denied")

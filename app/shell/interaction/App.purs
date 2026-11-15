@@ -9,7 +9,7 @@ import Control.Parallel (parallel, sequential)
 import Control.Promise (toAffE)
 import Data.Array as A
 import Data.Either (Either(..), either)
-import Data.Maybe (Maybe(..))
+import Data.Maybe (Maybe(..), maybe)
 import Data.Foldable (traverse_)
 import Data.Tuple (Tuple(..))
 import Effect.Aff (Aff, Milliseconds(..), delay, try)
@@ -55,6 +55,7 @@ handle runtime input = session input
       void $ H.subscribe $ GlobalEvent "keydown" <$> HS.makeEmitter (B.subscribeEvent "document" "keydown")
       void $ H.subscribe $ HS.makeEmitter \emit -> B.subscribeMedia "(prefers-color-scheme: dark)" $ emit RefreshTheme
       void $ H.subscribe $ (NativeReport <<< Browser.nativeReport) <$> HS.makeEmitter (B.callback "sapiensBrowserEvent")
+      void $ H.subscribe $ TelemetryReport <$> HS.makeEmitter (B.callback "sapiensTelemetryEvent")
       now <- liftEffect B.now
       savedTheme <- liftEffect $ B.storageRead "sapi-color-theme"
       H.modify_ \m -> m {now=now,theme=if A.elem savedTheme ["dark","light"] then savedTheme else m.theme}
@@ -67,7 +68,46 @@ handle runtime input = session input
         liftEffect $ B.historyReplace $ m.env.path
         void $ H.fork $ void $ H.liftAff $ try $ toAffE $ B.registerWorker "/sw.js"
       unless required $ dispatch LoadRegistry
+      when (M.telemetryAvailable m) $ dispatch ReadTelemetry
       E.sync runtime
+    ReadTelemetry -> do
+      m <- H.get
+      when (M.telemetryAvailable m && not m.telemetry.busy) do
+        H.modify_ \s -> s {telemetry=s.telemetry {busy=true}}
+        liftEffect $ B.nativeMessage $ D.json {telemetry:{action:"read"}}
+    SetTelemetry choice -> do
+      m <- H.get
+      when (M.telemetryAvailable m && m.telemetry.ready && not m.telemetry.busy) do
+        H.modify_ \s -> s {telemetry=s.telemetry {busy=true, error=""}}
+        liftEffect $ B.nativeMessage $ D.json {telemetry:
+          {action:"write", choice, notice_version:1, expected_epoch:maybe D.null D.json m.telemetry.epoch}}
+    ResetTelemetryIdentity -> do
+      m <- H.get
+      when (M.telemetryAvailable m && m.telemetry.ready && not m.telemetry.busy) do
+        traverse_ (\epoch -> do
+          H.modify_ \s -> s {telemetry=s.telemetry {busy=true, error=""}}
+          liftEffect $ B.nativeMessage $ D.json {telemetry:{action:"reset_identity",expected_epoch:epoch}}) m.telemetry.epoch
+    TelemetryReport value -> do
+      let saved = D.get "consent" value
+          epoch = D.s "consent_epoch" saved
+          failure = D.s "error" value
+          disabled = D.b "locally_disabled" value
+          detail = case failure of
+            "" -> if disabled then "A previous choice could not be saved. Reporting is off in this app until you retry." else ""
+            "conflicting_consent_revision" -> "Your choice changed in another window or process. Review it and choose again."
+            "invalid_credentials" -> "Usage reporting is paused because its credential was rejected. Start a new telemetry installation to resume."
+            "credential_update_failed" -> "The credential update could not be saved. Reporting can continue with the saved credential."
+            "reset_not_applicable" -> "There is no saved reporting choice to reset."
+            "invalid_profile" -> "Usage reporting is off. Repair the saved telemetry profile before opting in."
+            "insecure_profile" -> "Usage reporting is off. Repair the local profile permissions before opting in."
+            "unsupported_profile_version" -> "Usage reporting is off. This app cannot update the saved profile version."
+            "native_channel_unavailable" -> "Could not confirm the change. Reporting may still be enabled. Refresh and retry."
+            _ -> "Could not save or read your choice. Reporting is off in this app. Refresh and retry."
+      H.modify_ \s -> s {telemetry=
+        { granted:if failure == "native_channel_unavailable" then s.telemetry.granted else not disabled && D.s "state" saved == "granted"
+        , epoch:if epoch == "" then Nothing else Just epoch
+        , ready:A.elem failure ["","conflicting_consent_revision","invalid_credentials","credential_update_failed","reset_not_applicable"]
+        , busy:false, error:detail }}
     Finalize -> liftEffect $ C.dispose runtime
     Poll -> E.runUpdate runtime dispatch U.Poll
     Copy text caption -> do

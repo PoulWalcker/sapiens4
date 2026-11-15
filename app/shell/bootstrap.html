@@ -57,6 +57,15 @@ if(matchMedia('(prefers-color-scheme:dark)').matches) document.documentElement.d
       </div>
     </div>
     <p class="setup-note">Upgrading from an earlier launcher? Choose the folder that contains corpora-identity.json.</p>
+    <label class="relay-check"><input id="usage-reporting" type="checkbox" disabled> Help improve Sapiens4</label>
+    <p class="setup-note">Share usage statistics. No messages or files.</p>
+    <details class="setup-note">
+      <summary>Details</summary>
+      <p class="setup-note">Reports cover app opens, Corpora creation, accepted requests and pairings. They include a pseudonymous installation ID and random Corpora IDs, with version, OS and timestamps; no messages, files, paths or provider details.</p>
+      <p class="setup-note">Turning reporting off discards queued events but does not delete received history. An already authorized request may still arrive. Delivery is best effort; reports may be lost or duplicated.</p>
+      <p class="setup-note">Preview notice v1: retention and erasure policy is not finalized. Not approved for real-user collection.</p>
+    </details>
+    <p id="usage-feedback" class="setup-note" role="status"></p>
     <p id="error" role="alert"></p>
   </section>
 </div>
@@ -66,6 +75,7 @@ if(matchMedia('(prefers-color-scheme:dark)').matches) document.documentElement.d
 </main>
 <script>
 let storageChoice='new', storageDirectory='', storageBusy=false;
+let telemetryEpoch=null, telemetryReady=false, telemetryBusy=true;
 function postStorage(message) {
  if(window.webkit?.messageHandlers?.browser) window.webkit.messageHandlers.browser.postMessage(message);
  else window.chrome?.webview?.postMessage(message);
@@ -73,6 +83,7 @@ function postStorage(message) {
 function updateStorage() {
  document.querySelectorAll('.setup-choice').forEach((button,index)=>button.setAttribute('aria-pressed',String((index===0)===(storageChoice==='new'))));
  document.querySelectorAll('button').forEach(button=>button.disabled=storageBusy);
+ document.getElementById('usage-reporting').disabled=storageBusy || !telemetryReady || telemetryBusy;
  document.getElementById('get-started').disabled=storageBusy || (storageChoice==='existing' && !storageDirectory);
  const selected=storageChoice==='existing' && !!storageDirectory;
  document.getElementById('storage-existing').dataset.change=String(selected);
@@ -107,6 +118,20 @@ function continueSetup(event) {
   postStorage({storage:storageChoice,directory:storageDirectory});
  }
 }
+function sapiensTelemetryEvent(result) {
+ telemetryEpoch=result.consent?.consent_epoch ?? null;
+ telemetryBusy=false;
+ telemetryReady=!['invalid_profile','insecure_profile','unsupported_profile_version','native_channel_unavailable','profile_io_error'].includes(result.error);
+ document.getElementById('usage-reporting').checked=result.consent?.state==='granted' && !result.locally_disabled;
+ document.getElementById('usage-feedback').textContent=result.error ? 'Your reporting choice could not be confirmed. A previously saved choice may still apply. You can continue setup and review usage reporting in Settings.' : '';
+ updateStorage();
+}
+document.getElementById('usage-reporting').addEventListener('change',event=>{
+ if(!telemetryReady || telemetryBusy) return;
+ telemetryBusy=true;
+ postStorage({telemetry:{action:'write',choice:event.target.checked,notice_version:1,expected_epoch:telemetryEpoch}});
+ updateStorage();
+});
 function showStorageSetup() {
  document.querySelector('main').hidden=false;
 }
@@ -120,6 +145,8 @@ function storageLoading() {
  storageBusy=true;
  updateStorage();
 }
+postStorage({telemetry:{action:'read'}});
+updateStorage();
 </script>
 </body>
 </html>

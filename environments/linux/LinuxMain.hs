@@ -12,6 +12,7 @@ import System.Exit (exitSuccess)
 import System.FilePath
 import System.IO
 import System.Posix.Process (executeFile, getProcessID)
+import Telemetry (RuntimeKind (NativeDesktop))
 
 foreign import ccall safe "sapiens_linux_available" available :: IO CInt
 foreign import ccall safe "sapiens_linux_run" desktop :: CString -> CString -> IO CInt
@@ -38,7 +39,7 @@ main = runInBoundThread $ do
  setEnv "SAPIENS_LINUX_BACKEND" "native"
  getProcessID >>= setEnv "SAPIENS_DESKTOP_PID" . show
  setEnv "SAPIENS_BLINDLY_BINARY" (root </> "submodules/blindly4/.build/release/blindly4")
- bracket (startHost directory 0 False) hostStop $ \host -> do
+ bracket (startHost NativeDesktop directory 0 False) hostStop $ \host -> do
   let url = "http://127.0.0.1:" ++ show (hostPort host) ++ "/workspace/"
   status <- withCString url $ \address -> withCString directory (desktop address)
   unless (status == 0) $ ioError (userError "Linux desktop could not open the workspace")

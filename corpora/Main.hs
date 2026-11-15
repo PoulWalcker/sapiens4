@@ -1,32 +1,34 @@
 {-# LANGUAGE CPP #-}
 module Main where
 
-import Types
-import DataRoot
-import HostServer
 import Assets
 import BuildUI
 import Computer
-import Server
-import Setup
 import Control.Concurrent
 import Control.Exception
 import Control.Monad
 import Data.Aeson hiding (pairs)
 import qualified Data.ByteString.Lazy.Char8 as BL
-import qualified Data.String
 import Data.Maybe
-import GHC.IO.Encoding (setLocaleEncoding)
+import qualified Data.String
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import DataRoot
+import GHC.IO.Encoding (setLocaleEncoding)
+import HostServer
 import Network.Wai.Handler.Warp hiding (run)
+import Server
+import Setup
 import System.Directory
 import System.Environment
 import System.Exit
 import System.FilePath
-import System.Info
 import System.IO
+import System.Info
 import System.Process
+import qualified TelemetryCommand
+import Telemetry (RuntimeKind (..))
+import Types
 #ifndef mingw32_HOST_OS
 import System.Posix.Signals
 #else
@@ -53,6 +55,7 @@ run = do
  setEnv "SAPIENS_REPOSITORY" root
  case args of
   ["build-ui"] -> buildUI root
+  "telemetry":rest -> TelemetryCommand.run rest
   ["control",config,payload] -> jsonCommand $ do
    value <- either (failure 400 . T.pack) pure (eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack payload))))
    require (case value of Object _ -> True; _ -> False) 400 "Expected a JSON object"
@@ -100,13 +103,15 @@ hostMain root args = do
     else defaultDataDirectory
  void (asset root "/")
  void (asset root "/workspace/app.js")
- bracket (startHost directory port False) hostStop $ \host -> do
+ bracket (startHost (if "--desktop" `elem` args then NativeDesktop else Headless) directory port False) hostStop $ \host -> do
   let url="http://127.0.0.1:"<>show (hostPort host)<>"/workspace/"
   putStrLn ("Sapiens4: "<>url<>"\nUI database: "<>directory</>"corpora.sqlite3")
   finished <- newEmptyMVar
   let shutdown=void (tryPutMVar finished ())
   installShutdown shutdown
-  when ("--desktop" `elem` args) (void (forkIO ((void getLine `catch` \(_::IOException)->pure ()) >> shutdown)))
+  when ("--desktop" `elem` args) $ void $ forkIO $
+   (maybe (void getLine) TelemetryCommand.desktop (hostTelemetry host)
+     `catch` \(_ :: IOException) -> pure ()) `finally` shutdown
   when ("--open" `elem` args) (void (createProcess (proc (if os=="darwin" then "open" else if os=="mingw32" then "explorer" else "xdg-open") [url])))
   takeMVar finished
 

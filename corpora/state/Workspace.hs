@@ -11,19 +11,25 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Char
 import Data.List (find,isPrefixOf)
 import qualified Data.Map.Strict as Map
-import qualified Data.Set as Set
 import Data.Maybe
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import qualified Memo
 import Network.URI
+import qualified Store as DB
 import System.Directory
 import System.FilePath
-import System.Info (os)
 import System.IO (IOMode(ReadMode), withBinaryFile)
+import System.Info (os)
+import TelemetryStorage (isTelemetryPrivatePath)
 import Types
-import qualified Memo
-import qualified Store as DB
+
+requirePublicFile :: FilePath -> IO ()
+requirePublicFile path = do
+ private <- isTelemetryPrivatePath path
+ require (not private) 403 "Private application files cannot be opened or attached"
 
 migrateWorkspaces :: Service -> IO ()
 migrateWorkspaces s = do
@@ -77,6 +83,7 @@ destination s a d checkFile = validated (parseDestination d) >>= \location -> ca
  LocalFile local -> do
   p <- expandHome local
   full <- canonicalizePath (if isAbsolute p then p else workspaceRoot s a </> p)
+  requirePublicFile full
   when checkFile $ doesFileExist full >>= \ok -> require ok 404 "File not found"
   pure (obj [("url",str (fileURL full)),("path",str (T.pack full)),("title",str (T.pack (takeFileName full)))])
 -- Links authored inside Notes.html are relative to the owning workspace.
@@ -231,6 +238,7 @@ workspaceText s a i = do
  require (has tab "path") 404 "Unknown local file tab"
  let file = T.unpack (at tab "path")
  let isMemo = file == workspaceRoot s a </> "Notes.html"
+ requirePublicFile file
  when isMemo $ Memo.validate (workspaceRoot s a) file
  raw <- withBinaryFile file ReadMode (`BS.hGet` 2000001) `catch` (\(_ :: IOException) -> failure 404 "File not found or unreadable")
  require (BS.length raw <= 2000000) 413 "This file is too large for the text preview; open it in the desktop app"
@@ -262,6 +270,7 @@ createAttachment s a d = do
    exists <- doesFileExist p
    require (isAbsolute p && exists) 400 "Use an absolute path to a readable local file"
    full <- canonicalizePath p
+   requirePublicFile full
    pure $ merge base (obj [("name",str (T.pack (takeFileName full))),("value",str (T.pack full))])
  DB.saveAttachment s row
  pure row
@@ -287,13 +296,19 @@ resolveAttachments s a ids checkFiles = do
   require (get row "cancelled" /= Bool True) 409 ("This voice message was cancelled: " <> at row "name")
   require (get row "sent" /= Bool True) 409 ("This voice message was already sent: " <> at row "name")
   require (at row "transcript_status" == "done") 409 ("This voice message is not transcribed yet: " <> at row "name")
- when checkFiles $ forM_ result $ \row -> when (at row "kind" /= "link") $ doesFileExist (T.unpack (at row "value")) >>= \ok -> require ok 400 ("Attached file is no longer available: " <> at row "name")
+ when checkFiles $ forM_ result $ \row -> when (at row "kind" /= "link") $ do
+  let file = T.unpack (at row "value")
+  requirePublicFile file
+  doesFileExist file >>= \ok -> require ok 400 ("Attached file is no longer available: " <> at row "name")
  pure result
 attachmentPrompt :: Service -> [Value] -> IO Text
 attachmentPrompt _ [] = pure ""
 attachmentPrompt s rows = do
- p <- prompt s "attachments"
- pure (p <> jsonText (arr [describe row | row <- rows]))
+ allowed <- filterM (\row -> if at row "kind" `elem` ["link", "voice"] then pure True
+   else not <$> isTelemetryPrivatePath (T.unpack (at row "value"))) rows
+ if null allowed then pure "" else do
+  p <- prompt s "attachments"
+  pure (p <> jsonText (arr [describe row | row <- allowed]))
  where
  -- A voice message is already transcribed on this computer: the Sapi gets the spoken words,
  -- not the audio file, so it answers the message instead of re-processing the recording.

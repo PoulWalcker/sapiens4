@@ -17,16 +17,17 @@ import qualified Data.Map.Strict as M
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
-import GHC.Clock
-import System.Directory
-import Types
-import qualified Store as DB
-import Population
-import Workspace
 import qualified Delegation as D
-import qualified Routines as R
-import Provider
+import GHC.Clock
 import qualified GroupChat as G
+import Population
+import Provider
+import qualified Routines as R
+import qualified Store as DB
+import System.Directory
+import qualified Telemetry
+import Types
+import Workspace
 
 data ConversationArchive = ConversationArchive Text [Value]
 data Retention = Retention Value [ConversationArchive]
@@ -87,6 +88,8 @@ submitTurn s a d = do
      agentState s a >>= saveState s a . enqueueTurn (RunId i) flow message time
      pure i
    DB.message s i input attachments
+   forM_ (Telemetry.corporaRef (serviceRoot s)) $ \reference ->
+    serviceEmit s (Telemetry.IRequestAccepted reference)
    DB.forgetDrafts s a attachments
    DB.project s a
    trimConversation s a
@@ -286,14 +289,15 @@ advanceDeadline frequency time due = (elapsed,due+elapsed*interval)
 
 milliseconds :: IO Int
 milliseconds = fromIntegral . (`div` 1000000) <$> getMonotonicTimeNSec
-startExecution :: Service -> IO ()
-startExecution s = modifyMVar_ (serviceWorker s) $ \existing -> case existing of
+startExecution :: Maybe (IO ()) -> Service -> IO ()
+startExecution heartbeat s = modifyMVar_ (serviceWorker s) $ \existing -> case existing of
  Just _ -> pure existing
  Nothing -> Just <$> async loop
  where
  loop = do
   t <- milliseconds
   deadlines <- newIORef (M.fromList [(f,t+periodMillis f) | f <- [minBound..maxBound]])
+  heartbeatDeadline <- newIORef (t+3600000)
   let step = do
        stopped <- readIORef (serviceStopping s)
        unless stopped $ do
@@ -314,6 +318,12 @@ startExecution s = modifyMVar_ (serviceWorker s) $ \existing -> case existing of
            writeIORef (servicePulse s) (put "numbers" numbers current)
            DB.saveSingleton s DB.SystemPulse (obj [("pulse",str identity),("numbers",numbers)])
            onPulse s (Pulse identity frequency number)
+           when (frequency==Bph60) $ forM_ heartbeat $ \emit -> do
+            currentTime <- milliseconds
+            deadline <- readIORef heartbeatDeadline
+            when (currentTime>=deadline) $ do
+             writeIORef heartbeatDeadline (currentTime+3600000)
+             emit
         threadDelay 50000
         step
   step
