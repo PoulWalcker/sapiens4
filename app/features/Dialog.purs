@@ -102,14 +102,14 @@ body m d = case d.kind of
       ,V.node "details" []
         [V.textNode "summary" [] "Details"
         ,V.p "model-hint" "Reports cover app opens, Corpora creation, accepted agent requests, remote pairing and hourly scheduler activity. They include pseudonymous IDs, app version, OS and timestamps. No messages, files, paths or provider details."
-        ,V.p "model-hint" "Turning this off stops new reports and clears the queue. Earlier reports remain; a request already being sent may still arrive. Reports may be lost or duplicated."
+        ,V.p "model-hint" "Turning this off stops new reporting attempts and clears queued events. An attempt already authorized may still start or finish afterward. Earlier reports remain; reports may be lost or duplicated."
         ,V.p "model-hint" "Development preview: retention and deletion rules are pending. Not approved for real-user collection."
         ,V.p "model-hint" "Example report"
         ,V.textNode "pre" [] telemetryExample]
       ,V.p "corpora-feedback" (if m.telemetry.busy then "Saving or reading your choice…" else m.telemetry.error)
       ,V.when (m.telemetry.error /= "") $ V.control [V.disabled m.telemetry.busy] "Refresh usage reporting" ReadTelemetry
       ,V.control [V.disabled $ not m.telemetry.ready || m.telemetry.busy || m.telemetry.epoch == Nothing] "Start a new telemetry installation" ResetTelemetryIdentity
-      ,V.p "model-hint" "This clears the saved reporting identity. If reporting is enabled, a new identity will be created. It does not delete earlier reports or revoke copies of the old credential."]
+      ,V.p "model-hint" "This replaces the installation credential. If reporting is enabled, a new installation identity will be created. Corpora IDs stay unchanged, so activity from the same Corpora can still be linked across this reset. Earlier reports remain, and copies of the old credential are not revoked."]
     ,V.node "details" [V.cls "workspace-settings-help"]
       [V.textNode "summary" [] "About this workspace"
       ,V.p "" "Talk to your Sapis in chat, manage their notes, and save documents in their workspaces. Sapis can delegate requests through ChiefSapi."

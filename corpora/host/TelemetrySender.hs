@@ -3,7 +3,7 @@
 
 module TelemetrySender (HostTelemetry (..), startConfiguredTelemetry) where
 
-import Control.Concurrent (MVar, forkIO, newMVar, modifyMVar, withMVar)
+import Control.Concurrent (MVar, forkIO, newMVar, modifyMVar, modifyMVar_, withMVar)
 import Control.Concurrent.Async (asyncWithUnmask, cancel)
 import Control.Concurrent.STM
 import Control.Exception (SomeException, SomeAsyncException, IOException, catch, fromException, throwIO)
@@ -41,11 +41,12 @@ data HostTelemetry = HostTelemetry
   }
 
 data Grant = Grant ConsentEpoch NoticeVersion (Maybe Token) deriving (Eq)
-data SenderError = CredentialsRejected | CredentialUpdateFailed | EndpointUnavailable
+data SenderError = CredentialsRejected | CredentialUpdateFailed | EndpointUnavailable | ScopedIdentityUnavailable
 senderErrorText :: SenderError -> T.Text
 senderErrorText CredentialsRejected = "invalid_credentials"
 senderErrorText CredentialUpdateFailed = "credential_update_failed"
 senderErrorText EndpointUnavailable = "endpoint_unavailable"
+senderErrorText ScopedIdentityUnavailable = "scoped_identity_unavailable"
 data Control = Control (Maybe Grant) (Maybe Token) (Maybe SenderError)
 data Intent = Intent ConsentEpoch Word64 UTCTime EventIntent
 
@@ -285,7 +286,11 @@ materialize sender expected@(Grant epoch _ _) (Intent revision _ occurred intent
               location <- profileLocation sender
               result <- either (const (pure Nothing))
                 (\path -> timeout 1000000 (prepareCorporaId path epoch (corporaDirectory reference))) location
-              traverse (newRecord occurred . constructor) (result >>= id)
+              case result >>= id of
+                Nothing -> markError sender expected ScopedIdentityUnavailable >> pure Nothing
+                Just identifier -> do
+                  clearScopedError sender expected
+                  Just <$> newRecord occurred (constructor identifier)
         case intent of
           IAppOpened -> if runtime sender == NativeDesktop then Just <$> newRecord occurred AppOpened else pure Nothing
           ICorporaCreated reference -> scoped reference CorporaCreated
@@ -328,6 +333,13 @@ markError :: Sender -> Grant -> SenderError -> IO ()
 markError sender expected message = modifyMVar (control sender) $ \previous -> do
   (updated@(Control current rejected _), _) <- refreshLocked sender previous
   pure (if current == Just expected then Control current rejected (Just message) else updated, ())
+
+clearScopedError :: Sender -> Grant -> IO ()
+clearScopedError sender expected = modifyMVar_ (control sender) $ \previous ->
+  pure $ case previous of
+    Control current rejected (Just ScopedIdentityUnavailable) | current == Just expected ->
+      Control current rejected Nothing
+    _ -> previous
 
 data Payload = Enrollment | Submission Token BS.ByteString
 data Reply = Reply Int (Maybe BS.ByteString) (Maybe BS.ByteString)
