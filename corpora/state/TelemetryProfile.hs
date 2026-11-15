@@ -16,6 +16,7 @@ module TelemetryProfile
   , basicAuthorization
   , commitConsent
   , commitEnrollmentIfEmpty
+  , consentEpochText
   , consentStatusJSON
   , deviceIdText
   , loadProfile
@@ -79,6 +80,9 @@ data Consent
 
 newtype ConsentEpoch = ConsentEpoch UUID
   deriving (Eq, Show)
+
+consentEpochText :: ConsentEpoch -> Text
+consentEpochText (ConsentEpoch epoch) = UUID.toText epoch
 
 data ConsentRecord = ConsentRecord
   { consentChoice :: Consent

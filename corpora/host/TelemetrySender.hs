@@ -10,7 +10,7 @@ module TelemetrySender
   , startTelemetry
   ) where
 
-import Control.Concurrent (MVar, modifyMVar, newMVar)
+import Control.Concurrent (MVar, modifyMVar, newMVar, withMVar)
 import Control.Concurrent.Async (async, cancel)
 import Control.Concurrent.STM
 import Control.Exception
@@ -72,6 +72,7 @@ data SenderConfig = SenderConfig
 
 data HostTelemetry = HostTelemetry
   { hostEmit :: Emit
+  , hostConsentRead :: IO (Either ProfileError Profile, Bool)
   , hostConsent :: Maybe ConsentEpoch -> Consent -> IO (Either ProfileError Profile)
   , hostTelemetryStop :: IO ()
   }
@@ -116,7 +117,11 @@ startConfiguredTelemetry runtime = recover $ do
       startTelemetry settings (SenderConfig profile target version platform runtime)
     _ -> pure disabled
   where
-    disabled = HostTelemetry (const (pure ())) writeConsent (pure ())
+    disabled = HostTelemetry (const (pure ())) readStoredConsent writeConsent (pure ())
+    readStoredConsent = do
+      location <- resolveProfileLocation (if runtime == NativeDesktop then DesktopProfile else HeadlessProfile)
+      result <- either (pure . Left) loadProfile location
+      pure (result, False)
     writeConsent expected choice = do
       location <- resolveProfileLocation (if runtime == NativeDesktop then DesktopProfile else HeadlessProfile)
       either (pure . Left) (\profile -> commitConsent profile expected choice) location
@@ -144,7 +149,16 @@ startTelemetry settings configuration = mask $ \restore -> do
     let stop = do
           atomically (writeTVar (alive sender) False >> disable sender)
           cancel worker `finally` cleanup
-    pure (HostTelemetry (capture sender) (changeConsent sender) stop)
+    pure (HostTelemetry (capture sender) (readConsent sender) (changeConsent sender) stop)
+
+readConsent :: Sender -> IO (Either ProfileError Profile, Bool)
+readConsent sender = withMVar (control sender) $ \previous -> do
+  profile <- loadProfile (senderProfile (config sender))
+  let current = either (const Nothing) grantOf profile
+      disabled = case localDecision previous of
+        FailedConsent epoch -> epoch == grantEpoch current
+        FollowProfile -> False
+  pure (profile, disabled)
 
 disable :: Sender -> STM ()
 disable sender = do

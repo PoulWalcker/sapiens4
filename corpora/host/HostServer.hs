@@ -34,7 +34,7 @@ import TelemetryWire (RuntimeKind)
 import Types
 import Voice (startTranscriber)
 
-data Host = Host { hostPort :: Int, hostService :: Service, hostBridge :: Bridge, hostStop :: IO () }
+data Host = Host { hostPort :: Int, hostService :: Service, hostBridge :: Bridge, hostStop :: IO (), hostTelemetry :: Maybe Telemetry.HostTelemetry }
 listenLoopback :: Int -> IO (Socket.Socket,Int)
 listenLoopback port = Socket.withSocketsDo $ do
  sock <- Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol
@@ -52,7 +52,7 @@ startHost runtime root requested managed = mask $ \restore -> do
  host <- restore (startHostWith (Telemetry.hostEmit telemetry)
    (if managed || mode==Just "existing" || mode==Nothing && exists then AttachExisting else StartNew) root requested managed)
    `onException` Telemetry.hostTelemetryStop telemetry
- pure host {hostStop = Telemetry.hostTelemetryStop telemetry `finally` hostStop host}
+ pure host {hostStop = Telemetry.hostTelemetryStop telemetry `finally` hostStop host, hostTelemetry = Just telemetry}
 
 startHostWith :: Emit -> StorageChoice -> FilePath -> Int -> Bool -> IO Host
 startHostWith emit choice root requested managed = do
@@ -96,7 +96,7 @@ startHostWith emit choice root requested managed = do
                     (void (waitCatch worker) `finally` Socket.close socket))))))
         when (choice == StartNew && not managed) $
          forM_ (corporaRef (serviceRoot service)) (emit . ICorporaCreated)
-        pure (Host port service bridge stop)
+        pure (Host port service bridge stop Nothing)
 localRequest :: Int -> Bool -> RequestHeaders -> Validation ()
 localRequest port write headers = do
  let host = lookup hHost headers

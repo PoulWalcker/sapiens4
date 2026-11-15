@@ -20,6 +20,7 @@ import Foreign hiding (void, new)
 import ObjC
 import System.Directory (doesFileExist)
 import System.FilePath
+import TelemetryControl (isConsentMessage, parseConsentAction)
 import TelemetryStorage (isTelemetryPrivatePath, isTelemetryPrivateURL)
 
 field name (Object value) = fromMaybe Null (M.lookup (K.fromText name) value)
@@ -231,7 +232,7 @@ trustedShellMessage browser message allowed = do
         current <- obj0 sh "URL"
         (&&) <$> allowed source <*> allowed current
 
-receive browser message onPreferences onReady = do
+receive browser message onPreferences onReady onTelemetry = do
     trusted <- trustedShellMessage browser message $ \source -> do
         local <- sameOrigin source (origin browser)
         path <- textProp source "path"
@@ -241,7 +242,9 @@ receive browser message onPreferences onReady = do
         dictionary <- cls "NSDictionary"
         valid <- booleanArgument raw "isKindOfClass:" dictionary
         body <- if valid then jsonObject raw else pure Nothing
-        forM_ body $ \input -> do
+        forM_ body $ \input -> if isConsentMessage input then
+          forM_ (parseConsentAction input) onTelemetry
+        else do
           when (bool (field "workspaceReady" input)) onReady
           if field "clientPreferences" input /= Null then onPreferences (field "clientPreferences" input)
           else if bool (field "pickFile" input) then do

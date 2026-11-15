@@ -1,13 +1,18 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module TelemetryCommand (run) where
+module TelemetryCommand (run, desktop) where
 
-import Data.Aeson (Value, encode, object, (.=))
+import Data.Aeson (Value (..), decodeStrict, encode, object, (.=))
+import qualified Data.Aeson.KeyMap as KM
+import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy.Char8 as BL
 import Data.Text (Text)
 import qualified Data.Text as T
 import System.Exit (exitFailure)
+import Telemetry (EventIntent (IAppOpened))
+import TelemetryControl
 import TelemetryProfile
+import TelemetrySender (HostTelemetry (..))
 import Text.Read (readMaybe)
 
 run :: [String] -> IO ()
@@ -46,15 +51,31 @@ result = either reportError (output . consentStatusJSON)
 
 reportError :: ProfileError -> IO ()
 reportError err = do
-  let code :: Text
-      code = case err of
-        InvalidProfile -> "invalid_profile"
-        InsecureProfile -> "insecure_profile"
-        UnsupportedProfileVersion -> "unsupported_profile_version"
-        ProfileIOError -> "profile_io_error"
-        ConflictingConsentRevision -> "conflicting_consent_revision"
-  output (object ["error" .= code])
+  output (object ["error" .= profileErrorCode err])
   exitFailure
 
 output :: Value -> IO ()
 output = BL.putStrLn . encode
+
+-- Only the desktop parent's existing private stdin pipe reaches this loop.
+-- Unknown input and EOF retain their shutdown meaning.
+desktop :: HostTelemetry -> IO ()
+desktop telemetry = loop False
+  where
+    loop opened = do
+      line <- BS.dropWhileEnd (== '\r') <$> BS.getLine
+      case BS.stripPrefix "telemetry " line of
+        Just "opened" -> do
+          if opened then pure () else hostEmit telemetry IAppOpened
+          loop True
+        Just bytes | BS.length bytes <= 2048
+          , Just (Object fields) <- decodeStrict bytes
+          , KM.size fields == 2
+          , Just (Number identifier) <- KM.lookup "request" fields
+          , identifier > 0
+          , Just command <- KM.lookup "command" fields
+          , Just action <- parseConsentAction command -> do
+              reply <- runConsentAction (hostConsentRead telemetry) (hostConsent telemetry) action
+              BL.putStrLn ("Sapiens4 telemetry: " <> encode (object ["request" .= identifier, "result" .= reply]))
+              loop opened
+        _ -> pure ()

@@ -94,6 +94,20 @@ body m d = case d.kind of
     [V.node "nav" [V.label "Workspace settings"]
       [settingsLink "Models" "Provider, model and per-Sapi choices." M.Models
       ,settingsLink "Decision prompts" "Instructions used at each decision step." M.DecisionPrompts]
+    ,V.when (M.telemetryAvailable m) $ V.node "section" [V.cls "telemetry-settings",V.label "Usage reporting"]
+      [V.node "label" [V.cls "relay-check"]
+        [V.node "input" [V.attr "type" "checkbox",V.bool "checked" m.telemetry.granted,V.disabled $ not m.telemetry.ready || m.telemetry.busy,V.check SetTelemetry] []
+        ,V.text "Help improve Sapiens4"]
+      ,V.p "model-hint" "Share usage statistics. No messages or files."
+      ,V.node "details" []
+        [V.textNode "summary" [] "Details"
+        ,V.p "model-hint" "Reports cover app opens, Corpora creation, accepted requests and remote pairings. They include random installation/device IDs, keyed Corpora IDs, app version, OS and timestamps; no messages, files, paths or provider details."
+        ,V.p "model-hint" "Turning this off stops new reporting and discards queued events. It does not delete previously received history. An already authorized request may still arrive. Delivery is best effort; reports may be lost or duplicated."
+        ,V.p "model-hint" "Preview notice v1: retention and erasure policy is not finalized. This notice is not approved for real-user collection."
+        ,V.p "model-hint" "Synthetic example — not your data:"
+        ,V.textNode "pre" [] telemetryExample]
+      ,V.p "corpora-feedback" (if m.telemetry.busy then "Saving or reading your choice…" else m.telemetry.error)
+      ,V.when (m.telemetry.error /= "") $ V.control [V.disabled m.telemetry.busy] "Refresh usage reporting" ReadTelemetry]
     ,V.node "details" [V.cls "workspace-settings-help"]
       [V.textNode "summary" [] "About this workspace"
       ,V.p "" "Talk to your Sapis in chat, manage their notes, and save documents in their workspaces. Sapis can delegate requests through ChiefSapi."
@@ -344,3 +358,18 @@ computerAccess d value = V.div "setup-screen"
   ,V.when (permission /= "missing" && permission /= "not_required") $ setupButton d "refresh" "Check again"
   ,V.button "button" (if A.elem permission ["not_requested","denied","unavailable"] then "Not now" else "Done") CloseDialog]
   where permission = D.s "computer_permission" value
+
+telemetryExample :: String
+telemetryExample = """{
+  "schema_version": 1,
+  "device_id": "00000000-0000-4000-8000-000000000001",
+  "app_version": "0.2.0",
+  "os": "macos",
+  "runtime_kind": "native_desktop",
+  "notice_version": 1,
+  "events": [{
+    "event_id": "00000000-0000-4000-8000-000000000002",
+    "event_type": "app_opened",
+    "occurred_at": "2026-01-01T00:00:00.000Z"
+  }]
+}"""

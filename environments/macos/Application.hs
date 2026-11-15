@@ -24,6 +24,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Text.IO as TIO
 import DataRoot
 import DesktopStorage
+import qualified DesktopTelemetry as Telemetry
 import Foreign hiding (void, new)
 import Foreign.C.Error (throwErrnoIfMinus1Retry)
 import Foreign.C.Types (CInt(..), CLong)
@@ -42,11 +43,12 @@ import System.Posix.Types (ProcessID, CPid(..))
 import System.Process hiding (shell)
 import System.Process.Internals (withProcessHandle, ProcessHandle(waitpidLock), ProcessHandle__(..))
 import System.Timeout
+import TelemetryControl (ConsentAction, isConsentMessage, parseConsentAction)
 import Text.Read (readMaybe)
 
-data Application = Application { native :: Obj, browser :: IORef Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: IORef (Maybe ServerProcess), address :: IORef Text, startup :: IORef (Maybe (Async ())), starting :: IORef Bool, localLoaded :: IORef Bool, runtime :: FilePath, selectedRoot :: IORef (Maybe FilePath), recoveryError :: IORef (Maybe Text), firstSignal :: IORef (Maybe WorkspaceSignal), attemptNumber :: IORef Integer, recovering :: IORef Bool, clientPreferences :: Obj, quitting :: IORef Bool }
+data Application = Application { native :: Obj, browser :: IORef Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: IORef (Maybe ServerProcess), address :: IORef Text, startup :: IORef (Maybe (Async ())), starting :: IORef Bool, localLoaded :: IORef Bool, runtime :: FilePath, selectedRoot :: IORef (Maybe FilePath), recoveryError :: IORef (Maybe Text), firstSignal :: IORef (Maybe WorkspaceSignal), attemptNumber :: IORef Integer, recovering :: IORef Bool, clientPreferences :: Obj, quitting :: IORef Bool, telemetryOpened :: IORef Bool }
 
-data ServerProcess = ServerProcess { serverHandle :: ProcessHandle, serverSession :: ProcessID, serverInput :: Handle, serverOutput :: Handle, serverErrors :: Async (), serverDrain :: Maybe (Async ()), serverDirectory :: FilePath }
+data ServerProcess = ServerProcess { serverHandle :: ProcessHandle, serverSession :: ProcessID, serverInput :: Handle, serverOutput :: Handle, serverErrors :: Async (), serverDrain :: Maybe (Async ()), serverDirectory :: FilePath, serverTelemetry :: Telemetry.Channel }
 
 post :: Application -> IO () -> IO ()
 post application action = atomicModifyIORef' (pending application) (\actions -> (actions ++ [action],()))
@@ -100,12 +102,14 @@ launchServer application destination command = mask $ \restore -> do
                 line <- hGetLine errors
                 hPutStrLn logFile line
                 hFlush logFile) `catch` (\(_ :: IOException) -> pure ())) `finally` close errors) `onException` cleanup
-    let server = ServerProcess process group input output reader Nothing destination
+    telemetry <- Telemetry.newChannel input
+    let server = ServerProcess process group input output reader Nothing destination telemetry
     writeIORef (child application) (Just server)
     mapM_ (\h -> hSetEncoding h utf8 >> hSetNewlineMode h universalNewlineMode) [input,output] `onException` stopOwnedServer application
     ready <- restore (T.pack . show <$> awaitServerAddress output)
         `onException` stopOwnedServer application
-    drain <- async $ (forever (void (hGetLine output))) `catch` (\(_ :: IOException) -> close output)
+    drain <- async $ (forever (hGetLine output >>= Telemetry.receiveReply telemetry))
+        `catch` (\(_ :: IOException) -> close output)
     let running=server {serverDrain=Just drain}
     writeIORef (child application) (Just running)
     pure (running, ready)
@@ -428,12 +432,13 @@ runSession isFixture initialAddress = do
     signal <- newIORef Nothing; generation <- newIORef 0; recovery <- newIORef False
     problem <- newIORef Nothing
     closing <- newIORef False
+    opened <- newIORef False
     preferences <- if isFixture then pure nullPtr else do
         config <- configDirectory >>= canonicalizePath
         let hex byte = let value=showHex byte "" in replicate (2-length value) '0' ++ value
             suite="com.sapiens4.client." <> T.pack (concatMap hex (BS.unpack (SHA256.hash (TE.encodeUtf8 (T.pack config)))))
         allocated "NSUserDefaults" >>= \o -> str suite >>= obj1 o "initWithSuiteName:"
-    let state = Application application b win tasks isFixture process address worker busy loaded runtime selection problem signal generation recovery preferences closing
+    let state = Application application b win tasks isFixture process address worker busy loaded runtime selection problem signal generation recovery preferences closing opened
     (do
         target <- installMethods state
         initialize state target initialAddress
@@ -493,7 +498,7 @@ receiveMessage application message = do
     if connected || fixture application then do
         current <- readIORef (child application)
         live <- maybe (pure $ fixture application) (fmap not . serverExited . serverHandle) current
-        if live then receive b message (saveClientPreferences application) (commitWorkspace application WorkspaceReady)
+        if live then receive b message (saveClientPreferences application) (commitWorkspace application WorkspaceReady) (changeTelemetry application Telemetry.WorkspaceConsent)
           else recoverStartup application "The application server stopped. Choose a folder to reopen your workspace."
       else do
         expected <- fileURL (T.pack (bootstrapPath application))
@@ -501,7 +506,9 @@ receiveMessage application message = do
         when trusted $ do
             sh <- readIORef (shell b)
             raw <- obj0 message "body" >>= jsonObject
-            forM_ raw $ \input -> do
+            forM_ raw $ \input -> if isConsentMessage input then
+              forM_ (parseConsentAction input) (changeTelemetry application Telemetry.BootstrapConsent)
+            else do
               case text (field "storage" input) of
                 "new" -> (defaultDataDirectory >>= startSelected application (Just StartNew))
                     `catch` \(e :: IOException) -> showStorageError application (T.pack (storageMessage e))
@@ -515,6 +522,19 @@ receiveMessage application message = do
                     if isAbsolute directory then startSelected application Nothing directory
                       else showStorageError application "Choose a folder before continuing."
                 _ -> pure ()
+
+changeTelemetry :: Application -> Telemetry.ConsentContext -> ConsentAction -> IO ()
+changeTelemetry application context action = do
+    attempt <- readIORef (attemptNumber application)
+    view <- readIORef (browser application) >>= readIORef . shell
+    current <- readIORef (child application)
+    void $ forkIO $ do
+        result <- if fixture application then pure Telemetry.unavailableReply
+          else Telemetry.consent context (serverTelemetry <$> current) action
+        postAttempt application attempt $ do
+            active <- readIORef (browser application) >>= readIORef . shell
+            when (active == view) $
+                script active ("window.sapiensTelemetryEvent?.(" <> jsonText result <> ")")
 
 chooseDataDirectory :: IO (Maybe FilePath)
 chooseDataDirectory = do
@@ -648,3 +668,5 @@ commitWorkspace application signal =
     saveWhenReady (firstSignal application) signal (selectedRoot application) id (recoverStartup application . T.pack) $ \_ -> do
         atomicModifyIORef' (startup application) (\old -> (Nothing,old)) >>= mapM_ cancel
         writeIORef (starting application) False
+        current <- readIORef (child application)
+        Telemetry.opened (telemetryOpened application) (serverTelemetry <$> current)

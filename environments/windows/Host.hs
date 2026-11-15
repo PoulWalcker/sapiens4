@@ -1,29 +1,30 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module Host (Host(..), prepareHost, startHost, closeHost, watchHost, desktopArgs) where
+module Host (Host(..), prepareHost, startHost, closeHost, watchHost, desktopArgs, telemetryChannel) where
 
-import DesktopStorage (storageMode, awaitServerAddress)
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
 import Data.Aeson
+import qualified Data.Aeson.KeyMap as K
+import qualified Data.ByteString as BS
 import Data.Char (toUpper)
 import Data.IORef
 import Data.Maybe
 import DataRoot (configDirectory, defaultDataDirectory, StorageChoice(..), containedPath)
+import DesktopStorage (storageMode, awaitServerAddress)
+import qualified DesktopTelemetry as Telemetry
+import Native (processId, waitProcessHandle)
 import Network.HTTP.Client
 import Network.URI
-import Native (processId, waitProcessHandle)
-import System.Process.Internals (ProcessHandle__(..), withProcessHandle)
-import qualified Data.ByteString as BS
 import System.Directory
 import System.Environment
 import System.FilePath
 import System.IO
 import System.Process
+import System.Process.Internals (ProcessHandle__(..), withProcessHandle)
 import System.Timeout
-import qualified Data.Aeson.KeyMap as K
 
 data Host = Host
   { dataDirectory :: FilePath
@@ -40,6 +41,7 @@ data ServerProcess = ServerProcess
   , outputReader :: Maybe (Async ())
   , exitWatcher :: Maybe (Async ())
   , errorReader :: Maybe (Async ())
+  , processTelemetry :: Telemetry.Channel
   }
 
 data HostPaths = HostPaths { dataPath :: FilePath, runtimePath :: FilePath }
@@ -96,7 +98,8 @@ launchHost :: Host -> CreateProcess -> IO String
 launchHost host command = mask $ \restore -> do
   closeHost host
   (Just input, Just output, Just errors, child) <- createProcess command
-  let owned = ServerProcess child input output errors Nothing Nothing Nothing
+  telemetry <- Telemetry.newChannel input
+  let owned = ServerProcess child input output errors Nothing Nothing Nothing telemetry
   writeIORef (serverProcess host) (Just owned)
   (do
     mapM_ (\stream -> hSetEncoding stream utf8 >> hSetNewlineMode stream universalNewlineMode) [input, output, errors]
@@ -114,7 +117,7 @@ launchHost host command = mask $ \restore -> do
       putMVar readiness result
       case result of
         Left _ -> pure ()
-        Right _ -> (forever (void $ hGetLine output)) `catch` \(_ :: IOException) -> pure ()
+        Right _ -> (forever (hGetLine output >>= Telemetry.receiveReply telemetry)) `catch` \(_ :: IOException) -> pure ()
     writeIORef (serverProcess host) (Just owned {outputReader=Just drain,errorReader=Just collect})
     restore (takeMVar readiness >>= either (\e -> do
       void (timeout 250000 (waitCatch collect))
@@ -160,6 +163,9 @@ watchHost host recover = mask_ $ do
 
 serverRunning :: Maybe ServerProcess -> IO Bool
 serverRunning = maybe (pure False) (fmap isNothing . getProcessExitCode . processHandle)
+
+telemetryChannel :: Host -> IO (Maybe Telemetry.Channel)
+telemetryChannel host = fmap processTelemetry <$> readIORef (serverProcess host)
 
 closeHost :: Host -> IO ()
 closeHost host = mask_ $ do

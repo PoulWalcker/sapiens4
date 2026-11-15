@@ -109,7 +109,9 @@ hostMain root args = do
   finished <- newEmptyMVar
   let shutdown=void (tryPutMVar finished ())
   installShutdown shutdown
-  when ("--desktop" `elem` args) (void (forkIO ((void getLine `catch` \(_::IOException)->pure ()) >> shutdown)))
+  when ("--desktop" `elem` args) $ void $ forkIO $
+   (maybe (void getLine) TelemetryCommand.desktop (hostTelemetry host)
+     `catch` \(_ :: IOException) -> pure ()) `finally` shutdown
   when ("--open" `elem` args) (void (createProcess (proc (if os=="darwin" then "open" else if os=="mingw32" then "explorer" else "xdg-open") [url])))
   takeMVar finished
 

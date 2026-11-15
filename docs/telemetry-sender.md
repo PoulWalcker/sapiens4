@@ -44,6 +44,10 @@ the remaining event hooks retain their original tickets.
 Ticket 08 records the [native consent authority review](telemetry-native-authorization.md)
 and its remaining gate before ticket 09 wires the controls.
 
+Ticket 09 subsequently implements [native controls and workspace opens](telemetry-native-ui.md).
+Focused macOS observations are recorded separately from outstanding Windows
+runtime and complete post-wiring native-negative verification.
+
 ## Ownership and configuration
 
 `HostServer.startHost` owns one telemetry queue, worker and reusable TLS manager.

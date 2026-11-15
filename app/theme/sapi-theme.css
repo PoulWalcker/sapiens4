@@ -86,3 +86,5 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .sapi-workspace .main-sapi-row::after{content:'';position:absolute;left:0;right:0;bottom:-6px;height:1px;background:var(--sapi-line);pointer-events:none}
 
 .sapi-workspace .agent-row-name small{white-space:nowrap;flex-shrink:0}
+.telemetry-settings{margin-top:20px}
+.telemetry-settings pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px}

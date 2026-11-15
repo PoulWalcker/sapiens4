@@ -47,6 +47,7 @@ handle runtime dispatch action = case action of
       when (kind == M.ConnectRemote && M.remote m) $ liftEffect $ B.historyPush $ D.json {dialog: true}
       E.sync runtime
       case kind of
+        M.WorkspaceSettings -> when (M.telemetryAvailable m) $ dispatch ReadTelemetry
         M.Models -> loadModelSettings m d
         M.Computer | localSetup m && m.snapshot.computer.platform == "linux" -> receive d.identity (\value -> E.modifyDialog d.identity _ {content=F.computerAccess value,status=M.Editing}) $ E.api runtime m "/api/computer" "GET" D.null
         M.DecisionPrompts -> receive d.identity (\value -> E.modifyDialog d.identity _ {content=F.Prompts $ map F.prompt $ D.rows "prompts" value,fields=F.decode $ D.first $ D.rows "prompts" value,status=M.Editing}) $ E.api runtime m "/api/decision-prompts" "GET" D.null
