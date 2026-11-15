@@ -1,0 +1,73 @@
+worker_processes 1;
+pid /tmp/nginx.pid;
+error_log /dev/null;
+events { worker_connections ${TELEMETRY_WORKER_CONNECTIONS}; }
+http {
+    access_log off;
+    server_tokens off;
+    default_type application/json;
+    client_body_temp_path /tmp/client-body;
+    proxy_temp_path /tmp/proxy;
+    client_header_timeout ${TELEMETRY_HEADER_TIMEOUT};
+    client_body_timeout ${TELEMETRY_BODY_TIMEOUT};
+    send_timeout ${TELEMETRY_PROXY_TIMEOUT};
+    keepalive_timeout ${TELEMETRY_KEEPALIVE_TIMEOUT};
+    client_header_buffer_size ${TELEMETRY_HEADER_BUFFER_SIZE};
+    large_client_header_buffers ${TELEMETRY_HEADER_BUFFERS} ${TELEMETRY_HEADER_BUFFER_SIZE};
+    limit_req_zone $binary_remote_addr zone=credentials_ip:${TELEMETRY_LIMIT_ZONE_SIZE} rate=${TELEMETRY_CREDENTIALS_IP_RATE};
+    limit_req_zone $server_name zone=credentials_global:${TELEMETRY_LIMIT_ZONE_SIZE} rate=${TELEMETRY_CREDENTIALS_GLOBAL_RATE};
+    limit_req_zone $binary_remote_addr zone=events_ip:${TELEMETRY_LIMIT_ZONE_SIZE} rate=${TELEMETRY_EVENTS_IP_RATE};
+    limit_req_zone $server_name zone=events_global:${TELEMETRY_LIMIT_ZONE_SIZE} rate=${TELEMETRY_EVENTS_GLOBAL_RATE};
+    limit_conn_zone $binary_remote_addr zone=connections_ip:${TELEMETRY_LIMIT_ZONE_SIZE};
+    limit_conn_zone $server_name zone=connections_global:${TELEMETRY_LIMIT_ZONE_SIZE};
+    limit_req_status 429;
+    limit_conn_status 429;
+    server {
+        listen ${TELEMETRY_HTTPS_PORT} ssl;
+        server_name ${TELEMETRY_SERVER_NAME};
+        ssl_certificate /run/tls/fullchain.pem;
+        ssl_certificate_key /run/tls/privkey.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_session_tickets off;
+        limit_conn connections_ip ${TELEMETRY_CONNECTIONS_PER_IP};
+        limit_conn connections_global ${TELEMETRY_CONNECTIONS_GLOBAL};
+        add_header Cache-Control no-store always;
+        proxy_hide_header Cache-Control;
+        proxy_cache off;
+        proxy_next_upstream off;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host 127.0.0.1;
+        proxy_connect_timeout ${TELEMETRY_PROXY_TIMEOUT};
+        proxy_read_timeout ${TELEMETRY_PROXY_TIMEOUT};
+        proxy_send_timeout ${TELEMETRY_PROXY_TIMEOUT};
+        # Stream to the collector's absolute body deadline, including slow input.
+        proxy_request_buffering off;
+        proxy_buffering off;
+        location = /credentials {
+            client_max_body_size 1k;
+            limit_req zone=credentials_ip burst=${TELEMETRY_REQUEST_BURST} nodelay;
+            limit_req zone=credentials_global burst=${TELEMETRY_REQUEST_BURST} nodelay;
+            proxy_pass http://127.0.0.1:8081;
+        }
+        location = /events {
+            client_max_body_size 64k;
+            limit_req zone=events_ip burst=${TELEMETRY_REQUEST_BURST} nodelay;
+            limit_req zone=events_global burst=${TELEMETRY_REQUEST_BURST} nodelay;
+            proxy_pass http://127.0.0.1:8081;
+        }
+        location / { return 404 '{"error":{"code":"not_found"}}'; }
+        error_page 400 408 411 414 431 =400 @bad_request;
+        error_page 413 =413 @too_large;
+        error_page 429 =429 @rate_limited;
+        error_page 500 502 503 504 =503 @unavailable;
+        location @bad_request { return 400 '{"error":{"code":"bad_request"}}'; }
+        location @too_large { return 413 '{"error":{"code":"payload_too_large"}}'; }
+        location @rate_limited {
+            add_header Cache-Control no-store always;
+            add_header Retry-After 1 always;
+            return 429 '{"error":{"code":"rate_limited"}}';
+        }
+        location @unavailable { return 503 '{"error":{"code":"ingest_unavailable"}}'; }
+    }
+}

@@ -1,0 +1,17 @@
+**
+!remote/
+!remote/telemetry/
+!remote/telemetry/deploy/
+!remote/telemetry/deploy/Dockerfile
+!remote/telemetry/app/
+!remote/telemetry/app/*.hs
+!remote/telemetry/src/
+!remote/telemetry/src/*.hs
+!remote/telemetry/telemetry.cabal
+!remote/telemetry/cabal.project
+!remote/telemetry/cabal.project.freeze
+!corpora/
+!corpora/state/
+!corpora/state/Telemetry.hs
+!corpora/state/TelemetryCredential.hs
+!corpora/state/TelemetryJSON.hs

@@ -7,7 +7,7 @@ module Auth
   ) where
 
 import Control.Exception (IOException, bracket, mask_, onException, try)
-import Control.Monad (unless, when)
+import Control.Monad (guard, unless, when)
 import Crypto.Hash (SHA256)
 import Crypto.MAC.HMAC (HMAC, hmac)
 import Data.Aeson (Value (Null), withObject, (.:))
@@ -108,7 +108,7 @@ verifyAuthorization :: Auth -> [BS.ByteString] -> Maybe Principal
 verifyAuthorization (Auth active@(Key activeKid _) previous revoked) headers = do
   header <- case headers of [value] -> Just value; _ -> Nothing
   let (scheme, suffix) = B8.break (== ' ') header
-  guardMaybe (B8.map toLower scheme == "bearer")
+  guard (B8.map toLower scheme == "bearer")
   bytes <- BS.stripPrefix " " suffix
   token <- parseToken bytes
   let kid = tokenKid token
@@ -118,10 +118,9 @@ verifyAuthorization (Auth active@(Key activeKid _) previous revoked) headers = d
     _ -> Nothing
   supplied <- either (const Nothing) Just
     (convertFromBase Base64URLUnpadded (BS.drop 54 bytes) :: Either String BS.ByteString)
-  guardMaybe (BA.constEq supplied (deriveMac key identifier))
-  guardMaybe (not (Set.member identifier revoked))
+  guard (BA.constEq supplied (deriveMac key identifier))
+  guard (not (Set.member identifier revoked))
   pure (Principal identifier (if kid == activeKid then ActiveKey else PreviousKey))
-  where guardMaybe True = Just (); guardMaybe False = Nothing
 
 replacementCredential :: Auth -> Principal -> Maybe Token
 replacementCredential (Auth active _ _) (Principal identifier age) = case age of
