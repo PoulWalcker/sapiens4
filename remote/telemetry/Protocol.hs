@@ -368,10 +368,13 @@ parseEventRecord = withObject "event" $ \fields -> do
   body <- parseEventBody fields
   pure (EventRecord identifier timestamp body)
 
+maxBatchEvents :: Int
+maxBatchEvents = 10
+
 parseEvents :: Value -> Parser ValidBatch
 parseEvents value = do
   values <- parseJSON value :: Parser (NonEmpty Value)
-  when (NE.length values > 20) $ fail "Invalid events"
+  when (NE.length values > maxBatchEvents) $ fail "Invalid events"
   ValidBatch <$> traverse parseEventRecord values
 
 parseOccurredAt :: Value -> Parser UTCTime

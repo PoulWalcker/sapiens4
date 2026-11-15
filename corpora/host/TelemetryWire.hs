@@ -9,6 +9,7 @@ module TelemetryWire
   , RuntimeKind (..)
   , TelemetryEvent (..)
   , encodeBatch
+  , maxBatchEvents
   , mkAppVersion
   , newEventRecord
   ) where
@@ -73,9 +74,12 @@ eventJSON (EventRecord (EventId identifier) occurred body) = object $
   where
     scoped name corpora = ["event_type" .= (name :: Text), "corpora_id" .= publicCorporaIdText corpora]
 
+maxBatchEvents :: Int
+maxBatchEvents = 10
+
 encodeBatch :: ClientContext -> [EventRecord TelemetryEvent] -> Maybe BS.ByteString
 encodeBatch (ClientContext device (AppVersion version) system runtime notice) events
-  | null events || length events > 20 = Nothing
+  | null events || length events > maxBatchEvents = Nothing
   | runtime == Headless && any appOpened events = Nothing
   | any ((> 1024) . BL.length . encode) values = Nothing
   | BS.length bytes > 64 * 1024 = Nothing

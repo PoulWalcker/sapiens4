@@ -325,7 +325,7 @@ collect sender expected@(Grant epoch notice device (Just credentials)) first@(Qu
       when (current == Just expected) $ do
         let accumulated = records <> maybe [] (:[]) event
         now <- getMonotonicTimeNSec
-        if length accumulated >= 20 || now >= deadline then flush accumulated else do
+        if length accumulated >= maxBatchEvents || now >= deadline then flush accumulated else do
           next <- nextIntent sender (fromIntegral ((deadline - now) `div` 1000))
           case next of
             Nothing -> flush accumulated
