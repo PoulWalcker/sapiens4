@@ -15,8 +15,6 @@ import TelemetryJSON (decodeJSON)
 import TelemetryProfile (ProfileLocation, ConsentEpoch, withGrantedConsent)
 import TelemetryStorage
 
--- The ordinary Corpora UUID stays local. A separate random UUID moves with
--- the Corpora and is only created after an explicit grant.
 prepareCorporaId :: ProfileLocation -> ConsentEpoch -> FilePath -> IO (Maybe CorporaId)
 prepareCorporaId location epoch directory = do
   result <- withGrantedConsent location epoch $ recover $ do

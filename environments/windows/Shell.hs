@@ -263,7 +263,6 @@ desktopSession memory probe = do
                     Right view -> do
                       active <- valid
                       if not active then closeView view else do
-                        -- Closing can re-enter the window procedure after releasing the controller.
                         writeIORef shellRef Nothing
                         closeView bootstrap
                         writeIORef legacyView True
@@ -339,7 +338,6 @@ desktopSession memory probe = do
                     currentAttempt <- readIORef generation
                     when (not dead && currentAttempt==attempt && maybe False ((==core view) . core) current) action
                   on index iid action = onEvent memory (core view) index iid (\event -> active (action event))
-              -- Block child document loads within the trusted shell.
               on 17 "{9ADBE429-F36D-432B-9DDC-F8881FBD76E3}" $ \event -> callInt event 8 1
               on 7 "{9ADBE429-F36D-432B-9DDC-F8881FBD76E3}" $ \event -> do
                 destination <- getString event 3

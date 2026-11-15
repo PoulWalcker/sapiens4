@@ -157,8 +157,6 @@ withProfileLock location@(ProfileLocation _ root) action = do
     checkPrivate root True
     action
 
--- The action is the short STM admission only, never HTTP. The profile lock
--- serializes the final snapshot with every cooperating local process.
 withAttempt :: ProfileLocation -> ConsentEpoch -> Maybe Token -> IO a
             -> IO (Either ProfileError (Maybe a))
 withAttempt location@(ProfileLocation _ root) expected token action = profileAction $
@@ -205,8 +203,6 @@ resetIdentity location@(ProfileLocation _ root) expected = profileAction $
         publishProfile location updated
         pure updated
 
--- First enrollment wins. Renewal additionally preserves installation identity.
--- CAS failure returns the current winner; no unpersisted token is usable.
 commitToken :: ProfileLocation -> ConsentEpoch -> Maybe Token -> Token
             -> IO (Either ProfileError Profile)
 commitToken location@(ProfileLocation _ root) expected old replacement = profileAction $

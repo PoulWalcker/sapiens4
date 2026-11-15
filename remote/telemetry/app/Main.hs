@@ -51,8 +51,6 @@ dispatch service@(Service auth collector _ _ _) request =
     (_, ["healthz"]) -> pure (methodNotAllowed "GET")
     _ -> pure (failure status404 "not_found")
 
--- Preserve the existing application ceiling. Public route/IP budgets and
--- connection policy are separately required at ingress.
 bounded :: Service -> IO Response -> IO Response
 bounded (Service _ _ budget active maximumActive) action = do
   second <- (`div` 1000000000) <$> getMonotonicTimeNSec

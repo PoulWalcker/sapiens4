@@ -74,13 +74,11 @@ withLocal acquire = bracket
 withUser :: (Ptr () -> IO a) -> IO a
 withUser action = bracket open Win.closeHandle $ \token -> alloca $ \needed -> do
   poke needed 0
-  -- TOKEN_QUERY = 8; TokenUser = 1. The first call obtains the buffer size.
   void (tokenInformation token 1 nullPtr 0 needed)
   size <- peek needed
   unless (size > 0) (ioError (userError "Telemetry token information unavailable"))
   allocaBytes (fromIntegral size) $ \buffer -> do
     checkBool (tokenInformation token 1 buffer size needed)
-    -- TOKEN_USER begins with SID_AND_ATTRIBUTES, whose first member is PSID.
     user <- peek (castPtr buffer)
     action user
   where
@@ -109,8 +107,6 @@ createPrivateLock path = withUser $ \user -> withAttributes user $ \attributes -
   bracket (openFile path (Just attributes) Win.oPEN_ALWAYS)
     Win.closeHandle (const (pure ()))
 
--- Create with an explicit owner as well as a private DACL. Elevated Windows
--- tokens can otherwise assign their default group owner to temporary files.
 createPrivateTempFile :: FilePath -> IO (FilePath, Handle)
 createPrivateTempFile root = mask_ $ withUser $ \user -> withAttributes user $ \attributes -> do
   nonce <- UUIDv4.nextRandom
@@ -132,7 +128,6 @@ openFile path attributes mode = Win.createFile path
   (Win.rEAD_CONTROL .|. Win.fILE_READ_ATTRIBUTES)
   (Win.fILE_SHARE_READ .|. Win.fILE_SHARE_WRITE .|. Win.fILE_SHARE_DELETE)
   attributes mode
-  -- FILE_FLAG_OPEN_REPARSE_POINT is absent from older Win32 exports.
   (Win.fILE_FLAG_BACKUP_SEMANTICS .|. 0x00200000) Nothing
 
 checkPrivate :: FilePath -> Bool -> IO Bool
@@ -156,13 +151,11 @@ ownerOnly file user = alloca $ \ownerOut -> alloca $ \aclOut ->
     if sameOwner == 0 || valid == 0 then pure False else onlyUserAces acl user
   where
     acquire owner acl descriptor = do
-      -- SE_FILE_OBJECT = 1; OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION = 5.
       result <- securityInfo file 1 5 owner nullPtr acl nullPtr descriptor
       unless (result == 0) (ioError (userError "Telemetry security descriptor unavailable"))
 
 onlyUserAces :: Ptr () -> Ptr () -> IO Bool
 onlyUserAces acl user = allocaArray 3 $ \information -> do
-  -- ACL_SIZE_INFORMATION consists of three DWORDs; AclSizeInformation = 2.
   checkBool (aclInformation acl information 12 2)
   count <- peekElemOff information 0
   entries <- forM [1 .. count] $ \index -> alloca $ \out -> do
@@ -174,7 +167,6 @@ onlyUserAces acl user = allocaArray 3 $ \information -> do
         flags <- peekByteOff ace 1 :: IO Word8
         size <- peekByteOff ace 2 :: IO Word16
         if size < 16 then pure (False, False) else do
-          -- ACE_HEADER is BYTE, BYTE, WORD; DWORD Mask follows; SID starts at byte 8.
           let sid = ace `plusPtr` 8
           valid <- validSid sid
           lengthBytes <- if valid == 0 then pure 0 else lengthSid sid

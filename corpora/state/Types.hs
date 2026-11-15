@@ -176,8 +176,6 @@ atomicBytes :: FilePath -> BL.ByteString -> IO ()
 atomicBytes p bytes = do
  createDirectoryIfMissing True (takeDirectory p)
 #ifdef mingw32_HOST_OS
- -- Initial business identity publication must satisfy the same private-file
- -- authority as later telemetry updates, including an elevated token's owner.
  private <- isTelemetryPrivatePath p
  let temporary = if private then Private.createPrivateTempFile (takeDirectory p)
                  else openBinaryTempFile (takeDirectory p) ".writing-"

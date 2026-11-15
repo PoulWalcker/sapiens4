@@ -59,8 +59,6 @@ reportError err = do
 output :: Value -> IO ()
 output = BL.putStrLn . encode
 
--- Only the desktop parent's existing private stdin pipe reaches this loop.
--- Unknown input and EOF retain their shutdown meaning.
 desktop :: HostTelemetry -> IO ()
 desktop telemetry = loop False
   where

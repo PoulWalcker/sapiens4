@@ -11,8 +11,6 @@ import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString as BS
 
--- Aeson objects alone lose duplicate keys. Check depth and duplicates before
--- materializing bounded, untrusted input; semantic decoding happens once.
 decodeJSON :: Int -> BS.ByteString -> Either String Value
 decodeJSON limit bytes
   | BS.length bytes > limit = Left "JSON too large"

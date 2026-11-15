@@ -60,8 +60,6 @@ data Sender = Sender
   , control :: MVar Control
   }
 
--- No profile resolution, private I/O, trust-store initialization or entropy
--- on the application's startup path. The single worker owns those effects.
 startConfiguredTelemetry :: RuntimeKind -> IO HostTelemetry
 startConfiguredTelemetry kind = do
   sender <- Sender (if kind == NativeDesktop then DesktopProfile else HeadlessProfile) kind
@@ -140,7 +138,6 @@ readStatus sender = withMVar (control sender) $ \(Control _ rejected detail) -> 
 
 mutate :: Sender -> (ProfileLocation -> IO (Either ProfileError Profile)) -> IO (Either ProfileError Profile)
 mutate sender operation = do
-  -- This cutoff never waits for filesystem/network-held locks.
   atomically (writeTVar (locallyBlocked sender) True >> closeAdmission sender)
   modifyMVar (control sender) $ \previous -> do
     result <- profileLocation sender >>= either (pure . Left) operation
@@ -188,8 +185,6 @@ pause sender expected micros = do
           else waitWake sender (fromIntegral (min 10000000 ((deadline - now) `div` 1000))) >> loop
   loop
 
--- Locked disk snapshot + short STM gate admit the attempt. A withdrawal
--- after this point cannot recall it, including the pre-HTTP dispatch gap.
 admit :: Sender -> Grant -> IO Bool
 admit sender expected@(Grant epoch _ token) = withMVar (control sender) $ \_ -> do
   location <- profileLocation sender
@@ -254,8 +249,6 @@ background sender = do
           _ -> waitWake sender 10000000 >> loop lastEnrollment
   loop Nothing
 
--- Only grant/reset or a subsequently captured fresh intent starts another
--- enrollment episode. Exhaustion drops that episode's work, then stays idle.
 enroll :: Sender -> Transport -> Grant -> IO ()
 enroll sender transport expected@(Grant _ _ Nothing) = do
   reply <- attempts sender expected (post transport Enrollment)

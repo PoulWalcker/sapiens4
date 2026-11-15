@@ -20,8 +20,6 @@ services:
         source: ${TELEMETRY_DATA_ROOT:?Set a new private V2 dataset root owned by UID 10001}
         target: /data
         bind: {create_host_path: false}
-      # Close ingress and stop every old collector before changing this complete
-      # active/previous/revocation configuration. Never mix policy generations.
       - type: bind
         source: ${TELEMETRY_AUTH_CONFIG:?Set the private complete auth configuration owned by UID 10001}
         target: /run/secrets/auth.json

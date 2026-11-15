@@ -231,7 +231,6 @@ withoutExtendedACL acquire =
       acl <- acquire
       when (acl == nullPtr) $ do
         err <- getErrno
-        -- Darwin returns ENOENT for an existing object with no extended ACL.
         unless (err == eNOENT) (throwErrno "telemetry ACL")
       pure acl
     release acl = unless (acl == nullPtr) (void (aclFree acl))

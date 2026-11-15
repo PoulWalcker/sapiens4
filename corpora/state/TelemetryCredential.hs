@@ -20,7 +20,6 @@ import Data.UUID (UUID)
 import qualified Data.UUID as UUID
 import TelemetryJSON (decodeJSON, exactFields)
 
--- Deliberately no Show instance: credentials must never enter diagnostics.
 data Token = Token BS.ByteString InstallationId
 instance Eq Token where
   Token a _ == Token b _ = BA.constEq a b

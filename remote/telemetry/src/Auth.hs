@@ -31,7 +31,6 @@ import TelemetryJSON (decodeJSON, exactFields)
 
 data Key = Key BS.ByteString ScrubbedBytes
 data Auth = Auth Key (Maybe Key) (Set.Set InstallationId)
--- Only verified principals can be handed to the ingestion parser.
 data KeyAge = ActiveKey | PreviousKey
 data Principal = Principal InstallationId KeyAge
 

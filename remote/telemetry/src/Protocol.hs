@@ -81,7 +81,6 @@ decodeRows principal received bytes
           && T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S%3QZ" time) == value -> pure time
         _ -> fail "Invalid timestamp"
 
--- Shape errors have a distinct public status from semantic event errors.
 knownFields :: Value -> Either WireError ()
 knownFields (Object fields) = do
   allowed ["app_version", "os", "runtime_kind", "notice_version", "events"] fields
