@@ -1,0 +1,10 @@
+**
+!deploy/
+!deploy/Dockerfile
+!app/
+!app/*.hs
+!src/
+!src/*.hs
+!telemetry.cabal
+!cabal.project
+!cabal.project.freeze

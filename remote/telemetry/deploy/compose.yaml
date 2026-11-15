@@ -1,0 +1,29 @@
+services:
+  collector:
+    image: ${TELEMETRY_IMAGE:?Set the built collector image}
+    network_mode: host
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.0
+    pids_limit: 64
+    volumes:
+      - type: bind
+        source: /mnt/telemetry-data/events
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /etc/telemetry/signing.key
+        target: /run/secrets/signing.key
+        read_only: true
+        bind:
+          create_host_path: false
+    logging:
+      driver: local
+      options:
+        max-size: 1m
+        max-file: "3"
