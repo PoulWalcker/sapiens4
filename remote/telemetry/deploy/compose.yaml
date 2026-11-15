@@ -10,6 +10,10 @@ services:
     memswap_limit: 512m
     cpus: 1.0
     pids_limit: 64
+    ulimits:
+      nofile:
+        soft: 1024
+        hard: 1024
     volumes:
       - type: bind
         source: /mnt/telemetry-data/events
