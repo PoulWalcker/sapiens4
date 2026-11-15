@@ -55,6 +55,7 @@ desktopSession memory probe = do
   args <- desktopArgs <$> getArgs
   host <- prepareHost args
   configRoot <- configDirectory
+  createPrivateDirectory configRoot
   dataEnv <- lookupEnv "SAPIENS_DATA_DIR"
   let explicit = listToMaybe [value | (key,value) <- zip args (drop 1 args), key=="--data-dir"] `mplus` dataEnv
   saved <- try (startupDataDirectory explicit) :: IO (Either IOException (Maybe FilePath))
