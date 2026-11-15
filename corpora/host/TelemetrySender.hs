@@ -22,15 +22,14 @@ import GHC.Clock (getMonotonicTimeNSec)
 import Network.HTTP.Client hiding (path)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types (hAuthorization, hContentType, hRetryAfter, statusCode)
-import Network.URI (URI (..), URIAuth (..), parseURI)
 import qualified Paths_sapiens_domain as Package
-import System.Environment (lookupEnv)
 import System.Info (os)
 import System.Random (randomRIO)
 import System.Timeout (timeout)
 import Telemetry
 import TelemetryControl (ConsentAction, runConsentAction)
 import TelemetryCredential
+import TelemetryEndpoint (configuredEndpoint, endpointOrigin)
 import TelemetryIdentity (prepareCorporaId)
 import TelemetryProfile
 import Text.Read (readMaybe)
@@ -42,10 +41,11 @@ data HostTelemetry = HostTelemetry
   }
 
 data Grant = Grant ConsentEpoch NoticeVersion (Maybe Token) deriving (Eq)
-data SenderError = CredentialsRejected | CredentialUpdateFailed
+data SenderError = CredentialsRejected | CredentialUpdateFailed | EndpointUnavailable
 senderErrorText :: SenderError -> T.Text
 senderErrorText CredentialsRejected = "invalid_credentials"
 senderErrorText CredentialUpdateFailed = "credential_update_failed"
+senderErrorText EndpointUnavailable = "endpoint_unavailable"
 data Control = Control (Maybe Grant) (Maybe Token) (Maybe SenderError)
 data Intent = Intent ConsentEpoch Word64 UTCTime EventIntent
 
@@ -58,13 +58,14 @@ data Sender = Sender
   , locallyBlocked :: TVar Bool
   , wake :: TMVar ()
   , control :: MVar Control
+  , deliveryConfigured :: TVar Bool
   }
 
 startConfiguredTelemetry :: RuntimeKind -> IO HostTelemetry
 startConfiguredTelemetry kind = do
   sender <- Sender (if kind == NativeDesktop then DesktopProfile else HeadlessProfile) kind
     <$> newTBQueueIO 128 <*> newTVarIO Nothing <*> newTVarIO False
-    <*> newTVarIO False <*> newEmptyTMVarIO <*> newMVar (Control Nothing Nothing Nothing)
+    <*> newTVarIO False <*> newEmptyTMVarIO <*> newMVar (Control Nothing Nothing Nothing) <*> newTVarIO False
   worker <- asyncWithUnmask $ \unmask -> unmask (background sender) `catch` \(err :: SomeException) -> do
     atomically (writeTVar (stopped sender) True >> closeAdmission sender)
     case fromException err :: Maybe SomeAsyncException of
@@ -120,7 +121,8 @@ refreshLocked sender (Control previous rejected diagnostic) = do
   permitted <- atomically $ do
     blocked <- readTVar (locallyBlocked sender)
     dead <- readTVar (stopped sender)
-    let allowed = if blocked || dead || isJust refused then Nothing else current
+    configured <- readTVar (deliveryConfigured sender)
+    let allowed = if blocked || dead || isJust refused || not configured then Nothing else current
     when (changed || not (isJust allowed)) (void (flushTBQueue (queue sender)))
     writeTVar (cached sender) allowed
     pure allowed
@@ -131,10 +133,16 @@ readStatus sender = withMVar (control sender) $ \(Control _ rejected detail) -> 
   profile <- load sender
   blocked <- readTVarIO (locallyBlocked sender)
   dead <- readTVarIO (stopped sender)
+  configured <- readTVarIO (deliveryConfigured sender)
   let refused = case profile of
         Right value -> isJust rejected && profileToken value == rejected
         Left _ -> False
-  pure (profile, blocked || dead || refused, senderErrorText <$> (if refused then Just CredentialsRejected else detail))
+      diagnostic = case profile of
+        Left _ -> Nothing
+        Right _ | refused -> Just CredentialsRejected
+                | not configured -> Just EndpointUnavailable
+                | otherwise -> detail
+  pure (profile, blocked || dead || refused, senderErrorText <$> diagnostic)
 
 mutate :: Sender -> (ProfileLocation -> IO (Either ProfileError Profile)) -> IO (Either ProfileError Profile)
 mutate sender operation = do
@@ -201,32 +209,21 @@ data Transport = Transport Manager String AppVersion OsFamily
 
 configuredTransport :: IO (Maybe Transport)
 configuredTransport = do
-  supplied <- lookupEnv "SAPIENS_TELEMETRY_ENDPOINT"
+  endpoint <- configuredEndpoint
   let platform = case os of "darwin" -> Just MacOS; "mingw32" -> Just Windows; "linux" -> Just Linux; _ -> Nothing
-  case (supplied >>= endpoint, mkAppVersion (T.pack (showVersion Package.version)), platform) of
+  case (endpoint, mkAppVersion (T.pack (showVersion Package.version)), platform) of
     (Just origin, Just version, Just system) -> do
       manager <- newManager tlsManagerSettings
         { managerConnCount = 1, managerIdleConnectionCount = 1
         , managerResponseTimeout = responseTimeoutMicro 2000000
         , managerRetryableException = const False }
-      pure (Just (Transport manager origin version system))
+      pure (Just (Transport manager (endpointOrigin origin) version system))
     _ -> pure Nothing
-  where
-    endpoint address = do
-      uri <- parseURI address
-      authority <- uriAuthority uri
-      let portOK = case uriPort authority of
-            "" -> True
-            ':':digits | length digits <= 5, all (`elem` ['0'..'9']) digits ->
-              maybe False (\number -> number > (0 :: Int) && number <= 65535) (readMaybe digits)
-            _ -> False
-      if uriScheme uri == "https:" && null (uriUserInfo authority) && not (null (uriRegName authority))
-        && portOK && uriPath uri `elem` ["", "/"] && null (uriQuery uri) && null (uriFragment uri)
-        then Just (show uri { uriPath = "" }) else Nothing
 
 background :: Sender -> IO ()
 background sender = do
   transport <- configuredTransport
+  atomically (writeTVar (deliveryConfigured sender) (isJust transport))
   let loop lastEnrollment = do
         grant <- refresh sender
         case (transport, grant) of

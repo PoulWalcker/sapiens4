@@ -6,6 +6,8 @@ module Main where
 
 import Control.Exception
 import Control.Monad
+import Data.Aeson (encode, object, (.=))
+import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString as B
 import Data.Char (isDigit)
 import Data.List (sortOn, sort, isPrefixOf, nub)
@@ -14,6 +16,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import Assets (allAssets, assetFile)
+import TelemetryEndpoint (mkEndpoint, endpointOrigin)
 #ifdef darwin_HOST_OS
 import Foreign.C.Types (CInt(..), CUInt(..))
 import Foreign.C.Error (throwErrnoIfMinus1_)
@@ -217,6 +220,8 @@ withTemporary parent action = do
 
 stage :: FilePath -> FilePath -> IO ()
 stage root destination = do
+ supplied <- lookupEnv "SAPIENS_PACKAGE_TELEMETRY_ENDPOINT"
+ endpoint <- traverse (maybe (fail "Package telemetry endpoint must be an HTTPS origin") pure . mkEndpoint) supplied
  exists destination >>= flip when (fail "Runtime destination must be new")
  output <- makeAbsolute destination
  when (inside output root) $ fail "Runtime destination must not contain the source checkout"
@@ -229,7 +234,9 @@ stage root destination = do
       payload=nub (map assetFile allAssets++["app/shell/AI-LOGOS-LICENSE.txt","corpora/providers.json","app/shell/bootstrap.html","app/shell/client-preferences.js",".build/bin/sapiens4"++suffix,"submodules/blindly4/.build/"++blindly]++map (makeRelative root) (notices++prompts))
   forM_ payload $ \path -> copy (root</>path) (destination</>path)
   when (os=="mingw32") $ forM_ ["AppIcon.ico","AppIconDark.ico"] $ \icon -> copy (root</>"environments/windows"</>icon) (destination</>"environments/windows"</>icon)
-  writeFile (destination</>"package-manifest.json") "{\"channel\":\"stable\",\"appId\":\"com.sapiens4.desktop\"}\n"
+  BL.writeFile (destination</>"package-manifest.json") $ encode $ object
+   ["channel" .= ("stable" :: String), "appId" .= ("com.sapiens4.desktop" :: String)
+   ,"telemetry_endpoint" .= (endpointOrigin <$> endpoint)]
 
 packageMac :: FilePath -> String -> FilePath -> Bool -> IO ()
 #ifdef darwin_HOST_OS

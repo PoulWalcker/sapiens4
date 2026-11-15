@@ -81,7 +81,9 @@ runConsentAction readStatus write reset action = case action of
   ResetIdentity expected -> reset expected >>= mutationReply
   where
     mutationReply result = case result of
-      Right profile -> pure (reply (Right profile) False Nothing)
+      Right _ -> do
+        (current, disabled, diagnostic) <- readStatus
+        pure (reply current disabled diagnostic)
       Left err -> do
         (current, disabled, _) <- readStatus
         pure (reply current disabled (Just (profileErrorCode err)))

@@ -11,4 +11,4 @@ fi
 runghc build/Build.hs
 ./submodules/blindly4/macos/build.sh
 shift "$(( $# < 2 ? $# : 2 ))"
-runghc -XOverloadedStrings -XTupleSections -icorpora/host build/Package.hs macos "$version" "$output" "$@"
+./.build/bin/sapiens-package macos "$version" "$output" "$@"

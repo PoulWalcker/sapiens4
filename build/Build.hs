@@ -23,7 +23,7 @@ main = do
      suffix = if os=="mingw32" then ".exe" else ""
      desktop = os=="linux" && "--desktop" `elem` args
      buildFlags = ["--flags=" ++ if desktop then "linux-desktop" else "-linux-desktop"]
-     targets = ["sapiens4","sapiens-domain"] ++ map fst helpers ++ if os=="darwin" then ["sapiens-macos"] else if os=="mingw32" then ["sapiens-windows"] else ["sapiens-linux" | desktop]
+     targets = ["sapiens4","sapiens-domain","sapiens-package"] ++ map fst helpers ++ if os=="darwin" then ["sapiens-macos"] else if os=="mingw32" then ["sapiens-windows"] else ["sapiens-linux" | desktop]
  setEnv "CABAL_DIR" cache
  createDirectoryIfMissing True cache
  index <- doesFileExist (cache </> "packages/hackage.haskell.org/01-index.tar")

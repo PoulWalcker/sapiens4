@@ -95,6 +95,7 @@ handle runtime input = session input
           detail = case failure of
             "" -> if disabled then "Usage reporting is paused in this app. Refresh or restart to try again." else ""
             "conflicting_consent_revision" -> "Your choice changed in another window or process. Review it and choose again."
+            "endpoint_unavailable" -> "Your choice is saved, but usage reporting is unavailable in this build."
             "invalid_credentials" -> "Usage reporting is paused because its credential was rejected. Start a new telemetry installation to resume."
             "credential_update_failed" -> "The credential update could not be saved. Reporting can continue with the saved credential."
             "reset_not_applicable" -> "There is no saved reporting choice to reset."
@@ -103,9 +104,9 @@ handle runtime input = session input
             "native_channel_unavailable" -> "Could not confirm the change. Reporting may still be enabled. Refresh and retry."
             _ -> "Could not save or read your choice. Reporting is off in this app. Refresh and retry."
       H.modify_ \s -> s {telemetry=
-        { granted:if failure == "native_channel_unavailable" then s.telemetry.granted else not disabled && D.s "state" saved == "granted"
+        { granted:if failure == "native_channel_unavailable" then s.telemetry.granted else D.s "state" saved == "granted"
         , epoch:if epoch == "" then Nothing else Just epoch
-        , ready:A.elem failure ["","conflicting_consent_revision","invalid_credentials","credential_update_failed","reset_not_applicable"]
+        , ready:A.elem failure ["","conflicting_consent_revision","invalid_credentials","credential_update_failed","reset_not_applicable","endpoint_unavailable"]
         , busy:false, error:detail }}
     Finalize -> liftEffect $ C.dispose runtime
     Poll -> E.runUpdate runtime dispatch U.Poll
