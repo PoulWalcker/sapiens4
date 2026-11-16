@@ -107,7 +107,7 @@ body m d = case d.kind of
         ,V.p "model-hint" "Example report"
         ,V.textNode "pre" [] telemetryExample]
       ,V.p "corpora-feedback" (if m.telemetry.busy then "Saving or reading your choice…" else m.telemetry.error)
-      ,V.when (m.telemetry.error /= "") $ V.control [V.disabled m.telemetry.busy] "Refresh usage reporting" ReadTelemetry
+      ,V.when (m.telemetry.error /= "") $ V.control [V.disabled m.telemetry.busy] "Read reporting status" ReadTelemetry
       ,V.control [V.disabled $ not m.telemetry.ready || m.telemetry.busy || m.telemetry.epoch == Nothing] "Start a new telemetry installation" ResetTelemetryIdentity
       ,V.p "model-hint" "This replaces the installation credential. If reporting is enabled, a new installation identity will be created. Corpora IDs stay unchanged, so activity from the same Corpora can still be linked across this reset. Earlier reports remain, and copies of the old credential are not revoked."]
     ,V.node "details" [V.cls "workspace-settings-help"]

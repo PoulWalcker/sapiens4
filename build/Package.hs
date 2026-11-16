@@ -10,6 +10,8 @@ import Data.Aeson (encode, object, (.=))
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString as B
 import Data.Char (isDigit)
+import Data.Version (showVersion)
+import qualified Paths_sapiens_domain as Package
 import Data.List (sortOn, sort, isPrefixOf, nub)
 import Data.Maybe
 import qualified Data.Map.Strict as Map
@@ -37,10 +39,11 @@ main = do
  args <- getArgs
  root <- getCurrentDirectory >>= canonicalizePath
  case args of
-  ["stage", destination] -> stage root destination
+  ["stage", destination] -> stage root (showVersion Package.version) destination
+  ["stage", destination, version] -> stage root version destination
   ["macos", version, output] -> packageMac root version output False
   ["macos", version, output,"--release"] -> packageMac root version output True
-  _ -> fail "Usage: Package.hs stage NEW_RUNTIME | macos VERSION NEW_OUTPUT_DIRECTORY"
+  _ -> fail "Usage: Package.hs stage NEW_RUNTIME [VERSION] | macos VERSION NEW_OUTPUT_DIRECTORY"
 
 run :: FilePath -> [String] -> IO ()
 run = callProcess
@@ -218,8 +221,9 @@ withTemporary parent action = do
  let temporary=parent</>(".sapiens-package."++show nonce)
  bracket (createDirectory temporary >> pure temporary) removePathForcibly action
 
-stage :: FilePath -> FilePath -> IO ()
-stage root destination = do
+stage :: FilePath -> String -> FilePath -> IO ()
+stage root version destination = do
+ unless (not (null version) && length version <= 40 && all (\c -> c `elem` (['0'..'9'] ++ ['A'..'Z'] ++ ['a'..'z'] ++ "._+-")) version) $ fail "Invalid application version"
  supplied <- lookupEnv "SAPIENS_PACKAGE_TELEMETRY_ENDPOINT"
  endpoint <- traverse (maybe (fail "Package telemetry endpoint must be an HTTPS origin") pure . mkEndpoint) supplied
  exists destination >>= flip when (fail "Runtime destination must be new")
@@ -236,6 +240,7 @@ stage root destination = do
   when (os=="mingw32") $ forM_ ["AppIcon.ico","AppIconDark.ico"] $ \icon -> copy (root</>"environments/windows"</>icon) (destination</>"environments/windows"</>icon)
   BL.writeFile (destination</>"package-manifest.json") $ encode $ object
    ["channel" .= ("stable" :: String), "appId" .= ("com.sapiens4.desktop" :: String)
+   ,"app_version" .= version
    ,"telemetry_endpoint" .= (endpointOrigin <$> endpoint)]
 
 packageMac :: FilePath -> String -> FilePath -> Bool -> IO ()
@@ -256,7 +261,7 @@ packageMac root version outputInput public = do
   createDirectoryIfMissing True resources
   createDirectory macos
   copy (root</>".build/bin/sapiens-macos") (macos</>"Sapiens4")
-  stage root (resources</>"runtime")
+  stage root version (resources</>"runtime")
   let iconset=temporary</>"AppIcon.iconset"
   createDirectory iconset
   run (root</>".build/bin/sapiens-macos") ["--icon",iconset,root</>"app/shell/favicon.svg"]

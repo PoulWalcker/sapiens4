@@ -84,7 +84,7 @@ function updateStorage() {
  document.querySelectorAll('.setup-choice').forEach((button,index)=>button.setAttribute('aria-pressed',String((index===0)===(storageChoice==='new'))));
  document.querySelectorAll('button').forEach(button=>button.disabled=storageBusy);
  document.getElementById('usage-reporting').disabled=storageBusy || !telemetryReady || telemetryBusy;
- document.getElementById('get-started').disabled=storageBusy || (storageChoice==='existing' && !storageDirectory);
+ document.getElementById('get-started').disabled=storageBusy || telemetryBusy || (storageChoice==='existing' && !storageDirectory);
  const selected=storageChoice==='existing' && !!storageDirectory;
  document.getElementById('storage-existing').dataset.change=String(selected);
  document.getElementById('storage-change').hidden=!selected;
@@ -112,7 +112,7 @@ function storagePicked(directory) {
 }
 function continueSetup(event) {
  if(event?.detail>1) return;
- if(storageBusy) return;
+ if(storageBusy || telemetryBusy) return;
  if(storageChoice!=='existing' || storageDirectory) {
   storageLoading();
   postStorage({storage:storageChoice,directory:storageDirectory});
@@ -121,9 +121,9 @@ function continueSetup(event) {
 function sapiensTelemetryEvent(result) {
  telemetryEpoch=result.consent?.consent_epoch ?? null;
  telemetryBusy=false;
- telemetryReady=!['invalid_profile','insecure_profile','native_channel_unavailable','profile_io_error'].includes(result.error);
- document.getElementById('usage-reporting').checked=result.consent?.state==='granted' && !result.locally_disabled;
- document.getElementById('usage-feedback').textContent=result.error ? 'Your reporting choice could not be confirmed. A previously saved choice may still apply. You can continue setup and review usage reporting in Settings.' : '';
+ telemetryReady=!['invalid_profile','insecure_profile','native_channel_unavailable'].includes(result.error);
+ document.getElementById('usage-reporting').checked=result.consent?.state==='granted';
+ document.getElementById('usage-feedback').textContent=result.error==='native_channel_unavailable' ? 'Your reporting choice could not be confirmed. A previously saved choice may still apply. You can continue setup and review usage reporting in Settings.' : result.locally_disabled ? 'Reporting is paused in this app. The checkbox shows your saved choice. Fix the storage problem, then choose your preference again, or continue setup and review usage reporting in Settings.' : result.error ? 'Your reporting choice could not be confirmed. A previously saved choice may still apply. You can continue setup and review usage reporting in Settings.' : '';
  updateStorage();
 }
 document.getElementById('usage-reporting').addEventListener('change',event=>{

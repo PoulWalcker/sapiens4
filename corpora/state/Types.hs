@@ -37,11 +37,9 @@ import System.FilePath
 import System.IO
 import System.Process
 import Telemetry (Emit)
-import TelemetryStorage (isTelemetryPrivatePath)
 #ifdef mingw32_HOST_OS
 import Foreign.C
 import System.IO.Error (isPermissionError)
-import qualified TelemetryWindows as Private
 
 foreign import ccall unsafe "_wopen" syncOpen :: CWString -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "_commit" syncCommit :: CInt -> IO CInt
@@ -169,19 +167,11 @@ readJSON :: FromJSON a => FilePath -> a -> IO a
 readJSON p def = do
  exists <- doesFileExist p
  if not exists then pure def else do
-  private <- isTelemetryPrivatePath p
-  let diagnostic = if private then const "Invalid private application JSON" else id
-  either (throwIO . userError . diagnostic) pure . eitherDecode =<< BL.readFile p
+  either (throwIO . userError) pure . eitherDecode =<< BL.readFile p
 atomicBytes :: FilePath -> BL.ByteString -> IO ()
 atomicBytes p bytes = do
  createDirectoryIfMissing True (takeDirectory p)
-#ifdef mingw32_HOST_OS
- private <- isTelemetryPrivatePath p
- let temporary = if private then Private.createPrivateTempFile (takeDirectory p)
-                 else openBinaryTempFile (takeDirectory p) ".writing-"
-#else
  let temporary = openBinaryTempFile (takeDirectory p) ".writing-"
-#endif
  bracketOnError temporary (\(f,h) -> do
   hClose h `catch` (\(_::IOException) -> pure ())
   removeFile f `catch` (\(_::IOException) -> pure ())) $ \(f,h) -> do

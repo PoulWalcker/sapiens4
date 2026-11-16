@@ -46,7 +46,7 @@ import System.Timeout
 import TelemetryControl (ConsentAction, isConsentMessage, parseConsentAction)
 import Text.Read (readMaybe)
 
-data Application = Application { native :: Obj, browser :: IORef Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: IORef (Maybe ServerProcess), address :: IORef Text, startup :: IORef (Maybe (Async ())), starting :: IORef Bool, localLoaded :: IORef Bool, runtime :: FilePath, selectedRoot :: IORef (Maybe FilePath), recoveryError :: IORef (Maybe Text), firstSignal :: IORef (Maybe WorkspaceSignal), attemptNumber :: IORef Integer, recovering :: IORef Bool, clientPreferences :: Obj, quitting :: IORef Bool, telemetryOpened :: IORef Bool }
+data Application = Application { native :: Obj, browser :: IORef Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: IORef (Maybe ServerProcess), address :: IORef Text, startup :: IORef (Maybe (Async ())), starting :: IORef Bool, localLoaded :: IORef Bool, runtime :: FilePath, selectedRoot :: IORef (Maybe FilePath), recoveryError :: IORef (Maybe Text), firstSignal :: IORef (Maybe WorkspaceSignal), attemptNumber :: IORef Integer, recovering :: IORef Bool, clientPreferences :: Obj, quitting :: IORef Bool, telemetryOpened :: IORef Bool, telemetryConsent :: Telemetry.Session }
 
 data ServerProcess = ServerProcess { serverHandle :: ProcessHandle, serverSession :: ProcessID, serverInput :: Handle, serverOutput :: Handle, serverErrors :: Async (), serverDrain :: Maybe (Async ()), serverDirectory :: FilePath, serverTelemetry :: Telemetry.Channel }
 
@@ -75,11 +75,12 @@ startServer application choice runtime destination = do
     unless present $ ioError (userError "The application is incomplete. Extract the complete Sapiens4 package.")
     createDirectoryIfMissing True configRoot
     environment <- getEnvironment
+    blocked <- Telemetry.isBlocked (telemetryConsent application)
     pid <- getProcessID
     let toolPath = intercalate [searchPathSeparator] $ nub $
             ["/usr/bin","/bin","/usr/sbin","/sbin","/opt/homebrew/bin","/usr/local/bin"] ++
             filter isAbsolute (maybe [] splitSearchPath $ lookup "PATH" environment)
-        overrides = [("PATH",toolPath),("SAPIENS_REPOSITORY",runtime),("SAPIENS_CONFIG_DIR",configRoot),("SAPIENS_DATA_DIR",destination),("SAPIENS_DESKTOP_PID",show pid),("SAPIENS_STORAGE_MODE",storageMode choice)]
+        overrides = [("SAPIENS_TELEMETRY_BLOCKED",if blocked then "1" else "0"),("PATH",toolPath),("SAPIENS_REPOSITORY",runtime),("SAPIENS_CONFIG_DIR",configRoot),("SAPIENS_DATA_DIR",destination),("SAPIENS_DESKTOP_PID",show pid),("SAPIENS_STORAGE_MODE",storageMode choice)]
     let command = (proc binary ["--port","0","--data-dir",destination,"--desktop"])
             { cwd = Just runtime, env = Just (overrides ++ filter ((`notElem` map fst overrides) . fst) environment) }
     launchServer application destination command
@@ -433,12 +434,13 @@ runSession isFixture initialAddress = do
     problem <- newIORef Nothing
     closing <- newIORef False
     opened <- newIORef False
+    telemetry <- Telemetry.newSession
     preferences <- if isFixture then pure nullPtr else do
         config <- configDirectory >>= canonicalizePath
         let hex byte = let value=showHex byte "" in replicate (2-length value) '0' ++ value
             suite="com.sapiens4.client." <> T.pack (concatMap hex (BS.unpack (SHA256.hash (TE.encodeUtf8 (T.pack config)))))
         allocated "NSUserDefaults" >>= \o -> str suite >>= obj1 o "initWithSuiteName:"
-    let state = Application application b win tasks isFixture process address worker busy loaded runtime selection problem signal generation recovery preferences closing opened
+    let state = Application application b win tasks isFixture process address worker busy loaded runtime selection problem signal generation recovery preferences closing opened telemetry
     (do
         target <- installMethods state
         initialize state target initialAddress
@@ -530,7 +532,7 @@ changeTelemetry application context action = do
     current <- readIORef (child application)
     void $ forkIO $ do
         result <- if fixture application then pure Telemetry.unavailableReply
-          else Telemetry.consent context (serverTelemetry <$> current) action
+          else Telemetry.consent (telemetryConsent application) context (serverTelemetry <$> current) action
         postAttempt application attempt $ do
             active <- readIORef (browser application) >>= readIORef . shell
             when (active == view) $

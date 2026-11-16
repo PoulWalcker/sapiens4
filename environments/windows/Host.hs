@@ -31,6 +31,7 @@ data Host = Host
   , runtimeDirectory :: FilePath
   , serverProcess :: IORef (Maybe ServerProcess)
   , origin :: IORef (Maybe URI)
+  , telemetryConsent :: Telemetry.Session
   }
 
 data ServerProcess = ServerProcess
@@ -76,7 +77,7 @@ prepareHost args = do
   when (null (runtimePath paths)) $ fail "Runtime directory must not be empty"
   directory <- makeAbsolute (dataPath paths)
   runtime <- makeAbsolute (runtimePath paths)
-  Host directory runtime <$> newIORef Nothing <*> newIORef Nothing
+  Host directory runtime <$> newIORef Nothing <*> newIORef Nothing <*> Telemetry.newSession
 
 startHost :: StorageChoice -> Host -> IO String
 startHost choice host = do
@@ -84,10 +85,11 @@ startHost choice host = do
   available <- doesFileExist binary
   unless available $ ioError $ userError $ "Haskell runtime is missing. Extract the complete Sapiens4 package: " ++ binary
   environment <- getEnvironment
+  blocked <- Telemetry.isBlocked (telemetryConsent host)
   configRoot <- configDirectory
   createDirectoryIfMissing True configRoot
   pid <- processId
-  let overrides = [("SAPIENS_STORAGE_MODE",storageMode choice),("SAPIENS_DESKTOP_PID", show pid),("SAPIENS_REPOSITORY",runtimeDirectory host),("SAPIENS_CONFIG_DIR",configRoot),("SAPIENS_DATA_DIR",dataDirectory host)]
+  let overrides = [("SAPIENS_TELEMETRY_BLOCKED",if blocked then "1" else "0"),("SAPIENS_STORAGE_MODE",storageMode choice),("SAPIENS_DESKTOP_PID", show pid),("SAPIENS_REPOSITORY",runtimeDirectory host),("SAPIENS_CONFIG_DIR",configRoot),("SAPIENS_DATA_DIR",dataDirectory host)]
   let command = (proc binary ["--port", "0", "--data-dir", dataDirectory host, "--desktop"])
         { cwd = Just (runtimeDirectory host), std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe
         , env = Just (hostEnvironment overrides environment)

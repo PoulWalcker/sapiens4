@@ -188,7 +188,7 @@ desktopSession memory probe = do
             view <- readIORef shellRef
             channel <- telemetryChannel host
             void $ forkIO $ do
-              result <- Telemetry.consent context channel action
+              result <- Telemetry.consent (telemetryConsent host) context channel action
               post $ do
                 currentAttempt <- readIORef storageAttempt
                 current <- readIORef shellRef

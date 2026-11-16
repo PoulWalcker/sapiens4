@@ -16,20 +16,19 @@ import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Maybe (isJust)
 import qualified Data.Text as T
 import Data.Time (UTCTime, defaultTimeLocale, diffUTCTime, getCurrentTime, parseTimeM)
-import Data.Version (showVersion)
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
 import Network.HTTP.Client hiding (path)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types (hAuthorization, hContentType, hRetryAfter, statusCode)
-import qualified Paths_sapiens_domain as Package
 import System.Info (os)
+import System.Environment (lookupEnv)
 import System.Random (randomRIO)
 import System.Timeout (timeout)
 import Telemetry
 import TelemetryControl (ConsentAction, runConsentAction)
 import TelemetryCredential
-import TelemetryEndpoint (configuredEndpoint, endpointOrigin)
+import TelemetryEndpoint (configuredEndpoint, configuredAppVersion, endpointOrigin)
 import TelemetryIdentity (prepareCorporaId)
 import TelemetryProfile
 import Text.Read (readMaybe)
@@ -41,11 +40,9 @@ data HostTelemetry = HostTelemetry
   }
 
 data Grant = Grant ConsentEpoch NoticeVersion (Maybe Token) deriving (Eq)
-data SenderError = CredentialsRejected | CredentialUpdateFailed | EndpointUnavailable | ScopedIdentityUnavailable
+data SenderError = CredentialUpdateFailed | ScopedIdentityUnavailable
 senderErrorText :: SenderError -> T.Text
-senderErrorText CredentialsRejected = "invalid_credentials"
 senderErrorText CredentialUpdateFailed = "credential_update_failed"
-senderErrorText EndpointUnavailable = "endpoint_unavailable"
 senderErrorText ScopedIdentityUnavailable = "scoped_identity_unavailable"
 data Control = Control (Maybe Grant) (Maybe Token) (Maybe SenderError)
 data Intent = Intent ConsentEpoch Word64 UTCTime EventIntent
@@ -64,9 +61,12 @@ data Sender = Sender
 
 startConfiguredTelemetry :: RuntimeKind -> IO HostTelemetry
 startConfiguredTelemetry kind = do
+  -- Native launchers carry their process-local failure block across bootstrap
+  -- and backend recovery. Only an explicit successful mutation clears it.
+  blocked <- (== Just "1") <$> lookupEnv "SAPIENS_TELEMETRY_BLOCKED"
   sender <- Sender (if kind == NativeDesktop then DesktopProfile else HeadlessProfile) kind
     <$> newTBQueueIO 128 <*> newTVarIO Nothing <*> newTVarIO False
-    <*> newTVarIO False <*> newEmptyTMVarIO <*> newMVar (Control Nothing Nothing Nothing) <*> newTVarIO False
+    <*> newTVarIO blocked <*> newEmptyTMVarIO <*> newMVar (Control Nothing Nothing Nothing) <*> newTVarIO False
   worker <- asyncWithUnmask $ \unmask -> unmask (background sender) `catch` \(err :: SomeException) -> do
     atomically (writeTVar (stopped sender) True >> closeAdmission sender)
     case fromException err :: Maybe SomeAsyncException of
@@ -140,23 +140,29 @@ readStatus sender = withMVar (control sender) $ \(Control _ rejected detail) -> 
         Left _ -> False
       diagnostic = case profile of
         Left _ -> Nothing
-        Right _ | refused -> Just CredentialsRejected
-                | not configured -> Just EndpointUnavailable
-                | otherwise -> detail
-  pure (profile, blocked || dead || refused, senderErrorText <$> diagnostic)
+        Right _ | blocked -> Just "consent_write_failed"
+                | refused -> Just "invalid_credentials"
+                | not configured -> Just "endpoint_unavailable"
+                | otherwise -> senderErrorText <$> detail
+  pure (profile, blocked || dead || refused, diagnostic)
 
 mutate :: Sender -> (ProfileLocation -> IO (Either ProfileError Profile)) -> IO (Either ProfileError Profile)
-mutate sender operation = do
-  atomically (writeTVar (locallyBlocked sender) True >> closeAdmission sender)
-  modifyMVar (control sender) $ \previous -> do
-    result <- profileLocation sender >>= either (pure . Left) operation
-    case result of
-      Right _ -> atomically (writeTVar (locallyBlocked sender) False)
-      Left ConflictingConsentRevision -> atomically (writeTVar (locallyBlocked sender) False)
-      Left ResetNotApplicable -> atomically (writeTVar (locallyBlocked sender) False)
-      Left _ -> pure ()
-    (updated, _) <- refreshLocked sender previous
-    pure (updated, result)
+mutate sender operation = modifyMVar (control sender) $ \previous -> do
+  -- Serialize mutations with admission and refresh. A read or a stale mutation
+  -- must never clear the local block left by a failed opt-out.
+  wasBlocked <- atomically $ do
+    previousBlock <- readTVar (locallyBlocked sender)
+    writeTVar (locallyBlocked sender) True
+    closeAdmission sender
+    pure previousBlock
+  result <- profileLocation sender >>= either (pure . Left) operation
+  case result of
+    Right _ -> atomically (writeTVar (locallyBlocked sender) False)
+    Left ConflictingConsentRevision -> atomically (writeTVar (locallyBlocked sender) wasBlocked)
+    Left ResetNotApplicable -> atomically (writeTVar (locallyBlocked sender) wasBlocked)
+    Left _ -> pure ()
+  (updated, _) <- refreshLocked sender previous
+  pure (updated, result)
 
 capture :: Sender -> Emit
 capture sender intent = do
@@ -211,8 +217,9 @@ data Transport = Transport Manager String AppVersion OsFamily
 configuredTransport :: IO (Maybe Transport)
 configuredTransport = do
   endpoint <- configuredEndpoint
+  version <- (>>= mkAppVersion) <$> configuredAppVersion
   let platform = case os of "darwin" -> Just MacOS; "mingw32" -> Just Windows; "linux" -> Just Linux; _ -> Nothing
-  case (endpoint, mkAppVersion (T.pack (showVersion Package.version)), platform) of
+  case (endpoint, version, platform) of
     (Just origin, Just version, Just system) -> do
       manager <- newManager tlsManagerSettings
         { managerConnCount = 1, managerIdleConnectionCount = 1
@@ -324,7 +331,7 @@ collect sender transport@(Transport _ _ version system) expected@(Grant _ notice
           (updated@(Control current _ _), _) <- refreshLocked sender previous
           if current == Just expected then do
             atomically (closeAdmission sender)
-            pure (Control current (Just token) (Just CredentialsRejected), ())
+            pure (Control current (Just token) Nothing, ())
             else pure (updated, ())
         _ -> pure ()
 collect _ _ _ _ = pure ()

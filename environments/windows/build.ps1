@@ -86,7 +86,7 @@ try {
     $staging = $candidate
     $package = Join-Path $staging 'Sapiens4'
     New-Item -ItemType Directory -Path $package | Out-Null
-    & (Join-Path $repo '.build/bin/sapiens-package.exe') stage (Join-Path $package 'runtime')
+    & (Join-Path $repo '.build/bin/sapiens-package.exe') stage (Join-Path $package 'runtime') $Version
     if ($LASTEXITCODE -ne 0) { throw 'Runtime assembly failed' }
     Copy-Item -LiteralPath (Join-Path $repo '.build/bin/sapiens-windows.exe') -Destination (Join-Path $package 'Sapiens4.exe')
     Copy-Item -LiteralPath (Join-Path $repo '.build/bin/WebView2Loader.dll'),(Join-Path $repo '.build/bin/WebView2-LICENSE.txt') -Destination $package

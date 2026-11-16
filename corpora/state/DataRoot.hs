@@ -25,7 +25,6 @@ import System.FilePath
 import System.IO
 import System.IO.Error (ioeGetErrorString, isAlreadyExistsError, isUserError)
 import System.Info (os)
-import TelemetryStorage (isTelemetryPrivatePath)
 import Types (writeJSON, migrateAgentState, validateValue, pairs, get)
 #ifdef mingw32_HOST_OS
 import qualified TelemetryStorage as Private
@@ -212,9 +211,7 @@ storageError = ioError . userError
 
 readDataJSON :: FromJSON a => FilePath -> IO a
 readDataJSON path = do
- private <- isTelemetryPrivatePath path
- let diagnostic = if private then const "Could not read private application data" else ("Could not read data: " ++)
- either (storageError . diagnostic) pure . eitherDecode =<< L.readFile path
+ either (storageError . ("Could not read data: " ++)) pure . eitherDecode =<< L.readFile path
 
 validateDataRoot :: StorageChoice -> FilePath -> IO ()
 validateDataRoot choice = validate []

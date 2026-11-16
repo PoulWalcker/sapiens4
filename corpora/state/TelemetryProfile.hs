@@ -7,7 +7,7 @@ module TelemetryProfile
   , resolveProfileLocation, loadProfile, commitConsent, resetIdentity
   , commitToken, withAttempt, withGrantedConsent
   , profileConsent, profileToken, consentEpochText, parseConsentEpoch
-  , mkNoticeVersion, noticeVersionNumber, consentStatusJSON
+  , mkNoticeVersion, noticeVersionNumber, consentJSON, consentStatusJSON
   ) where
 
 import Control.Exception (Exception, Handler (..), IOException, catches, throwIO)

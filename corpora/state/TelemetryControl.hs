@@ -14,6 +14,7 @@ import Control.Monad (guard)
 import Data.Aeson (Value (..), object, (.=))
 import qualified Data.Aeson.KeyMap as KM
 import Data.Text (Text)
+import Data.IORef (IORef, atomicModifyIORef', readIORef, writeIORef)
 import TelemetryProfile
 
 data ConsentAction = ReadConsent | WriteConsent (Maybe ConsentEpoch) Consent | ResetIdentity ConsentEpoch
@@ -89,9 +90,7 @@ runConsentAction readStatus write reset action = case action of
         pure (reply current disabled (Just (profileErrorCode err)))
     reply current disabled failure = object
       [ "consent" .= case current of
-          Right profile -> case consentStatusJSON profile of
-            Object fields -> KM.lookup "consent" fields
-            _ -> Nothing
+          Right profile -> consentJSON <$> profileConsent profile
           Left _ -> Nothing
       , "locally_disabled" .= disabled
       , "error" .= case failure of
@@ -99,9 +98,28 @@ runConsentAction readStatus write reset action = case action of
           Nothing -> either (Just . profileErrorCode) (const Nothing) current
       ]
 
-localConsent :: ConsentAction -> IO Value
-localConsent action = do
+-- Bootstrap has no sender yet. Keep failures latched in the native process so
+-- continuing setup cannot revive an older grant when the backend starts.
+localConsent :: IORef Bool -> ConsentAction -> IO Value
+localConsent blocked action = do
+  previous <- atomicModifyIORef' blocked $ \current ->
+    (case action of ReadConsent -> current; _ -> True, current)
   location <- resolveProfileLocation DesktopProfile
+  let status readProfile = do
+        profile <- readProfile
+        disabled <- readIORef blocked
+        pure (profile, disabled, if disabled then Just "consent_write_failed" else Nothing)
+      mutation operation = do
+        result <- operation
+        case result of
+          Right _ -> writeIORef blocked False
+          Left ConflictingConsentRevision -> writeIORef blocked previous
+          Left ResetNotApplicable -> writeIORef blocked previous
+          Left _ -> pure ()
+        pure result
   case location of
-    Left err -> runConsentAction (pure (Left err, True, Nothing)) (\_ _ -> pure (Left err)) (\_ -> pure (Left err)) action
-    Right profile -> runConsentAction ((\value -> (value, False, Nothing)) <$> loadProfile profile) (commitConsent profile) (resetIdentity profile) action
+    Left err -> runConsentAction (status (pure (Left err)))
+      (\_ _ -> mutation (pure (Left err))) (\_ -> mutation (pure (Left err))) action
+    Right profile -> runConsentAction (status (loadProfile profile))
+      (\expected choice -> mutation (commitConsent profile expected choice))
+      (\expected -> mutation (resetIdentity profile expected)) action

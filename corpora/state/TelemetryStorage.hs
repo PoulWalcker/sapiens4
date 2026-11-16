@@ -15,18 +15,19 @@ module TelemetryStorage
   ) where
 
 import Control.Exception (Exception, IOException, bracketOnError, catch, mask, throwIO)
-import Control.Monad (unless, when)
+import Control.Monad (filterM, unless, when)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Char (toLower)
-import Data.List (dropWhileEnd, isPrefixOf)
+import Data.List (dropWhileEnd)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Network.HTTP.Types.URI (urlDecode)
-import Network.URI (parseURI, uriPath, uriScheme)
-import System.Directory (canonicalizePath, pathIsSymbolicLink, removeFile)
+import Network.URI (parseURI, uriAuthority, uriRegName, uriPath, uriScheme)
+import System.Directory (canonicalizePath, doesFileExist, makeAbsolute, pathIsSymbolicLink, removeFile)
 import System.FileLock (SharedExclusive (Exclusive), withFileLock)
-import System.FilePath (takeDirectory, takeFileName)
+import System.FilePath ((</>), equalFilePath, joinPath, splitDirectories, splitDrive, takeDirectory, takeFileName)
+import RuntimePaths (configDirectory, defaultConfigDirectory)
 import System.IO (Handle, hClose)
 import System.IO.Error (isDoesNotExistError)
 import System.Info (os)
@@ -65,17 +66,39 @@ privatePathExists :: FilePath -> IO Bool
 privatePathExists path = (True <$ pathIsSymbolicLink path) `catch` \(err :: IOException) ->
   if isDoesNotExistError err then pure False else throwIO err
 
+-- Compare actual private locations, including aliases and Windows stream syntax.
+-- The Corpora identity is core application data; only .telemetry is private.
 isTelemetryPrivatePath :: FilePath -> IO Bool
 isTelemetryPrivatePath path = do
-  resolved <- canonicalizePath path `catch` \(_ :: IOException) -> pure path
-  let reserved value =
-        let raw = map toLower (takeFileName value)
-            name = if os == "mingw32"
-              then dropWhileEnd (`elem` (" ." :: String)) (takeWhile (/= ':') raw)
-              else raw
-        in name `elem` ["corpora-identity.json", "telemetry.json"]
-          || ".telemetry-writing-" `isPrefixOf` name
-  pure (reserved path || reserved resolved)
+  absolute <- makeAbsolute (nativePath path)
+  resolved <- canonicalizePath absolute
+  profiles <- mapM (>>= canonicalizePath . (</> "telemetry")) [configDirectory, defaultConfigDirectory]
+  let candidates = filter ((== ".telemetry") . foldCase . takeFileName)
+        (ancestors absolute <> ancestors resolved)
+  corpora <- filterM (doesFileExist . (</> "corpora-identity.json") . takeDirectory) candidates
+    >>= mapM canonicalizePath
+  pure (any (\root -> any (matches root) (ancestors resolved)) (profiles <> corpora))
+  where
+    matches a b = equalFilePath (foldCase (nativePath a)) (foldCase (nativePath b))
+    foldCase = if os `elem` ["mingw32", "darwin"] then map toLower else id
+
+ancestors :: FilePath -> [FilePath]
+ancestors path = path : if parent == path then [] else ancestors parent
+  where parent = takeDirectory path
+
+nativePath :: FilePath -> FilePath
+nativePath path
+  | os == "mingw32" = let (drive, rest) = splitDrive (namespace path)
+      in drive <> joinPath (map component (splitDirectories rest))
+  | otherwise = path
+  where
+    namespace value = case value of
+      '\\':'\\':'?':'\\':u:n:c:'\\':rest | map toLower [u,n,c] == "unc" -> "\\\\" <> rest
+      '\\':'\\':device:'\\':rest | device `elem` ['?', '.'] -> rest
+      _ -> value
+    component value
+      | value `elem` [".", ".."] = value
+      | otherwise = dropWhileEnd (`elem` (" ." :: String)) (takeWhile (/= ':') value)
 
 isTelemetryPrivateURL :: String -> IO Bool
 isTelemetryPrivateURL address = case parseURI address of
@@ -83,9 +106,11 @@ isTelemetryPrivateURL address = case parseURI address of
     case TE.decodeUtf8' (urlDecode False (TE.encodeUtf8 (T.pack (uriPath uri)))) of
       Left _ -> pure True
       Right value ->
-        let path = case T.unpack value of
+        let host = maybe "" uriRegName (uriAuthority uri)
+            path = case T.unpack value of
               '/':drive:':':rest | os == "mingw32" -> drive:':':rest
-              decoded -> decoded
+              decoded | os == "mingw32", host /= "", map toLower host /= "localhost" -> "//" <> host <> decoded
+                      | otherwise -> decoded
         in isTelemetryPrivatePath path
   _ -> pure False
 
