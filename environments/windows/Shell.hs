@@ -262,8 +262,8 @@ desktopSession memory probe update = do
                 writeJSON (preferencesPath directory) next
                 writeIORef preferenceValues next
           commitWorkspace signal =
-            DesktopStorage.saveWhenReady firstSignal signal selectedRoot fst recoverStartup $ \(directory,url) -> do
-              forM_ update $ \updater -> Update.workspaceOpened updater directory
+            DesktopStorage.saveWhenReady firstSignal signal selectedRoot fst recoverStartup $ \(directory,url) corpora -> do
+              forM_ update $ \updater -> Update.workspaceOpened updater directory corpora
               atomicModifyIORef' workerRef (\old -> (Nothing,old)) >>= mapM_ cancel
               writeIORef starting False
               storageScript "window.dispatchEvent(new Event('sapiens-preferences-ready'))"
@@ -397,7 +397,8 @@ desktopSession memory probe update = do
                           _ -> chooseStorage message
                     | Navigation.trusted base source && Navigation.trusted base current -> do
                         forM_ [version | String version <- [field "updateAndRestart" message]] startUpdate
-                        when (field "workspaceReady" message==Bool True) $ commitWorkspace DesktopStorage.WorkspaceReady
+                        forM_ [corpora | String corpora <- [field "workspaceReady" message], not (T.null corpora)] $
+                          commitWorkspace . DesktopStorage.WorkspaceReady
                         applyWindowTheme hwnd light dark lastTheme message
                         case field "clientPreferences" message of
                           input@(JSON.Object _) -> savePreferences input

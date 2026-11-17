@@ -24,6 +24,7 @@ import Data.Version
 import Text.ParserCombinators.ReadP (readP_to_S)
 import Installation
 import Types (atomicBytes)
+import qualified MigrationBackup as Backup
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
@@ -58,16 +59,17 @@ startupNotice (DesktopUpdate owner _ _ _ _) = do
     Left () -> pure Nothing
     Right () -> Just . T.unpack . TE.decodeUtf8 <$> B.readFile claimed `finally` removeFile claimed
 
-workspaceOpened :: DesktopUpdate -> FilePath -> IO ()
-workspaceOpened (DesktopUpdate owner version _ _ _) root = do
+workspaceOpened :: DesktopUpdate -> FilePath -> Text -> IO ()
+workspaceOpened (DesktopUpdate owner version _ _ _) root corpora = do
   let marker = statePath owner </> "update.json"
   exists <- doesFileExist marker
   when exists $ do
     contents <- B.readFile marker
-    (target, expected, fields) <- either fail pure (eitherDecodeStrict contents >>= parseEither
-      (withObject "installed update" (\o -> (,,) <$> o .: "version" <*> o .:? "root" .!= "" <*> pure o)))
-    when (target == showVersion version && (null expected || equalFilePath expected root)) $ do
-      let confirmed = KM.insert "status" (String "ready") (KM.insert "root" (String $ T.pack root) fields)
+    (target, expected, attempt, fields) <- either fail pure (eitherDecodeStrict contents >>= parseEither
+      (withObject "installed update" (\o -> (,,,) <$> o .: "version" <*> o .: "root" <*> o .: "attempt" <*> pure o)))
+    preserved <- Backup.hasOriginal attempt root
+    when (preserved && not (T.null corpora) && target == showVersion version && (null expected || equalFilePath expected root)) $ do
+      let confirmed = KM.insert "status" (String "ready") $ KM.insert "corpora" (String corpora) $ KM.insert "root" (String $ T.pack root) fields
       atomicBytes marker (encode (Object confirmed))
 
 data WorkerFailure = PreviousAvailable String | InstallationIncomplete String
@@ -212,14 +214,12 @@ startWorker owner selected@(Release _ url digest) stop root config = do
   let detail = state </> "outcome.txt"
   exists <- doesFileExist detail
   when exists (removeFile detail)
-  reserveUpdate owner reservation
   let launch errors = createProcess command
         { std_in=CreatePipe, std_out=CreatePipe, std_err=errors
         , close_fds=True, new_session=os=="darwin", create_new_console=False }
-      cancel = cancelUpdate owner reservation
   (input,output,_,child) <- (if os == "darwin"
     then withFile "/dev/null" ReadWriteMode (launch . UseHandle)
-    else launch NoStream) `onException` cancel
+    else launch NoStream)
   case (input,output) of
     (Just control,Just progress) -> do
       let abandon = do
@@ -227,7 +227,6 @@ startWorker owner selected@(Release _ url digest) stop root config = do
             terminateProcess child
             void (waitForProcess child)
             hClose progress
-            cancel
       flip onException abandon $ do
         ready <- timeout 3600000000 (hGetLine progress `catch` \(err :: IOException) -> do
           failure <- workerResult owner child
@@ -237,12 +236,11 @@ startWorker owner selected@(Release _ url digest) stop root config = do
           Nothing -> fail "The update download did not complete within one hour."
           Just _ -> fail "Unexpected updater response."
         stop
-        beginMaintenance owner $ hPutStrLn control "install" >> hFlush control
+        beginMaintenance owner reservation $ hPutStrLn control "install" >> hFlush control
       hClose control
       hClose progress
       pure child
     _ -> do
       terminateProcess child
       void (waitForProcess child)
-      cancel
       fail "The updater could not establish its control channel."

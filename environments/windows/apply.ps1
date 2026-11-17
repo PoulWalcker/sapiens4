@@ -55,7 +55,7 @@ try {
     $App = [IO.Path]::GetFullPath($App)
     $State = [IO.Path]::GetFullPath($State)
     $expected = Join-Path (Split-Path $App -Parent) ('.' + (Split-Path $App -Leaf) + '.update')
-    if ($State -ne $expected -or (Split-Path $PSScriptRoot -Parent) -ne $State -or -not [IO.Directory]::Exists($pending)) { exit 1 }
+    if ($State -ne $expected -or (Split-Path $PSScriptRoot -Parent) -ne $State) { exit 1 }
     if (-not $Asset.IsAbsoluteUri -or $Asset.Scheme -ne 'https' -or $Asset.UserInfo -or $Asset.Fragment -or
         $Version -notmatch '^\d+\.\d+\.\d+$' -or $Digest -notmatch '^[a-fA-F0-9]{64}$') { throw 'Invalid selected release.' }
     $originalShell = Get-Process -Id $ShellPid -ErrorAction SilentlyContinue
@@ -86,6 +86,7 @@ try {
     [Console]::Out.WriteLine('downloaded')
     [Console]::Out.Flush()
     if ([Console]::ReadLine() -cne 'install') { throw 'The update was cancelled before installation. The previous version is available.' }
+    if (-not [IO.File]::Exists($reservation)) { throw 'Installation ownership was not granted.' }
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = Join-Path $PSScriptRoot 'previous.zip'
     [IO.Compression.ZipFile]::CreateFromDirectory($App,$archive)
@@ -109,7 +110,7 @@ try {
     Verify-Publisher (Join-Path $App 'runtime/.build/bin/sapiens4.exe') $old.publisher
     $marker = Join-Path $State 'update.json'
     $next = Join-Path $PSScriptRoot 'update.json'
-    [IO.File]::WriteAllText($next,(@{version=$Version;root=$Root;status='installed';recovery=$archive} | ConvertTo-Json -Compress))
+    [IO.File]::WriteAllText($next,(@{attempt=(Split-Path $PSScriptRoot -Leaf);version=$Version;root=$Root;status='installed';recovery=$archive} | ConvertTo-Json -Compress))
     if ([IO.File]::Exists($marker)) { [IO.File]::Replace($next,$marker,$null) } else { [IO.File]::Move($next,$marker) }
     Release-Reservation
     Open-Shell
@@ -117,6 +118,4 @@ try {
     [IO.File]::WriteAllText($outcome,$_.Exception.Message)
     if (-not $armed) { Release-Reservation }
     exit 1
-} finally {
-    if ([IO.File]::Exists($package)) { [IO.File]::Delete($package) }
 }

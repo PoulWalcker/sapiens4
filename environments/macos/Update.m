@@ -4,6 +4,7 @@
 #import <sys/stat.h>
 #import <signal.h>
 #import <fcntl.h>
+#import <poll.h>
 
 // Sparkle owns package validation and replacement. This process lives outside the
 // replaceable bundle and opens the selected root only after verifying the installed B.
@@ -28,6 +29,15 @@ typedef NS_ENUM(NSUInteger, Phase) { Downloading, Preserving, Installing };
                encoding:NSUTF8StringEncoding error:NULL];
 }
 - (NSURL *)attemptDirectory { return NSBundle.mainBundle.bundleURL.URLByDeletingLastPathComponent; }
+- (void)flush:(NSArray<NSURL *> *)paths {
+    for (NSURL *path in paths) {
+        int fd = open(path.fileSystemRepresentation, O_RDONLY);
+        if (fd < 0) [self stopWith:@"Cannot open the update recovery files for flushing."];
+        int status = fsync(fd);
+        close(fd);
+        if (status != 0) [self stopWith:@"Cannot flush the update recovery files to disk."];
+    }
+}
 - (BOOL)releaseReservation {
     NSURL *pending = [self.state URLByAppendingPathComponent:@"pending"];
     NSURL *token = [pending URLByAppendingPathComponent:self.attemptDirectory.lastPathComponent];
@@ -64,12 +74,14 @@ typedef NS_ENUM(NSUInteger, Phase) { Downloading, Preserving, Installing };
         id release = bytes ? [NSJSONSerialization JSONObjectWithData:bytes options:0 error:&error] : nil;
         if (![release isKindOfClass:NSDictionary.class] ||
             ![release[@"version"] isEqual:self.version]) [self stopWith:@"Installed release does not match the selected release."];
-        NSData *record = [NSJSONSerialization dataWithJSONObject:@{@"version":self.version, @"root":self.root, @"status":@"installed", @"recovery":[self.attemptDirectory URLByAppendingPathComponent:@"previous.zip"].path} options:0 error:&error];
+        NSData *record = [NSJSONSerialization dataWithJSONObject:@{@"attempt":self.attemptDirectory.lastPathComponent, @"version":self.version, @"root":self.root, @"status":@"installed", @"recovery":[self.attemptDirectory URLByAppendingPathComponent:@"previous.zip"].path} options:0 error:&error];
         if (!record || ![record writeToURL:marker options:NSDataWritingAtomic error:&error])
             [self stopWith:error.localizedDescription];
+        [self flush:@[marker,self.state]];
     }
     if (![self releaseReservation])
         [self stopWith:[NSString stringWithFormat:@"Cannot finish installation ownership: %s", strerror(errno)]];
+    [self flush:@[self.state]];
     NSTask *task = [NSTask new];
     task.executableURL = [self.app URLByAppendingPathComponent:@"Contents/MacOS/Sapiens4"];
     NSMutableDictionary *env = [NSProcessInfo.processInfo.environment mutableCopy];
@@ -123,7 +135,8 @@ typedef NS_ENUM(NSUInteger, Phase) { Downloading, Preserving, Installing };
 }
 - (void)showUserInitiatedUpdateCheckWithCancellation:(void (^)(void))cancel {}
 - (void)showUpdateFoundWithAppcastItem:(SUAppcastItem *)item state:(SPUUserUpdateState *)state reply:(void (^)(SPUUserUpdateChoice))reply {
-    if (state.stage != SPUUserUpdateStageNotDownloaded) [self authorizeInstallation];
+    if (state.stage != SPUUserUpdateStageNotDownloaded)
+        [self stopWith:@"An earlier staged update needs recovery before starting a new update."];
     reply(SPUUserUpdateChoiceInstall);
 }
 - (void)showUpdateReleaseNotesWithDownloadData:(SPUDownloadData *)data {}
@@ -137,9 +150,19 @@ typedef NS_ENUM(NSUInteger, Phase) { Downloading, Preserving, Installing };
     if (self.phase != Downloading) return;
     if (puts("downloaded") == EOF || fflush(stdout) != 0)
         [self stopWith:@"The application closed before installation. The previous version is available."];
-    char command[16];
-    if (!fgets(command, sizeof(command), stdin) || strcmp(command, "install\n") != 0)
-        [self stopWith:@"The update was cancelled before installation. The previous version is available."];
+    // This callback blocks Sparkle before extraction. Its timeout must not depend
+    // on the main run loop, which cannot run NSTimer while waiting here.
+    NSDate *limit = [NSDate dateWithTimeIntervalSinceNow:60];
+    char command[8];
+    for (NSUInteger i = 0; i < sizeof(command); i++) {
+        struct pollfd input = { STDIN_FILENO, POLLIN, 0 };
+        int remaining = (int)([limit timeIntervalSinceNow] * 1000);
+        if (remaining <= 0 || poll(&input, 1, remaining) <= 0 || read(STDIN_FILENO, &command[i], 1) != 1)
+            [self stopWith:@"The update was cancelled before installation. The previous version is available."];
+    }
+    NSURL *token = [[self.state URLByAppendingPathComponent:@"pending"] URLByAppendingPathComponent:self.attemptDirectory.lastPathComponent];
+    if (memcmp(command, "install\n", sizeof(command)) != 0 || ![[NSFileManager defaultManager] fileExistsAtPath:token.path])
+        [self stopWith:@"Installation ownership was not granted."];
     self.phase = Preserving;
     NSURL *archive = [self.attemptDirectory URLByAppendingPathComponent:@"previous.zip"];
     NSTask *copy = [NSTask new];
@@ -156,13 +179,7 @@ typedef NS_ENUM(NSUInteger, Phase) { Downloading, Preserving, Installing };
     if (![verify launchAndReturnError:&error]) [self stopWith:error.localizedDescription];
     [verify waitUntilExit];
     if (verify.terminationStatus != 0) [self stopWith:@"The preserved application archive could not be verified."];
-    for (NSURL *path in @[archive,self.attemptDirectory]) {
-        int fd = open(path.fileSystemRepresentation, O_RDONLY);
-        if (fd < 0) [self stopWith:@"The preserved application could not be opened for flushing."];
-        int status = fsync(fd);
-        close(fd);
-        if (status != 0) [self stopWith:@"The preserved application could not be flushed to disk."];
-    }
+    [self flush:@[archive,self.attemptDirectory]];
     self.phase = Installing;
 }
 - (void)updater:(SPUUpdater *)updater willExtractUpdate:(SUAppcastItem *)item { [self authorizeInstallation]; }
@@ -193,8 +210,7 @@ int main(int argc, const char *argv[]) {
         NSString *expected = [NSString stringWithFormat:@".%@.update", driver.app.lastPathComponent];
         if (![driver.state.lastPathComponent isEqual:expected] ||
             ![driver.state.URLByDeletingLastPathComponent.path isEqual:driver.app.URLByDeletingLastPathComponent.path]) return EXIT_FAILURE;
-        BOOL directory = NO;
-        if (![[NSFileManager defaultManager] fileExistsAtPath:[driver.state.path stringByAppendingPathComponent:@"pending"] isDirectory:&directory] || !directory) return EXIT_FAILURE;
+        if (![driver.attemptDirectory.URLByDeletingLastPathComponent.path isEqual:driver.state.path]) return EXIT_FAILURE;
         driver.version = args[3]; driver.asset = [NSURL URLWithString:args[4]];
         driver.root = args[5]; driver.config = args[6]; driver.shellPID = args[7].intValue;
         if (driver.shellPID <= 0 || ![driver.asset.scheme isEqual:@"https"]) return EXIT_FAILURE;

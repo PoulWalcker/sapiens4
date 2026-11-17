@@ -27,6 +27,7 @@ import System.Environment
 import System.Exit
 import System.FilePath
 import System.Info
+import qualified MigrationBackup
 import qualified Installation
 import System.IO
 import System.Process
@@ -55,6 +56,7 @@ run = Installation.withInstallation $ \_ -> do
  root <- repository
  setEnv "SAPIENS_REPOSITORY" root
  case args of
+  ["restore-data", path, operation] -> canonicalizePath path >>= \directory -> MigrationBackup.restoreData directory operation
   ["build-ui"] -> buildUI root
   ["control",config,payload] -> jsonCommand $ do
    value <- either (failure 400 . T.pack) pure (eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack payload))))

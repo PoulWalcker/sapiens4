@@ -224,7 +224,8 @@ receive browser message onPreferences onReady onUpdate onUpdateReady = do
         valid <- booleanArgument raw "isKindOfClass:" dictionary
         body <- if valid then jsonObject raw else pure Nothing
         forM_ body $ \input -> do
-          when (bool (field "workspaceReady" input)) onReady
+          let corpora = text (field "workspaceReady" input)
+          unless (T.null corpora) (onReady corpora)
           if bool (field "desktopUpdateReady" input) then onUpdateReady
           else if field "updateAndRestart" input /= Null then onUpdate (text (field "updateAndRestart" input))
           else if field "clientPreferences" input /= Null then onPreferences (field "clientPreferences" input)

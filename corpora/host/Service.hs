@@ -28,6 +28,7 @@ import Types
 import qualified Telemetry
 import DataRoot
 import qualified MigrationBackup as Backup
+import qualified Installation
 import qualified Computer
 import qualified Store as DB
 import Population
@@ -57,7 +58,7 @@ openService choice path = do
 -- handle open. Only the root lease is transferred to the published Service.
 prepareDataRoot :: StorageChoice -> FilePath -> FilePath -> IO Service
 prepareDataRoot choice repo root = do
- Backup.recoverBeforeOpen root lockSaved
+ Backup.checkNoPending root
  pending <- doesDirectoryExist (initializingDirectory root)
  names <- if choice==AttachExisting then listDirectory root else pure []
  published <- if pending then withUpdateLock root (publishedBootstrap root) else pure False
@@ -85,7 +86,9 @@ prepareDataRoot choice repo root = do
    Backup.checkNoPending root
    finishBootstrap <- publishedBootstrap root
    legacy <- filterM (\(mode,folder,_) -> inspectRoot mode folder) tree
-   unless (null legacy) $ Backup.withMigrationBackup root [folder | (_,folder,_) <- tree] $ do
+   attempt <- Installation.currentAttempt
+   preserved <- maybe (pure True) (`Backup.hasOriginal` root) attempt
+   unless (null legacy && preserved) $ Backup.withMigrationBackup attempt root [folder | (_,folder,_) <- tree] $ do
     forM_ legacy $ \(_,folder,lock) ->
      bracket (openStorageService repo folder lock) DB.closeDatabase $ \s -> DB.initialize s >> convertStoredFields s
     when finishBootstrap (removeDirectory (initializingDirectory root))
@@ -93,8 +96,6 @@ prepareDataRoot choice repo root = do
     unless (actual==[(mode,folder) | (mode,folder,_) <- tree]) $ storageError "The Corpora registry changed during migration."
     forM_ tree $ \(mode,folder,_) -> inspectRoot mode folder >>= \pendingConversion -> when pendingConversion (storageError "Data conversion did not finish.")
    openStorageService repo root owner
- where
- lockSaved paths action = foldr withUpdateLock action paths
 
 openStorageService :: FilePath -> FilePath -> FileLock -> IO Service
 openStorageService repo root lock = do

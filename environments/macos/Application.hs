@@ -568,7 +568,7 @@ receiveMessage application message = do
     if connected || fixture application then do
         current <- readIORef (child application)
         live <- maybe (pure $ fixture application) (fmap not . serverExited . serverHandle) current
-        if live then receive b message (saveClientPreferences application) (commitWorkspace application WorkspaceReady) (startUpdate application) (showUpdate application)
+        if live then receive b message (saveClientPreferences application) (commitWorkspace application . WorkspaceReady) (startUpdate application) (showUpdate application)
           else recoverStartup application "The application server stopped. Choose a folder to reopen your workspace."
       else do
         sh <- readIORef (shell b)
@@ -730,7 +730,7 @@ postAttempt application attempt action = post application $ do
 
 commitWorkspace :: Application -> WorkspaceSignal -> IO ()
 commitWorkspace application signal =
-    saveWhenReady (firstSignal application) signal (selectedRoot application) id (recoverStartup application . T.pack) $ \directory -> do
-        forM_ (updater application) $ \update -> Update.workspaceOpened update directory
+    saveWhenReady (firstSignal application) signal (selectedRoot application) id (recoverStartup application . T.pack) $ \directory corpora -> do
+        forM_ (updater application) $ \update -> Update.workspaceOpened update directory corpora
         atomicModifyIORef' (startup application) (\old -> (Nothing,old)) >>= mapM_ cancel
         writeIORef (starting application) False

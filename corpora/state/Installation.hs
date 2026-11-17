@@ -1,12 +1,17 @@
 -- Admission is keyed to the physical installed application, before resolving user storage.
+{-# LANGUAGE OverloadedStrings #-}
 module Installation
-  ( Installation, appPath, statePath, installed, withInstallation, reserveUpdate, cancelUpdate, resumeUse, beginMaintenance
-  , pendingPath, runtimePath, shellPath
+  ( Installation, appPath, statePath, installed, withInstallation, resumeUse, beginMaintenance
+  , pendingPath, runtimePath, shellPath, currentAttempt
   ) where
 
 import Control.Concurrent.MVar
 import Control.Exception
 import qualified Data.ByteString as B
+import Data.Aeson
+import Data.Aeson.Types (parseEither)
+import qualified Data.UUID as UUID
+import qualified MigrationFiles as Files
 import Control.Monad
 import System.Directory
 import System.Environment (getExecutablePath)
@@ -50,13 +55,37 @@ installed exe
 pendingPath :: Installation -> FilePath
 pendingPath owner = statePath owner </> "pending"
 
+installationState :: FilePath -> FilePath
+installationState app = takeDirectory app </> ("." ++ takeFileName app ++ ".update")
+
+-- Storage asks only which installed update owns this startup. It decides whether
+-- this Data Root needs conversion or a new original before normal runtime writes.
+currentAttempt :: IO (Maybe String)
+currentAttempt = do
+  image <- canonicalizePath =<< getExecutablePath
+  case installed image of
+    Nothing -> pure Nothing
+    Just app -> do
+      let marker = installationState app </> "update.json"
+          readObject path = B.readFile path >>= either fail pure . eitherDecodeStrict
+          field key value = either fail pure (parseEither (withObject "installed update" (.: key)) value)
+      exists <- doesFileExist marker
+      if not exists then pure Nothing else do
+        value <- readObject marker
+        target <- field "version" value
+        actual <- readObject (runtimePath app </> "desktop-update.json") >>= field "version"
+        attempt <- field "attempt" value
+        unless (maybe False ((== attempt) . ("driver-" ++) . UUID.toString) (UUID.fromString (drop 7 attempt))) $
+          fail "Invalid installed update attempt."
+        pure (if (target :: String) == actual then Just attempt else Nothing)
+
 withInstallation :: (Maybe Installation -> IO a) -> IO a
 withInstallation action = do
   path <- canonicalizePath =<< getExecutablePath
   case installed path of
     Nothing -> action Nothing
     Just app -> do
-      let directory = takeDirectory app </> ("." ++ takeFileName app ++ ".update")
+      let directory = installationState app
       createDirectoryIfMissing False directory
       bracket (open app directory) (\owner -> modifyMVar_ (useLock owner) (\lease -> mapM_ unlockFile lease >> pure Nothing)) (action . Just)
   where
@@ -70,21 +99,15 @@ withInstallation action = do
       lease <- lockFile (directory </> "use.lock") Shared
       Installation app directory <$> newMVar (Just lease)
 
--- Reserve admission while the existing application continues using its data.
+-- Publish only after download, shutdown and exclusive ownership. An uncertain
+-- handoff keeps the gate closed until the native helper or explicit repair finishes.
 reserveUpdate :: Installation -> String -> IO ()
-reserveUpdate owner attempt = withFileLock (statePath owner </> "admission.lock") Exclusive $ \_ -> do
+reserveUpdate owner attempt = do
   createDirectory (pendingPath owner)
-  B.writeFile (pendingPath owner </> attempt) B.empty `onException` removeDirectory (pendingPath owner)
-
-cancelUpdate :: Installation -> String -> IO ()
-cancelUpdate owner attempt = withFileLock (statePath owner </> "admission.lock") Exclusive $ \_ -> do
-  let token = pendingPath owner </> attempt
-  reserved <- doesFileExist token
-  when reserved (removeFile token)
-  pending <- doesDirectoryExist (pendingPath owner)
-  when pending $ do
-    contents <- listDirectory (pendingPath owner)
-    when (null contents) (removeDirectory (pendingPath owner))
+  B.writeFile (pendingPath owner </> attempt) B.empty
+  Files.syncEntry False (pendingPath owner </> attempt)
+  Files.syncEntry True (pendingPath owner)
+  Files.syncEntry True (statePath owner)
 
 resumeUse :: Installation -> IO Bool
 resumeUse owner = withFileLock (statePath owner </> "admission.lock") Exclusive $ \_ -> do
@@ -97,8 +120,8 @@ resumeUse owner = withFileLock (statePath owner </> "admission.lock") Exclusive 
 
 -- New readers and promotions serialize on admission.lock. The original reader is
 -- reacquired before opening admission on failure; pending survives loss of the shell.
-beginMaintenance :: forall a. Installation -> IO a -> IO a
-beginMaintenance owner launch = mask_ $ do
+beginMaintenance :: forall a. Installation -> String -> IO a -> IO a
+beginMaintenance owner attempt launch = mask_ $ do
   outcome <-
    withFileLock (statePath owner </> "admission.lock") Exclusive $ \_ ->
     modifyMVar (useLock owner) $ \current -> case current of
@@ -110,6 +133,7 @@ beginMaintenance owner launch = mask_ $ do
           case writer of
             Nothing -> fail "Another instance is using this installation. Close it and try again."
             Just _ -> do
+              reserveUpdate owner attempt
               launch
         case (outcome :: Either IOException a) of
           Right result -> pure (Nothing, Right result)
