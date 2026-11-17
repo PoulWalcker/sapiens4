@@ -12,6 +12,7 @@ import System.IO.Error (isDoesNotExistError)
 #ifdef mingw32_HOST_OS
 import Control.Concurrent (threadDelay)
 import Data.Bits
+import Data.List (isPrefixOf)
 import Data.Word
 import Foreign hiding (void)
 import Foreign.C.String
@@ -19,9 +20,17 @@ import System.Environment (getEnvironment)
 import qualified System.Win32.File as W
 import qualified System.Win32.Types as W
 
-withNode path access = bracket
-  (W.createFile path access (W.fILE_SHARE_READ .|. W.fILE_SHARE_WRITE .|. W.fILE_SHARE_DELETE)
-    Nothing W.oPEN_EXISTING (W.fILE_FLAG_BACKUP_SEMANTICS .|. 0x00200000) Nothing) W.closeHandle
+-- Backup paths can exceed MAX_PATH even when the original Data Root does not.
+nativePath path = do
+  absolute <- normalise <$> makeAbsolute path
+  pure $ if "\\\\?\\" `isPrefixOf` absolute then absolute
+    else if "\\\\" `isPrefixOf` absolute then "\\\\?\\UNC\\" ++ drop 2 absolute
+    else "\\\\?\\" ++ absolute
+
+withNode path access use = do
+  native <- nativePath path
+  bracket (W.createFile native access (W.fILE_SHARE_READ .|. W.fILE_SHARE_WRITE .|. W.fILE_SHARE_DELETE)
+    Nothing W.oPEN_EXISTING (W.fILE_FLAG_BACKUP_SEMANTICS .|. 0x00200000) Nothing) W.closeHandle use
 
 fileIdentity path = withNode path 0 $ \h -> do
   info <- W.getFileInformationByHandle h
@@ -42,7 +51,7 @@ foreign import stdcall unsafe "LocalFree" localFree :: Ptr a -> IO (Ptr a)
 foreign import stdcall unsafe "MoveFileExW" moveFile
   :: CWString -> CWString -> Word32 -> IO Int32
 
-withSecurity path use = withCWString path $ \name -> alloca $ \size -> do
+withSecurity path use = nativePath path >>= \native -> withCWString native $ \name -> alloca $ \size -> do
   poke size 0
   _ <- getSecurity name 7 nullPtr 0 size
   count <- peek size
@@ -65,7 +74,7 @@ entryKind path = withNode path 0 $ \h -> do
   pure (if directory then 'd' else 'f')
 
 copyEntry directory src dst = do
-  unless directory $ W.copyFile src dst True
+  unless directory $ copyFileWithMetadata src dst
   preserveAccess src dst
 
 privateDirectory path = do
@@ -81,7 +90,9 @@ privateDirectory path = do
     { env = Just (("SAPIENS_MIGRATION_DIRECTORY",path):env) }) ""
   unless (code == ExitSuccess) $ fail ("Cannot create private directory " ++ path ++ ": " ++ err)
 
-preserveAccess src dst = do
+preserveAccess source target = do
+  src <- nativePath source
+  dst <- nativePath target
   withSecurity src $ \original -> withSecurity dst $ \current -> do
     wanted <- descriptor 7 original
     previous <- descriptor 7 current
@@ -99,18 +110,29 @@ preserveAccess src dst = do
         (/=0) <$> setSecurity name (if owner == existing then 4 else 7) original
   W.getFileAttributes src >>= W.setFileAttributes dst
 
-syncEntry dir path = unless dir $ withNode path 0x40000000 W.flushFileBuffers
-durableMove src dst = withCWString src $ \s -> withCWString dst $ \d -> do
-  let move attempts = do
+syncEntry dir path = unless dir $ do
+  native <- nativePath path
+  flags <- W.getFileAttributes native
+  let readonly = flags .&. W.fILE_ATTRIBUTE_READONLY /= 0
+      restoreFlags = when readonly (W.setFileAttributes native flags)
+  mask $ \restore -> do
+    when readonly $ W.setFileAttributes native (flags .&. complement W.fILE_ATTRIBUTE_READONLY)
+    (withNode native 0x40000000 $ \handle -> restoreFlags >> restore (W.flushFileBuffers handle))
+      `onException` restoreFlags
+durableMove source target = do
+  src <- nativePath source
+  dst <- nativePath target
+  withCWString src $ \s -> withCWString dst $ \d -> move s d 20
+  where
+    move s d attempts = do
         result <- moveFile s d (W.mOVEFILE_REPLACE_EXISTING .|. 8)
         when (result == 0) $ do
           code <- W.getLastError
           -- Win32's wrapper retries only sharing violations; a reader denying
           -- delete sharing can also produce access denied during replacement.
           if code `elem` [5,32] && attempts > (0 :: Int)
-            then threadDelay 100000 >> move (attempts-1)
-            else W.failWith ("MoveFileEx " ++ src ++ " -> " ++ dst) code
-  move 20
+            then threadDelay 100000 >> move s d (attempts-1)
+            else W.failWith ("MoveFileEx " ++ source ++ " -> " ++ target) code
 #else
 import qualified System.Posix as P
 #ifdef darwin_HOST_OS
@@ -216,7 +238,7 @@ restoreTree locks source target = copyDirectory "" where
     if kind == 'd' then do
       listDirectory path >>= mapM_ (erase . (relative </>))
       unless (protected relative) (removeDirectory path)
-    else removeFile path
+    else removePathForcibly path
   copyDirectory relative = do
     let from = source </> relative; to = target </> relative
     names <- listDirectory from
