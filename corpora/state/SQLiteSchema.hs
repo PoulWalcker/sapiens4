@@ -24,9 +24,15 @@ checkSchema db version
 migrate :: Connection -> IO ()
 migrate db = do
  version <- readVersion db
+ integrity <- query_ db "PRAGMA quick_check" :: IO [Only T.Text]
+ unless (integrity == [Only "ok"]) $ fail "The Corpora database failed its integrity check. Restore a complete Data Root from backup."
  -- Zero is also used when initializing a new database.
  unless (version >= 0 && version <= currentVersion) $
   fail ("Unsupported Corpora schema: " ++ show version)
+ if version == 0 then do
+  tables <- query_ db "SELECT count(*) FROM sqlite_master" :: IO [Only Int]
+  unless (tables == [Only 0]) $ fail "An unversioned Corpora database is not empty. Restore a complete Data Root from backup."
+ else checkSchema db version
  when (version < currentVersion) $ do
   execute_ db "PRAGMA journal_mode=WAL"
   withTransaction db $ do

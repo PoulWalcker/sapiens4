@@ -31,6 +31,7 @@ import qualified MigrationBackup as Backup
 import qualified Installation
 import qualified Computer
 import qualified Store as DB
+import qualified SQLiteSchema
 import Population
 import Workspace
 import Voice (hasOpenRecording, receivePiece, cancelRecording, retryTranscription, draftable)
@@ -59,51 +60,37 @@ openService choice path = do
 prepareDataRoot :: StorageChoice -> FilePath -> FilePath -> IO Service
 prepareDataRoot choice repo root = do
  Backup.checkNoPending root
- pending <- doesDirectoryExist (initializingDirectory root)
- names <- if choice==AttachExisting then listDirectory root else pure []
- published <- if pending then withUpdateLock root (publishedBootstrap root) else pure False
- if not published && (choice==StartNew || choice==CreateCorpora || choice==AttachExisting && (pending || names==["host.lock"]))
-  then bracketOnError (acquireStorage choice root) unlockFile $ \lock -> do
-   Backup.checkNoPending root
-   unless (choice==CreateCorpora) $ do
-    initializing <- doesDirectoryExist (initializingDirectory root)
-    alreadyPublished <- publishedBootstrap root
-    unless (initializing && not alreadyPublished) $ storageError "The Data Root changed while opening. Reopen this folder."
-   let identityPath = root </> "corpora-identity.json"
-   exists <- doesFileExist identityPath
-   unless exists $ do ident <- UUID.toText <$> UUID.nextRandom
-                      writeJSON identityPath (obj [("version",num 1),("corpora_id",str ident)])
-   bracketOnError (openStorageService repo root lock) DB.closeDatabase $ \s -> do
-    DB.initialize s
-    rows <- DB.agents s
-    when (null rows) $ void (createAgent s (obj [("name",str "ChiefSapi"),("role",str "Head of Corpora")]))
-    convertStoredFields s
-    initialized <- doesDirectoryExist (initializingDirectory root)
-    when initialized (removeDirectory (initializingDirectory root))
-    attempt <- Installation.currentAttempt
-    case attempt of
-     Nothing -> pure s
-     Just _ -> do
-      -- A root first created by B has no A data. Preserve its initialized state
-      -- before the first normal write, so readiness and later recovery use the same path.
-      DB.closeDatabase s
-      Backup.withMigrationBackup attempt root [root] (pure ())
-      openStorageService repo root lock
-  else let existing = if published then AttachExisting else choice
-       in openStorageTree existing root $ \owner tree -> do
-   Backup.checkNoPending root
-   finishBootstrap <- publishedBootstrap root
-   legacy <- filterM (\(mode,folder,_) -> inspectRoot mode folder) tree
-   attempt <- Installation.currentAttempt
-   preserved <- maybe (pure True) (`Backup.hasOriginal` root) attempt
-   unless (null legacy && preserved) $ Backup.withMigrationBackup attempt root [folder | (_,folder,_) <- tree] $ do
-    forM_ legacy $ \(_,folder,lock) ->
-     bracket (openStorageService repo folder lock) DB.closeDatabase $ \s -> DB.initialize s >> convertStoredFields s
-    when finishBootstrap (removeDirectory (initializingDirectory root))
-    actual <- storageTree existing root
+ openStorageTree choice root $ \owner tree -> do
+  Backup.checkNoPending root
+  states <- forM tree $ \(mode,folder,lock) -> do
+   state <- inspectRoot mode folder
+   pure (folder,lock,state)
+  attempt <- Installation.currentAttempt
+  preserved <- maybe (pure True) (`Backup.hasOriginal` root) attempt
+  unless (all (\(_,_,state) -> state==CurrentStorage) states && preserved) $
+   Backup.withMigrationBackup attempt root [folder | (_,folder,_) <- tree] $ do
+    forM_ states $ \(folder,lock,state) -> unless (state==CurrentStorage) $ do
+     let identityPath = folder </> "corpora-identity.json"
+     exists <- doesFileExist identityPath
+     unless exists $ do
+      ident <- UUID.toText <$> UUID.nextRandom
+      writeJSON identityPath (obj [("version",num 1),("corpora_id",str ident)])
+     bracket (openStorageService repo folder lock) DB.closeDatabase $ \s -> do
+      version <- DB.connection s SQLiteSchema.readVersion
+      when (version==0 && state/=Initializing) $
+       storageError "An existing Corpora database has no schema. Restore a complete Data Root from backup."
+      DB.initialize s
+      rows <- DB.agents s
+      when (null rows) $ do
+       files <- or <$> mapM (doesPathExist . (folder </>)) ["agentpy","workspaces"]
+       unless (state==Initializing && not files) $
+        storageError "The Corpora database has no agents. Restore a complete Data Root from backup."
+       void (createAgent s (obj [("name",str "ChiefSapi"),("role",str "Head of Corpora")]))
+      convertStoredFields s
+     markStorageCurrent folder
+    actual <- storageTree choice root
     unless (actual==[(mode,folder) | (mode,folder,_) <- tree]) $ storageError "The Corpora registry changed during migration."
-    forM_ tree $ \(mode,folder,_) -> inspectRoot mode folder >>= \pendingConversion -> when pendingConversion (storageError "Data conversion did not finish.")
-   openStorageService repo root owner
+  openStorageService repo root owner
 
 openStorageService :: FilePath -> FilePath -> FileLock -> IO Service
 openStorageService repo root lock = do
@@ -128,6 +115,7 @@ openStorageService repo root lock = do
 
 convertStoredFields :: Service -> IO ()
 convertStoredFields s = do
+ void (corporaSettings s)
  migrateWorkspaces s
  repairAvatars s
  agents <- DB.agents s

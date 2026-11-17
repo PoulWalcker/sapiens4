@@ -31,16 +31,16 @@ validate root p = do
 ensureMemo :: FilePath -> Text -> Text -> IO ()
 ensureMemo root name purpose = do
  let p = root </> "Notes.html"
+ mapM_ (validate root . (root </>)) ["Notes.html","Notes.yaml","Notes.md"]
  exists <- doesPathExist p
- link <- pathIsSymbolicLink p `catch` (\(_ :: IOException) -> pure False)
- unless (exists || link) $ do
+ unless exists $ do
   createDirectoryIfMissing True root
   sources <- filterM doesPathExist [root </> "Notes.yaml",root </> "Notes.md"]
   content <- case listToMaybe sources of
    Nothing -> pure "notes: []"
    Just source -> do
-    validate root source
-    old <- readText source
+    bytes <- BS.readFile source
+    old <- either (const (failure 500 "Legacy Notes must contain UTF-8 text")) pure (TE.decodeUtf8' bytes)
     pure (if takeExtension source == ".md" then "notes: " <> jsonText (str old) else old)
   writeText p (migratedMemo name purpose content)
 
