@@ -82,10 +82,7 @@ migrateAgent s row = do
  require (get v "schema_version" `elem` map num [1,2,3]) 500 "Unsupported agent state schema"
  require (at v "agid" == a) 500 "Agent ID does not match saved state"
  when (int (get v "schema_version") < 3) $ do
-  let version = int (get v "schema_version"); backup = root </> ("legacy-state-v" ++ show version ++ ".json")
-  migrated <- validated (migrateAgentState version v)
-  backed <- doesFileExist backup
-  unless backed $ copyFile p backup
+  migrated <- validated (migrateAgentState (int (get v "schema_version")) v)
   saveState s a migrated
  d <- directory s
  let entry = get d a `fallback` obj [("scope",str "")]

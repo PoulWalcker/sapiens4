@@ -1,5 +1,6 @@
 param([switch]$Repair, [switch]$Previous)
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 if ($Repair -and $Previous) { throw 'Choose either Repair or Previous.' }
 $savedAttempt = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'request.json') -Raw | ConvertFrom-Json
 $App = $savedAttempt.app; $State = $savedAttempt.state; $Version = $savedAttempt.version
@@ -119,21 +120,7 @@ try {
     if ([version]$installed.version -ge [version]$Version -or $installed.publisher -notmatch '^[a-fA-F0-9]{40}$') { throw 'Invalid installed publisher or version.' }
     Verify-Publisher $exe $installed.publisher
     $old = $installed
-    Add-Type -AssemblyName System.Net.Http
-    $handler = [Net.Http.HttpClientHandler]::new()
-    $handler.AllowAutoRedirect = $false
-    $client = [Net.Http.HttpClient]::new($handler)
-    $client.Timeout = [TimeSpan]::FromMinutes(60)
-    try {
-        $response = $client.GetAsync($Asset, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
-        try {
-            if ([int]$response.StatusCode -ne 200) { throw "Update download failed (HTTP $([int]$response.StatusCode))." }
-            $stream = [IO.File]::Open($package,'CreateNew','Write','None')
-            $timeout = [Threading.CancellationTokenSource]::new([TimeSpan]::FromMinutes(60))
-            try { $response.Content.CopyToAsync($stream).Wait($timeout.Token) }
-            finally { $timeout.Dispose(); $stream.Dispose() }
-        } finally { $response.Dispose() }
-    } finally { $client.Dispose() }
+    Invoke-WebRequest -Uri $Asset -OutFile $package -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 3600
     if ((Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash -ne $Digest) { throw 'The update checksum did not match the selected release.' }
     Verify-Installer $package $Version
     $cacheRecord = Join-Path $State 'current-installer'

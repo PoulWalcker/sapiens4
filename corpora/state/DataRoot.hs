@@ -439,9 +439,6 @@ inspectRoot choice root = do
      Object fields | Just (Number version) <- K.lookup "schema_version" fields, version `elem` [1,2,3],
                      Just (String savedAgent) <- K.lookup "agid" fields, savedAgent==agent -> do
       current (version==3 && not (K.member "initial_manager" fields)) "agent state v3"
-      forM_ [1::Int,2] $ \v -> do
-       backup <- managedDataPath (takeDirectory path) (takeDirectory path </> ("legacy-state-v" ++ show v ++ ".json"))
-       void (regularFileExists backup)
       forM_ ["Notes.html","Notes.yaml","Notes.md"] $ \name -> do
        note <- managedDataPath work (work </> name)
        void (regularFileExists note)
