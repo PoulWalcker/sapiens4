@@ -226,9 +226,11 @@ packageUpdater root app version identity = do
    forM_ [("SUFeedURL",appcast),("SUPublicEDKey",key)] $ \(field,value) -> run "plutil" ["-insert",field,"-string",value,plist]
    forM_ [("SUEnableAutomaticChecks","NO"),("SUAllowsAutomaticUpdates","NO"),("SUVerifyUpdateBeforeExtraction","YES")] $ \(field,value) ->
     run "plutil" ["-insert",field,"-bool",value,plist]
+   contract <- fromMaybe "same-format-v1" <$> lookupEnv "SAPIENS_UPDATE_CONTRACT"
+   unless (contract `elem` ["same-format-v1","prepare-data-v1"]) $ fail "Unknown desktop update contract"
    let manifest=app</>"Contents/Resources/runtime/desktop-update.json"
    run "plutil" ["-create","xml1",manifest]
-   forM_ [("version",version),("feed",feed),("contract","same-format-v1"),("platform","macos-arm64"),("format","sapiens4-2026-11")] $ \(field,value) ->
+   forM_ [("version",version),("feed",feed),("contract",contract),("platform","macos-arm64"),("format","sapiens4-2026-11")] $ \(field,value) ->
     run "plutil" ["-insert",field,"-string",value,manifest]
    run "plutil" ["-convert","json",manifest]
   _ -> fail "Set all four desktop update packaging inputs together"

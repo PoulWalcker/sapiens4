@@ -66,10 +66,10 @@ workerFailure (DesktopUpdate owner _ _ _ _) worker = do
       recorded <- doesFileExist outcome
       Just <$> if recorded then readFile outcome else pure ("The installer exited with code " ++ show n)
 
-data Release = Release Version String String deriving Eq
+data Release = Release Version UpdateContract String String deriving Eq
 
 releaseVersion :: Release -> String
-releaseVersion (Release version _ _) = showVersion version
+releaseVersion (Release version _ _ _) = showVersion version
 
 versionField :: String -> Parser Version
 versionField raw = case [v | (v,"") <- readP_to_S parseVersion raw, showVersion v == raw,
@@ -100,7 +100,7 @@ withDesktopUpdate action = withInstallation $ \owner -> case owner of
       platform <- o .: "platform"
       format <- o .: "format"
       contract <- o .: "contract"
-      unless (contract == sameFormatContract && format == sameFormatFamily && platform == nativePlatform) $
+      unless ((contract == PrepareData || format == sameFormatFamily) && platform == nativePlatform) $
         fail "Invalid installed update target"
       (,,) <$> (o .: "version" >>= versionField) <*> (o .: "feed" >>= https) <*> pure platform
     nativePlatform = if os == "darwin" then "macos-arm64"
@@ -125,7 +125,7 @@ check (DesktopUpdate _ current feed platform manager) = do
       format <- o .: "format"
       version <- o .: "version" >>= versionField
       contract <- o .: "contract"
-      if contract /= sameFormatContract || format /= sameFormatFamily || version <= current then pure Nothing else do
+      if (contract == SameFormat && format /= sameFormatFamily) || version <= current then pure Nothing else do
         assets <- o .: "assets"
         withObject "release assets" (\targets -> do
           asset <- targets .:? (Key.fromString platform)
@@ -133,7 +133,7 @@ check (DesktopUpdate _ current feed platform manager) = do
             url <- entry .: "url" >>= https
             digest <- entry .: "sha256"
             unless (length digest == 64 && all (\c -> isAscii c && isHexDigit c) digest) $ fail "Invalid release SHA-256"
-            pure (Release version url digest)) asset) assets
+            pure (Release version contract url digest)) asset) assets
 
 watchReleases :: DesktopUpdate -> (Either String (Maybe Release) -> IO ()) -> IO ()
 watchReleases update notify = forever $ do
@@ -171,18 +171,18 @@ installRelease update@(DesktopUpdate owner _ _ _ _) selected stop root config = 
     else pure (SelectionChanged current)
 
 startWorker :: Installation -> Release -> IO () -> Maybe FilePath -> FilePath -> IO ProcessHandle
-startWorker owner selected@(Release _ url digest) stop root config = do
+startWorker owner selected@(Release _ contract url digest) stop root config = do
   stop
   let app = appPath owner
       state = statePath owner
       backend = runtimePath app </> ".build/bin" </> if os == "darwin" then "sapiens4" else "sapiens4.exe"
-  forM_ root $ \directory -> do
+  when (contract == SameFormat) $ forM_ root $ \directory -> do
     (code,_,detail) <- readProcessWithExitCode backend ["--check-update-root",directory] ""
     unless (code == ExitSuccess) $ fail detail
   pid <- getCurrentPid
   attempt <- UUID.toString <$> UUID.nextRandom
   let workspace = state </> ("driver-" ++ attempt)
-      arguments = [app,state,releaseVersion selected,url,maybe "" id root,config,show pid]
+      arguments = [app,state,releaseVersion selected,url,maybe "" id root,config,show pid,contractName contract]
       macDriver = workspace </> "Update.app"
       powershell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
       worker = workspace </> "apply.ps1"

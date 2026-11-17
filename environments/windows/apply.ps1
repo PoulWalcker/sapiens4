@@ -1,6 +1,6 @@
 param(
     [string]$App, [string]$State, [string]$Version, [uri]$Asset,
-    [AllowEmptyString()][string]$Root, [string]$Config, [int]$ShellPid, [string]$Digest
+    [AllowEmptyString()][string]$Root, [string]$Config, [int]$ShellPid, [ValidateSet("same-format-v1","prepare-data-v1")][string]$Contract, [string]$Digest
 )
 $ErrorActionPreference = 'Stop'
 $pending = Join-Path $State 'pending'
@@ -15,7 +15,7 @@ $originalShell = $null
 
 function Installed-Release {
     $local = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
-    if ($local.contract -cne 'same-format-v1' -or $local.format -cne 'sapiens4-2026-11' -or
+    if ($local.contract -cnotin @('same-format-v1','prepare-data-v1') -or ($local.contract -ceq 'same-format-v1' -and $local.format -cne 'sapiens4-2026-11') -or
         $local.platform -notin @('win-x64','win-arm64') -or $local.version -notmatch '^\d+\.\d+\.\d+$') {
         throw 'The installed update contract could not be verified.'
     }
@@ -83,12 +83,12 @@ try {
     if ($setup.ExitCode -eq 3010) { throw 'Restart Windows and repair this installation before reopening.' }
     if ($setup.ExitCode -ne 0) { throw "Setup exited with code $($setup.ExitCode). Repair this installation before reopening." }
     $new = Installed-Release
-    if ($new.version -cne $Version -or $new.platform -cne $old.platform -or $new.publisher -ne $old.publisher) { throw 'Could not confirm the installed release.' }
+    if ($new.version -cne $Version -or $new.contract -cne $Contract -or $new.platform -cne $old.platform -or $new.publisher -ne $old.publisher) { throw 'Could not confirm the installed release.' }
     Verify-Publisher $exe $old.publisher
     Verify-Publisher (Join-Path $App 'runtime/.build/bin/sapiens4.exe') $old.publisher
     $marker = Join-Path $State 'same-format'
     $next = Join-Path $PSScriptRoot 'same-format'
-    [IO.File]::WriteAllText($next,(@{contract='same-format-v1';version=$Version} | ConvertTo-Json -Compress))
+    [IO.File]::WriteAllText($next,(@{contract=$Contract;version=$Version} | ConvertTo-Json -Compress))
     if ([IO.File]::Exists($marker)) { [IO.File]::Replace($next,$marker,$null) } else { [IO.File]::Move($next,$marker) }
     [IO.Directory]::Delete($pending)
     Open-Shell
