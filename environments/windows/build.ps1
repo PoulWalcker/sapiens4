@@ -97,9 +97,7 @@ try {
         if (-not $PublicRelease -or -not [uri]::TryCreate($updateFeed, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne 'https' -or $uri.UserInfo -or $uri.Fragment) {
             throw 'Windows updates require a publisher-signed release and a valid HTTPS metadata URL.'
         }
-        $contract = if ($env:SAPIENS_UPDATE_CONTRACT) { $env:SAPIENS_UPDATE_CONTRACT } else { 'same-format-v1' }
-        if ($contract -cnotin @('same-format-v1','prepare-data-v1')) { throw 'Unknown desktop update contract.' }
-        $metadata = @{ version=$Version; feed=$updateFeed; platform=$Runtime; format='sapiens4-2026-11'; contract=$contract; publisher=$CertificateThumbprint }
+        $metadata = @{ version=$Version; feed=$updateFeed; platform=$Runtime; publisher=$CertificateThumbprint }
         [IO.File]::WriteAllText((Join-Path $package 'runtime/desktop-update.json'), ($metadata | ConvertTo-Json -Compress))
         $driver = Join-Path $package 'apply.ps1'
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'apply.ps1') -Destination $driver

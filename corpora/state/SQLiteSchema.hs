@@ -6,16 +6,8 @@ import Data.String (fromString)
 import qualified Data.Text as T
 import Database.SQLite.Simple
 
--- The existing converter brings every supported historical layout to v8.
--- Append one step per subsequent version; published entries keep their position.
-data Step = Step { apply :: Connection -> IO (), checkTarget :: Connection -> IO () }
-
-stepsAfter8 :: [Step]
-stepsAfter8 = []
-
-baseline, currentVersion :: Int
-baseline = 8
-currentVersion = baseline + length stepsAfter8
+currentVersion :: Int
+currentVersion = 8
 
 readVersion :: Connection -> IO Int
 readVersion db = do
@@ -26,12 +18,8 @@ readVersion db = do
 
 checkSchema :: Connection -> Int -> IO ()
 checkSchema db version
- | version >= 1 && version <= baseline = checkThrough8 db version
- | Just step <- lookup version numberedSteps = checkTarget step db
+ | version >= 1 && version <= currentVersion = checkThrough8 db version
  | otherwise = fail ("Unsupported Corpora schema: " ++ show version)
-
-numberedSteps :: [(Int, Step)]
-numberedSteps = zip [baseline + 1 ..] stepsAfter8
 
 migrate :: Connection -> IO ()
 migrate db = do
@@ -42,16 +30,9 @@ migrate db = do
  when (version < currentVersion) $ do
   execute_ db "PRAGMA journal_mode=WAL"
   withTransaction db $ do
-   when (version < baseline) $ do
-    migrateTo8 db version
-    finish baseline
-   forM_ (dropWhile ((<= version) . fst) numberedSteps) $ \(target, step) -> do
-    apply step db
-    finish target
- where
- finish target = do
-  checkSchema db target
-  execute_ db (fromString ("PRAGMA user_version=" ++ show target))
+   migrateTo8 db version
+   checkSchema db currentVersion
+   execute_ db (fromString ("PRAGMA user_version=" ++ show currentVersion))
 
 migrateTo8 :: Connection -> Int -> IO ()
 migrateTo8 db version = do

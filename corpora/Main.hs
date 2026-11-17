@@ -47,7 +47,7 @@ main = run `catches` [Handler (\(code::ExitCode) -> throwIO code), Handler repor
   hPutStrLn stderr detail
   exitFailure
 run :: IO ()
-run = Installation.withInstallation $ \installation -> do
+run = Installation.withInstallation $ \_ -> do
  setLocaleEncoding utf8
  mapM_ (`hSetEncoding` utf8) [stdin,stdout,stderr]
  hSetBuffering stdout LineBuffering
@@ -55,7 +55,6 @@ run = Installation.withInstallation $ \installation -> do
  root <- repository
  setEnv "SAPIENS_REPOSITORY" root
  case args of
-  ["--check-update-root", path] -> checkUpdateRoot path
   ["build-ui"] -> buildUI root
   ["control",config,payload] -> jsonCommand $ do
    value <- either (failure 400 . T.pack) pure (eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack payload))))
@@ -67,9 +66,7 @@ run = Installation.withInstallation $ \installation -> do
   "computer":rest -> jsonCommand (computerMain root rest)
   "relay":rest -> relayMain root (normalized rest)
   "mcp":rest -> mcpMain (option "--url" "http://127.0.0.1:4174" (normalized rest))
-  _ -> do
-   strict <- maybe (pure False) Installation.strictStartup installation
-   hostMain root (normalized args ++ ["--same-format" | strict && "--same-format" `notElem` args])
+  _ -> hostMain root (normalized args)
 jsonCommand :: IO ExitCode -> IO ()
 jsonCommand action = do
  code <- action `catch` (\(e::SomeException) -> case fromException e :: Maybe AsyncException of
@@ -94,7 +91,7 @@ repository = do
 hostMain :: FilePath -> [String] -> IO ()
 hostMain root args = do
  when ("--help" `elem` args || "-h" `elem` args) $ putStrLn "Usage: sapiens4 [--port PORT] [--data-dir DIRECTORY] [--open]" >> exitSuccess
- validated (validateOptions ["--port","--data-dir",Telemetry.startupConsentOption] ["--open","--desktop","--same-format"] args)
+ validated (validateOptions ["--port","--data-dir",Telemetry.startupConsentOption] ["--open","--desktop"] args)
  consent <- traverse (either (failure 400 . T.pack) pure . eitherDecode . BL.pack) (optionValue Telemetry.startupConsentOption args)
  port <- validated (parseIntegerOption "--port" "4174" args)
  require (port>=0 && port<=65535) 400 "Port must be between 0 and 65535"
@@ -108,8 +105,7 @@ hostMain root args = do
     else defaultDataDirectory
  void (asset root "/")
  void (asset root "/workspace/app.js")
- let formats = if "--same-format" `elem` args then CurrentFormatsOnly else AllowExistingConversions
- bracket (startHostFor formats consent directory port False) hostStop $ \host -> do
+ bracket (startHost consent directory port False) hostStop $ \host -> do
   let url="http://127.0.0.1:"<>show (hostPort host)<>"/workspace/"
   putStrLn ("Sapiens4: "<>url<>"\nUI database: "<>directory</>"corpora.sqlite3")
   finished <- newEmptyMVar

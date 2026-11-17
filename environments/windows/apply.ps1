@@ -1,6 +1,6 @@
 param(
     [string]$App, [string]$State, [string]$Version, [uri]$Asset,
-    [AllowEmptyString()][string]$Root, [string]$Config, [int]$ShellPid, [ValidateSet("same-format-v1","prepare-data-v1")][string]$Contract, [string]$Digest
+    [AllowEmptyString()][string]$Root, [string]$Config, [int]$ShellPid, [string]$Digest
 )
 $ErrorActionPreference = 'Stop'
 $pending = Join-Path $State 'pending'
@@ -22,9 +22,8 @@ function Release-Reservation {
 }
 function Installed-Release {
     $local = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
-    if ($local.contract -cnotin @('same-format-v1','prepare-data-v1') -or ($local.contract -ceq 'same-format-v1' -and $local.format -cne 'sapiens4-2026-11') -or
-        $local.platform -notin @('win-x64','win-arm64') -or $local.version -notmatch '^\d+\.\d+\.\d+$') {
-        throw 'The installed update contract could not be verified.'
+    if ($local.platform -notin @('win-x64','win-arm64') -or $local.version -notmatch '^\d+\.\d+\.\d+$') {
+        throw 'The installed release could not be verified.'
     }
     if ([IO.File]::ReadAllText((Join-Path $App 'sapiens-installation.id')) -cne $identity) { throw 'Wrong installed application.' }
     $entry = Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\${identity}_is1"
@@ -105,12 +104,12 @@ try {
     if ($setup.ExitCode -eq 3010) { throw 'Restart Windows and repair this installation before reopening.' }
     if ($setup.ExitCode -ne 0) { throw "Setup exited with code $($setup.ExitCode). Repair this installation before reopening." }
     $new = Installed-Release
-    if ($new.version -cne $Version -or $new.contract -cne $Contract -or $new.platform -cne $old.platform -or $new.publisher -ne $old.publisher) { throw 'Could not confirm the installed release.' }
+    if ($new.version -cne $Version -or $new.platform -cne $old.platform -or $new.publisher -ne $old.publisher) { throw 'Could not confirm the installed release.' }
     Verify-Publisher $exe $old.publisher
     Verify-Publisher (Join-Path $App 'runtime/.build/bin/sapiens4.exe') $old.publisher
-    $marker = Join-Path $State 'same-format'
-    $next = Join-Path $PSScriptRoot 'same-format'
-    [IO.File]::WriteAllText($next,(@{contract=$Contract;version=$Version;root=$Root;status='installed';recovery=$archive} | ConvertTo-Json -Compress))
+    $marker = Join-Path $State 'update.json'
+    $next = Join-Path $PSScriptRoot 'update.json'
+    [IO.File]::WriteAllText($next,(@{version=$Version;root=$Root;status='installed';recovery=$archive} | ConvertTo-Json -Compress))
     if ([IO.File]::Exists($marker)) { [IO.File]::Replace($next,$marker,$null) } else { [IO.File]::Move($next,$marker) }
     Release-Reservation
     Open-Shell

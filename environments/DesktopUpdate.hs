@@ -23,7 +23,6 @@ import qualified Data.UUID.V4 as UUID
 import Data.Version
 import Text.ParserCombinators.ReadP (readP_to_S)
 import Installation
-import DataRoot (checkUpdateRoot)
 import Types (atomicBytes)
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
@@ -61,7 +60,7 @@ startupNotice (DesktopUpdate owner _ _ _ _) = do
 
 workspaceOpened :: DesktopUpdate -> FilePath -> IO ()
 workspaceOpened (DesktopUpdate owner version _ _ _) root = do
-  let marker = statePath owner </> "same-format"
+  let marker = statePath owner </> "update.json"
   exists <- doesFileExist marker
   when exists $ do
     contents <- B.readFile marker
@@ -90,10 +89,10 @@ workerResult owner worker = do
       recorded <- doesFileExist outcome
       Just <$> if recorded then readFile outcome else pure ("The installer exited with code " ++ show n)
 
-data Release = Release Version UpdateContract String String deriving Eq
+data Release = Release Version String String deriving Eq
 
 releaseVersion :: Release -> String
-releaseVersion (Release version _ _ _) = showVersion version
+releaseVersion (Release version _ _) = showVersion version
 
 versionField :: String -> Parser Version
 versionField raw = case [v | (v,"") <- readP_to_S parseVersion raw, showVersion v == raw,
@@ -122,9 +121,7 @@ withDesktopUpdate action = withInstallation $ \owner -> case owner of
   where
     config = withObject "installed desktop release" $ \o -> do
       platform <- o .: "platform"
-      format <- o .: "format"
-      contract <- o .: "contract"
-      unless ((contract == PrepareData || format == sameFormatFamily) && platform == nativePlatform) $
+      unless (platform == nativePlatform) $
         fail "Invalid installed update target"
       (,,) <$> (o .: "version" >>= versionField) <*> (o .: "feed" >>= https) <*> pure platform
     nativePlatform = if os == "darwin" then "macos-arm64"
@@ -146,10 +143,8 @@ check (DesktopUpdate _ current feed platform manager) = do
     parseOffer = withObject "desktop update feed" $ \o -> do
       product <- o .: "product"
       unless (product == ("com.sapiens4.desktop" :: Text)) $ fail "Unexpected desktop product"
-      format <- o .: "format"
       version <- o .: "version" >>= versionField
-      contract <- o .: "contract"
-      if (contract == SameFormat && format /= sameFormatFamily) || version <= current then pure Nothing else do
+      if version <= current then pure Nothing else do
         assets <- o .: "assets"
         withObject "release assets" (\targets -> do
           asset <- targets .:? (Key.fromString platform)
@@ -157,7 +152,7 @@ check (DesktopUpdate _ current feed platform manager) = do
             url <- entry .: "url" >>= https
             digest <- entry .: "sha256"
             unless (length digest == 64 && all (\c -> isAscii c && isHexDigit c) digest) $ fail "Invalid release SHA-256"
-            pure (Release version contract url digest)) asset) assets
+            pure (Release version url digest)) asset) assets
 
 watchReleases :: DesktopUpdate -> (Either String (Maybe Release) -> IO ()) -> IO ()
 watchReleases update notify = forever $ do
@@ -195,14 +190,14 @@ installRelease update@(DesktopUpdate owner _ _ _ _) selected stop root config = 
     else pure (SelectionChanged current)
 
 startWorker :: Installation -> Release -> IO () -> Maybe FilePath -> FilePath -> IO ProcessHandle
-startWorker owner selected@(Release _ contract url digest) stop root config = do
+startWorker owner selected@(Release _ url digest) stop root config = do
   let app = appPath owner
       state = statePath owner
   pid <- getCurrentPid
   attempt <- UUID.toString <$> UUID.nextRandom
   let reservation = "driver-" ++ attempt
       workspace = state </> reservation
-      arguments = [app,state,releaseVersion selected,url,maybe "" id root,config,show pid,contractName contract]
+      arguments = [app,state,releaseVersion selected,url,maybe "" id root,config,show pid]
       macDriver = workspace </> "Update.app"
       powershell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
       worker = workspace </> "apply.ps1"
@@ -242,7 +237,6 @@ startWorker owner selected@(Release _ contract url digest) stop root config = do
           Nothing -> fail "The update download did not complete within one hour."
           Just _ -> fail "Unexpected updater response."
         stop
-        when (contract == SameFormat) $ mapM_ checkUpdateRoot root
         beginMaintenance owner $ hPutStrLn control "install" >> hFlush control
       hClose control
       hClose progress

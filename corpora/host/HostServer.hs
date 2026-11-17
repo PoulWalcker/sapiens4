@@ -48,25 +48,22 @@ listenLoopback port = Socket.withSocketsDo $ do
   Socket.SockAddrInet assigned _ <- Socket.getSocketName sock
   pure (sock,fromIntegral assigned)
 startHost :: Maybe Bool -> FilePath -> Int -> Bool -> IO Host
-startHost = startHostFor AllowExistingConversions
-
-startHostFor :: StartupFormats -> Maybe Bool -> FilePath -> Int -> Bool -> IO Host
-startHostFor formats consent root requested managed = do
+startHost consent root requested managed = do
  mode <- lookupEnv "SAPIENS_STORAGE_MODE"
  directory <- doesDirectoryExist root
  names <- if directory then listDirectory root else pure []
  let existing = managed || mode==Just "existing" || mode==Nothing && not (null (filter (/="host.lock") names))
- startHostUsing formats Nothing consent (if existing then AttachExisting else StartNew) root requested managed
+ startHostUsing Nothing consent (if existing then AttachExisting else StartNew) root requested managed
 
-startHostUsing :: StartupFormats -> Maybe Telemetry.Telemetry -> Maybe Bool -> StorageChoice -> FilePath -> Int -> Bool -> IO Host
-startHostUsing formats inherited consent choice root requested managed = mask $ \restore -> do
+startHostUsing :: Maybe Telemetry.Telemetry -> Maybe Bool -> StorageChoice -> FilePath -> Int -> Bool -> IO Host
+startHostUsing inherited consent choice root requested managed = mask $ \restore -> do
  args <- getArgs
  desktopPid <- lookupEnv "SAPIENS_DESKTOP_PID"
  let desktop = "--desktop" `elem` args || desktopPid/=Nothing
  mode <- lookupEnv "SAPIENS_STORAGE_MODE"
  let report phase = when (not managed && mode `elem` [Just "new",Just "existing"]) (putStrLn phase)
  report openingStorage
- bracketOnError (restore (Service.openService formats choice root)) Service.closeService $ \service -> do
+ bracketOnError (restore (Service.openService choice root)) Service.closeService $ \service -> do
   reporter <- if managed then pure inherited else Just <$> Telemetry.openTelemetry (if desktop then Telemetry.Desktop else Telemetry.Headless) consent
   flip onException (unless managed (mapM_ Telemetry.closeTelemetry reporter)) $ restore $ do
    writeIORef (serviceTelemetry service) reporter
@@ -79,7 +76,7 @@ startHostUsing formats inherited consent choice root requested managed = mask $ 
    Service.attachEndpoint service ("http://127.0.0.1:"<>T.pack (show port))
    bridge <- newBridge service
    let child selection path = do
-        host <- startHostUsing formats reporter Nothing selection path 0 True
+        host <- startHostUsing reporter Nothing selection path 0 True
         pure (hostService host,hostBridge host,hostStop host)
    registry <- if managed then pure Nothing else Just <$> newRegistry service bridge child
    onboarding <- if managed then pure Nothing else Just <$> O.openOnboarding (repositoryRoot service)

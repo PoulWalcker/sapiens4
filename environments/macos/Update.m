@@ -11,7 +11,7 @@ typedef NS_ENUM(NSUInteger, Phase) { Downloading, Preserving, Installing };
 
 @interface Update : NSObject <SPUUserDriver, SPUUpdaterDelegate>
 @property(nonatomic,strong) NSURL *app, *state, *asset;
-@property(nonatomic,copy) NSString *version, *root, *config, *oldVersion, *publicKey, *product, *contract;
+@property(nonatomic,copy) NSString *version, *root, *config, *oldVersion, *publicKey, *product;
 @property(nonatomic) pid_t shellPID;
 @property(nonatomic,strong) SPUUpdater *updater;
 @property(nonatomic) Phase phase;
@@ -57,15 +57,15 @@ typedef NS_ENUM(NSUInteger, Phase) { Downloading, Preserving, Installing };
 }
 - (void)reopen {
     NSError *error = nil;
-    NSURL *marker = [self.state URLByAppendingPathComponent:@"same-format"];
+    NSURL *marker = [self.state URLByAppendingPathComponent:@"update.json"];
     {
         NSURL *metadata = [self.app URLByAppendingPathComponent:@"Contents/Resources/runtime/desktop-update.json"];
         NSData *bytes = [NSData dataWithContentsOfURL:metadata options:0 error:&error];
         id release = bytes ? [NSJSONSerialization JSONObjectWithData:bytes options:0 error:&error] : nil;
-        if (![release isKindOfClass:NSDictionary.class] || ![release[@"contract"] isEqual:self.contract] ||
-            ![release[@"version"] isEqual:self.version]) [self stopWith:@"Installed release does not match the selected contract."];
-        NSData *contract = [NSJSONSerialization dataWithJSONObject:@{@"contract":self.contract, @"version":self.version, @"root":self.root, @"status":@"installed", @"recovery":[self.attemptDirectory URLByAppendingPathComponent:@"previous.zip"].path} options:0 error:&error];
-        if (!contract || ![contract writeToURL:marker options:NSDataWritingAtomic error:&error])
+        if (![release isKindOfClass:NSDictionary.class] ||
+            ![release[@"version"] isEqual:self.version]) [self stopWith:@"Installed release does not match the selected release."];
+        NSData *record = [NSJSONSerialization dataWithJSONObject:@{@"version":self.version, @"root":self.root, @"status":@"installed", @"recovery":[self.attemptDirectory URLByAppendingPathComponent:@"previous.zip"].path} options:0 error:&error];
+        if (!record || ![record writeToURL:marker options:NSDataWritingAtomic error:&error])
             [self stopWith:error.localizedDescription];
     }
     if (![self releaseReservation])
@@ -185,7 +185,7 @@ typedef NS_ENUM(NSUInteger, Phase) { Downloading, Preserving, Installing };
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
-        if (argc != 9) return EXIT_FAILURE;
+        if (argc != 8) return EXIT_FAILURE;
         NSArray<NSString *> *args = NSProcessInfo.processInfo.arguments;
         Update *driver = [Update new];
         driver.app = [[NSURL fileURLWithPath:args[1] isDirectory:YES] URLByResolvingSymlinksInPath];
@@ -196,8 +196,7 @@ int main(int argc, const char *argv[]) {
         BOOL directory = NO;
         if (![[NSFileManager defaultManager] fileExistsAtPath:[driver.state.path stringByAppendingPathComponent:@"pending"] isDirectory:&directory] || !directory) return EXIT_FAILURE;
         driver.version = args[3]; driver.asset = [NSURL URLWithString:args[4]];
-        driver.root = args[5]; driver.config = args[6]; driver.shellPID = args[7].intValue; driver.contract = args[8];
-        if (![@[@"same-format-v1",@"prepare-data-v1"] containsObject:driver.contract]) return EXIT_FAILURE;
+        driver.root = args[5]; driver.config = args[6]; driver.shellPID = args[7].intValue;
         if (driver.shellPID <= 0 || ![driver.asset.scheme isEqual:@"https"]) return EXIT_FAILURE;
         signal(SIGPIPE, SIG_IGN);
         [NSApplication sharedApplication];

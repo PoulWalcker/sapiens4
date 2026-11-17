@@ -43,26 +43,26 @@ import qualified Groups as G
 import qualified GroupChat as GC
 import qualified GroupWork as GW
 
-openService :: StartupFormats -> StorageChoice -> FilePath -> IO Service
-openService formats choice path = do
+openService :: StorageChoice -> FilePath -> IO Service
+openService choice path = do
  root <- selectedPath choice path
  repo <- lookupEnv "SAPIENS_REPOSITORY" >>= maybe getCurrentDirectory pure >>= canonicalizePath
  mask $ \restore -> do
   s <- modifyIOError (\e -> ioeSetErrorString e ("Data Root " ++ root ++ ": " ++ ioeGetErrorString e)) $
-       prepareDataRoot formats choice repo root
+       prepareDataRoot choice repo root
   restore (startStorage s) `onException` (DB.closeDatabase s `finally` unlockFile (serviceFileLock s))
   pure s
 
 -- A failed preparation must leave no normal worker, SQLite writer or telemetry
 -- handle open. Only the root lease is transferred to the published Service.
-prepareDataRoot :: StartupFormats -> StorageChoice -> FilePath -> FilePath -> IO Service
-prepareDataRoot formats choice repo root = do
+prepareDataRoot :: StorageChoice -> FilePath -> FilePath -> IO Service
+prepareDataRoot choice repo root = do
  Backup.recoverBeforeOpen root lockSaved
  pending <- doesDirectoryExist (initializingDirectory root)
  names <- if choice==AttachExisting then listDirectory root else pure []
  published <- if pending then withUpdateLock root (publishedBootstrap root) else pure False
  if not published && (choice==StartNew || choice==CreateCorpora || choice==AttachExisting && (pending || names==["host.lock"]))
-  then bracketOnError (acquireStorageWith formats choice root) unlockFile $ \lock -> do
+  then bracketOnError (acquireStorage choice root) unlockFile $ \lock -> do
    Backup.checkNoPending root
    unless (choice==CreateCorpora) $ do
     initializing <- doesDirectoryExist (initializingDirectory root)
@@ -81,17 +81,17 @@ prepareDataRoot formats choice repo root = do
     when initialized (removeDirectory (initializingDirectory root))
     pure s
   else let existing = if published then AttachExisting else choice
-       in openStorageTree formats existing root $ \owner tree -> do
+       in openStorageTree existing root $ \owner tree -> do
    Backup.checkNoPending root
    finishBootstrap <- publishedBootstrap root
-   legacy <- filterM (\(mode,folder,_) -> inspectRoot formats mode folder) tree
+   legacy <- filterM (\(mode,folder,_) -> inspectRoot mode folder) tree
    unless (null legacy) $ Backup.withMigrationBackup root [folder | (_,folder,_) <- tree] $ do
     forM_ legacy $ \(_,folder,lock) ->
      bracket (openStorageService repo folder lock) DB.closeDatabase $ \s -> DB.initialize s >> convertStoredFields s
     when finishBootstrap (removeDirectory (initializingDirectory root))
     actual <- storageTree existing root
     unless (actual==[(mode,folder) | (mode,folder,_) <- tree]) $ storageError "The Corpora registry changed during migration."
-    forM_ tree $ \(mode,folder,_) -> void (inspectRoot CurrentFormatsOnly mode folder)
+    forM_ tree $ \(mode,folder,_) -> inspectRoot mode folder >>= \pendingConversion -> when pendingConversion (storageError "Data conversion did not finish.")
    openStorageService repo root owner
  where
  lockSaved paths action = foldr withUpdateLock action paths

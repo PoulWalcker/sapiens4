@@ -1,16 +1,12 @@
 -- Admission is keyed to the physical installed application, before resolving user storage.
 module Installation
   ( Installation, appPath, statePath, installed, withInstallation, reserveUpdate, cancelUpdate, resumeUse, beginMaintenance
-  , UpdateContract(..), contractName, sameFormatFamily, strictStartup, pendingPath, runtimePath, shellPath
+  , pendingPath, runtimePath, shellPath
   ) where
 
 import Control.Concurrent.MVar
 import Control.Exception
-import Data.Aeson
-import Data.Aeson.Types (parseEither, Parser)
 import qualified Data.ByteString as B
-import qualified Data.Text as T
-import System.IO.Error (isDoesNotExistError)
 import Control.Monad
 import System.Directory
 import System.Environment (getExecutablePath)
@@ -53,40 +49,6 @@ installed exe
 
 pendingPath :: Installation -> FilePath
 pendingPath owner = statePath owner </> "pending"
-
-data UpdateContract = SameFormat | PrepareData deriving Eq
-
-contractName :: UpdateContract -> String
-contractName SameFormat = "same-format-v1"
-contractName PrepareData = "prepare-data-v1"
-
-instance FromJSON UpdateContract where
-  parseJSON = withText "update contract" $ \value -> case T.unpack value of
-    "same-format-v1" -> pure SameFormat
-    "prepare-data-v1" -> pure PrepareData
-    _ -> fail "Unknown installed update contract"
-
-sameFormatFamily :: String
-sameFormatFamily = "sapiens4-2026-11"
-
-strictStartup :: Installation -> IO Bool
-strictStartup owner = do
-  declaration <- readOptional (runtimePath (appPath owner) </> "desktop-update.json")
-  previous <- readOptional (statePath owner </> "same-format")
-  marker <- traverse parse previous
-  case declaration of
-    Nothing | Nothing <- marker -> pure False
-            | otherwise -> fail "Updated application is missing its update declaration"
-    Just bytes -> do
-      (running, declared) <- parse bytes
-      forM_ marker $ \(target, selected) ->
-        when (target == running && selected /= declared) $ fail "Installed and selected update contracts differ"
-      pure (declared == SameFormat)
-  where
-    readOptional path = catchJust (\e -> if isDoesNotExistError e then Just () else Nothing)
-      (Just <$> B.readFile path) (const $ pure Nothing)
-    parse input = either fail pure $ eitherDecodeStrict input >>= parseEither
-      (withObject "desktop update contract" $ \o -> (,) <$> (o .: "version" :: Parser String) <*> o .: "contract")
 
 withInstallation :: (Maybe Installation -> IO a) -> IO a
 withInstallation action = do

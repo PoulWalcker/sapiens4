@@ -29,8 +29,6 @@ import System.Info (os)
 import qualified SQLiteSchema
 import qualified MigrationFiles
 
-data StartupFormats = AllowExistingConversions | CurrentFormatsOnly deriving (Eq)
-
 data StorageChoice = StartNew | AttachExisting | AttachChild FilePath T.Text | CreateCorpora deriving (Eq, Show)
 
 selectionPath :: IO FilePath
@@ -151,18 +149,15 @@ publishedBootstrap root = do
     if null table then pure False else not . null <$> (query_ db "SELECT 1 FROM agents LIMIT 1" :: IO [Only Int])
 
 acquireStorage :: StorageChoice -> FilePath -> IO FileLock
-acquireStorage = acquireStorageWith AllowExistingConversions
-
-acquireStorageWith :: StartupFormats -> StorageChoice -> FilePath -> IO FileLock
-acquireStorageWith formats choice root = do
+acquireStorage choice root = do
  when (choice==StartNew) $ checkWritableParent root >> createPrivateDirectory root
  path <- managedDataPath root (root </> "host.lock")
  lockedBefore <- doesFileExist path
- unless lockedBefore $ validateRootFormats formats choice root
+ unless lockedBefore $ validateRoot choice root
  bracketOnError (storageLock root) unlockFile $ \lock -> do
   location <- selectedPath choice root
   unless (equalFilePath location root) $ storageError "The selected data directory changed during startup."
-  validateRootFormats formats choice root
+  validateRoot choice root
   names <- listDirectory root
   when (names==["host.lock"] && choice `elem` [StartNew,AttachExisting]) $
    makePrivateDirectory (initializingDirectory root)
@@ -199,12 +194,6 @@ storageError = ioError . userError
 readDataJSON :: FromJSON a => FilePath -> IO a
 readDataJSON path = either (storageError . ("Could not read data: " ++)) pure . eitherDecode =<< L.readFile path
 
--- The preflight never creates a missing lock or database in the selected tree.
-checkUpdateRoot :: FilePath -> IO ()
-checkUpdateRoot path = do
- root <- selectedPath AttachExisting path
- withUpdateLock root (validateRootFormats CurrentFormatsOnly AttachExisting root)
-
 withUpdateLock :: FilePath -> IO a -> IO a
 withUpdateLock root action = do
  lock <- managedDataPath root (root </> "host.lock")
@@ -212,11 +201,11 @@ withUpdateLock root action = do
  unless exists $ storageError ("Missing existing Corpora lock: " ++ root)
  bracket (storageLock root) unlockFile (const action)
 
-validateRootFormats :: StartupFormats -> StorageChoice -> FilePath -> IO ()
-validateRootFormats formats choice root = do
+validateRoot :: StorageChoice -> FilePath -> IO ()
+validateRoot choice root = do
  tree <- storageTree choice root
- let lockChild (_,path) = if formats==CurrentFormatsOnly then withUpdateLock path else withExistingLock path
- foldr lockChild (mapM_ (\(mode,path) -> void (inspectRoot formats mode path)) tree) (drop 1 tree)
+ let lockChild (_,path) = withExistingLock path
+ foldr lockChild (mapM_ (\(mode,path) -> void (inspectRoot mode path)) tree) (drop 1 tree)
 
 -- Managed writers must not follow aliases outside their owned storage paths.
 managedDataPath :: FilePath -> FilePath -> IO FilePath
@@ -232,10 +221,6 @@ regularFileExists path = do
   regular <- doesFileExist path
   unless regular $ storageError ("Expected a regular file: " ++ path)
  pure exists
-
-formatRequirement :: StartupFormats -> FilePath -> String -> IO ()
-formatRequirement AllowExistingConversions _ _ = pure ()
-formatRequirement CurrentFormatsOnly root what = storageError ("Update requires current " ++ what ++ " in " ++ root)
 
 registeredChildren :: FilePath -> IO [(StorageChoice,FilePath)]
 registeredChildren root = do
@@ -272,9 +257,9 @@ storageTree = walk []
 
 -- Keep every participant locked through conversion and final inspection. The caller
 -- takes ownership of the root lock only when its action succeeds.
-openStorageTree :: StartupFormats -> StorageChoice -> FilePath
+openStorageTree :: StorageChoice -> FilePath
                 -> (FileLock -> [(StorageChoice,FilePath,FileLock)] -> IO a) -> IO a
-openStorageTree formats choice root action = do
+openStorageTree choice root action = do
  tree <- storageTree choice root
  let ids = [ident | (AttachChild _ ident,_) <- tree]
  unless (length (nub ids)==length ids) $ storageError "A Corpora identity occurs twice in the registry tree."
@@ -282,7 +267,7 @@ openStorageTree formats choice root action = do
  locations <- mapM MigrationFiles.fileIdentity paths
  present <- mapM (regularFileExists . (</> "host.lock")) paths
  unless (and present) $ forM_ tree $ \(mode,path) -> do
-  void (inspectRoot formats mode path)
+  void (inspectRoot mode path)
   void (managedDataPath path (path </> "host.lock"))
  bracketOnError (storageLock root) unlockFile $ \owner ->
   let lockChildren [] acquired = do
@@ -300,10 +285,11 @@ openStorageTree formats choice root action = do
        lockChildren rest ((mode,path,lock):acquired)
   in lockChildren (drop 1 tree) []
 
-inspectRoot :: StartupFormats -> StorageChoice -> FilePath -> IO Bool
-inspectRoot formats choice root = do
+inspectRoot :: StorageChoice -> FilePath -> IO Bool
+inspectRoot choice root = do
   changed <- newIORef False
-  let legacy what = formatRequirement formats root what >> writeIORef changed True
+  let legacy :: String -> IO ()
+      legacy _ = writeIORef changed True
   exists <- doesDirectoryExist root
   unless exists $ storageError "This data directory is unavailable. Reconnect the drive or choose another directory."
   names <- listDirectory root
