@@ -80,7 +80,15 @@ prepareDataRoot choice repo root = do
     convertStoredFields s
     initialized <- doesDirectoryExist (initializingDirectory root)
     when initialized (removeDirectory (initializingDirectory root))
-    pure s
+    attempt <- Installation.currentAttempt
+    case attempt of
+     Nothing -> pure s
+     Just _ -> do
+      -- A root first created by B has no A data. Preserve its initialized state
+      -- before the first normal write, so readiness and later recovery use the same path.
+      DB.closeDatabase s
+      Backup.withMigrationBackup attempt root [root] (pure ())
+      openStorageService repo root lock
   else let existing = if published then AttachExisting else choice
        in openStorageTree existing root $ \owner tree -> do
    Backup.checkNoPending root

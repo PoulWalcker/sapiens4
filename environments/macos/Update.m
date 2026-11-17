@@ -5,6 +5,9 @@
 #import <signal.h>
 #import <fcntl.h>
 #import <poll.h>
+#import <CommonCrypto/CommonDigest.h>
+#import <sys/sysctl.h>
+#import <sys/file.h>
 
 // Sparkle owns package validation and replacement. This process lives outside the
 // replaceable bundle and opens the selected root only after verifying the installed B.
@@ -18,6 +21,7 @@ typedef NS_ENUM(NSUInteger, Phase) { Downloading, Preserving, Installing };
 @property(nonatomic) Phase phase;
 @property(nonatomic,strong) NSTimer *timer;
 @property(nonatomic,strong) NSDate *deadline;
+@property(nonatomic,strong) NSMutableDictionary *request;
 @end
 
 @implementation Update
@@ -40,13 +44,94 @@ typedef NS_ENUM(NSUInteger, Phase) { Downloading, Preserving, Installing };
 }
 - (BOOL)releaseReservation {
     NSURL *pending = [self.state URLByAppendingPathComponent:@"pending"];
-    NSURL *token = [pending URLByAppendingPathComponent:self.attemptDirectory.lastPathComponent];
-    return unlink(token.fileSystemRepresentation) == 0 && rmdir(pending.fileSystemRepresentation) == 0;
+    NSString *attempt = [NSString stringWithContentsOfURL:pending encoding:NSUTF8StringEncoding error:NULL];
+    return [attempt isEqual:self.attemptDirectory.lastPathComponent] && unlink(pending.fileSystemRepresentation) == 0;
 }
 - (void)stopWith:(NSString *)message {
     [self record:message];
     if (self.phase != Installing) [self releaseReservation];
     exit(EXIT_FAILURE);
+}
+- (NSNumber *)boot {
+    struct timeval boot;
+    size_t size = sizeof(boot);
+    if (sysctlbyname("kern.boottime", &boot, &size, NULL, 0) != 0)
+        [self stopWith:@"Cannot determine whether an interrupted installer is still running."];
+    return @(boot.tv_sec);
+}
+- (void)repair:(BOOL)previous {
+    self.phase = Installing; // Failure must retain the recovery gate and both archives.
+    self.product = @"com.sapiens4.desktop";
+    self.oldVersion = self.request[@"oldVersion"];
+    self.publicKey = self.request[@"publicKey"];
+    if (!self.oldVersion.length || !self.publicKey.length) [self stopWith:@"The recovery request is incomplete."];
+    for (NSString *name in @[@"admission.lock", @"use.lock"]) {
+        int fd = open([self.state URLByAppendingPathComponent:name].fileSystemRepresentation, O_RDWR | O_CLOEXEC);
+        if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) != 0)
+            [self stopWith:@"Close every Sapiens instance from this installation before recovery."];
+        // The process owns these leases until exit, including during Finder replacement.
+    }
+    NSFileManager *files = NSFileManager.defaultManager;
+    NSURL *pending = [self.state URLByAppendingPathComponent:@"pending"];
+    BOOL exists = [files fileExistsAtPath:pending.path];
+    if (exists) {
+        NSString *attempt = [NSString stringWithContentsOfURL:pending encoding:NSUTF8StringEncoding error:NULL];
+        if (![attempt isEqual:self.attemptDirectory.lastPathComponent])
+            [self stopWith:@"A different update owns this installation."];
+        // Sparkle's installer can outlive its controller. A reboot is the smallest
+        // reliable boundary for an interrupted native replacement, without a supervisor.
+        if ([self.request[@"boot"] isEqual:[self boot]])
+            [self stopWith:@"Restart macOS, then run this Repair.command again. An earlier installer may still be running."];
+    }
+    NSURL *marker = [self.state URLByAppendingPathComponent:@"update.json"];
+    NSData *bytes = [NSData dataWithContentsOfURL:marker];
+    NSDictionary *current = bytes ? [NSJSONSerialization JSONObjectWithData:bytes options:0 error:NULL] : nil;
+    if (!exists && bytes && (![current isKindOfClass:NSDictionary.class] || ![current[@"attempt"] isEqual:self.attemptDirectory.lastPathComponent]))
+        [self stopWith:@"A newer update owns this installation. Use its recovery command."];
+    NSString *target = previous ? self.oldVersion : self.version;
+    NSURL *archive = [self.attemptDirectory URLByAppendingPathComponent:previous ? @"previous.zip" : @"installed.zip"];
+    if (![self validInstalledVersion:target] && ![files fileExistsAtPath:archive.path])
+        [self stopWith:@"No complete copy of B was preserved. Run Repair.command --previous to recover A; no data will be restored automatically."];
+    NSError *error = nil;
+    if (!exists) {
+        if (![self.attemptDirectory.lastPathComponent writeToURL:pending atomically:YES encoding:NSUTF8StringEncoding error:&error]) [self stopWith:error.localizedDescription];
+        [self flush:@[pending,self.state]];
+    }
+    self.request[@"boot"] = [self boot];
+    NSURL *request = [self.attemptDirectory URLByAppendingPathComponent:@"request.json"];
+    bytes = [NSJSONSerialization dataWithJSONObject:self.request options:0 error:&error];
+    if (!bytes || ![bytes writeToURL:request options:NSDataWritingAtomic error:&error]) [self stopWith:error.localizedDescription];
+    [self flush:@[request,self.attemptDirectory]];
+    if (![self validInstalledVersion:target]) {
+        NSURL *stage = [self.attemptDirectory URLByAppendingPathComponent:[@"repair-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+        NSTask *extract = [NSTask new];
+        extract.executableURL = [NSURL fileURLWithPath:@"/usr/bin/ditto"];
+        extract.arguments = @[@"-x",@"-k",archive.path,stage.path];
+        if (![extract launchAndReturnError:&error]) [self stopWith:error.localizedDescription];
+        [extract waitUntilExit];
+        if (extract.terminationStatus != 0) [self stopWith:@"Cannot extract the preserved application."];
+        NSURL *destination = self.app;
+        self.app = [stage URLByAppendingPathComponent:destination.lastPathComponent];
+        if (![self validInstalledVersion:target]) [self stopWith:@"The preserved application failed signature verification."];
+        [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[self.app]];
+        printf("In Finder, copy %s to %s and choose Replace. Finder handles any required authorization.\n",
+               self.app.path.UTF8String, destination.URLByDeletingLastPathComponent.path.UTF8String);
+        self.app = destination;
+        while (![self validInstalledVersion:target]) {
+            printf("Press Return after Finder finishes, or close this window to cancel.\n"); fflush(stdout);
+            char line[16];
+            if (!fgets(line, sizeof(line), stdin)) [self stopWith:@"Recovery is unfinished. The application archives and data remain available."];
+        }
+    }
+    if (!previous) [self reopen];
+    if ([files fileExistsAtPath:marker.path]) {
+        NSURL *saved = [self.attemptDirectory URLByAppendingPathComponent:@"restored-update.json"];
+        if (rename(marker.fileSystemRepresentation, saved.fileSystemRepresentation) != 0) [self stopWith:@"Cannot finish application recovery."];
+        [self flush:@[self.attemptDirectory,self.state]];
+    }
+    if (![self releaseReservation]) [self stopWith:@"Cannot finish installation ownership."];
+    [self flush:@[self.state]];
+    puts("Previous application restored. Explicitly restore the corresponding data before opening it; newer data must be preserved first.");
 }
 - (BOOL)validInstalledVersion:(NSString *)version {
     NSDictionary *info = self.installedInfo;
@@ -66,6 +151,7 @@ typedef NS_ENUM(NSUInteger, Phase) { Downloading, Preserving, Installing };
     return [p.executableURL.URLByResolvingSymlinksInPath.path isEqual:expected.URLByResolvingSymlinksInPath.path] ? p : nil;
 }
 - (void)reopen {
+    [self.timer invalidate];
     NSError *error = nil;
     NSURL *marker = [self.state URLByAppendingPathComponent:@"update.json"];
     {
@@ -74,9 +160,11 @@ typedef NS_ENUM(NSUInteger, Phase) { Downloading, Preserving, Installing };
         id release = bytes ? [NSJSONSerialization JSONObjectWithData:bytes options:0 error:&error] : nil;
         if (![release isKindOfClass:NSDictionary.class] ||
             ![release[@"version"] isEqual:self.version]) [self stopWith:@"Installed release does not match the selected release."];
-        NSData *record = [NSJSONSerialization dataWithJSONObject:@{@"attempt":self.attemptDirectory.lastPathComponent, @"version":self.version, @"root":self.root, @"status":@"installed", @"recovery":[self.attemptDirectory URLByAppendingPathComponent:@"previous.zip"].path} options:0 error:&error];
+        [self archiveApplication:@"installed.zip"];
+        NSData *record = [NSJSONSerialization dataWithJSONObject:@{@"attempt":self.attemptDirectory.lastPathComponent, @"version":self.version, @"status":@"installed"} options:0 error:&error];
         if (!record || ![record writeToURL:marker options:NSDataWritingAtomic error:&error])
             [self stopWith:error.localizedDescription];
+        if (chmod(marker.fileSystemRepresentation, 0644) != 0) [self stopWith:@"Cannot publish the installation state."];
         [self flush:@[marker,self.state]];
     }
     if (![self releaseReservation])
@@ -114,6 +202,17 @@ typedef NS_ENUM(NSUInteger, Phase) { Downloading, Preserving, Installing };
     self.publicKey = info[@"SUPublicEDKey"];
     if (![self.product isEqual:@"com.sapiens4.desktop"] || !self.publicKey.length ||
         ![self validInstalledVersion:self.oldVersion]) [self stopWith:@"Cannot verify the original installed application."];
+    self.request[@"oldVersion"] = self.oldVersion;
+    self.request[@"publicKey"] = self.publicKey;
+    self.request[@"boot"] = [self boot];
+    NSURL *request = [self.attemptDirectory URLByAppendingPathComponent:@"request.json"];
+    NSData *saved = [NSJSONSerialization dataWithJSONObject:self.request options:0 error:error];
+    if (!saved || ![saved writeToURL:request options:NSDataWritingAtomic error:error]) return NO;
+    NSURL *repair = [self.attemptDirectory URLByAppendingPathComponent:@"Repair.command"];
+    NSString *script = @"#!/bin/sh\nexec \"$(dirname \"$0\")/Update.app/Contents/MacOS/Update\" \"${1:---repair}\"\n";
+    if (![script writeToURL:repair atomically:YES encoding:NSUTF8StringEncoding error:error] ||
+        chmod(repair.fileSystemRepresentation, 0700) != 0) return NO;
+    [self flush:@[request,repair,self.attemptDirectory]];
     NSBundle *bundle = [NSBundle bundleWithURL:self.app];
     self.updater = [[SPUUpdater alloc] initWithHostBundle:bundle applicationBundle:bundle userDriver:self delegate:self];
     if (![self.updater startUpdater:error]) return NO;
@@ -160,11 +259,16 @@ typedef NS_ENUM(NSUInteger, Phase) { Downloading, Preserving, Installing };
         if (remaining <= 0 || poll(&input, 1, remaining) <= 0 || read(STDIN_FILENO, &command[i], 1) != 1)
             [self stopWith:@"The update was cancelled before installation. The previous version is available."];
     }
-    NSURL *token = [[self.state URLByAppendingPathComponent:@"pending"] URLByAppendingPathComponent:self.attemptDirectory.lastPathComponent];
-    if (memcmp(command, "install\n", sizeof(command)) != 0 || ![[NSFileManager defaultManager] fileExistsAtPath:token.path])
+    NSURL *pending = [self.state URLByAppendingPathComponent:@"pending"];
+    NSString *attempt = [NSString stringWithContentsOfURL:pending encoding:NSUTF8StringEncoding error:NULL];
+    if (memcmp(command, "install\n", sizeof(command)) != 0 || ![attempt isEqual:self.attemptDirectory.lastPathComponent])
         [self stopWith:@"Installation ownership was not granted."];
     self.phase = Preserving;
-    NSURL *archive = [self.attemptDirectory URLByAppendingPathComponent:@"previous.zip"];
+    [self archiveApplication:@"previous.zip"];
+    self.phase = Installing;
+}
+- (void)archiveApplication:(NSString *)name {
+    NSURL *archive = [self.attemptDirectory URLByAppendingPathComponent:name];
     NSTask *copy = [NSTask new];
     copy.executableURL = [NSURL fileURLWithPath:@"/usr/bin/ditto"];
     copy.arguments = @[@"-c",@"-k",@"--sequesterRsrc",@"--keepParent",self.app.path,archive.path];
@@ -180,7 +284,6 @@ typedef NS_ENUM(NSUInteger, Phase) { Downloading, Preserving, Installing };
     [verify waitUntilExit];
     if (verify.terminationStatus != 0) [self stopWith:@"The preserved application archive could not be verified."];
     [self flush:@[archive,self.attemptDirectory]];
-    self.phase = Installing;
 }
 - (void)updater:(SPUUpdater *)updater willExtractUpdate:(SUAppcastItem *)item { [self authorizeInstallation]; }
 - (void)showDownloadDidStartExtractingUpdate {}
@@ -202,21 +305,36 @@ typedef NS_ENUM(NSUInteger, Phase) { Downloading, Preserving, Installing };
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
-        if (argc != 8) return EXIT_FAILURE;
+        if (argc > 2) return EXIT_FAILURE;
         NSArray<NSString *> *args = NSProcessInfo.processInfo.arguments;
         Update *driver = [Update new];
-        driver.app = [[NSURL fileURLWithPath:args[1] isDirectory:YES] URLByResolvingSymlinksInPath];
-        driver.state = [[NSURL fileURLWithPath:args[2] isDirectory:YES] URLByResolvingSymlinksInPath];
-        NSString *expected = [NSString stringWithFormat:@".%@.update", driver.app.lastPathComponent];
-        if (![driver.state.lastPathComponent isEqual:expected] ||
-            ![driver.state.URLByDeletingLastPathComponent.path isEqual:driver.app.URLByDeletingLastPathComponent.path]) return EXIT_FAILURE;
+        NSData *request = [NSData dataWithContentsOfURL:[driver.attemptDirectory URLByAppendingPathComponent:@"request.json"]];
+        driver.request = request ? [NSJSONSerialization JSONObjectWithData:request options:NSJSONReadingMutableContainers error:NULL] : nil;
+        if (![driver.request isKindOfClass:NSMutableDictionary.class]) return EXIT_FAILURE;
+        driver.app = [[NSURL fileURLWithPath:driver.request[@"app"] isDirectory:YES] URLByResolvingSymlinksInPath];
+        driver.state = [[NSURL fileURLWithPath:driver.request[@"state"] isDirectory:YES] URLByResolvingSymlinksInPath];
+        NSString *expected = [driver.app.URLByDeletingLastPathComponent.path stringByAppendingPathComponent:[NSString stringWithFormat:@".%@.update", driver.app.lastPathComponent]];
+        if ([driver.app.path hasPrefix:@"/Applications/"]) {
+            NSData *path = [driver.app.path dataUsingEncoding:NSUTF8StringEncoding];
+            unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+            CC_SHA256(path.bytes, (CC_LONG)path.length, digest);
+            NSMutableString *hash = [NSMutableString new];
+            for (NSUInteger i = 0; i < sizeof(digest); i++) [hash appendFormat:@"%02x", digest[i]];
+            expected = [@"/Users/Shared/.sapiens4-update-" stringByAppendingString:hash];
+        }
+        if (![driver.state.path isEqual:expected]) return EXIT_FAILURE;
         if (![driver.attemptDirectory.URLByDeletingLastPathComponent.path isEqual:driver.state.path]) return EXIT_FAILURE;
-        driver.version = args[3]; driver.asset = [NSURL URLWithString:args[4]];
-        driver.root = args[5]; driver.config = args[6]; driver.shellPID = args[7].intValue;
+        driver.version = driver.request[@"version"]; driver.asset = [NSURL URLWithString:driver.request[@"asset"]];
+        driver.root = driver.request[@"root"]; driver.config = driver.request[@"config"]; driver.shellPID = [driver.request[@"shellPid"] intValue];
         if (driver.shellPID <= 0 || ![driver.asset.scheme isEqual:@"https"]) return EXIT_FAILURE;
         signal(SIGPIPE, SIG_IGN);
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
+        if (argc == 2) {
+            if (![args[1] isEqual:@"--repair"] && ![args[1] isEqual:@"--previous"]) return EXIT_FAILURE;
+            [driver repair:[args[1] isEqual:@"--previous"]];
+            return EXIT_SUCCESS;
+        }
         NSError *error = nil;
         if (![driver start:&error]) [driver stopWith:error.localizedDescription];
         [NSApp run];

@@ -24,6 +24,7 @@ SolidCompression=yes
 CloseApplications=no
 RestartApplications=no
 RestartIfNeededByRun=no
+SetupMutex=Global\Sapiens4Setup-{username}
 UninstallDisplayIcon={app}\Sapiens4.exe
 #ifdef PublisherSign
 SignTool=sapiens
@@ -35,6 +36,12 @@ SignedUninstaller=no
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "sapiens-installation.id"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceDir}\sapiens-installation.id"; DestDir: "{app}"; Flags: ignoreversion
+
+; Runtime is wholly owned by the package; Data Roots and configuration are
+; required to live outside the installation. Remove obsolete B runtime files
+; when reinstalling A as well as obsolete A files when installing B.
+[InstallDelete]
+Type: filesandordirs; Name: "{app}\runtime"
 
 [Icons]
 Name: "{userprograms}\{#PackageName}"; Filename: "{app}\Sapiens4.exe"
@@ -107,6 +114,44 @@ function OpenInstalledImage(FileName: String; Access, Sharing: Cardinal;
   external 'CreateFileW@kernel32.dll stdcall';
 function CloseInstalledImage(Handle: THandle): BOOL;
   external 'CloseHandle@kernel32.dll stdcall';
+function FlushInstallerFile(Handle: THandle): BOOL;
+  external 'FlushFileBuffers@kernel32.dll stdcall';
+function PublishInstallerFile(Source, Destination: String; Flags: Cardinal): BOOL;
+  external 'MoveFileExW@kernel32.dll stdcall';
+
+procedure FlushCachedFile(Path: String);
+var Handle: THandle;
+begin
+  Handle := OpenInstalledImage(Path, $40000000, 7, 0, 3, 0, 0);
+  if Handle = THandle(-1) then RaiseException('Cannot open the recovery installer for flushing.');
+  try
+    if not FlushInstallerFile(Handle) then RaiseException('Cannot flush the recovery installer.');
+  finally
+    CloseInstalledImage(Handle);
+  end;
+end;
+
+procedure CurStepChanged(Step: TSetupStep);
+var App, State, Source, Cached, Digest, Next: String;
+begin
+  if Step <> ssPostInstall then Exit;
+  App := RemoveBackslash(ExpandConstant('{app}'));
+  State := AddBackslash(ExtractFileDir(App)) + '.' + ExtractFileName(App) + '.update';
+  if not ForceDirectories(State + '\installers') then RaiseException('Cannot create the recovery installer directory.');
+  Source := ExpandConstant('{srcexe}');
+  Digest := GetSHA256OfFile(Source);
+  Cached := State + '\installers\' + Digest + '.exe';
+  if CompareText(Source, Cached) <> 0 then begin
+    if not FileCopy(Source, Cached, False) then RaiseException('Cannot preserve the recovery installer.');
+    FlushCachedFile(Cached);
+  end;
+  if GetSHA256OfFile(Cached) <> Digest then RaiseException('The recovery installer copy is incomplete.');
+  Next := State + '\current-installer.new';
+  if not SaveStringToFile(Next, AnsiString(Digest), False) then RaiseException('Cannot record the recovery installer.');
+  FlushCachedFile(Next);
+  if not PublishInstallerFile(Next, State + '\current-installer', 9) then
+    RaiseException('Cannot publish the recovery installer.');
+end;
 
 type
   TImageFindData = array[0..147] of Cardinal;

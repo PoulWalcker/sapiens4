@@ -1,23 +1,68 @@
-param(
-    [string]$App, [string]$State, [string]$Version, [uri]$Asset,
-    [AllowEmptyString()][string]$Root, [string]$Config, [int]$ShellPid, [string]$Digest
-)
+param([switch]$Repair, [switch]$Previous)
 $ErrorActionPreference = 'Stop'
+if ($Repair -and $Previous) { throw 'Choose either Repair or Previous.' }
+$savedAttempt = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'request.json') -Raw | ConvertFrom-Json
+$App = $savedAttempt.app; $State = $savedAttempt.state; $Version = $savedAttempt.version
+[uri]$Asset = $savedAttempt.asset; $Root = $savedAttempt.root; $Config = $savedAttempt.config; $Digest = $savedAttempt.digest
+[int]$ShellPid = if ($Repair -or $Previous) { 0 } else { $savedAttempt.shellPid }
 $pending = Join-Path $State 'pending'
-$reservation = Join-Path $pending (Split-Path $PSScriptRoot -Leaf)
+$attempt = Split-Path $PSScriptRoot -Leaf
 $outcome = Join-Path $State 'outcome.txt'
 $exe = Join-Path $App 'Sapiens4.exe'
 $manifest = Join-Path $App 'runtime/desktop-update.json'
 $package = Join-Path $PSScriptRoot 'update.exe'
+$previousInstaller = Join-Path $PSScriptRoot 'previous.exe'
 $identity = 'com.sapiens4.desktop'
 $armed = $false
 $old = $null
 $originalShell = $null
+$leases = @()
+$ownsGate = $false
+
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class UpdateFiles {
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    public static extern bool MoveFileEx(string source, string target, uint flags);
+}
+'@
+function Write-Record([string]$Path, $Value, [switch]$Plain) {
+    $next = "$Path.new"
+    $text = if ($Plain) { [string]$Value } else { $Value | ConvertTo-Json -Depth 5 -Compress }
+    [IO.File]::WriteAllText($next,$text)
+    $file = [IO.File]::Open($next,'Open','ReadWrite','None')
+    try { $file.Flush($true) } finally { $file.Dispose() }
+    if (-not [UpdateFiles]::MoveFileEx($next,$Path,9)) { throw 'Cannot publish the update recovery record.' }
+}
+function Lock-Installation([string]$Name) {
+    $file = [IO.File]::Open((Join-Path $State $Name),'OpenOrCreate','ReadWrite','ReadWrite')
+    try {
+        for ($n=0; $n -lt 50; $n++) {
+            try { $file.Lock(0,1); return $file }
+            catch [IO.IOException] { if ($n -eq 49) { throw }; Start-Sleep -Milliseconds 100 }
+        }
+    } catch { $file.Dispose(); throw 'Another process is using this installation. Close it before recovery.' }
+}
+function Acquire-Maintenance {
+    $script:leases += Lock-Installation 'admission.lock'
+    $script:leases += Lock-Installation 'use.lock'
+    if (Test-Path -LiteralPath $pending) {
+        if ([IO.File]::ReadAllText($pending) -cne $attempt) { throw 'A different update owns this installation.' }
+    } else {
+        $marker = Join-Path $State 'update.json'
+        if (($Repair -or $Previous) -and (Test-Path -LiteralPath $marker)) {
+            $current = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json
+            if ($current.attempt -cne $attempt) { throw 'A newer update owns this installation. Use its recovery command.' }
+        }
+        Write-Record $pending $attempt -Plain
+    }
+    $script:ownsGate = $true
+}
 
 function Release-Reservation {
-    if ([IO.File]::Exists($reservation)) {
-        [IO.File]::Delete($reservation)
-        [IO.Directory]::Delete($pending)
+    if ([IO.File]::Exists($pending) -and [IO.File]::ReadAllText($pending) -ceq $attempt) {
+        [IO.File]::Delete($pending)
     }
 }
 function Installed-Release {
@@ -34,6 +79,13 @@ function Verify-Publisher([string]$Path, [string]$Thumbprint) {
     $signature = Get-AuthenticodeSignature -LiteralPath $Path
     if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -ne $Thumbprint) {
         throw "The publisher signature could not be verified on $([IO.Path]::GetFileName($Path))."
+    }
+}
+function Verify-Installer([string]$Path, [string]$Expected) {
+    Verify-Publisher $Path $old.publisher
+    $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($Path)
+    if ($info.ProductName -cne $identity -or $info.FileDescription -cne "Sapiens4 Setup $($old.platform)" -or $info.ProductVersion -cne $Expected) {
+        throw 'Wrong signed installer product, version or platform.'
     }
 }
 function Close-Shell {
@@ -58,8 +110,11 @@ try {
     if ($State -ne $expected -or (Split-Path $PSScriptRoot -Parent) -ne $State) { exit 1 }
     if (-not $Asset.IsAbsoluteUri -or $Asset.Scheme -ne 'https' -or $Asset.UserInfo -or $Asset.Fragment -or
         $Version -notmatch '^\d+\.\d+\.\d+$' -or $Digest -notmatch '^[a-fA-F0-9]{64}$') { throw 'Invalid selected release.' }
-    $originalShell = Get-Process -Id $ShellPid -ErrorAction SilentlyContinue
+    if ($ShellPid -gt 0) { $originalShell = Get-Process -Id $ShellPid -ErrorAction SilentlyContinue }
     if ($originalShell -and $originalShell.Path -ne $exe) { $originalShell = $null }
+    if ($Repair -or $Previous) {
+        $old = $savedAttempt.old
+    } else {
     $installed = Installed-Release
     if ([version]$installed.version -ge [version]$Version -or $installed.publisher -notmatch '^[a-fA-F0-9]{40}$') { throw 'Invalid installed publisher or version.' }
     Verify-Publisher $exe $installed.publisher
@@ -80,25 +135,32 @@ try {
         } finally { $response.Dispose() }
     } finally { $client.Dispose() }
     if ((Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash -ne $Digest) { throw 'The update checksum did not match the selected release.' }
-    Verify-Publisher $package $old.publisher
-    $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($package)
-    if ($info.ProductName -cne $identity -or $info.FileDescription -cne "Sapiens4 Setup $($old.platform)" -or $info.ProductVersion -cne $Version) { throw 'Wrong signed installer product, version or platform.' }
+    Verify-Installer $package $Version
+    $cacheRecord = Join-Path $State 'current-installer'
+    if (-not [IO.File]::Exists($cacheRecord)) { throw 'Reinstall the current version once to preserve its signed recovery installer.' }
+    $cached = [IO.File]::ReadAllText($cacheRecord)
+    if ($cached -notmatch '^[a-fA-F0-9]{64}$') { throw 'Reinstall the current version once to preserve its signed recovery installer.' }
+    $original = Join-Path $State "installers\$cached.exe"
+    if ((Get-FileHash -LiteralPath $original -Algorithm SHA256).Hash -ne $cached) { throw 'The previous installer cache is incomplete.' }
+    Verify-Installer $original $old.version
+    [IO.File]::Copy($original,$previousInstaller,$false)
+    Verify-Installer $previousInstaller $old.version
+    foreach ($path in @($package,$previousInstaller)) {
+        $file = [IO.File]::Open($path,'Open','ReadWrite','None')
+        try { $file.Flush($true) } finally { $file.Dispose() }
+    }
+    $savedAttempt | Add-Member -NotePropertyName old -NotePropertyValue $old
+    Write-Record (Join-Path $PSScriptRoot 'request.json') $savedAttempt
+    [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'Repair.cmd'), "@echo off`r`npowershell.exe -NoProfile -File `"%~dp0apply.ps1`" -Repair`r`npause`r`n")
     [Console]::Out.WriteLine('downloaded')
     [Console]::Out.Flush()
     if ([Console]::ReadLine() -cne 'install') { throw 'The update was cancelled before installation. The previous version is available.' }
-    if (-not [IO.File]::Exists($reservation)) { throw 'Installation ownership was not granted.' }
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $archive = Join-Path $PSScriptRoot 'previous.zip'
-    [IO.Compression.ZipFile]::CreateFromDirectory($App,$archive)
-    $saved = [IO.Compression.ZipFile]::OpenRead($archive)
-    try {
-        foreach ($entry in $saved.Entries) {
-            $content = $entry.Open()
-            try { $content.CopyTo([IO.Stream]::Null) } finally { $content.Dispose() }
-        }
-    } finally { $saved.Dispose() }
-    $saved = [IO.File]::Open($archive,'Open','ReadWrite','None')
-    try { $saved.Flush($true) } finally { $saved.Dispose() }
+    if (-not [IO.File]::Exists($pending) -or [IO.File]::ReadAllText($pending) -cne $attempt) { throw 'Installation ownership was not granted.' }
+    }
+    if ($Previous) { $package = $previousInstaller; $Version = $old.version }
+    elseif ((Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash -ne $Digest) { throw 'The retained update checksum does not match.' }
+    Verify-Installer $package $Version
+    Acquire-Maintenance
     Close-Shell
     $armed = $true
     $setup = Start-Process -FilePath $package -ArgumentList @('/CURRENTUSER','/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/RESTARTEXITCODE=3010',("/DIR=`"$App`"")) -PassThru -Wait
@@ -109,13 +171,18 @@ try {
     Verify-Publisher $exe $old.publisher
     Verify-Publisher (Join-Path $App 'runtime/.build/bin/sapiens4.exe') $old.publisher
     $marker = Join-Path $State 'update.json'
-    $next = Join-Path $PSScriptRoot 'update.json'
-    [IO.File]::WriteAllText($next,(@{attempt=(Split-Path $PSScriptRoot -Leaf);version=$Version;root=$Root;status='installed';recovery=$archive} | ConvertTo-Json -Compress))
-    if ([IO.File]::Exists($marker)) { [IO.File]::Replace($next,$marker,$null) } else { [IO.File]::Move($next,$marker) }
+    if ($Previous) {
+        if ([IO.File]::Exists($marker) -and -not [UpdateFiles]::MoveFileEx($marker,(Join-Path $PSScriptRoot 'restored-update.json'),9)) { throw 'Cannot finish application recovery.' }
+    } else {
+        Write-Record $marker @{attempt=(Split-Path $PSScriptRoot -Leaf);version=$Version;status='installed'}
+    }
     Release-Reservation
-    Open-Shell
+    if ($Previous) { Write-Output 'Previous application restored. Open it only after explicitly restoring the corresponding data; newer data must be preserved first.' }
+    else { Open-Shell }
 } catch {
-    [IO.File]::WriteAllText($outcome,$_.Exception.Message)
-    if (-not $armed) { Release-Reservation }
+    [IO.File]::WriteAllText($outcome,($_.Exception.Message + " Recovery: powershell.exe -NoProfile -File `"$PSCommandPath`" -Repair. The retained installers have not been deleted."))
+    if ($ownsGate -and -not $armed -and -not $Repair -and -not $Previous) { Release-Reservation }
     exit 1
+} finally {
+    foreach ($file in $leases) { $file.Dispose() }
 }

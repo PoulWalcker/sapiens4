@@ -25,6 +25,9 @@ import Text.ParserCombinators.ReadP (readP_to_S)
 import Installation
 import Types (atomicBytes)
 import qualified MigrationBackup as Backup
+import qualified MigrationFiles as Files
+import qualified Crypto.Hash.SHA256 as SHA
+import Numeric (showHex)
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
@@ -65,11 +68,16 @@ workspaceOpened (DesktopUpdate owner version _ _ _) root corpora = do
   exists <- doesFileExist marker
   when exists $ do
     contents <- B.readFile marker
-    (target, expected, attempt, fields) <- either fail pure (eitherDecodeStrict contents >>= parseEither
-      (withObject "installed update" (\o -> (,,,) <$> o .: "version" <*> o .: "root" <*> o .: "attempt" <*> pure o)))
+    (target, attempt, fields) <- either fail pure (eitherDecodeStrict contents >>= parseEither
+      (withObject "installed update" (\o -> (,,) <$> o .: "version" <*> o .: "attempt" <*> pure o)))
+    -- The shared installation marker contains no private Data Root paths.
+    request <- B.readFile (statePath owner </> attempt </> "request.json")
+    expected <- either fail pure (eitherDecodeStrict request >>= parseEither (withObject "update request" (.: "root")))
     preserved <- Backup.hasOriginal attempt root
     when (preserved && not (T.null corpora) && target == showVersion version && (null expected || equalFilePath expected root)) $ do
-      let confirmed = KM.insert "status" (String "ready") $ KM.insert "corpora" (String corpora) $ KM.insert "root" (String $ T.pack root) fields
+      let hex byte = let digits = showHex byte "" in replicate (2-length digits) '0' ++ digits
+          rootHash = T.pack $ concatMap hex (B.unpack (SHA.hash (TE.encodeUtf8 (T.pack root))))
+          confirmed = KM.insert "status" (String "ready") $ KM.insert "corpora" (String corpora) $ KM.insert "rootHash" (String rootHash) fields
       atomicBytes marker (encode (Object confirmed))
 
 data WorkerFailure = PreviousAvailable String | InstallationIncomplete String
@@ -115,7 +123,8 @@ withDesktopUpdate action = withInstallation $ \owner -> case owner of
   Just install -> do
     let file = runtimePath (appPath install) </> "desktop-update.json"
     configured <- doesFileExist file
-    if not configured then action Nothing else do
+    canWrite <- writable <$> getPermissions (statePath install)
+    if not configured || not canWrite then action Nothing else do
       bytes <- B.readFile file
       (version,feed,platform) <- either fail pure (eitherDecodeStrict bytes >>= parseEither config)
       manager <- newManager tlsManagerSettings
@@ -199,18 +208,20 @@ startWorker owner selected@(Release _ url digest) stop root config = do
   attempt <- UUID.toString <$> UUID.nextRandom
   let reservation = "driver-" ++ attempt
       workspace = state </> reservation
-      arguments = [app,state,releaseVersion selected,url,maybe "" id root,config,show pid]
       macDriver = workspace </> "Update.app"
       powershell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
       worker = workspace </> "apply.ps1"
-  createDirectory workspace
+  Files.privateDirectory workspace
+  atomicBytes (workspace </> "request.json") $ encode $ object
+    ["app" .= app, "state" .= state, "version" .= releaseVersion selected, "asset" .= url,
+     "root" .= maybe "" id root, "config" .= config, "shellPid" .= show pid, "digest" .= digest]
   command <- if os == "darwin" then do
     callProcess "/usr/bin/ditto" [app </> "Contents/Helpers/Update.app",macDriver]
     callProcess "/usr/bin/codesign" ["--verify","--deep","--strict",macDriver]
-    pure (proc (macDriver </> "Contents/MacOS/Update") arguments)
+    pure (proc (macDriver </> "Contents/MacOS/Update") [])
    else do
     copyFile (app </> "apply.ps1") worker
-    pure (proc powershell (["-NoProfile","-NonInteractive","-File",worker] ++ arguments ++ [digest]))
+    pure (proc powershell ["-NoProfile","-NonInteractive","-File",worker])
   let detail = state </> "outcome.txt"
   exists <- doesFileExist detail
   when exists (removeFile detail)
