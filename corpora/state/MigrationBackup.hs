@@ -9,7 +9,8 @@ import Data.List (nub, sort)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import GHC.Generics (Generic)
-import DataRoot (StorageChoice(..), storageTree, withUpdateLock)
+import DataRoot (storageLock)
+import System.FileLock (unlockFile)
 import MigrationFiles
 import System.Directory
 import System.FilePath
@@ -126,6 +127,23 @@ withMigrationBackup attempt root paths convert = do
   syncTree (lockPaths root members) root
   record dir receipt {phase = Migrated}
 
+-- The live registry may be precisely what an interrupted migration damaged.
+-- Lock every physical child, including newer/unregistered Corpora, before saving
+-- and restoring the tree. Existing receipts still require the original identities.
+recoveryTree :: FilePath -> IO [FilePath]
+recoveryTree root = do
+  noLink root
+  let children = root </> "corporas"
+  exists <- doesPathExist children
+  descendants <- if not exists then pure [] else do
+    noLink children
+    names <- sort <$> listDirectory children
+    fmap concat $ forM (filter validId names) $ \name -> do
+      let child = children </> name
+      directory <- doesDirectoryExist child
+      if directory then recoveryTree child else pure []
+  pure (root:descendants)
+
 restoreData :: FilePath -> String -> IO ()
 restoreData root ident = do
   ensure (validId ident) "Invalid migration recovery identifier."
@@ -139,14 +157,22 @@ restoreData root ident = do
   ensure (all (\(d,r) -> d == dir || not (incomplete (phase r))) records) "Another migration or restoration needs recovery first."
   paths <- case phase seen of
     Restoring _ members -> pure (map folder members)
-    _ -> nub . (map folder (participants seen) ++) . map snd <$> storageTree AttachExisting root
-  members <- mapM member paths
-  ensure (all (`elem` members) (participants seen)) "Original Data Root or lock identity changed."
-  foldr withUpdateLock (restoreLocked dir seen members) paths
+    _ -> nub . (map folder (participants seen) ++) <$> recoveryTree root
+  let required = case phase seen of
+        Restoring _ locked -> locked
+        _ -> participants seen
+  actual <- mapM (member . folder) required
+  ensure (actual == required) "Original Data Root or lock identity changed."
+  locations <- mapM fileIdentity paths
+  -- Only unpublished/newer children may need a lock created. Original and
+  -- interrupted-restoration lock identities were checked above and again below.
+  let lock path action = bracket (storageLock path) unlockFile (const action)
+  foldr lock (restoreLocked dir seen required paths locations) paths
   where
-  restoreLocked dir seen members = do
-    actual <- mapM (member . folder) members
-    ensure (actual == members) "Recovery participant changed while acquiring locks."
+  restoreLocked dir seen required paths locations = do
+    members <- mapM member paths
+    ensure (map directoryId members == locations && all (`elem` members) required)
+      "Recovery participant changed while acquiring locks."
     current <- receipts root
     ensure (all (\(d,r) -> d == dir || not (incomplete (phase r))) current) "Another migration or restoration needs recovery first."
     receipt <- maybe (fail "The recovery record disappeared.") pure (lookup dir current)
@@ -157,8 +183,8 @@ restoreData root ident = do
         noLink saved
         pure saved
       _ -> do
-        now <- map snd <$> storageTree AttachExisting root
-        ensure (all (`elem` map folder members) now) "The registered Corpora changed; retry recovery."
+        now <- recoveryTree root
+        ensure (all (`elem` map folder members) now) "The Corpora directories changed; retry recovery."
         nonce <- UUID.toString <$> UUID.nextRandom
         let saved = dir </> nonce
         privateDirectory saved
