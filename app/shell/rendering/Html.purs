@@ -2,6 +2,7 @@ module Sapiens.Html where
 
 import Sapiens.Form as F
 import Prelude
+import Sapiens.DesktopUpdate (Slots)
 import Data.Tuple (Tuple)
 import Effect.Aff (Aff)
 import Halogen as H
@@ -11,7 +12,7 @@ import Halogen.HTML.Events as E
 import Sapiens.Action (Action(..))
 import Web.Event.Event (Event, EventType(..))
 
-type Html = H.ComponentHTML Action () Aff
+type Html = H.ComponentHTML Action Slots Aff
 type Prop = P.IProp () Action
 
 node :: String -> Array Prop -> Array Html -> Html

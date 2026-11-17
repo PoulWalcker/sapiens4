@@ -11,7 +11,7 @@ import Data.Aeson hiding (pairs)
 import qualified Data.Aeson.KeyMap as K
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, nub)
 import Data.Char (isAscii, isAlphaNum)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -32,6 +32,8 @@ import qualified System.Posix.Directory as Posix
 
 supportedDatabaseVersions :: [Int]
 supportedDatabaseVersions = [0..8]
+
+data StartupFormats = AllowExistingConversions | CurrentFormatsOnly deriving (Eq)
 
 data StorageChoice = StartNew | AttachExisting | AttachChild FilePath T.Text | CreateCorpora deriving (Eq, Show)
 
@@ -143,15 +145,18 @@ initializingDirectory :: FilePath -> FilePath
 initializingDirectory root = root </> ".sapiens-initializing"
 
 acquireStorage :: StorageChoice -> FilePath -> IO FileLock
-acquireStorage choice root = do
+acquireStorage = acquireStorageWith AllowExistingConversions
+
+acquireStorageWith :: StartupFormats -> StorageChoice -> FilePath -> IO FileLock
+acquireStorageWith formats choice root = do
  when (choice==StartNew) $ checkWritableParent root >> createPrivateDirectory root
  path <- containedPath root (root </> "host.lock")
  lockedBefore <- doesFileExist path
- unless lockedBefore $ validateDataRoot choice root
+ unless lockedBefore $ validateRootFormats formats choice root
  bracketOnError (storageLock root) unlockFile $ \lock -> do
   location <- selectedPath choice root
   unless (equalFilePath location root) $ storageError "The selected data directory changed during startup."
-  validateDataRoot choice root
+  validateRootFormats formats choice root
   names <- listDirectory root
   when (names==["host.lock"] && choice `elem` [StartNew,AttachExisting]) $
    makePrivateDirectory (initializingDirectory root)
@@ -212,7 +217,23 @@ readDataJSON :: FromJSON a => FilePath -> IO a
 readDataJSON path = either (storageError . ("Could not read data: " ++)) pure . eitherDecode =<< L.readFile path
 
 validateDataRoot :: StorageChoice -> FilePath -> IO ()
-validateDataRoot choice = validate []
+validateDataRoot = validateRootFormats AllowExistingConversions
+
+-- The preflight never creates a missing lock or database in the selected tree.
+checkUpdateRoot :: FilePath -> IO ()
+checkUpdateRoot path = do
+ root <- selectedPath AttachExisting path
+ withUpdateLock root (validateRootFormats CurrentFormatsOnly AttachExisting root)
+
+withUpdateLock :: FilePath -> IO a -> IO a
+withUpdateLock root action = do
+ lock <- containedPath root (root </> "host.lock")
+ exists <- doesFileExist lock
+ unless exists $ storageError ("Missing existing Corpora lock: " ++ root)
+ bracket (storageLock root) unlockFile (const action)
+
+validateRootFormats :: StartupFormats -> StorageChoice -> FilePath -> IO ()
+validateRootFormats formats choice = validate []
  where
  validate ancestors directory = do
   exists <- doesDirectoryExist directory
@@ -231,6 +252,10 @@ validateDataRoot choice = validate []
    if regular && not link then (==0) <$> getFileSize lock else pure False
    else pure False
   pending <- if topLevel then doesDirectoryExist (initializingDirectory root) else pure False
+  let strict = formats==CurrentFormatsOnly
+      current condition what = when (strict && not condition) $
+        storageError ("Update requires current " ++ what ++ " in " ++ root)
+  current (not pending) "completed storage initialization"
   when pending $ do
    linked <- pathIsSymbolicLink (initializingDirectory root)
    contents <- listDirectory (initializingDirectory root)
@@ -240,6 +265,7 @@ validateDataRoot choice = validate []
    storageError "Start fresh requires an empty data directory. Choose Use another folder to open your existing data."
   let initializing = topLevel && (null names && choice==StartNew || lockOnly)
                   || null ancestors && choice==CreateCorpora && all (`elem` ["corpora-identity.json","corpora-settings.json"]) meaningful
+  current (not initializing || choice `elem` [StartNew,CreateCorpora]) "existing Corpora"
   when (choice==CreateCorpora && not initializing) $ storageError "New Corpora directory contains unexpected data."
   if initializing && choice==CreateCorpora then do
    identity <- readDataJSON (root </> "corpora-identity.json")
@@ -279,22 +305,47 @@ validateDataRoot choice = validate []
    agents <- if beforeSchema then pure [] else withReadOnlyDatabase root $ \db -> do
     [Only version] <- query_ db "PRAGMA user_version" :: IO [Only Int]
     unless (version > 0 && version `elem` supportedDatabaseVersions && (not pending || version==8)) $ storageError "Unsupported Corpora schema. Open these data with a compatible Sapiens version; no migration was performed."
+    current (version==8) "SQLite schema 8"
     integrity <- query_ db "PRAGMA quick_check" :: IO [Only T.Text]
     unless (integrity==[Only "ok"]) $ storageError "The Corpora database is corrupted. Restore it from a backup."
     checkSchema db version
     rows <- query_ db "SELECT id FROM agents ORDER BY created,id" :: IO [Only T.Text]
+    when strict $ do
+     faces <- query_ db "SELECT face FROM agents" :: IO [Only T.Text]
+     current (length (nub faces)==length faces) "agent avatars"
+     routines <- query_ db "SELECT value FROM scheduled_routines" :: IO [Only T.Text]
+     forM_ routines $ \(Only encoded) -> do
+      routine <- either storageError pure (eitherDecodeStrict (TE.encodeUtf8 encoded))
+      current (case get routine "runCount" of Number _ -> True; _ -> False) "routine run counts"
     when (null rows && not pending) $ storageError "The Corpora database has no agents. Restore a complete Data Root from backup."
     preferences <- query_ db "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='preferences'" :: IO [Only Int]
     when (preferences==[Only 1]) $ do
      prefs <- query_ db "SELECT value FROM preferences WHERE id=1" :: IO [Only T.Text]
+     current (length prefs==1) "workspace preferences"
      groupsPresent <- query_ db "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='groups'" :: IO [Only Int]
      groups <- if groupsPresent==[Only 1] then query_ db "SELECT id FROM groups" else pure []
      forM_ prefs $ \(Only encoded) -> do
       doc <- either storageError pure (eitherDecodeStrict (TE.encodeUtf8 encoded))
+      when strict $ do
+       let ws = get doc "workspaces"
+           array (Array _) = True
+           array _ = False
+       current (get doc "browser_version"==Number 1 && case ws of Object _ -> True; _ -> False) "browser preferences v1"
+       current (all (\(_,w) -> array (get w "tabs") && array (get w "bookmarks")) (pairs ws)) "workspace tabs and bookmarks"
+       current (all (\(Only agent) -> get (get ws agent) "memo_bookmark_seeded"==Bool True) rows) "Notes bookmarks"
+       current (case doc of Object f -> not (K.member "work_views" f); _ -> False) "preferences"
+       current (get doc "panel" `notElem` map String ["mindmap","cron","log"]) "panel preferences"
       when (get doc "browser_version" /= Number 1) $ forM_ (pairs (get doc "workspaces")) $ \(owner,_) -> do
        unless (Only owner `elem` rows ++ groups && safeId owner) $ storageError "Workspace preferences contain an unknown owner."
        void (containedPath root (root </> "workspaces" </> T.unpack owner))
     pure (map fromOnly rows)
+   when (strict && not (null agents)) $ do
+    dirPath <- containedPath root (root </> "agentpy/corpora/directory.json")
+    directory <- readDataJSON dirPath
+    forM_ (zip [0::Int ..] agents) $ \(index,agent) -> do
+     current (case get directory agent of
+      Object entry -> if index==0 then K.lookup "parent" entry==Just Null else case K.lookup "parent" entry of Just (String _) -> True; _ -> False
+      _ -> False) "agent directory"
    forM_ agents $ \agent -> do
     unless (safeId agent) $
      storageError "The Corpora database contains an invalid agent identity."
@@ -307,6 +358,8 @@ validateDataRoot choice = validate []
     case state of
      Object fields | Just (Number version) <- K.lookup "schema_version" fields, version `elem` [1,2,3],
                      Just (String savedAgent) <- K.lookup "agid" fields, savedAgent==agent -> do
+      current (version==3 && not (K.member "initial_manager" fields)) "agent state v3"
+      when strict $ doesFileExist (work </> "Notes.html") >>= flip current "Notes.html"
       let decoded = if version==3 then validateValue 500 parseJSON state else migrateAgentState (round version) state
       case decoded of
        Right _ -> pure ()
@@ -325,7 +378,7 @@ validateDataRoot choice = validate []
         child <- childPath root ident
         available <- doesDirectoryExist child
         unless available $ storageError "A registered Corpora is missing. Restore the complete Data Root before opening it."
-        withExistingLock child $ do
+        (if strict then withUpdateLock else withExistingLock) child $ do
          checkRegisteredIdentity child ident
          validate (root:ancestors) child
        _ -> storageError "The Corpora registry contains an invalid identity. Restore it from backup."

@@ -3,6 +3,11 @@ AppId={#PackageId}
 AppName={#PackageName}
 AppVersion={#AppVersion}
 VersionInfoVersion={#FileVersion}
+#ifdef UpdatePlatform
+VersionInfoProductName={#PackageId}
+VersionInfoDescription=Sapiens4 Setup {#UpdatePlatform}
+VersionInfoProductTextVersion={#AppVersion}
+#endif
 DefaultDirName={localappdata}\Programs\{#PackageName}
 DefaultGroupName={#PackageName}
 PrivilegesRequired=lowest

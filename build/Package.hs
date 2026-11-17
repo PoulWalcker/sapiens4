@@ -59,16 +59,26 @@ renameNew source destination = do
 #endif
 
 files :: FilePath -> IO [FilePath]
-files root = do
+files = packageFiles Nothing
+
+packageFiles :: Maybe FilePath -> FilePath -> IO [FilePath]
+packageFiles framework root = do
  present <- doesDirectoryExist root
  if not present then pure [] else sort . concat <$> (listDirectory root >>= mapM visit)
  where
  visit name = do
   let path=root</>name
   link <- pathIsSymbolicLink path
-  when link $ fail ("Package payload may not contain symbolic links: "++path)
-  directory <- doesDirectoryExist path
-  if directory then files path else pure [path]
+  if link then case framework of
+   Just sdk | inside sdk path -> do
+    target <- canonicalizePath path
+    valid <- doesPathExist target
+    unless (valid && inside sdk target) $ fail ("Invalid framework symlink: " ++ path)
+    pure []
+   _ -> fail ("Package payload may not contain symbolic links: "++path)
+  else do
+   directory <- doesDirectoryExist path
+   if directory then packageFiles framework path else pure [path]
 
 copy :: FilePath -> FilePath -> IO ()
 copy source target = createDirectoryIfMissing True (takeDirectory target) >> copyFile source target
@@ -81,7 +91,10 @@ macho path = do
   pure $ magic `elem` map B.pack [[254,237,250,206],[206,250,237,254],[254,237,250,207],[207,250,237,254],[202,254,186,190],[190,186,254,202],[202,254,186,191],[191,186,254,202]]
 
 binaries :: FilePath -> IO [FilePath]
-binaries root = files root >>= filterM macho
+binaries root = packageFiles (Just (updateHelper root </> "Contents/Frameworks/Sparkle.framework")) root >>= filterM macho
+
+updateHelper :: FilePath -> FilePath
+updateHelper app = app </> "Contents/Helpers/Update.app"
 
 dependencies :: FilePath -> IO [String]
 dependencies binary = map (T.unpack . fst . T.breakOn " (" . T.strip . T.pack) . drop 1 . lines <$> capture "otool" ["-L",binary]
@@ -176,9 +189,50 @@ splitVersion value = case break (=='.') value of (part,[]) -> [part];(part,_:res
 sign :: FilePath -> FilePath -> Maybe String -> IO ()
 sign root app identity = do
  let flags=["--force","--sign",fromMaybe "-" identity]++[value | isJust identity,value<-["--options","runtime","--timestamp"]]
- binaries app >>= mapM_ (\binary->run "codesign" (flags++[binary])) . sortOn (negate . length . splitDirectories)
+ bins <- binaries app
+ mapM_ (\binary->run "codesign" (flags++[binary])) $ sortOn (negate . length . splitDirectories) (filter (not . inside (updateHelper app)) bins)
  run "codesign" (flags++["--entitlements",root</>"build/package/macos-entitlements.plist",app])
  run "codesign" ["--verify","--deep","--strict",app]
+
+#ifdef darwin_HOST_OS
+packageUpdater :: FilePath -> FilePath -> String -> Maybe String -> IO ()
+packageUpdater root app version identity = do
+ config <- mapM lookupEnv ["SAPIENS_UPDATE_FEED","SAPIENS_MAC_APPCAST_URL","SAPIENS_MAC_UPDATE_KEY","SAPIENS_SPARKLE_FRAMEWORK"]
+ case config of
+  [Nothing,Nothing,Nothing,Nothing] -> pure ()
+  [Just feed,Just appcast,Just key,Just input] -> do
+   unless (all ("https://" `isPrefixOf`) [feed,appcast] && length key==44) $
+    fail "Update-enabled packaging requires HTTPS manifests and a base64 Ed25519 public key"
+   sdk <- canonicalizePath input
+   result <- lines <$> capture "plutil" ["-extract","CFBundleShortVersionString","raw",sdk</>"Resources/Info.plist"]
+   unless (result==["2.10.1"]) $ fail "Desktop updates require Sparkle 2.10.1"
+   run "codesign" ["--verify","--deep","--strict",sdk]
+   let helper = updateHelper app
+       framework = helper</>"Contents/Frameworks/Sparkle.framework"
+       plist = app</>"Contents/Info.plist"
+       bundle = framework</>"Versions/B"
+       program = helper</>"Contents/MacOS/Update"
+       signing = ["--force","--sign",fromMaybe "-" identity]++["--options=runtime" | isJust identity]++["--timestamp" | isJust identity]
+   createDirectoryIfMissing True (takeDirectory framework)
+   createDirectoryIfMissing True (takeDirectory program)
+   run "ditto" ["--arch","arm64",sdk,framework]
+   run "clang" ["-fobjc-arc","-Wall","-Werror","-arch","arm64","-mmacosx-version-min=13.0","-F"++takeDirectory framework,
+     "-framework","AppKit","-framework","Security","-framework","Sparkle","-Wl,-rpath,@loader_path/../Frameworks",
+     root</>"environments/macos/Update.m","-o",program]
+   copy (root</>"build/package/update-helper.plist") (helper</>"Contents/Info.plist")
+   forM_ [bundle</>"Autoupdate",bundle</>"XPCServices/Downloader.xpc",bundle</>"XPCServices/Installer.xpc",bundle</>"Updater.app",framework] $ \component ->
+    run "codesign" (signing++["--preserve-metadata=identifier,entitlements",component])
+   run "codesign" (signing++[helper])
+   forM_ [("SUFeedURL",appcast),("SUPublicEDKey",key)] $ \(field,value) -> run "plutil" ["-insert",field,"-string",value,plist]
+   forM_ [("SUEnableAutomaticChecks","NO"),("SUAllowsAutomaticUpdates","NO"),("SUVerifyUpdateBeforeExtraction","YES")] $ \(field,value) ->
+    run "plutil" ["-insert",field,"-bool",value,plist]
+   let manifest=app</>"Contents/Resources/runtime/desktop-update.json"
+   run "plutil" ["-create","xml1",manifest]
+   forM_ [("version",version),("feed",feed),("contract","same-format-v1"),("platform","macos-arm64"),("format","sapiens4-2026-11")] $ \(field,value) ->
+    run "plutil" ["-insert",field,"-string",value,manifest]
+   run "plutil" ["-convert","json",manifest]
+  _ -> fail "Set all four desktop update packaging inputs together"
+#endif
 
 diskImage :: FilePath -> FilePath -> Maybe String -> IO FilePath
 diskImage app temporary plan = do
@@ -226,7 +280,7 @@ stage root destination = do
   prompts <- files (root</>"corpora/prompts")
   let suffix=if os=="mingw32" then ".exe" else ""
       blindly=if os=="mingw32" then "windows/blindly4.exe" else "release/blindly4"
-      payload=nub (map assetFile allAssets++["app/shell/AI-LOGOS-LICENSE.txt","corpora/providers.json","app/shell/bootstrap.html","app/shell/client-preferences.js",".build/bin/sapiens4"++suffix,"submodules/blindly4/.build/"++blindly]++map (makeRelative root) (notices++prompts))
+      payload=nub (map assetFile allAssets++["app/shell/AI-LOGOS-LICENSE.txt","corpora/providers.json","app/shell/bootstrap.html","app/shell/client-preferences.js",".build/web/bootstrap.js",".build/bin/sapiens4"++suffix,"submodules/blindly4/.build/"++blindly]++map (makeRelative root) (notices++prompts))
   forM_ payload $ \path -> copy (root</>path) (destination</>path)
   when (os=="mingw32") $ forM_ ["AppIcon.ico","AppIconDark.ico"] $ \icon -> copy (root</>"environments/windows"</>icon) (destination</>"environments/windows"</>icon)
   writeFile (destination</>"package-manifest.json") "{\"channel\":\"stable\",\"appId\":\"com.sapiens4.desktop\"}\n"
@@ -259,6 +313,7 @@ packageMac root version outputInput public = do
    "<key>NSHighResolutionCapable</key><true/><key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/><key>NSAllowsArbitraryLoadsInWebContent</key><true/></dict></dict></plist>"
   run "plutil" ["-lint",app</>"Contents/Info.plist"]
   relocate app
+  packageUpdater root app version identity
   audit app
   sign root app identity
   image <- diskImage app temporary identity

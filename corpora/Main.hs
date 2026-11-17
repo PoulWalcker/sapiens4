@@ -27,6 +27,7 @@ import System.Environment
 import System.Exit
 import System.FilePath
 import System.Info
+import qualified Installation
 import System.IO
 import System.Process
 #ifndef mingw32_HOST_OS
@@ -46,7 +47,7 @@ main = run `catches` [Handler (\(code::ExitCode) -> throwIO code), Handler repor
   hPutStrLn stderr detail
   exitFailure
 run :: IO ()
-run = do
+run = Installation.withInstallation $ \installation -> do
  setLocaleEncoding utf8
  mapM_ (`hSetEncoding` utf8) [stdin,stdout,stderr]
  hSetBuffering stdout LineBuffering
@@ -54,6 +55,7 @@ run = do
  root <- repository
  setEnv "SAPIENS_REPOSITORY" root
  case args of
+  ["--check-update-root", path] -> checkUpdateRoot path
   ["build-ui"] -> buildUI root
   ["control",config,payload] -> jsonCommand $ do
    value <- either (failure 400 . T.pack) pure (eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack payload))))
@@ -65,7 +67,9 @@ run = do
   "computer":rest -> jsonCommand (computerMain root rest)
   "relay":rest -> relayMain root (normalized rest)
   "mcp":rest -> mcpMain (option "--url" "http://127.0.0.1:4174" (normalized rest))
-  _ -> hostMain root (normalized args)
+  _ -> do
+   strict <- maybe (pure False) Installation.strictStartup installation
+   hostMain root (normalized args ++ ["--same-format" | strict && "--same-format" `notElem` args])
 jsonCommand :: IO ExitCode -> IO ()
 jsonCommand action = do
  code <- action `catch` (\(e::SomeException) -> case fromException e :: Maybe AsyncException of
@@ -90,7 +94,7 @@ repository = do
 hostMain :: FilePath -> [String] -> IO ()
 hostMain root args = do
  when ("--help" `elem` args || "-h" `elem` args) $ putStrLn "Usage: sapiens4 [--port PORT] [--data-dir DIRECTORY] [--open]" >> exitSuccess
- validated (validateOptions ["--port","--data-dir",Telemetry.startupConsentOption] ["--open","--desktop"] args)
+ validated (validateOptions ["--port","--data-dir",Telemetry.startupConsentOption] ["--open","--desktop","--same-format"] args)
  consent <- traverse (either (failure 400 . T.pack) pure . eitherDecode . BL.pack) (optionValue Telemetry.startupConsentOption args)
  port <- validated (parseIntegerOption "--port" "4174" args)
  require (port>=0 && port<=65535) 400 "Port must be between 0 and 65535"
@@ -104,15 +108,35 @@ hostMain root args = do
     else defaultDataDirectory
  void (asset root "/")
  void (asset root "/workspace/app.js")
- bracket (startHost consent directory port False) hostStop $ \host -> do
+ let formats = if "--same-format" `elem` args then CurrentFormatsOnly else AllowExistingConversions
+ bracket (startHostFor formats consent directory port False) hostStop $ \host -> do
   let url="http://127.0.0.1:"<>show (hostPort host)<>"/workspace/"
   putStrLn ("Sapiens4: "<>url<>"\nUI database: "<>directory</>"corpora.sqlite3")
   finished <- newEmptyMVar
   let shutdown=void (tryPutMVar finished ())
   installShutdown shutdown
-  when ("--desktop" `elem` args) (void (forkIO ((void getLine `catch` \(_::IOException)->pure ()) >> shutdown)))
+  when ("--desktop" `elem` args) (void (forkIO (desktopControl host shutdown)))
   when ("--open" `elem` args) (void (createProcess (proc (if os=="darwin" then "open" else if os=="mingw32" then "explorer" else "xdg-open") [url])))
   takeMVar finished
+
+desktopControl :: Host -> IO () -> IO ()
+desktopControl host shutdown = loop
+ where
+ loop = do
+  eof <- hIsEOF stdin
+  if eof then shutdown else do
+   command <- getLine
+   case command of
+    "stop" -> shutdown
+    "stop-for-update" -> do
+     result <- (Right <$> hostStopForUpdate host) `catches`
+      [Handler (\(APIError _ message) -> pure (Left (T.unpack message))),
+       Handler (\(err::IOException) -> pure (Left (displayException err)))]
+     case result of
+      Right UpdateStopping -> putStrLn "update: stopping" >> shutdown
+      Right UpdateBusy -> putStrLn "update: busy" >> loop
+      Left reason -> putStrLn ("update: refused " ++ unwords (lines reason)) >> loop
+    _ -> putStrLn "update: refused unknown command" >> loop
 
 parseIntegerOption :: String -> String -> [String] -> Validation Int
 parseIntegerOption key def args = case reads (option key def args) of

@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE CPP #-}
-module Service (Service, APIError(..), openService, startService, closeService, serviceRoot, attachEndpoint, dispatch, snapshot, corporaIdentity) where
+module Service (Service, APIError(..), openService, startService, closeService, hasRunnableWork, serviceRoot, attachEndpoint, dispatch, snapshot, corporaIdentity) where
 
 import Control.Concurrent
 import Control.Concurrent.STM (newTVarIO, readTVarIO)
@@ -30,7 +30,7 @@ import qualified Computer
 import qualified Store as DB
 import Population
 import Workspace
-import Voice (receivePiece, cancelRecording, retryTranscription, draftable)
+import Voice (hasOpenRecording, receivePiece, cancelRecording, retryTranscription, draftable)
 import Memo
 import qualified Management as Mgt
 import qualified Provider as Provider
@@ -41,11 +41,12 @@ import qualified Groups as G
 import qualified GroupChat as GC
 import qualified GroupWork as GW
 
-openService :: StorageChoice -> FilePath -> IO Service
-openService choice path = do
+openService :: StartupFormats -> StorageChoice -> FilePath -> IO Service
+openService formats choice path = do
  root <- selectedPath choice path
  repo <- lookupEnv "SAPIENS_REPOSITORY" >>= maybe getCurrentDirectory pure >>= canonicalizePath
- lock <- acquireStorage choice root
+ lock <- acquireStorageWith formats choice root
+ let currentOnly = formats == CurrentFormatsOnly && case choice of AttachExisting -> True; AttachChild _ _ -> True; _ -> False
  let prepareIdentity = do
       let identityPath=root </> "corpora-identity.json"
       exists <- doesFileExist identityPath
@@ -58,6 +59,7 @@ openService choice path = do
  let initialize = do
       guard <- newMVar ()
       stopping <- newIORef False
+      admission <- newTVarIO (Serving 0)
       worker <- newMVar Nothing
       runs <- newMVar M.empty
       lease <- newIORef Nothing
@@ -69,29 +71,30 @@ openService choice path = do
       subscribers <- newTVarIO 0
       files <- newIORef Set.empty
       telemetry <- newIORef Nothing
-      let s=Service root repo guard lock stopping worker runs lease endpoint pulse actors database states revision subscribers files telemetry corporaId
-      DB.initialize s
-      migrateWorkspaces s
+      let s=Service root repo guard lock stopping admission worker runs lease endpoint pulse actors database states revision subscribers files telemetry corporaId
+      unless currentOnly $ DB.initialize s >> migrateWorkspaces s
       rows <- DB.agents s
       when (null rows) $ void (createAgent s (obj [("name",str "ChiefSapi"),("role",str "Head of Corpora")]))
       let marker = initializingDirectory root
       pending <- doesDirectoryExist marker
       when (choice `elem` [StartNew,AttachExisting] && pending) $ removeDirectory marker
-      repairAvatars s
+      unless currentOnly $ repairAvatars s
       agents <- DB.agents s
-      mapM_ (ensureAgent s) agents
+      mapM_ (if currentOnly then setManifests s else ensureAgent s) agents
       chief <- DB.mainAgent s
-      d <- directory s
-      saveDirectory s $ foldl (\dir row -> let a=at row "id"; entry=get dir a in put a (put "parent" (if a==chief then Null else get entry "parent" `fallback` str chief) entry) dir) d agents
+      unless currentOnly $ do
+       d <- directory s
+       saveDirectory s $ foldl (\dir row -> let a=at row "id"; entry=get dir a in put a (put "parent" (if a==chief then Null else get entry "parent" `fallback` str chief) entry) dir) d agents
       mapM_ (E.recover s . (`at` "id")) agents
-      prefs <- DB.singleton s DB.Preferences
-      let panel=at prefs "panel"; updated=if panel=="mindmap" then put "panel" (str "notes") prefs else if panel `elem` ["cron","log"] then put "panel" (str "chat") prefs else prefs
-      DB.saveSingleton s DB.Preferences (remove ["work_views"] updated)
+      unless currentOnly $ do
+       prefs <- DB.singleton s DB.Preferences
+       let panel=at prefs "panel"; updated=if panel=="mindmap" then put "panel" (str "notes") prefs else if panel `elem` ["cron","log"] then put "panel" (str "chat") prefs else prefs
+       DB.saveSingleton s DB.Preferences (remove ["work_views"] updated)
       savedPulse <- DB.singleton s DB.SystemPulse
       identityPulse <- if has savedPulse "pulse" then pure (at savedPulse "pulse") else ("pulse_" <>) <$> newId
       cfg <- corporaSettings s
       writeIORef pulse (obj [("id",str identityPulse),("running",Bool (corporaStatus cfg==Active)),("numbers",merge (obj [(k,num 0) | k<-["bpm120","bpm60","bph60"]]) (get savedPulse "numbers"))])
-      R.initializeRoutines s
+      unless currentOnly $ R.initializeRoutines s
       D.reconcileWorks s
       D.pendingWorks s
       GC.reconcileGroups s
@@ -118,8 +121,21 @@ closeService s = do
   (do chief <- DB.mainAgent s
       DB.record s [chief] "corpora" "system.stopped" empty "system" Nothing)
    `finally` (DB.closeDatabase s `finally` unlockFile (serviceFileLock s))
+-- Caller holds serviceGuard so a finishing worker or scheduler cannot change the decision.
+hasRunnableWork :: Service -> IO Bool
+hasRunnableWork s = do
+ runs <- readMVar (serviceRuns s)
+ agents <- DB.agents s
+ states <- mapM (agentState s . (`at` "id")) agents
+ works <- D.readWorks s
+ groups <- DB.values s DB.Groups
+ requests <- concat <$> mapM G.readRequests groups
+ recordings <- or <$> mapM (hasOpenRecording s . (`at` "id")) (agents ++ groups)
+ pure $ recordings || not (M.null runs) || any (any (activeStatus . turnStatus) . agentTurns) states
+     || any (any ((`elem` [D.CallQueued,D.CallRunning]) . D.callState) . D.workCalls) works
+     || any (not . G.requestSettled) requests
 snapshot :: Service -> IO Value
-snapshot s = locked s (snapshotUnlocked s)
+snapshot s = locked s (requireAdmission s >> snapshotUnlocked s)
 snapshotUnlocked :: Service -> IO Value
 snapshotUnlocked s = do
  revision <- readTVarIO (serviceRevision s)
@@ -195,9 +211,10 @@ dispatch :: Telemetry.RequestTransport -> Service -> Text -> Text -> Maybe Value
 dispatch _ s "PUT" "/api/model-settings" body = do
  requested <- decodeValue 400 (fromMaybe Null body)
  Provider.validateModelSettingsDraft s requested
- saved <- locked s (saveModelSettings s requested)
+ saved <- locked s (requireAdmission s >> saveModelSettings s requested)
  pure (200,encode saved,"application/json; charset=utf-8")
 dispatch transport s method target body = locked s $ do
+ requireAdmission s
  let (path,query)=T.breakOn "?" target; parts=filter (not . T.null) (T.splitOn "/" path); write=method `elem` ["POST","PUT"]; d=fromMaybe Null body
  when write $ require (case d of Object _->True; _->False) 400 "Expected a JSON object"
  cfg <- corporaSettings s

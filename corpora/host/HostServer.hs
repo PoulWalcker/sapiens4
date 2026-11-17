@@ -37,7 +37,7 @@ import Network.Wai.Handler.Warp
 import qualified Network.Socket as Socket
 
 
-data Host = Host { hostPort :: Int, hostService :: Service, hostBridge :: Bridge, hostStop :: IO () }
+data Host = Host { hostPort :: Int, hostService :: Service, hostBridge :: Bridge, hostStop :: IO (), hostStopForUpdate :: IO UpdateStop }
 listenLoopback :: Int -> IO (Socket.Socket,Int)
 listenLoopback port = Socket.withSocketsDo $ do
  sock <- Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol
@@ -48,16 +48,16 @@ listenLoopback port = Socket.withSocketsDo $ do
   Socket.SockAddrInet assigned _ <- Socket.getSocketName sock
   pure (sock,fromIntegral assigned)
 startHost :: Maybe Bool -> FilePath -> Int -> Bool -> IO Host
-startHost consent root requested managed = do
+startHost = startHostFor AllowExistingConversions
+
+startHostFor :: StartupFormats -> Maybe Bool -> FilePath -> Int -> Bool -> IO Host
+startHostFor formats consent root requested managed = do
  mode <- lookupEnv "SAPIENS_STORAGE_MODE"
  exists <- doesFileExist (root </> "corpora-identity.json")
- startHostWith consent (if managed || mode==Just "existing" || mode==Nothing && exists then AttachExisting else StartNew) root requested managed
+ startHostUsing formats Nothing consent (if managed || mode==Just "existing" || mode==Nothing && exists then AttachExisting else StartNew) root requested managed
 
-startHostWith :: Maybe Bool -> StorageChoice -> FilePath -> Int -> Bool -> IO Host
-startHostWith = startHostUsing Nothing
-
-startHostUsing :: Maybe Telemetry.Telemetry -> Maybe Bool -> StorageChoice -> FilePath -> Int -> Bool -> IO Host
-startHostUsing inherited consent choice root requested managed = mask $ \restore -> do
+startHostUsing :: StartupFormats -> Maybe Telemetry.Telemetry -> Maybe Bool -> StorageChoice -> FilePath -> Int -> Bool -> IO Host
+startHostUsing formats inherited consent choice root requested managed = mask $ \restore -> do
  args <- getArgs
  desktopPid <- lookupEnv "SAPIENS_DESKTOP_PID"
  let desktop = "--desktop" `elem` args || desktopPid/=Nothing
@@ -66,7 +66,7 @@ startHostUsing inherited consent choice root requested managed = mask $ \restore
   mode <- lookupEnv "SAPIENS_STORAGE_MODE"
   let report phase = when (not managed && mode `elem` [Just "new",Just "existing"]) (putStrLn phase)
   report openingStorage
-  bracketOnError (Service.openService choice root) Service.closeService $ \service -> do
+  bracketOnError (Service.openService formats choice root) Service.closeService $ \service -> do
    writeIORef (serviceTelemetry service) reporter
    report openedStorage >> start reporter service
  where
@@ -77,7 +77,7 @@ startHostUsing inherited consent choice root requested managed = mask $ \restore
    Service.attachEndpoint service ("http://127.0.0.1:"<>T.pack (show port))
    bridge <- newBridge service
    let child selection path = do
-        host <- startHostUsing reporter Nothing selection path 0 True
+        host <- startHostUsing formats reporter Nothing selection path 0 True
         pure (hostService host,hostBridge host,hostStop host)
    registry <- if managed then pure Nothing else Just <$> newRegistry service bridge child
    onboarding <- if managed then pure Nothing else Just <$> O.openOnboarding (repositoryRoot service)
@@ -107,7 +107,7 @@ startHostUsing inherited consent choice root requested managed = mask $ \restore
         void (waitCatch worker)
         Socket.close socket
         pure True
-   pure (Host port service bridge stop)
+   pure (Host port service bridge stop (maybe (failure 409 "Only the desktop root can stop for update") tryStopForUpdate registry))
 localRequest :: Int -> Bool -> RequestHeaders -> Validation ()
 localRequest port write headers = do
  let host = lookup hHost headers
@@ -161,7 +161,7 @@ updatesSocket s pending = do
   race_ (send (-1)) (void (WS.receiveDataMessage conn))
 
 httpApplication :: Service -> Bridge -> Maybe Registry -> Maybe O.Onboarding -> Int -> Application
-httpApplication service bridge registry onboarding port req respond = respond =<< respondError (do
+httpApplication service bridge registry onboarding port req respond = respond =<< respondError (withAdmission service $ do
  let method = TE.decodeUtf8 (requestMethod req)
      path = TE.decodeUtf8 (rawPathInfo req)
      target = requestTarget req

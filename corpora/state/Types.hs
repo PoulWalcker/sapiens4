@@ -9,7 +9,7 @@ import Domain
 import qualified Telemetry
 
 import Control.Concurrent
-import Control.Concurrent.STM (TVar, atomically, modifyTVar')
+import Control.Concurrent.STM (TVar, atomically, modifyTVar', readTVar, readTVarIO, writeTVar, throwSTM)
 import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
@@ -73,7 +73,9 @@ instance ToJSON ModelSelection where
  toJSON choice = obj [("provider",str (providerName (selectionProvider choice))),("model",str (selectionModel choice)),("effort",str (selectionEffort choice))]
 
 data Run = Run { runOwner :: AgentId, runId :: RunId, runSlot :: Int, runCancel :: IORef Bool, runProcess :: MVar (Maybe ProcessHandle), runActivity :: IORef Value, runDeadline :: Word64, runModelConfig :: ModelSelection }
-data Service = Service { serviceRoot :: FilePath, repositoryRoot :: FilePath, serviceGuard :: MVar (), serviceFileLock :: FileLock, serviceStopping :: IORef Bool, serviceWorker :: MVar (Maybe (Async ())), serviceRuns :: MVar (Map RunId Run), serviceLease :: IORef (Maybe (AgentId, RunId)), serviceEndpoint :: IORef Text, servicePulse :: IORef Value, serviceActors :: MVar (Map ThreadId (Text,Maybe Text)), serviceDatabase :: MVar (Maybe Connection), serviceStates :: MVar (Map Text CachedAgentState)
+data ServiceAdmission = Serving Int | StoppingForUpdate deriving (Eq)
+data UpdateStop = UpdateBusy | UpdateStopping deriving (Eq)
+data Service = Service { serviceRoot :: FilePath, repositoryRoot :: FilePath, serviceGuard :: MVar (), serviceFileLock :: FileLock, serviceStopping :: IORef Bool, serviceAdmission :: TVar ServiceAdmission, serviceWorker :: MVar (Maybe (Async ())), serviceRuns :: MVar (Map RunId Run), serviceLease :: IORef (Maybe (AgentId, RunId)), serviceEndpoint :: IORef Text, servicePulse :: IORef Value, serviceActors :: MVar (Map ThreadId (Text,Maybe Text)), serviceDatabase :: MVar (Maybe Connection), serviceStates :: MVar (Map Text CachedAgentState)
  , serviceRevision :: TVar Integer, updateSubscribers :: TVar Int, snapshotFiles :: IORef (Set FilePath)
  , serviceTelemetry :: IORef (Maybe Telemetry.Telemetry), serviceCorporaId :: Text }
 
@@ -201,6 +203,22 @@ writeJSON :: ToJSON a => FilePath -> a -> IO ()
 writeJSON p = atomicBytes p . encode
 locked :: Service -> IO a -> IO a
 locked s = withMVar (serviceGuard s) . const
+requireAdmission :: Service -> IO ()
+requireAdmission s = do
+ admission <- readTVarIO (serviceAdmission s)
+ when (admission == StoppingForUpdate) $ failure 409 "Desktop update in progress"
+
+-- Covers requests that can mutate outside serviceGuard (onboarding, relay and telemetry).
+withAdmission :: Service -> IO a -> IO a
+withAdmission s = bracket_ enter leave
+ where
+ gate = serviceAdmission s
+ enter = atomically $ readTVar gate >>= \state -> case state of
+  Serving n -> writeTVar gate (Serving (n+1))
+  StoppingForUpdate -> throwSTM (APIError 409 "Desktop update in progress")
+ leave = atomically $ modifyTVar' gate $ \state -> case state of
+  Serving n -> Serving (n-1)
+  StoppingForUpdate -> StoppingForUpdate
 agentRoot :: Service -> Text -> FilePath
 agentRoot s a = serviceRoot s </> "agentpy/agents" </> T.unpack a
 workspaceRoot :: Service -> Text -> FilePath

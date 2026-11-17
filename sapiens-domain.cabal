@@ -33,6 +33,7 @@ common host
   other-modules:
     Command,
     Domain,
+    Installation,
     RuntimePaths,
     Telemetry,
     TelemetryDevice,
@@ -95,6 +96,7 @@ executable sapiens-macos
   hs-source-dirs: environments/macos, environments, corpora/state, corpora/telemetry
   other-modules:
     Domain,
+    Installation,
     RuntimePaths,
     Telemetry,
     TelemetryDevice,
@@ -102,6 +104,7 @@ executable sapiens-macos
     Paths_sapiens_domain,
     DataRoot,
     DesktopStorage,
+    DesktopUpdate,
     Types,
     Application,
     Browser,
@@ -119,6 +122,7 @@ common windows-host
   import: runtime
   other-modules:
     Domain,
+    Installation,
     RuntimePaths,
     Telemetry,
     TelemetryDevice,
@@ -126,6 +130,7 @@ common windows-host
     Paths_sapiens_domain,
     DataRoot,
     DesktopStorage,
+    DesktopUpdate,
     Types,
     Browser,
     Host,

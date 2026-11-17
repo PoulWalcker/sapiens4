@@ -5,7 +5,7 @@
 module Voice
  ( Pcm, pcmBytes, pcmFromWav, wavFromPcm
  , Progress(..), Cut(..), PiecePlan(..), startProgress, planPiece
- , receivePiece, cancelRecording, retryTranscription, draftable
+ , hasOpenRecording, receivePiece, cancelRecording, retryTranscription, draftable
  , startTranscriber
  ) where
 
@@ -177,6 +177,17 @@ recordingParts s a recording = filter (\v -> at v "kind" == "voice" && at v "rec
 -- to a phone, or be sent; sent and cancelled voice messages must never come back.
 draftable :: Value -> Bool
 draftable v = get v "sent" /= Bool True && get v "cancelled" /= Bool True
+
+hasOpenRecording :: Service -> Text -> IO Bool
+hasOpenRecording s agent = do
+ let directory = takeDirectory (recordingDir s agent "recording")
+ exists <- doesDirectoryExist directory
+ if not exists then pure False else do
+  names <- listDirectory directory
+  or <$> forM names (\name -> do
+   let path = directory </> name </> "progress.json"
+   saved <- doesFileExist path
+   if saved then not . finished <$> readProgress path else pure False)
 
 validRecording :: Text -> IO ()
 validRecording recording = require (T.length recording == 36 && T.all (\c -> isHexDigit c || c == '-') recording) 400 "Invalid voice recording id"

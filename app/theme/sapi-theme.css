@@ -86,3 +86,8 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .sapi-workspace .main-sapi-row::after{content:'';position:absolute;left:0;right:0;bottom:-6px;height:1px;background:var(--sapi-line);pointer-events:none}
 
 .sapi-workspace .agent-row-name small{white-space:nowrap;flex-shrink:0}
+
+.desktop-update-button { display: block; margin-top: 8px; width: 100%; padding: 8px 12px; border: 0; border-radius: 6px; background: #255bcc; color: #fff; font: 600 13px/1.4 var(--sapi-font); cursor: pointer; }
+.desktop-update-button:hover:enabled { background: #1c4bab; }
+.desktop-update-button:focus-visible { outline: 2px solid var(--sapi-ink); outline-offset: 2px; }
+.desktop-update-button:disabled { cursor: default; }

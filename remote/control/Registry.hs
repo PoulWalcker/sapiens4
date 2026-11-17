@@ -11,6 +11,7 @@ import Client
 import Crypto (confirmationCode)
 import Setup
 import Control.Concurrent
+import Control.Concurrent.STM (atomically, readTVar, writeTVar)
 import Control.Exception
 import Control.Monad
 import Data.Aeson hiding (pairs)
@@ -39,6 +40,23 @@ data Registry = Registry
  , registryClosed :: IORef Bool
  }
 
+-- Do not wait behind child startup or a service mutation: the user can retry.
+tryStopForUpdate :: Registry -> IO UpdateStop
+tryStopForUpdate registry = tryGuard (registryGuard registry) $ do
+ services <- map (\(service,_,_) -> service) . M.elems <$> readIORef (registryLocals registry)
+ pairingClients <- readIORef (registryPairClients registry)
+ if not (M.null pairingClients) then pure UpdateBusy else
+  foldr (tryGuard . serviceGuard) (decide services) services
+ where
+ tryGuard lock action = bracket (tryTakeMVar lock) (mapM_ (putMVar lock)) $ maybe (pure UpdateBusy) (const action)
+ decide services = do
+  busy <- or <$> mapM Service.hasRunnableWork services
+  if busy then pure UpdateBusy else atomically $ do
+   let gates = map serviceAdmission services
+   current <- mapM readTVar gates
+   if all (== Serving 0) current then mapM_ (flip writeTVar StoppingForUpdate) gates >> pure UpdateStopping
+    else pure UpdateBusy
+
 registryPath :: Registry -> FilePath
 registryPath registry = serviceRoot (registryService registry) </> "host-corpora.json"
 localAvailable :: Bool
@@ -60,6 +78,7 @@ newRegistry service bridge openChild = do
 
 local :: Registry -> Text -> IO (Service, Bridge, IO ())
 local registry identity = do
+ requireAdmission (registryService registry)
  opened <- readIORef (registryLocals registry)
  case M.lookup identity opened of
   Just value -> pure value
@@ -156,7 +175,8 @@ remoteAction registry bridge path input = registryLock registry $ do
   _ -> failure 404 "Not found"
 
 registryCreate :: Registry -> Value -> IO Value
-registryCreate registry input = do
+registryCreate registry input = registryLock registry $ do
+ requireAdmission (registryService registry)
  require localAvailable 403 "Local corpora are unavailable on this device"
  let name = at input "name"; scope = fallback (get input "scope") (str "")
  require (null (filter (`notElem` ["name","scope"]) (keys input)) && not (T.null $ T.strip name) && T.length name <= 200 && case scope of String value -> T.length value <= 16000; _ -> False) 400 "Provide a corpora name and scope of work"
@@ -169,7 +189,7 @@ registryCreate registry input = do
  writeJSON (folder </> "corpora-settings.json") $ obj [("name",str $ T.strip name),("scope",str $ T.strip $ text scope),("device",get mainIdentity "device"),("status",str "paused"),("revision",num 1),("operations",empty)]
  bracketOnError (registryOpenChild registry CreateCorpora folder) (\(_,_,close) -> close) $ \child@(service,bridge,_) -> do
   metadata <- Service.corporaIdentity service
-  registryLock registry $ mask_ $ do
+  mask_ $ do
    ownRelay <- savedRelay bridge
    mainRelay <- savedRelay (registryBridge registry)
    when (ownRelay==empty && mainRelay/=empty) $ writeJSON (relayPath bridge) mainRelay

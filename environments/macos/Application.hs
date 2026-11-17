@@ -15,6 +15,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy as L
 import DataRoot
+import qualified DesktopUpdate as Update
 import DesktopStorage
 import qualified Data.Text.IO as TIO
 import Data.IORef
@@ -45,9 +46,9 @@ import Numeric (showHex)
 import Text.Read (readMaybe)
 
 
-data Application = Application { native :: Obj, browser :: IORef Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: IORef (Maybe ServerProcess), address :: IORef Text, startup :: IORef (Maybe (Async ())), starting :: IORef Bool, localLoaded :: IORef Bool, runtime :: FilePath, selectedRoot :: IORef (Maybe FilePath), recoveryError :: IORef (Maybe Text), firstSignal :: IORef (Maybe WorkspaceSignal), attemptNumber :: IORef Integer, recovering :: IORef Bool, clientPreferences :: Obj, quitting :: IORef Bool }
+data Application = Application { native :: Obj, browser :: IORef Browser, windowRef :: IORef Obj, pending :: IORef [IO ()], fixture :: Bool, child :: IORef (Maybe ServerProcess), address :: IORef Text, startup :: IORef (Maybe (Async ())), starting :: IORef Bool, localLoaded :: IORef Bool, runtime :: FilePath, selectedRoot :: IORef (Maybe FilePath), recoveryError :: IORef (Maybe Text), firstSignal :: IORef (Maybe WorkspaceSignal), attemptNumber :: IORef Integer, recovering :: IORef Bool, clientPreferences :: Obj, quitting :: IORef Bool, updater :: Maybe Update.DesktopUpdate, updateView :: IORef Update.UpdateView }
 
-data ServerProcess = ServerProcess { serverHandle :: ProcessHandle, serverSession :: ProcessID, serverInput :: Handle, serverOutput :: Handle, serverErrors :: Async (), serverDrain :: Maybe (Async ()), serverDirectory :: FilePath }
+data ServerProcess = ServerProcess { updateReplies :: MVar String, serverHandle :: ProcessHandle, serverSession :: ProcessID, serverInput :: Handle, serverOutput :: Handle, serverErrors :: Async (), serverDrain :: Maybe (Async ()), serverDirectory :: FilePath }
 
 post :: Application -> IO () -> IO ()
 post application action = atomicModifyIORef' (pending application) (\actions -> (actions ++ [action],()))
@@ -101,12 +102,13 @@ launchServer application destination command = mask $ \restore -> do
                 line <- hGetLine errors
                 hPutStrLn logFile line
                 hFlush logFile) `catch` (\(_ :: IOException) -> pure ())) `finally` close errors) `onException` cleanup
-    let server = ServerProcess process group input output reader Nothing destination
+    replies <- newEmptyMVar
+    let server = ServerProcess replies process group input output reader Nothing destination
     writeIORef (child application) (Just server)
     mapM_ (\h -> hSetEncoding h utf8 >> hSetNewlineMode h universalNewlineMode) [input,output] `onException` stopOwnedServer application
     ready <- restore (T.pack . show <$> awaitServerAddress output)
         `onException` stopOwnedServer application
-    drain <- async $ (forever (void (hGetLine output))) `catch` (\(_ :: IOException) -> close output)
+    drain <- async $ (forever (hGetLine output >>= Update.recordReply replies)) `catch` (\(_ :: IOException) -> close output)
     let running=server {serverDrain=Just drain}
     writeIORef (child application) (Just running)
     pure (running, ready)
@@ -189,14 +191,17 @@ alert :: Text -> IO ()
 alert message = void $ prompt message ["OK"]
 
 prompt :: Text -> [Text] -> IO CLong
-prompt message buttons = do
+prompt = promptWithTitle "Sapiens4 could not open"
+
+promptWithTitle :: Text -> Text -> [Text] -> IO CLong
+promptWithTitle title message buttons = do
     application <- cls "NSApplication" >>= \c -> obj0 c "sharedApplication"
     void (obj1 application "setActivationPolicy:" (int 0))
     running <- booleanValue application "isRunning"
     unless running $ void (obj0 application "finishLaunching")
     void (obj1 application "activateIgnoringOtherApps:" (int 1))
     bracket (new "NSAlert") (void . (`obj0` "release")) $ \panel -> do
-        setText panel "setMessageText:" "Sapiens4 could not open"
+        setText panel "setMessageText:" title
         setText panel "setInformativeText:" message
         mapM_ (\title -> str title >>= void . obj1 panel "addButtonWithTitle:") buttons
         long panel "runModal"
@@ -276,6 +281,7 @@ installMethods application = do
         unless (fixture application || closing) $ do
             path <- obj0 view "URL" >>= (\u -> textProp u "path")
             when (path==T.pack (bootstrapPath application)) $ do
+                TIO.readFile (runtime application </> ".build/web/bootstrap.js") >>= script view
                 bootstrapConsentScript >>= script view
                 loaded <- atomicModifyIORef' (localLoaded application) (\old -> (True,old))
                 writeIORef (recovering application) False
@@ -403,10 +409,10 @@ initialize application target address = do
 runApplication :: Bool -> Text -> IO ()
 runApplication isFixture address = do
     loadFrameworks
-    bracket (new "NSAutoreleasePool") (\pool -> void (obj0 pool "drain")) $ \_ -> (runSession isFixture address `catch` (\(e :: SomeException) -> alert (T.pack (storageMessage e))))
+    bracket (new "NSAutoreleasePool") (\pool -> void (obj0 pool "drain")) $ \_ -> (Update.withDesktopUpdate (\update -> runSession update isFixture address) `catch` (\(e :: SomeException) -> alert (T.pack (storageMessage e))))
 
-runSession :: Bool -> Text -> IO ()
-runSession isFixture initialAddress = do
+runSession :: Maybe Update.DesktopUpdate -> Bool -> Text -> IO ()
+runSession update isFixture initialAddress = do
     executable <- getExecutablePath
     let packaged = takeDirectory executable </> "../Resources/runtime"
     bundled <- doesDirectoryExist packaged
@@ -438,14 +444,85 @@ runSession isFixture initialAddress = do
         let hex byte = let value=showHex byte "" in replicate (2-length value) '0' ++ value
             suite="com.sapiens4.client." <> T.pack (concatMap hex (BS.unpack (SHA256.hash (TE.encodeUtf8 (T.pack config)))))
         allocated "NSUserDefaults" >>= \o -> str suite >>= obj1 o "initWithSuiteName:"
-    let state = Application application b win tasks isFixture process address worker busy loaded runtime selection problem signal generation recovery preferences closing
+    offer <- newIORef Update.NoOffer
+    let state = Application application b win tasks isFixture process address worker busy loaded runtime selection problem signal generation recovery preferences closing update offer
     (do
         target <- installMethods state
         initialize state target initialAddress
-        void (obj0 application "run")) `finally` do
+        forM_ update $ \release -> Update.startupNotice release >>= mapM_ (\reason -> post state $
+            void (promptWithTitle "Sapiens4 update" (T.pack reason) ["OK"]))
+        let watch release = Update.watchReleases release $ \result -> post state $ do
+                current <- readIORef offer
+                case current of
+                    Update.Installing _ _ -> pure ()
+                    _ -> displayUpdate state (either (const Update.NoOffer) (maybe Update.NoOffer Update.Offered) result)
+            eventLoop = void (obj0 application "run")
+        case update of
+            Just release | not isFixture -> withAsync (watch release) (const eventLoop)
+            _ -> eventLoop) `finally` do
         closeApplication state `finally` do
             readIORef b >>= \current -> void (obj0 (origin current) "release")
             unless isFixture $ void (obj0 preferences "release")
+
+displayUpdate :: Application -> Update.UpdateView -> IO ()
+displayUpdate app state = do
+    writeIORef (updateView app) state
+    showUpdate app
+
+showUpdate :: Application -> IO ()
+showUpdate app = do
+    state <- readIORef (updateView app)
+    readIORef (browser app) >>= readIORef . shell >>= \view -> script view (Update.viewScript state)
+
+startUpdate :: Application -> Text -> IO ()
+startUpdate app requested = do
+    state <- readIORef (updateView app)
+    case (updater app, state) of
+        (Just update, Update.Offered release) | T.pack (Update.releaseVersion release) == requested -> do
+            busy <- readIORef (starting app)
+            closing <- readIORef (quitting app)
+            unless (busy || closing) $ do
+                writeIORef (starting app) True
+                original <- atomicModifyIORef' (address app) (\a -> ("",a))
+                current <- readIORef (child app)
+                displayUpdate app (Update.Installing release "Preparing update…")
+                let onFailure reason = post app $ do
+                        writeIORef (starting app) False
+                        displayUpdate app (Update.Offered release)
+                        ended <- maybe (pure False) (serverExited . serverHandle) current
+                        if ended then recoverStartup app (T.pack reason)
+                          else writeIORef (address app) original >> void (promptWithTitle "Sapiens4 update" (T.pack reason) ["OK"])
+                void $ forkIO $ do
+                    result <- tryJust Update.updateError $ do
+                        config <- configDirectory
+                        Update.installRelease update release (mapM_ stopForUpdate current) (serverDirectory <$> current) config
+                    case result of
+                        Left reason -> onFailure reason
+                        Right (Update.SelectionChanged next) -> post app $ do
+                            writeIORef (address app) original
+                            writeIORef (starting app) False
+                            displayUpdate app (maybe Update.NoOffer Update.Offered next)
+                            void (promptWithTitle "Sapiens4 update" "The offered release changed." ["OK"])
+                        Right (Update.WorkerStarted process) -> do
+                            post app (displayUpdate app (Update.Installing release "Updating…"))
+                            failure <- Update.workerFailure update process
+                            forM_ failure $ \reason -> post app $ do
+                                displayUpdate app (Update.Installing release "Update stopped")
+                                void (promptWithTitle "Sapiens4 update" (T.pack reason) ["OK"])
+        _ -> pure ()
+
+stopForUpdate :: ServerProcess -> IO ()
+stopForUpdate server = do
+    Update.stopIdle (serverInput server) (updateReplies server)
+    let process = serverHandle server
+        await = do
+            ended <- serverExited process
+            members <- serverProcesses server
+            unless (ended && null members) $ threadDelay 50000 >> await
+    finished <- timeout 10000000 await
+    unless (isJust finished) $ fail "The backend or a child process is still running."
+    status <- waitForProcess process
+    unless (status == ExitSuccess) $ fail ("The backend did not shut down cleanly: " ++ show status)
 
 createShell :: Application -> Obj -> IO Obj
 createShell application target = do
@@ -490,7 +567,7 @@ receiveMessage application message = do
     if connected || fixture application then do
         current <- readIORef (child application)
         live <- maybe (pure $ fixture application) (fmap not . serverExited . serverHandle) current
-        if live then receive b message (saveClientPreferences application) (commitWorkspace application WorkspaceReady)
+        if live then receive b message (saveClientPreferences application) (commitWorkspace application WorkspaceReady) (startUpdate application) (showUpdate application)
           else recoverStartup application "The application server stopped. Choose a folder to reopen your workspace."
       else do
         sh <- readIORef (shell b)
@@ -503,6 +580,8 @@ receiveMessage application message = do
         when (sourceView==sh && mainFrame && scheme=="file" && path==T.pack (bootstrapPath application)) $ do
             raw <- obj0 message "body" >>= jsonObject
             forM_ raw $ \input -> do
+              when (bool (field "desktopUpdateReady" input)) (showUpdate application)
+              forM_ [version | String version <- [field "updateAndRestart" input]] (startUpdate application)
               let consent = case field "telemetry" input of Bool enabled -> Just enabled; _ -> Nothing
               case text (field "storage" input) of
                 "new" -> (defaultDataDirectory >>= startSelectedWithConsent application consent (Just StartNew))

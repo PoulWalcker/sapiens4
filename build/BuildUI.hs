@@ -27,7 +27,7 @@ buildUI root = do
  raw <- B.concat <$> mapM (\p -> (TE.encodeUtf8 (T.pack (makeRelative root p)) <>) <$> B.readFile p) inputs
  let fingerprint=hash raw
  saved <- doesFileExist stamp >>= \exists -> if exists then readText stamp else pure ""
- present <- and <$> mapM (doesFileExist . (output</>)) ["app.js","sw.js","guest.js"]
+ present <- and <$> mapM (doesFileExist . (output</>)) ["app.js","sw.js","guest.js","bootstrap.js"]
  unless (saved==fingerprint && present) $ do
   version <- readProcess "node" ["--version"] ""
   let components = map (reads . T.unpack) (T.splitOn "." (T.drop 1 (T.strip (T.pack version)))) :: [[(Int,String)]]
@@ -55,7 +55,7 @@ buildUI root = do
    sources <- either (failure 500 . T.pack) pure (eitherDecodeStrict (TE.encodeUtf8 (T.pack sourceJSON)))
    createDirectoryIfMissing True output
    tool "purs" (["compile"] ++ (sources::[String]) ++ [root</>"app/**/*.purs","--output",output</>"modules"])
-  forM_ [("Sapiens.Main","app.js"),("Sapiens.ServiceWorker","sw.js"),("Sapiens.Guest","guest.js")] $ \(modName,filename) -> do
+  forM_ [("Sapiens.Main","app.js"),("Sapiens.ServiceWorker","sw.js"),("Sapiens.Guest","guest.js"),("Sapiens.DesktopUpdate","bootstrap.js")] $ \(modName,filename) -> do
    let entry=output</>filename<>".entry.js"
    writeFile entry ("import {main} from \"./modules/"<>modName<>"/index.js\";main();\n")
    tool "esbuild" [entry,"--bundle","--minify","--format=iife","--target=es2020","--legal-comments=none","--outfile="<>output</>filename]

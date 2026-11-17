@@ -182,7 +182,7 @@ remoteRequest message = do
 executeRemote :: Bridge -> Value -> IO Value
 executeRemote b message = do
  RemoteRequest method target input <- validated (remoteRequest message)
- (status,body,mime) <- Service.dispatch Telemetry.Remote (bridgeService b) method target input
+ (status,body,mime) <- withAdmission (bridgeService b) $ Service.dispatch Telemetry.Remote (bridgeService b) method target input
   `catch` \(APIError status messageText) -> pure (status,encode (obj [("error",str messageText)]),"application/json")
  let isJSON = "application/json" `T.isPrefixOf` mime
  pure (obj [("status",num status),("body",if isJSON then fromMaybeValue (decode body) else str (b64 (BL.toStrict body))),("mime",str mime),("binary",Bool (not isJSON))])
