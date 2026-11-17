@@ -42,11 +42,11 @@ Windows retains exact native installers, verifies their publisher/product/versio
 |---|---|
 | R1 download/consent/exclusion | Download-before-stop and explicit handoff implemented. Updated full installed journey not yet qualified. No automatic installation. |
 | R2 shutdown/no concurrent writes | Installation leases, backend stop admission and all-tree host locks retained. macOS interruption/storage checks pass; complete installed Windows interruption remains unqualified. |
-| R3 B-owned storage conversion | Existing backend owns SQL/JSON conversion; updater has no SQLite/JSON format policy. Parent/registered-child migration and explicit recovery pass on macOS and Windows Administrator. |
+| R3 B-owned storage conversion | Existing backend owns SQL/JSON conversion; updater has no SQLite/JSON format policy. Current parent/registered-child migration and explicit recovery pass on macOS and Windows Administrator; current backend/shell builds pass on both platforms. |
 | R4 skipped releases | Existing supported version transformations are reused without a speculative registry. SQL 7 → 8 and agent state 1 → 3 were exercised together on macOS. This is not proof for every arbitrary historical binary/schema. |
 | R5 recoverable data | Whole originals, durable receipts and explicit preservation of newer data implemented. Process-interruption checks pass on macOS. Physical power loss is NOT TESTED. |
 | R6 failed update/recovery | Explicit application/data recovery implemented. macOS valid-B repair and stale/same-boot rejection pass. Windows native installer A → B → A component scenario passes. Failed signed-helper Repair/retry and damaged macOS payload replacement are NOT TESTED. |
-| R7 real readiness | Local Corpora ID plus navigation and actual snapshot required. Real macOS Workspace Ready with retained chat/HTML and a custom root passes. Windows installed UI Ready is NOT TESTED. |
+| R7 real readiness | Local Corpora ID plus navigation and actual snapshot required. Historical macOS Workspace Ready with retained chat/HTML and a custom root passes; the latest storage preparation still needs installed UI qualification. Windows installed UI Ready is NOT TESTED. |
 | R8 previous version/originals | A archives/installers and originals retained; no automatic cleanup. Installed artifacts and every retained installer were not yet exercised as complete application recovery E2Es. |
 
 A manually built application and a custom private `.sapiens` Data Root are separate concerns: migration follows the selected root when B opens it, regardless of how B was installed. A source checkout updated by `git pull` does not itself enable a packaged Sparkle/Inno update channel. Compatibility is bounded by supported stored formats; the user's specific first-build commit has not been identified or qualified.
@@ -85,7 +85,7 @@ Temporary helpers remain outside the repository. `spec/native-mirror/qualify.py`
 | `/Applications` real B Workspace | PASS selected custom root, migrated child, retained chat/HTML, Ready, private request/public header separation. Ad-hoc qualification app, not a production release. |
 | macOS current Repair with valid B | PASS archive creation, pending cleared, actual local Workspace Ready. Same-boot interrupted-installer and stale-helper guards PASS. Actual reboot and Finder replacement NOT TESTED. |
 | First root created by B | PASS installed backend initialization of a hidden custom `.sapiens`, attempt-bound original before normal runtime. Onboarding UI NOT TESTED. |
-| Windows actual backend data recovery | PASS on Administrator after fixes: original/newer bytes, registered child, exact lock identities, replay refusal. Read-only fixture PASS, readonly attribute observed afterward. |
+| Windows actual backend data recovery | PASS current source `223196d`, Administrator: default and `--readonly` diagnostic both exit 0; parent/child migration, original/newer bytes, explicit restore, exact lock identities, replay refusal. This diagnostic does not establish API/UI readiness or signed installation. |
 | Inno 6.4.3 compile + native A → B → A | PASS isolated installer component fixture: both installers cached, obsolete B runtime removed, external sentinel preserved. Payload was a non-launched fixture, not the actual application. |
 | Ordinary Windows account | NOT TESTED. D2Qualification exists; user stated no password was entered. S4U task registration failed AccessDenied. No known valid login established. |
 | Full installed updated A → B → migration → Ready | NOT TESTED on either platform. Previous Sparkle PoCs do not qualify this changed implementation. |
@@ -98,7 +98,7 @@ Evidence paths (local scratch is retained, not committed):
 - Unpublished preparation: `/private/var/folders/97/80rddxm51750bvdn9k9fnv2w0000gn/T/d2-unpublished-recovery-kwnji5n2/result.json`.
 - macOS real UI and current helper: `/private/var/folders/97/80rddxm51750bvdn9k9fnv2w0000gn/T/d2-ui-readiness-9in26ib1/readiness-result.json` and `repair-current-result.json`.
 - First hidden root: `/private/var/folders/97/80rddxm51750bvdn9k9fnv2w0000gn/T/d2-first-root-9twq2emw/result.json`.
-- Windows storage: `C:\Users\Administrator\AppData\Local\Temp\1\d2-current-storage-54djziwy\result.json`; readonly: `d2-current-storage-g3iih1kw\result.json` under the same parent.
+- Current Windows storage: `C:\Users\Administrator\AppData\Local\Temp\1\d2-current-storage-sxfi0r7l\result.json`; readonly: `d2-current-storage-srf6lx2o\result.json` under the same parent. Current build: `C:\Build\d2-native\build-223196d.log`.
 - Windows Inno: `C:\Build\d2-native\inno-current\inno-qualification-b76c1047d161458c8cf30e6776d23688\result.json`.
 
 During initial macOS UI setup, a test app was inadvertently launched without the isolated environment and opened the default user Data Root. It was stopped; the readiness binding correctly refused the wrong root. No claim is made that this default root was untouched. User data/backups were not deleted. Subsequent recorded UI checks used the verified isolated custom root.
