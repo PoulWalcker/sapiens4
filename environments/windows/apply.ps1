@@ -138,7 +138,7 @@ try {
     }
     $savedAttempt | Add-Member -NotePropertyName old -NotePropertyValue $old
     Write-Record (Join-Path $PSScriptRoot 'request.json') $savedAttempt
-    [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'Repair.cmd'), "@echo off`r`npowershell.exe -NoProfile -File `"%~dp0apply.ps1`" -Repair`r`npause`r`n")
+    [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'Repair.cmd'), "@echo off`r`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"%~dp0apply.ps1`" -Repair`r`npause`r`n")
     [Console]::Out.WriteLine('downloaded')
     [Console]::Out.Flush()
     if ([Console]::ReadLine() -cne 'install') { throw 'The update was cancelled before installation. The previous version is available.' }
@@ -167,7 +167,7 @@ try {
     if ($Previous) { Write-Output 'Previous application restored. Open it only after explicitly restoring the corresponding data; newer data must be preserved first.' }
     else { Open-Shell }
 } catch {
-    [IO.File]::WriteAllText($outcome,($_.Exception.Message + " Recovery: powershell.exe -NoProfile -File `"$PSCommandPath`" -Repair. The retained installers have not been deleted."))
+    [IO.File]::WriteAllText($outcome,($_.Exception.Message + " Recovery: powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Repair. The retained installers have not been deleted."))
     if ($ownsGate -and -not $armed -and -not $Repair -and -not $Previous) { Release-Reservation }
     exit 1
 } finally {

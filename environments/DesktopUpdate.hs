@@ -221,7 +221,7 @@ startWorker owner selected@(Release _ url digest) stop root config = do
     pure (proc (macDriver </> "Contents/MacOS/Update") [])
    else do
     copyFile (app </> "apply.ps1") worker
-    pure (proc powershell ["-NoProfile","-NonInteractive","-File",worker])
+    pure (proc powershell ["-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",worker])
   let detail = state </> "outcome.txt"
   exists <- doesFileExist detail
   when exists (removeFile detail)
