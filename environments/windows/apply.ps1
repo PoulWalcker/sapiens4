@@ -4,6 +4,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $pending = Join-Path $State 'pending'
+$reservation = Join-Path $pending (Split-Path $PSScriptRoot -Leaf)
 $outcome = Join-Path $State 'outcome.txt'
 $exe = Join-Path $App 'Sapiens4.exe'
 $manifest = Join-Path $App 'runtime/desktop-update.json'
@@ -13,6 +14,12 @@ $armed = $false
 $old = $null
 $originalShell = $null
 
+function Release-Reservation {
+    if ([IO.File]::Exists($reservation)) {
+        [IO.File]::Delete($reservation)
+        [IO.Directory]::Delete($pending)
+    }
+}
 function Installed-Release {
     $local = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
     if ($local.contract -cnotin @('same-format-v1','prepare-data-v1') -or ($local.contract -ceq 'same-format-v1' -and $local.format -cne 'sapiens4-2026-11') -or
@@ -77,6 +84,21 @@ try {
     Verify-Publisher $package $old.publisher
     $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($package)
     if ($info.ProductName -cne $identity -or $info.FileDescription -cne "Sapiens4 Setup $($old.platform)" -or $info.ProductVersion -cne $Version) { throw 'Wrong signed installer product, version or platform.' }
+    [Console]::Out.WriteLine('downloaded')
+    [Console]::Out.Flush()
+    if ([Console]::ReadLine() -cne 'install') { throw 'The update was cancelled before installation. The previous version is available.' }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = Join-Path $PSScriptRoot 'previous.zip'
+    [IO.Compression.ZipFile]::CreateFromDirectory($App,$archive)
+    $saved = [IO.Compression.ZipFile]::OpenRead($archive)
+    try {
+        foreach ($entry in $saved.Entries) {
+            $content = $entry.Open()
+            try { $content.CopyTo([IO.Stream]::Null) } finally { $content.Dispose() }
+        }
+    } finally { $saved.Dispose() }
+    $saved = [IO.File]::Open($archive,'Open','ReadWrite','None')
+    try { $saved.Flush($true) } finally { $saved.Dispose() }
     Close-Shell
     $armed = $true
     $setup = Start-Process -FilePath $package -ArgumentList @('/CURRENTUSER','/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/RESTARTEXITCODE=3010',("/DIR=`"$App`"")) -PassThru -Wait
@@ -88,20 +110,13 @@ try {
     Verify-Publisher (Join-Path $App 'runtime/.build/bin/sapiens4.exe') $old.publisher
     $marker = Join-Path $State 'same-format'
     $next = Join-Path $PSScriptRoot 'same-format'
-    [IO.File]::WriteAllText($next,(@{contract=$Contract;version=$Version} | ConvertTo-Json -Compress))
+    [IO.File]::WriteAllText($next,(@{contract=$Contract;version=$Version;root=$Root;status='installed';recovery=$archive} | ConvertTo-Json -Compress))
     if ([IO.File]::Exists($marker)) { [IO.File]::Replace($next,$marker,$null) } else { [IO.File]::Move($next,$marker) }
-    [IO.Directory]::Delete($pending)
+    Release-Reservation
     Open-Shell
 } catch {
     [IO.File]::WriteAllText($outcome,$_.Exception.Message)
-    if ($old -and -not $armed) {
-        Close-Shell
-        $current = Installed-Release
-        if ($current.version -cne $old.version) { exit 1 }
-        Verify-Publisher $exe $old.publisher
-        [IO.Directory]::Delete($pending)
-        Open-Shell
-    }
+    if (-not $armed) { Release-Reservation }
     exit 1
 } finally {
     if ([IO.File]::Exists($package)) { [IO.File]::Delete($package) }

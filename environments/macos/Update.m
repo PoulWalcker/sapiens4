@@ -2,15 +2,19 @@
 #import <Security/Security.h>
 #import <Sparkle/Sparkle.h>
 #import <sys/stat.h>
+#import <signal.h>
+#import <fcntl.h>
 
 // Sparkle owns package validation and replacement. This process lives outside the
 // replaceable bundle and opens the selected root only after verifying the installed B.
+typedef NS_ENUM(NSUInteger, Phase) { Downloading, Preserving, Installing };
+
 @interface Update : NSObject <SPUUserDriver, SPUUpdaterDelegate>
 @property(nonatomic,strong) NSURL *app, *state, *asset;
 @property(nonatomic,copy) NSString *version, *root, *config, *oldVersion, *publicKey, *product, *contract;
 @property(nonatomic) pid_t shellPID;
 @property(nonatomic,strong) SPUUpdater *updater;
-@property(nonatomic) BOOL installationPossible, awaitingCommit, returningToA;
+@property(nonatomic) Phase phase;
 @property(nonatomic,strong) NSTimer *timer;
 @property(nonatomic,strong) NSDate *deadline;
 @end
@@ -23,8 +27,15 @@
     [message writeToURL:[self.state URLByAppendingPathComponent:@"outcome.txt"] atomically:YES
                encoding:NSUTF8StringEncoding error:NULL];
 }
+- (NSURL *)attemptDirectory { return NSBundle.mainBundle.bundleURL.URLByDeletingLastPathComponent; }
+- (BOOL)releaseReservation {
+    NSURL *pending = [self.state URLByAppendingPathComponent:@"pending"];
+    NSURL *token = [pending URLByAppendingPathComponent:self.attemptDirectory.lastPathComponent];
+    return unlink(token.fileSystemRepresentation) == 0 && rmdir(pending.fileSystemRepresentation) == 0;
+}
 - (void)stopWith:(NSString *)message {
     [self record:message];
+    if (self.phase != Installing) [self releaseReservation];
     exit(EXIT_FAILURE);
 }
 - (BOOL)validInstalledVersion:(NSString *)version {
@@ -44,20 +55,20 @@
     NSURL *expected = [self.app URLByAppendingPathComponent:@"Contents/MacOS/Sapiens4"];
     return [p.executableURL.URLByResolvingSymlinksInPath.path isEqual:expected.URLByResolvingSymlinksInPath.path] ? p : nil;
 }
-- (void)reopen:(BOOL)updated {
+- (void)reopen {
     NSError *error = nil;
     NSURL *marker = [self.state URLByAppendingPathComponent:@"same-format"];
-    if (updated) {
+    {
         NSURL *metadata = [self.app URLByAppendingPathComponent:@"Contents/Resources/runtime/desktop-update.json"];
         NSData *bytes = [NSData dataWithContentsOfURL:metadata options:0 error:&error];
         id release = bytes ? [NSJSONSerialization JSONObjectWithData:bytes options:0 error:&error] : nil;
         if (![release isKindOfClass:NSDictionary.class] || ![release[@"contract"] isEqual:self.contract] ||
             ![release[@"version"] isEqual:self.version]) [self stopWith:@"Installed release does not match the selected contract."];
-        NSData *contract = [NSJSONSerialization dataWithJSONObject:@{@"contract":self.contract, @"version":self.version} options:0 error:&error];
+        NSData *contract = [NSJSONSerialization dataWithJSONObject:@{@"contract":self.contract, @"version":self.version, @"root":self.root, @"status":@"installed", @"recovery":[self.attemptDirectory URLByAppendingPathComponent:@"previous.zip"].path} options:0 error:&error];
         if (!contract || ![contract writeToURL:marker options:NSDataWritingAtomic error:&error])
             [self stopWith:error.localizedDescription];
     }
-    if (rmdir([[self.state URLByAppendingPathComponent:@"pending"] fileSystemRepresentation]) != 0)
+    if (![self releaseReservation])
         [self stopWith:[NSString stringWithFormat:@"Cannot finish installation ownership: %s", strerror(errno)]];
     NSTask *task = [NSTask new];
     task.executableURL = [self.app URLByAppendingPathComponent:@"Contents/MacOS/Sapiens4"];
@@ -67,13 +78,14 @@
     env[@"SAPIENS_CONFIG_DIR"] = self.config;
     task.environment = env;
     if (![task launchAndReturnError:&error]) [self stopWith:error.localizedDescription];
-    exit(updated ? EXIT_SUCCESS : EXIT_FAILURE);
+    exit(EXIT_SUCCESS);
 }
 - (void)tick {
     if ([self.deadline timeIntervalSinceNow] <= 0) [self stopWith:@"The updater could not confirm completion. Repair this installation before reopening."];
+    if (self.phase == Downloading && self.shell == nil)
+        [self stopWith:@"The application closed before installation. The previous version is available."];
     if (self.shell != nil) return;
-    if (self.returningToA && [self validInstalledVersion:self.oldVersion]) [self reopen:NO];
-    if (self.awaitingCommit && [self validInstalledVersion:self.version]) [self reopen:YES];
+    if (self.phase == Installing && [self validInstalledVersion:self.version]) [self reopen];
 }
 - (void)finishAfterShellExits {
     // Dismiss at Sparkle's ready callback requests install-on-exit. Only the
@@ -111,7 +123,7 @@
 }
 - (void)showUserInitiatedUpdateCheckWithCancellation:(void (^)(void))cancel {}
 - (void)showUpdateFoundWithAppcastItem:(SUAppcastItem *)item state:(SPUUserUpdateState *)state reply:(void (^)(SPUUserUpdateChoice))reply {
-    if (state.stage != SPUUserUpdateStageNotDownloaded) self.installationPossible = YES;
+    if (state.stage != SPUUserUpdateStageNotDownloaded) [self authorizeInstallation];
     reply(SPUUserUpdateChoiceInstall);
 }
 - (void)showUpdateReleaseNotesWithDownloadData:(SPUDownloadData *)data {}
@@ -121,10 +133,42 @@
 - (void)showDownloadInitiatedWithCancellation:(void (^)(void))cancel {}
 - (void)showDownloadDidReceiveExpectedContentLength:(uint64_t)length {}
 - (void)showDownloadDidReceiveDataOfLength:(uint64_t)length {}
-- (void)showDownloadDidStartExtractingUpdate { self.installationPossible = YES; }
+- (void)authorizeInstallation {
+    if (self.phase != Downloading) return;
+    if (puts("downloaded") == EOF || fflush(stdout) != 0)
+        [self stopWith:@"The application closed before installation. The previous version is available."];
+    char command[16];
+    if (!fgets(command, sizeof(command), stdin) || strcmp(command, "install\n") != 0)
+        [self stopWith:@"The update was cancelled before installation. The previous version is available."];
+    self.phase = Preserving;
+    NSURL *archive = [self.attemptDirectory URLByAppendingPathComponent:@"previous.zip"];
+    NSTask *copy = [NSTask new];
+    copy.executableURL = [NSURL fileURLWithPath:@"/usr/bin/ditto"];
+    copy.arguments = @[@"-c",@"-k",@"--sequesterRsrc",@"--keepParent",self.app.path,archive.path];
+    NSError *error = nil;
+    if (![copy launchAndReturnError:&error]) [self stopWith:error.localizedDescription];
+    [copy waitUntilExit];
+    if (copy.terminationStatus != 0) [self stopWith:@"The previous application could not be preserved."];
+    NSTask *verify = [NSTask new];
+    verify.executableURL = [NSURL fileURLWithPath:@"/usr/bin/unzip"];
+    verify.arguments = @[@"-tq",archive.path];
+    verify.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+    if (![verify launchAndReturnError:&error]) [self stopWith:error.localizedDescription];
+    [verify waitUntilExit];
+    if (verify.terminationStatus != 0) [self stopWith:@"The preserved application archive could not be verified."];
+    for (NSURL *path in @[archive,self.attemptDirectory]) {
+        int fd = open(path.fileSystemRepresentation, O_RDONLY);
+        if (fd < 0) [self stopWith:@"The preserved application could not be opened for flushing."];
+        int status = fsync(fd);
+        close(fd);
+        if (status != 0) [self stopWith:@"The preserved application could not be flushed to disk."];
+    }
+    self.phase = Installing;
+}
+- (void)updater:(SPUUpdater *)updater willExtractUpdate:(SUAppcastItem *)item { [self authorizeInstallation]; }
+- (void)showDownloadDidStartExtractingUpdate {}
 - (void)showExtractionReceivedProgress:(double)progress {}
 - (void)showReadyToInstallAndRelaunch:(void (^)(SPUUserUpdateChoice))reply {
-    self.awaitingCommit = YES;
     reply(SPUUserUpdateChoiceDismiss);
     [self finishAfterShellExits];
 }
@@ -132,19 +176,10 @@
 - (void)showUpdateInstalledAndRelaunched:(BOOL)relaunched acknowledgement:(void (^)(void))ack { ack(); }
 - (void)dismissUpdateInstallation {}
 - (void)updater:(SPUUpdater *)updater didFinishUpdateCycleForUpdateCheck:(SPUUpdateCheck)check error:(NSError *)error {
-    if (self.awaitingCommit) return;
-    // An already-terminated host may be installed without the ready-to-relaunch callback.
-    if (!error && self.installationPossible && !self.shell) {
-        self.awaitingCommit = YES;
-        self.deadline = [NSDate dateWithTimeIntervalSinceNow:120];
-        [self tick];
-        return;
-    }
-    NSString *message = error.localizedDescription ?: @"Update check finished without installing the selected version.";
-    if (self.installationPossible) [self stopWith:message];
-    self.returningToA = YES;
-    [self record:message];
-    [self finishAfterShellExits];
+    if (error) [self stopWith:error.localizedDescription];
+    if (self.phase == Downloading) [self stopWith:@"The selected update was not downloaded."];
+    self.deadline = [NSDate dateWithTimeIntervalSinceNow:120];
+    [self tick];
 }
 @end
 
@@ -164,15 +199,11 @@ int main(int argc, const char *argv[]) {
         driver.root = args[5]; driver.config = args[6]; driver.shellPID = args[7].intValue; driver.contract = args[8];
         if (![@[@"same-format-v1",@"prepare-data-v1"] containsObject:driver.contract]) return EXIT_FAILURE;
         if (driver.shellPID <= 0 || ![driver.asset.scheme isEqual:@"https"]) return EXIT_FAILURE;
+        signal(SIGPIPE, SIG_IGN);
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
         NSError *error = nil;
-        if (![driver start:&error]) {
-            [driver record:error.localizedDescription];
-            driver.returningToA = YES;
-            driver.timer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) { [driver tick]; }];
-            [driver finishAfterShellExits];
-        }
+        if (![driver start:&error]) [driver stopWith:error.localizedDescription];
         [NSApp run];
     }
     return EXIT_FAILURE;

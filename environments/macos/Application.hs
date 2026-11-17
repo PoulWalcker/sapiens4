@@ -437,7 +437,8 @@ runSession update isFixture initialAddress = do
     process <- newIORef Nothing; address <- newIORef (if isFixture then initialAddress else "")
     worker <- newIORef Nothing; busy <- newIORef False; loaded <- newIORef False; selection <- newIORef Nothing
     signal <- newIORef Nothing; generation <- newIORef 0; recovery <- newIORef False
-    problem <- newIORef Nothing
+    notice <- maybe (pure Nothing) Update.startupNotice update
+    problem <- newIORef (T.pack <$> notice)
     closing <- newIORef False
     preferences <- if isFixture then pure nullPtr else do
         config <- configDirectory >>= canonicalizePath
@@ -449,8 +450,6 @@ runSession update isFixture initialAddress = do
     (do
         target <- installMethods state
         initialize state target initialAddress
-        forM_ update $ \release -> Update.startupNotice release >>= mapM_ (\reason -> post state $
-            void (promptWithTitle "Sapiens4 update" (T.pack reason) ["OK"]))
         let watch release = Update.watchReleases release $ \result -> post state $ do
                 current <- readIORef offer
                 case current of
@@ -483,9 +482,9 @@ startUpdate app requested = do
             closing <- readIORef (quitting app)
             unless (busy || closing) $ do
                 writeIORef (starting app) True
-                original <- atomicModifyIORef' (address app) (\a -> ("",a))
+                original <- readIORef (address app)
                 current <- readIORef (child app)
-                displayUpdate app (Update.Installing release "Preparing update…")
+                displayUpdate app (Update.Installing release "Downloading…")
                 let onFailure reason = post app $ do
                         writeIORef (starting app) False
                         displayUpdate app (Update.Offered release)
@@ -495,7 +494,7 @@ startUpdate app requested = do
                 void $ forkIO $ do
                     result <- tryJust Update.updateError $ do
                         config <- configDirectory
-                        Update.installRelease update release (mapM_ stopForUpdate current) (serverDirectory <$> current) config
+                        Update.installRelease update release (writeIORef (address app) "" >> mapM_ stopForUpdate current) (serverDirectory <$> current) config
                     case result of
                         Left reason -> onFailure reason
                         Right (Update.SelectionChanged next) -> post app $ do
@@ -506,9 +505,11 @@ startUpdate app requested = do
                         Right (Update.WorkerStarted process) -> do
                             post app (displayUpdate app (Update.Installing release "Updating…"))
                             failure <- Update.workerFailure update process
-                            forM_ failure $ \reason -> post app $ do
-                                displayUpdate app (Update.Installing release "Update stopped")
-                                void (promptWithTitle "Sapiens4 update" (T.pack reason) ["OK"])
+                            forM_ failure $ \outcome -> case outcome of
+                                Update.PreviousAvailable reason -> onFailure reason
+                                Update.InstallationIncomplete reason -> post app $ do
+                                    displayUpdate app (Update.Installing release "Update stopped")
+                                    void (promptWithTitle "Sapiens4 update" (T.pack reason) ["OK"])
         _ -> pure ()
 
 stopForUpdate :: ServerProcess -> IO ()
@@ -729,6 +730,7 @@ postAttempt application attempt action = post application $ do
 
 commitWorkspace :: Application -> WorkspaceSignal -> IO ()
 commitWorkspace application signal =
-    saveWhenReady (firstSignal application) signal (selectedRoot application) id (recoverStartup application . T.pack) $ \_ -> do
+    saveWhenReady (firstSignal application) signal (selectedRoot application) id (recoverStartup application . T.pack) $ \directory -> do
+        forM_ (updater application) $ \update -> Update.workspaceOpened update directory
         atomicModifyIORef' (startup application) (\old -> (Nothing,old)) >>= mapM_ cancel
         writeIORef (starting application) False

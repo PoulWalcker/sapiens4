@@ -1,6 +1,6 @@
 -- Admission is keyed to the physical installed application, before resolving user storage.
 module Installation
-  ( Installation, appPath, statePath, installed, withInstallation, beginMaintenance
+  ( Installation, appPath, statePath, installed, withInstallation, reserveUpdate, cancelUpdate, resumeUse, beginMaintenance
   , UpdateContract(..), contractName, sameFormatFamily, strictStartup, pendingPath, runtimePath, shellPath
   ) where
 
@@ -108,6 +108,31 @@ withInstallation action = do
       lease <- lockFile (directory </> "use.lock") Shared
       Installation app directory <$> newMVar (Just lease)
 
+-- Reserve admission while the existing application continues using its data.
+reserveUpdate :: Installation -> String -> IO ()
+reserveUpdate owner attempt = withFileLock (statePath owner </> "admission.lock") Exclusive $ \_ -> do
+  createDirectory (pendingPath owner)
+  B.writeFile (pendingPath owner </> attempt) B.empty `onException` removeDirectory (pendingPath owner)
+
+cancelUpdate :: Installation -> String -> IO ()
+cancelUpdate owner attempt = withFileLock (statePath owner </> "admission.lock") Exclusive $ \_ -> do
+  let token = pendingPath owner </> attempt
+  reserved <- doesFileExist token
+  when reserved (removeFile token)
+  pending <- doesDirectoryExist (pendingPath owner)
+  when pending $ do
+    contents <- listDirectory (pendingPath owner)
+    when (null contents) (removeDirectory (pendingPath owner))
+
+resumeUse :: Installation -> IO Bool
+resumeUse owner = withFileLock (statePath owner </> "admission.lock") Exclusive $ \_ -> do
+  pending <- doesDirectoryExist (pendingPath owner)
+  if pending then pure False else do
+    modifyMVar_ (useLock owner) $ \current -> case current of
+      Just _ -> pure current
+      Nothing -> Just <$> lockFile (statePath owner </> "use.lock") Shared
+    pure True
+
 -- New readers and promotions serialize on admission.lock. The original reader is
 -- reacquired before opening admission on failure; pending survives loss of the shell.
 beginMaintenance :: forall a. Installation -> IO a -> IO a
@@ -123,8 +148,7 @@ beginMaintenance owner launch = mask_ $ do
           case writer of
             Nothing -> fail "Another instance is using this installation. Close it and try again."
             Just _ -> do
-              createDirectory (pendingPath owner)
-              launch `onException` removeDirectory (pendingPath owner)
+              launch
         case (outcome :: Either IOException a) of
           Right result -> pure (Nothing, Right result)
           Left err -> do

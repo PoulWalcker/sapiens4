@@ -195,7 +195,7 @@ desktopSession memory probe update = do
                 busy <- readIORef starting
                 unless busy $ do
                   writeIORef starting True
-                  displayUpdate (Update.Installing release "Preparing update…")
+                  displayUpdate (Update.Installing release "Downloading…")
                   session <- readIORef (origin host)
                   root <- traverse (const $ readIORef activeRoot) session
                   void $ forkIO $ do
@@ -213,7 +213,13 @@ desktopSession memory probe update = do
                       Right (Update.WorkerStarted process) -> do
                         post (displayUpdate (Update.Installing release "Updating…"))
                         failure <- Update.workerFailure updater process
-                        forM_ failure $ \reason -> post (displayUpdate (Update.Installing release "Update stopped") >> reportUpdate reason)
+                        forM_ failure $ \outcome -> post $ case outcome of
+                          Update.PreviousAvailable reason -> do
+                            writeIORef starting False
+                            displayUpdate (Update.Offered release)
+                            if isNothing root then reportUpdate reason else recoverStartup reason
+                          Update.InstallationIncomplete reason ->
+                            displayUpdate (Update.Installing release "Update stopped") >> reportUpdate reason
               _ -> pure ()
           storageError :: String -> IO ()
           storageError message = do
@@ -256,7 +262,8 @@ desktopSession memory probe update = do
                 writeJSON (preferencesPath directory) next
                 writeIORef preferenceValues next
           commitWorkspace signal =
-            DesktopStorage.saveWhenReady firstSignal signal selectedRoot fst recoverStartup $ \(_,url) -> do
+            DesktopStorage.saveWhenReady firstSignal signal selectedRoot fst recoverStartup $ \(directory,url) -> do
+              forM_ update $ \updater -> Update.workspaceOpened updater directory
               atomicModifyIORef' workerRef (\old -> (Nothing,old)) >>= mapM_ cancel
               writeIORef starting False
               storageScript "window.dispatchEvent(new Event('sapiens-preferences-ready'))"

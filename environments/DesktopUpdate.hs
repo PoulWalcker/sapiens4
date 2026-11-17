@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module DesktopUpdate
   ( DesktopUpdate, Release, releaseVersion, withDesktopUpdate, watchReleases
-  , InstallResult(..), installRelease, stopIdle, recordReply, updateError, UpdateView(..), viewScript, workerFailure, startupNotice
+  , InstallResult(..), installRelease, stopIdle, recordReply, updateError, UpdateView(..), viewScript, WorkerFailure(..), workerFailure, startupNotice, workspaceOpened
   ) where
 
 import Control.Concurrent
@@ -9,6 +9,7 @@ import Control.Exception
 import Control.Monad
 import Data.Aeson
 import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (parseEither, Parser)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
@@ -22,6 +23,8 @@ import qualified Data.UUID.V4 as UUID
 import Data.Version
 import Text.ParserCombinators.ReadP (readP_to_S)
 import Installation
+import DataRoot (checkUpdateRoot)
+import Types (atomicBytes)
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
@@ -56,8 +59,29 @@ startupNotice (DesktopUpdate owner _ _ _ _) = do
     Left () -> pure Nothing
     Right () -> Just . T.unpack . TE.decodeUtf8 <$> B.readFile claimed `finally` removeFile claimed
 
-workerFailure :: DesktopUpdate -> ProcessHandle -> IO (Maybe String)
+workspaceOpened :: DesktopUpdate -> FilePath -> IO ()
+workspaceOpened (DesktopUpdate owner version _ _ _) root = do
+  let marker = statePath owner </> "same-format"
+  exists <- doesFileExist marker
+  when exists $ do
+    contents <- B.readFile marker
+    (target, expected, fields) <- either fail pure (eitherDecodeStrict contents >>= parseEither
+      (withObject "installed update" (\o -> (,,) <$> o .: "version" <*> o .:? "root" .!= "" <*> pure o)))
+    when (target == showVersion version && (null expected || equalFilePath expected root)) $ do
+      let confirmed = KM.insert "status" (String "ready") (KM.insert "root" (String $ T.pack root) fields)
+      atomicBytes marker (encode (Object confirmed))
+
+data WorkerFailure = PreviousAvailable String | InstallationIncomplete String
+
+workerFailure :: DesktopUpdate -> ProcessHandle -> IO (Maybe WorkerFailure)
 workerFailure (DesktopUpdate owner _ _ _ _) worker = do
+  failure <- workerResult owner worker
+  forM failure $ \reason -> do
+    available <- resumeUse owner
+    pure (if available then PreviousAvailable reason else InstallationIncomplete reason)
+
+workerResult :: Installation -> ProcessHandle -> IO (Maybe String)
+workerResult owner worker = do
   code <- waitForProcess worker
   case code of
     ExitSuccess -> pure Nothing
@@ -172,36 +196,59 @@ installRelease update@(DesktopUpdate owner _ _ _ _) selected stop root config = 
 
 startWorker :: Installation -> Release -> IO () -> Maybe FilePath -> FilePath -> IO ProcessHandle
 startWorker owner selected@(Release _ contract url digest) stop root config = do
-  stop
   let app = appPath owner
       state = statePath owner
-      backend = runtimePath app </> ".build/bin" </> if os == "darwin" then "sapiens4" else "sapiens4.exe"
-  when (contract == SameFormat) $ forM_ root $ \directory -> do
-    (code,_,detail) <- readProcessWithExitCode backend ["--check-update-root",directory] ""
-    unless (code == ExitSuccess) $ fail detail
   pid <- getCurrentPid
   attempt <- UUID.toString <$> UUID.nextRandom
-  let workspace = state </> ("driver-" ++ attempt)
+  let reservation = "driver-" ++ attempt
+      workspace = state </> reservation
       arguments = [app,state,releaseVersion selected,url,maybe "" id root,config,show pid,contractName contract]
       macDriver = workspace </> "Update.app"
       powershell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
       worker = workspace </> "apply.ps1"
-  bracketOnError (createDirectory workspace) (const $ removeDirectoryRecursive workspace) $ \_ -> do
-    command <- if os == "darwin" then do
-      callProcess "/usr/bin/ditto" [app </> "Contents/Helpers/Update.app",macDriver]
-      callProcess "/usr/bin/codesign" ["--verify","--deep","--strict",macDriver]
-      pure (proc (macDriver </> "Contents/MacOS/Update") arguments)
-     else do
-      copyFile (app </> "apply.ps1") worker
-      pure (proc powershell (["-NoProfile","-NonInteractive","-File",worker] ++ arguments ++ [digest]))
-    beginMaintenance owner $ do
-      let detail = state </> "outcome.txt"
-      exists <- doesFileExist detail
-      when exists (removeFile detail)
-      let launch streams = do
-            (_,_,_,child) <- createProcess command {std_in=streams,std_out=streams,std_err=streams,
-                                                    close_fds=True,new_session=os=="darwin",create_new_console=False}
-            pure child
-      -- Sparkle may claim a closed standard descriptor as a guarded XPC port.
-      if os == "darwin" then withFile "/dev/null" ReadWriteMode (launch . UseHandle)
-                        else launch NoStream
+  createDirectory workspace
+  command <- if os == "darwin" then do
+    callProcess "/usr/bin/ditto" [app </> "Contents/Helpers/Update.app",macDriver]
+    callProcess "/usr/bin/codesign" ["--verify","--deep","--strict",macDriver]
+    pure (proc (macDriver </> "Contents/MacOS/Update") arguments)
+   else do
+    copyFile (app </> "apply.ps1") worker
+    pure (proc powershell (["-NoProfile","-NonInteractive","-File",worker] ++ arguments ++ [digest]))
+  let detail = state </> "outcome.txt"
+  exists <- doesFileExist detail
+  when exists (removeFile detail)
+  reserveUpdate owner reservation
+  let launch errors = createProcess command
+        { std_in=CreatePipe, std_out=CreatePipe, std_err=errors
+        , close_fds=True, new_session=os=="darwin", create_new_console=False }
+      cancel = cancelUpdate owner reservation
+  (input,output,_,child) <- (if os == "darwin"
+    then withFile "/dev/null" ReadWriteMode (launch . UseHandle)
+    else launch NoStream) `onException` cancel
+  case (input,output) of
+    (Just control,Just progress) -> do
+      let abandon = do
+            hClose control
+            terminateProcess child
+            void (waitForProcess child)
+            hClose progress
+            cancel
+      flip onException abandon $ do
+        ready <- timeout 3600000000 (hGetLine progress `catch` \(err :: IOException) -> do
+          failure <- workerResult owner child
+          ioError (userError (maybe (displayException err) id failure)))
+        case ready of
+          Just "downloaded" -> pure ()
+          Nothing -> fail "The update download did not complete within one hour."
+          Just _ -> fail "Unexpected updater response."
+        stop
+        when (contract == SameFormat) $ mapM_ checkUpdateRoot root
+        beginMaintenance owner $ hPutStrLn control "install" >> hFlush control
+      hClose control
+      hClose progress
+      pure child
+    _ -> do
+      terminateProcess child
+      void (waitForProcess child)
+      cancel
+      fail "The updater could not establish its control channel."
