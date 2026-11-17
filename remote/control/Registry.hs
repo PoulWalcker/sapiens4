@@ -3,6 +3,7 @@ module Registry where
 
 import Types
 import qualified Telemetry
+import qualified MigrationBackup as Backup
 import DataRoot
 import System.FileLock (unlockFile)
 import qualified Service as Service
@@ -311,7 +312,8 @@ withSavedCorporaLocks root (identity:rest) action = do
  folder <- childPath root identity
  exists <- doesDirectoryExist folder
  require exists 409 "A registered Corpora is unavailable. Restore the complete Data Root."
- bracket (acquireStorage (AttachChild root identity) folder) unlockFile $ \_ -> withSavedCorporaLocks root rest action
+ Backup.checkNoPending folder
+ bracket (acquireStorage (AttachChild root identity) folder) unlockFile $ \_ -> Backup.checkNoPending folder >> withSavedCorporaLocks root rest action
 
 recoverRelays :: FilePath -> IO ()
 recoverRelays root = do

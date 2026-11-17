@@ -23,9 +23,11 @@ import System.Environment
 import System.FileLock
 import System.FilePath
 import System.Info
+import System.IO.Error (modifyIOError, ioeGetErrorString, ioeSetErrorString)
 import Types
 import qualified Telemetry
 import DataRoot
+import qualified MigrationBackup as Backup
 import qualified Computer
 import qualified Store as DB
 import Population
@@ -45,63 +47,112 @@ openService :: StartupFormats -> StorageChoice -> FilePath -> IO Service
 openService formats choice path = do
  root <- selectedPath choice path
  repo <- lookupEnv "SAPIENS_REPOSITORY" >>= maybe getCurrentDirectory pure >>= canonicalizePath
- lock <- acquireStorageWith formats choice root
- let currentOnly = formats == CurrentFormatsOnly && case choice of AttachExisting -> True; AttachChild _ _ -> True; _ -> False
- let prepareIdentity = do
-      let identityPath=root </> "corpora-identity.json"
-      exists <- doesFileExist identityPath
-      unless exists $ do i<-UUID.toText <$> UUID.nextRandom; writeJSON identityPath (obj [("version",num 1),("corpora_id",str i)])
-      identity <- readJSON identityPath empty
-      require (get identity "version"==num 1 && maybe False ((==at identity "corpora_id") . UUID.toText) (UUID.fromText (at identity "corpora_id"))) 409 "Invalid CORPORA identity. Restore corpora-identity.json from backup."
-      pure (at identity "corpora_id")
- corporaId <- prepareIdentity `onException` unlockFile lock
- database <- (DB.openDatabase root >>= newMVar . Just) `onException` unlockFile lock
- let initialize = do
-      guard <- newMVar ()
-      stopping <- newIORef False
-      admission <- newTVarIO (Serving 0)
-      worker <- newMVar Nothing
-      runs <- newMVar M.empty
-      lease <- newIORef Nothing
-      endpoint <- newIORef ""
-      pulse <- newIORef empty
-      actors <- newMVar M.empty
-      states <- newMVar M.empty
-      revision <- newTVarIO 0
-      subscribers <- newTVarIO 0
-      files <- newIORef Set.empty
-      telemetry <- newIORef Nothing
-      let s=Service root repo guard lock stopping admission worker runs lease endpoint pulse actors database states revision subscribers files telemetry corporaId
-      unless currentOnly $ DB.initialize s >> migrateWorkspaces s
-      rows <- DB.agents s
-      when (null rows) $ void (createAgent s (obj [("name",str "ChiefSapi"),("role",str "Head of Corpora")]))
-      let marker = initializingDirectory root
-      pending <- doesDirectoryExist marker
-      when (choice `elem` [StartNew,AttachExisting] && pending) $ removeDirectory marker
-      unless currentOnly $ repairAvatars s
-      agents <- DB.agents s
-      mapM_ (if currentOnly then setManifests s else ensureAgent s) agents
-      chief <- DB.mainAgent s
-      unless currentOnly $ do
-       d <- directory s
-       saveDirectory s $ foldl (\dir row -> let a=at row "id"; entry=get dir a in put a (put "parent" (if a==chief then Null else get entry "parent" `fallback` str chief) entry) dir) d agents
-      mapM_ (E.recover s . (`at` "id")) agents
-      unless currentOnly $ do
-       prefs <- DB.singleton s DB.Preferences
-       let panel=at prefs "panel"; updated=if panel=="mindmap" then put "panel" (str "notes") prefs else if panel `elem` ["cron","log"] then put "panel" (str "chat") prefs else prefs
-       DB.saveSingleton s DB.Preferences (remove ["work_views"] updated)
-      savedPulse <- DB.singleton s DB.SystemPulse
-      identityPulse <- if has savedPulse "pulse" then pure (at savedPulse "pulse") else ("pulse_" <>) <$> newId
-      cfg <- corporaSettings s
-      writeIORef pulse (obj [("id",str identityPulse),("running",Bool (corporaStatus cfg==Active)),("numbers",merge (obj [(k,num 0) | k<-["bpm120","bpm60","bph60"]]) (get savedPulse "numbers"))])
-      unless currentOnly $ R.initializeRoutines s
-      D.reconcileWorks s
-      D.pendingWorks s
-      GC.reconcileGroups s
-      GC.dispatchGroups s
-      DB.record s [chief] "corpora" "system.started" empty "system" Nothing
-      pure s
- initialize `onException` (withMVar database (mapM_ DB.closeConnection) `finally` unlockFile lock)
+ mask $ \restore -> do
+  s <- modifyIOError (\e -> ioeSetErrorString e ("Data Root " ++ root ++ ": " ++ ioeGetErrorString e)) $
+       prepareDataRoot formats choice repo root
+  restore (startStorage s) `onException` (DB.closeDatabase s `finally` unlockFile (serviceFileLock s))
+  pure s
+
+-- A failed preparation must leave no normal worker, SQLite writer or telemetry
+-- handle open. Only the root lease is transferred to the published Service.
+prepareDataRoot :: StartupFormats -> StorageChoice -> FilePath -> FilePath -> IO Service
+prepareDataRoot formats choice repo root = do
+ Backup.recoverBeforeOpen root lockSaved
+ pending <- doesDirectoryExist (initializingDirectory root)
+ names <- if choice==AttachExisting then listDirectory root else pure []
+ published <- if pending then withUpdateLock root (publishedBootstrap root) else pure False
+ if not published && (choice==StartNew || choice==CreateCorpora || choice==AttachExisting && (pending || names==["host.lock"]))
+  then bracketOnError (acquireStorageWith formats choice root) unlockFile $ \lock -> do
+   Backup.checkNoPending root
+   unless (choice==CreateCorpora) $ do
+    initializing <- doesDirectoryExist (initializingDirectory root)
+    alreadyPublished <- publishedBootstrap root
+    unless (initializing && not alreadyPublished) $ storageError "The Data Root changed while opening. Reopen this folder."
+   let identityPath = root </> "corpora-identity.json"
+   exists <- doesFileExist identityPath
+   unless exists $ do ident <- UUID.toText <$> UUID.nextRandom
+                      writeJSON identityPath (obj [("version",num 1),("corpora_id",str ident)])
+   bracketOnError (openStorageService repo root lock) DB.closeDatabase $ \s -> do
+    DB.initialize s
+    rows <- DB.agents s
+    when (null rows) $ void (createAgent s (obj [("name",str "ChiefSapi"),("role",str "Head of Corpora")]))
+    convertStoredFields s
+    initialized <- doesDirectoryExist (initializingDirectory root)
+    when initialized (removeDirectory (initializingDirectory root))
+    pure s
+  else let existing = if published then AttachExisting else choice
+       in openStorageTree formats existing root $ \owner tree -> do
+   Backup.checkNoPending root
+   finishBootstrap <- publishedBootstrap root
+   legacy <- filterM (\(mode,folder,_) -> do
+    found <- newIORef False
+    inspectRoot (\what -> formatRequirement formats folder what >> writeIORef found True) mode folder
+    readIORef found) tree
+   unless (null legacy) $ Backup.withMigrationBackup root [folder | (_,folder,_) <- tree] $ \temporary -> do
+    forM_ legacy $ \(_,folder,lock) ->
+     bracket (openStorageService repo folder lock) DB.closeDatabase $ \s -> DB.initialize s >> convertStoredFields s { migrationTemporaryName = Just temporary }
+    when finishBootstrap (removeDirectory (initializingDirectory root))
+    actual <- storageTree existing root
+    unless (actual==[(mode,folder) | (mode,folder,_) <- tree]) $ storageError "The Corpora registry changed during migration."
+    forM_ tree $ \(mode,folder,_) -> inspectRoot (formatRequirement CurrentFormatsOnly folder) mode folder
+   openStorageService repo root owner
+ where
+ lockSaved paths action = foldr withUpdateLock action paths
+
+openStorageService :: FilePath -> FilePath -> FileLock -> IO Service
+openStorageService repo root lock = do
+ identity <- readDataJSON (root </> "corpora-identity.json")
+ let corporaId = at identity "corpora_id"
+ require (get identity "version"==num 1 && (UUID.toText <$> UUID.fromText corporaId)==Just corporaId) 409 "Invalid Corpora identity."
+ bracketOnError (DB.openDatabase root) DB.closeConnection $ \db -> do
+  database <- newMVar (Just db)
+  guard <- newMVar ()
+  stopping <- newIORef False
+  admission <- newTVarIO (Serving 0)
+  worker <- newMVar Nothing
+  runs <- newMVar M.empty
+  lease <- newIORef Nothing
+  endpoint <- newIORef ""
+  pulse <- newIORef empty
+  actors <- newMVar M.empty
+  states <- newMVar M.empty
+  revision <- newTVarIO 0
+  subscribers <- newTVarIO 0
+  files <- newIORef Set.empty
+  telemetry <- newIORef Nothing
+  pure (Service root repo guard lock stopping admission worker runs lease endpoint pulse actors database states revision subscribers files telemetry corporaId Nothing)
+
+convertStoredFields :: Service -> IO ()
+convertStoredFields s = do
+ migrateWorkspaces s
+ repairAvatars s
+ agents <- DB.agents s
+ mapM_ (migrateAgent s) agents
+ chief <- DB.mainAgent s
+ d <- directory s
+ let normalized = foldl (\dir row -> let a=at row "id"; entry=get dir a in put a (put "parent" (if a==chief then Null else get entry "parent" `fallback` str chief) entry) dir) d agents
+ when (normalized /= d) (saveDirectory s normalized)
+ prefs <- DB.singleton s DB.Preferences
+ let panel=at prefs "panel"; updated=if panel=="mindmap" then put "panel" (str "notes") prefs else if panel `elem` ["cron","log"] then put "panel" (str "chat") prefs else prefs
+ let current = remove ["work_views"] updated
+ when (current /= prefs) (DB.saveSingleton s DB.Preferences current)
+ R.initializeRoutines s
+
+startStorage :: Service -> IO ()
+startStorage s = do
+ agents <- DB.agents s
+ mapM_ (setManifests s) agents
+ mapM_ (E.recover s . (`at` "id")) agents
+ savedPulse <- DB.singleton s DB.SystemPulse
+ identityPulse <- if has savedPulse "pulse" then pure (at savedPulse "pulse") else ("pulse_" <>) <$> newId
+ cfg <- corporaSettings s
+ writeIORef (servicePulse s) (obj [("id",str identityPulse),("running",Bool (corporaStatus cfg==Active)),("numbers",merge (obj [(k,num 0) | k<-["bpm120","bpm60","bph60"]]) (get savedPulse "numbers"))])
+ D.reconcileWorks s
+ D.pendingWorks s
+ GC.reconcileGroups s
+ GC.dispatchGroups s
+ chief <- DB.mainAgent s
+ DB.record s [chief] "corpora" "system.started" empty "system" Nothing
 attachEndpoint :: Service -> Text -> IO ()
 attachEndpoint s url = locked s $ do
  writeIORef (serviceEndpoint s) url

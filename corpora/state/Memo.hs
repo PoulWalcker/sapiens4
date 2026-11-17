@@ -28,8 +28,8 @@ validate root p = do
  exists <- doesPathExist p
  file <- doesFileExist p
  require (not link && takeDirectory resolved == root && (not exists || file)) 409 (T.pack (takeFileName p) <> " must be a regular file inside this Sapi workspace")
-ensureMemo :: FilePath -> Text -> Text -> IO ()
-ensureMemo root name purpose = do
+ensureMemo :: Service -> FilePath -> Text -> Text -> IO ()
+ensureMemo s root name purpose = do
  let p = root </> "Notes.html"
  exists <- doesPathExist p
  link <- pathIsSymbolicLink p `catch` (\(_ :: IOException) -> pure False)
@@ -42,7 +42,7 @@ ensureMemo root name purpose = do
     validate root source
     old <- readText source
     pure (if takeExtension source == ".md" then "notes: " <> jsonText (str old) else old)
-  writeText p (migratedMemo name purpose content)
+  writeStoredText s p (migratedMemo name purpose content)
 
 migratedMemo :: Text -> Text -> Text -> Text
 migratedMemo name purpose content =

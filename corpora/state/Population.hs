@@ -2,7 +2,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Population where
 
-import Control.Exception
 import Control.Monad
 import Data.Aeson hiding (pairs)
 import qualified Data.Map.Strict as Map
@@ -31,7 +30,7 @@ requireActive s a = DB.agent s a >> retired s a >>= \r -> require (not r) 409 "T
 directory :: Service -> IO Value
 directory s = readJSON (serviceRoot s </> "agentpy/corpora/directory.json") empty
 saveDirectory :: Service -> Value -> IO ()
-saveDirectory s = writeJSON (serviceRoot s </> "agentpy/corpora/directory.json")
+saveDirectory s = writeStoredJSON s (serviceRoot s </> "agentpy/corpora/directory.json")
 resolve :: Service -> Text -> Bool -> IO Text
 resolve s name includeRetired = do
  rows <- DB.agents s
@@ -71,10 +70,13 @@ assignManager s a parent = do
  saveDirectory s (put a (put "parent" parent entry) d)
  when (old /= parent) $ DB.record s [a] a "sapi.manager.changed" (obj [("previous",old),("manager",parent)]) "admin" Nothing
 ensureAgent :: Service -> Value -> IO ()
-ensureAgent s row = do
+ensureAgent s row = migrateAgent s row >> setManifests s row
+
+migrateAgent :: Service -> Value -> IO ()
+migrateAgent s row = do
  let a = at row "id"; root = agentRoot s a; work = workspaceRoot s a; p = root </> "state.json"
  createDirectoryIfMissing True work
- ensureMemo work (at row "name") (at row "role") `catch` (\(_::APIError) -> pure ())
+ ensureMemo s work (at row "name") (at row "role")
  seedMemoBookmark s a
  v <- readJSON p Null
  require (get v "schema_version" `elem` map num [1,2,3]) 500 "Unsupported agent state schema"
@@ -86,10 +88,11 @@ ensureAgent s row = do
   unless backed $ copyFile p backup
   saveState s a migrated
  d <- directory s
- unless (has d a) $ saveDirectory s (put a (obj [("parent",get v "initial_manager"),("scope",str "")]) d)
+ let entry = get d a `fallback` obj [("scope",str "")]
+ unless (has entry "parent") $ saveDirectory s (put a (put "parent" (get v "initial_manager") entry) d)
  when (get v "schema_version"==num 3 && has v "initial_manager") $
-  writeJSON p (remove ["initial_manager"] v)
- setManifests s row
+  writeStoredJSON s p (remove ["initial_manager"] v)
+
 setManifests :: Service -> Value -> IO ()
 setManifests s row = do
  let a = at row "id"; root = agentRoot s a </> "manifests"

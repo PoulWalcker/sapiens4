@@ -29,7 +29,7 @@ import Network.Wai.Handler.WebSockets (websocketsOr)
 import qualified Network.WebSockets as WS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import System.Directory (doesFileExist)
+import System.Directory (doesDirectoryExist,listDirectory)
 import System.FilePath ((</>))
 import Network.HTTP.Types
 import Network.Wai
@@ -53,20 +53,22 @@ startHost = startHostFor AllowExistingConversions
 startHostFor :: StartupFormats -> Maybe Bool -> FilePath -> Int -> Bool -> IO Host
 startHostFor formats consent root requested managed = do
  mode <- lookupEnv "SAPIENS_STORAGE_MODE"
- exists <- doesFileExist (root </> "corpora-identity.json")
- startHostUsing formats Nothing consent (if managed || mode==Just "existing" || mode==Nothing && exists then AttachExisting else StartNew) root requested managed
+ directory <- doesDirectoryExist root
+ names <- if directory then listDirectory root else pure []
+ let existing = managed || mode==Just "existing" || mode==Nothing && not (null (filter (/="host.lock") names))
+ startHostUsing formats Nothing consent (if existing then AttachExisting else StartNew) root requested managed
 
 startHostUsing :: StartupFormats -> Maybe Telemetry.Telemetry -> Maybe Bool -> StorageChoice -> FilePath -> Int -> Bool -> IO Host
 startHostUsing formats inherited consent choice root requested managed = mask $ \restore -> do
  args <- getArgs
  desktopPid <- lookupEnv "SAPIENS_DESKTOP_PID"
  let desktop = "--desktop" `elem` args || desktopPid/=Nothing
- reporter <- if managed then pure inherited else Just <$> Telemetry.openTelemetry (if desktop then Telemetry.Desktop else Telemetry.Headless) consent
- flip onException (unless managed (mapM_ Telemetry.closeTelemetry reporter)) $ restore $ do
-  mode <- lookupEnv "SAPIENS_STORAGE_MODE"
-  let report phase = when (not managed && mode `elem` [Just "new",Just "existing"]) (putStrLn phase)
-  report openingStorage
-  bracketOnError (Service.openService formats choice root) Service.closeService $ \service -> do
+ mode <- lookupEnv "SAPIENS_STORAGE_MODE"
+ let report phase = when (not managed && mode `elem` [Just "new",Just "existing"]) (putStrLn phase)
+ report openingStorage
+ bracketOnError (restore (Service.openService formats choice root)) Service.closeService $ \service -> do
+  reporter <- if managed then pure inherited else Just <$> Telemetry.openTelemetry (if desktop then Telemetry.Desktop else Telemetry.Headless) consent
+  flip onException (unless managed (mapM_ Telemetry.closeTelemetry reporter)) $ restore $ do
    writeIORef (serviceTelemetry service) reporter
    report openedStorage >> start reporter service
  where

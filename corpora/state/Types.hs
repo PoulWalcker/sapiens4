@@ -6,6 +6,7 @@
 module Types (module Types, module Domain) where
 
 import Domain
+import qualified MigrationFiles
 import qualified Telemetry
 
 import Control.Concurrent
@@ -77,7 +78,7 @@ data ServiceAdmission = Serving Int | StoppingForUpdate deriving (Eq)
 data UpdateStop = UpdateBusy | UpdateStopping deriving (Eq)
 data Service = Service { serviceRoot :: FilePath, repositoryRoot :: FilePath, serviceGuard :: MVar (), serviceFileLock :: FileLock, serviceStopping :: IORef Bool, serviceAdmission :: TVar ServiceAdmission, serviceWorker :: MVar (Maybe (Async ())), serviceRuns :: MVar (Map RunId Run), serviceLease :: IORef (Maybe (AgentId, RunId)), serviceEndpoint :: IORef Text, servicePulse :: IORef Value, serviceActors :: MVar (Map ThreadId (Text,Maybe Text)), serviceDatabase :: MVar (Maybe Connection), serviceStates :: MVar (Map Text CachedAgentState)
  , serviceRevision :: TVar Integer, updateSubscribers :: TVar Int, snapshotFiles :: IORef (Set FilePath)
- , serviceTelemetry :: IORef (Maybe Telemetry.Telemetry), serviceCorporaId :: Text }
+ , serviceTelemetry :: IORef (Maybe Telemetry.Telemetry), serviceCorporaId :: Text, migrationTemporaryName :: Maybe FilePath }
 
 emitTelemetry :: Service -> Telemetry.Event -> Object -> IO ()
 emitTelemetry s event fields = do
@@ -177,9 +178,16 @@ readJSON p def = do
  exists <- doesFileExist p
  if exists then either (throwIO . userError) pure . eitherDecode =<< BL.readFile p else pure def
 atomicBytes :: FilePath -> BL.ByteString -> IO ()
-atomicBytes p bytes = do
+atomicBytes = atomicStoredBytes Nothing
+
+atomicStoredBytes :: Maybe FilePath -> FilePath -> BL.ByteString -> IO ()
+atomicStoredBytes temporary p bytes = do
  createDirectoryIfMissing True (takeDirectory p)
- bracketOnError (openBinaryTempFile (takeDirectory p) ".writing-") (\(f,h) -> do
+ let parent = takeDirectory p
+     open = case temporary of
+      Nothing -> openBinaryTempFile parent ".writing-"
+      Just name -> let path = parent </> name in (path,) <$> MigrationFiles.openExclusive path
+ bracketOnError open (\(f,h) -> do
   hClose h `catch` (\(_::IOException) -> pure ())
   removeFile f `catch` (\(_::IOException) -> pure ())) $ \(f,h) -> do
   BL.hPut h bytes
@@ -190,15 +198,27 @@ atomicBytes p bytes = do
    require (fd >= 0) 500 "Cannot open durable temporary file"
    code <- syncCommit fd
    require (code == 0) 500 "Cannot synchronize temporary file"
+  preserveAccess f
   let replace attempt = renameFile f p `catch` \(e::IOException) ->
        if isPermissionError e && attempt < (100::Int) then threadDelay 10000 >> replace (attempt+1) else throwIO e
   replace 0
 #else
   fd <- Posix.handleToFd h
   Posix.fileSynchronise fd `finally` Posix.closeFd fd
+  preserveAccess f
   renameFile f p
   bracket (Posix.openFd (takeDirectory p) Posix.ReadOnly Posix.defaultFileFlags) Posix.closeFd Posix.fileSynchronise
 #endif
+ where
+  preserveAccess f = forM_ temporary $ \_ -> do
+   existing <- doesFileExist p
+   when existing (MigrationFiles.copyEntry True p f)
+
+writeStoredJSON :: ToJSON a => Service -> FilePath -> a -> IO ()
+writeStoredJSON s p = atomicStoredBytes (migrationTemporaryName s) p . encode
+writeStoredText :: Service -> FilePath -> Text -> IO ()
+writeStoredText s p = atomicStoredBytes (migrationTemporaryName s) p . BL.fromStrict . TE.encodeUtf8
+
 writeJSON :: ToJSON a => FilePath -> a -> IO ()
 writeJSON p = atomicBytes p . encode
 locked :: Service -> IO a -> IO a
@@ -243,7 +263,7 @@ agentStateInput s a = do
        updated = if BS.length bytes > 4*1024*1024 then remaining else M.insert a entry (bounded remaining)
    pure (updated,entry)
 saveState :: Service -> Text -> AgentState -> IO ()
-saveState s a v = writeJSON (agentRoot s a </> "state.json") (put "revision" (num (int (get (stateJSON v) "revision") + 1)) (stateJSON v))
+saveState s a v = writeStoredJSON s (agentRoot s a </> "state.json") (put "revision" (num (int (get (stateJSON v) "revision") + 1)) (stateJSON v))
 modifyState :: Service -> Text -> (Value -> Value) -> IO ()
 modifyState s a f = agentState s a >>= decodeValue 500 . f . stateJSON >>= saveState s a
 modifyTurns :: Service -> Text -> (Turn -> Turn) -> IO ()
