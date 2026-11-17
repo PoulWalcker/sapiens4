@@ -1,7 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE ForeignFunctionInterface #-}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Types (module Types, module Domain) where
 
@@ -39,16 +37,6 @@ import System.FileLock
 import System.FilePath
 import System.IO
 import System.Process
-#ifdef mingw32_HOST_OS
-import Foreign.C
-import System.IO.Error (isPermissionError)
-foreign import ccall unsafe "_wopen" syncOpen :: CWString -> CInt -> CInt -> IO CInt
-foreign import ccall unsafe "_commit" syncCommit :: CInt -> IO CInt
-foreign import ccall unsafe "_close" syncClose :: CInt -> IO CInt
-#else
-import qualified System.Posix.IO as Posix
-import qualified System.Posix.Unistd as Posix
-#endif
 
 
 data APIError = APIError Int Text deriving (Show, Typeable)
@@ -78,7 +66,7 @@ data ServiceAdmission = Serving Int | StoppingForUpdate deriving (Eq)
 data UpdateStop = UpdateBusy | UpdateStopping deriving (Eq)
 data Service = Service { serviceRoot :: FilePath, repositoryRoot :: FilePath, serviceGuard :: MVar (), serviceFileLock :: FileLock, serviceStopping :: IORef Bool, serviceAdmission :: TVar ServiceAdmission, serviceWorker :: MVar (Maybe (Async ())), serviceRuns :: MVar (Map RunId Run), serviceLease :: IORef (Maybe (AgentId, RunId)), serviceEndpoint :: IORef Text, servicePulse :: IORef Value, serviceActors :: MVar (Map ThreadId (Text,Maybe Text)), serviceDatabase :: MVar (Maybe Connection), serviceStates :: MVar (Map Text CachedAgentState)
  , serviceRevision :: TVar Integer, updateSubscribers :: TVar Int, snapshotFiles :: IORef (Set FilePath)
- , serviceTelemetry :: IORef (Maybe Telemetry.Telemetry), serviceCorporaId :: Text, migrationTemporaryName :: Maybe FilePath }
+ , serviceTelemetry :: IORef (Maybe Telemetry.Telemetry), serviceCorporaId :: Text }
 
 emitTelemetry :: Service -> Telemetry.Event -> Object -> IO ()
 emitTelemetry s event fields = do
@@ -178,46 +166,18 @@ readJSON p def = do
  exists <- doesFileExist p
  if exists then either (throwIO . userError) pure . eitherDecode =<< BL.readFile p else pure def
 atomicBytes :: FilePath -> BL.ByteString -> IO ()
-atomicBytes = atomicStoredBytes Nothing
-
-atomicStoredBytes :: Maybe FilePath -> FilePath -> BL.ByteString -> IO ()
-atomicStoredBytes temporary p bytes = do
- createDirectoryIfMissing True (takeDirectory p)
+atomicBytes p bytes = do
  let parent = takeDirectory p
-     open = case temporary of
-      Nothing -> openBinaryTempFile parent ".writing-"
-      Just name -> let path = parent </> name in (path,) <$> MigrationFiles.openExclusive path
- bracketOnError open (\(f,h) -> do
+ createDirectoryIfMissing True parent
+ bracketOnError (openBinaryTempFile parent ".writing-") (\(f,h) -> do
   hClose h `catch` (\(_::IOException) -> pure ())
   removeFile f `catch` (\(_::IOException) -> pure ())) $ \(f,h) -> do
   BL.hPut h bytes
-  hFlush h
-#ifdef mingw32_HOST_OS
   hClose h
-  withCWString f $ \name -> bracket (syncOpen name 32770 0) (void . syncClose) $ \fd -> do
-   require (fd >= 0) 500 "Cannot open durable temporary file"
-   code <- syncCommit fd
-   require (code == 0) 500 "Cannot synchronize temporary file"
-  preserveAccess f
-  let replace attempt = renameFile f p `catch` \(e::IOException) ->
-       if isPermissionError e && attempt < (100::Int) then threadDelay 10000 >> replace (attempt+1) else throwIO e
-  replace 0
-#else
-  fd <- Posix.handleToFd h
-  Posix.fileSynchronise fd `finally` Posix.closeFd fd
-  preserveAccess f
-  renameFile f p
-  bracket (Posix.openFd (takeDirectory p) Posix.ReadOnly Posix.defaultFileFlags) Posix.closeFd Posix.fileSynchronise
-#endif
- where
-  preserveAccess f = forM_ temporary $ \_ -> do
-   existing <- doesFileExist p
-   when existing (MigrationFiles.copyEntry True p f)
-
-writeStoredJSON :: ToJSON a => Service -> FilePath -> a -> IO ()
-writeStoredJSON s p = atomicStoredBytes (migrationTemporaryName s) p . encode
-writeStoredText :: Service -> FilePath -> Text -> IO ()
-writeStoredText s p = atomicStoredBytes (migrationTemporaryName s) p . BL.fromStrict . TE.encodeUtf8
+  existing <- doesFileExist p
+  when existing (MigrationFiles.preserveAccess p f)
+  MigrationFiles.syncEntry False f
+  MigrationFiles.durableMove f p
 
 writeJSON :: ToJSON a => FilePath -> a -> IO ()
 writeJSON p = atomicBytes p . encode
@@ -263,7 +223,7 @@ agentStateInput s a = do
        updated = if BS.length bytes > 4*1024*1024 then remaining else M.insert a entry (bounded remaining)
    pure (updated,entry)
 saveState :: Service -> Text -> AgentState -> IO ()
-saveState s a v = writeStoredJSON s (agentRoot s a </> "state.json") (put "revision" (num (int (get (stateJSON v) "revision") + 1)) (stateJSON v))
+saveState s a v = writeJSON (agentRoot s a </> "state.json") (put "revision" (num (int (get (stateJSON v) "revision") + 1)) (stateJSON v))
 modifyState :: Service -> Text -> (Value -> Value) -> IO ()
 modifyState s a f = agentState s a >>= decodeValue 500 . f . stateJSON >>= saveState s a
 modifyTurns :: Service -> Text -> (Turn -> Turn) -> IO ()

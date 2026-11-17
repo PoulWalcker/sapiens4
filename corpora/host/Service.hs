@@ -84,26 +84,21 @@ prepareDataRoot formats choice repo root = do
        in openStorageTree formats existing root $ \owner tree -> do
    Backup.checkNoPending root
    finishBootstrap <- publishedBootstrap root
-   legacy <- filterM (\(mode,folder,_) -> do
-    found <- newIORef False
-    inspectRoot (\what -> formatRequirement formats folder what >> writeIORef found True) mode folder
-    readIORef found) tree
-   unless (null legacy) $ Backup.withMigrationBackup root [folder | (_,folder,_) <- tree] $ \temporary -> do
+   legacy <- filterM (\(mode,folder,_) -> inspectRoot formats mode folder) tree
+   unless (null legacy) $ Backup.withMigrationBackup root [folder | (_,folder,_) <- tree] $ do
     forM_ legacy $ \(_,folder,lock) ->
-     bracket (openStorageService repo folder lock) DB.closeDatabase $ \s -> DB.initialize s >> convertStoredFields s { migrationTemporaryName = Just temporary }
+     bracket (openStorageService repo folder lock) DB.closeDatabase $ \s -> DB.initialize s >> convertStoredFields s
     when finishBootstrap (removeDirectory (initializingDirectory root))
     actual <- storageTree existing root
     unless (actual==[(mode,folder) | (mode,folder,_) <- tree]) $ storageError "The Corpora registry changed during migration."
-    forM_ tree $ \(mode,folder,_) -> inspectRoot (formatRequirement CurrentFormatsOnly folder) mode folder
+    forM_ tree $ \(mode,folder,_) -> void (inspectRoot CurrentFormatsOnly mode folder)
    openStorageService repo root owner
  where
  lockSaved paths action = foldr withUpdateLock action paths
 
 openStorageService :: FilePath -> FilePath -> FileLock -> IO Service
 openStorageService repo root lock = do
- identity <- readDataJSON (root </> "corpora-identity.json")
- let corporaId = at identity "corpora_id"
- require (get identity "version"==num 1 && (UUID.toText <$> UUID.fromText corporaId)==Just corporaId) 409 "Invalid Corpora identity."
+ corporaId <- readCorporaIdentity root
  bracketOnError (DB.openDatabase root) DB.closeConnection $ \db -> do
   database <- newMVar (Just db)
   guard <- newMVar ()
@@ -120,7 +115,7 @@ openStorageService repo root lock = do
   subscribers <- newTVarIO 0
   files <- newIORef Set.empty
   telemetry <- newIORef Nothing
-  pure (Service root repo guard lock stopping admission worker runs lease endpoint pulse actors database states revision subscribers files telemetry corporaId Nothing)
+  pure (Service root repo guard lock stopping admission worker runs lease endpoint pulse actors database states revision subscribers files telemetry corporaId)
 
 convertStoredFields :: Service -> IO ()
 convertStoredFields s = do

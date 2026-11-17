@@ -40,7 +40,7 @@ migrateWorkspaces s = do
       let path=workspaceRoot s owner </> ("saved-tab-"++T.unpack identity++".html")
       occupied <- doesPathExist path
       require (not occupied) 409 "The saved tab destination already exists."
-      writeStoredText s path (at tab "html")
+      writeText path (at tab "html")
       pure (put "path" (str (T.pack path)) tab)
      else pure tab
     identity <- newId

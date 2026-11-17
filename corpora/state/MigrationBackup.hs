@@ -9,7 +9,6 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Char8 as ASCII
 import qualified Data.ByteString.Lazy as BL
-import Data.Char (isHexDigit)
 import Data.List (sort, sortOn)
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
@@ -66,8 +65,9 @@ member path = do
   mapM_ noLink [path,lock,identity]
   Member path <$> fileIdentity path <*> fileIdentity lock <*> digest identity
 
-scan root members = walk "" where
-  locks = S.fromList [makeRelative root (p </> "host.lock") | p <- members]
+lockPaths root paths = S.fromList [makeRelative root (p </> "host.lock") | p <- paths]
+
+scan root locks = walk "" where
   walk rel = do
     let path = if null rel then root else root </> rel
     (kind, access) <- describeFile path
@@ -101,27 +101,6 @@ copyTree from to saved live = do
   forM_ (reverse dirs) $ \p -> do
     when (changed p) $ copyEntry True (from </> p) (to </> p)
     syncEntry True (to </> p)
-
--- Conversion is allowed to rewrite only these existing files. Notes, raw legacy
--- states and exported tabs can be created, but existing user copies are immutable.
-mayChange temporary isNew members full = any allowed members where
-  allowed m = case splitDirectories (makeRelative (folder m) full) of
-    [db] | db `elem` ["corpora.sqlite3","corpora.sqlite3-journal","corpora.sqlite3-wal","corpora.sqlite3-shm"] -> True
-    [".sapiens-initializing"] -> not isNew
-    ["agentpy","corpora","directory.json"] -> True
-    ["agentpy","agents",_,"state.json"] -> True
-    ["agentpy","agents",_,n] -> isNew && (writing n || n `elem` ["legacy-state-v1.json","legacy-state-v2.json"])
-    ["agentpy","corpora",n] -> isNew && writing n
-    ["agentpy","corpora"] -> isNew
-    ["workspaces"] -> isNew
-    ["workspaces",_] -> isNew
-    ["workspaces",_,n] -> isNew && (n == "Notes.html" || writing n || savedTab n)
-    _ -> False
-  writing name = name == temporary
-  savedTab n = case splitExtension n of
-    (base,".html") -> let (prefix,uuid) = splitAt 10 base
-                      in prefix == "saved-tab-" && length uuid == 32 && all isHexDigit uuid
-    _ -> False
 
 ensureArea root = do
   let path = area root
@@ -174,34 +153,27 @@ verified saved actual path = ensure (saved == actual) ("Migration copy verificat
 closeRecord dir outcome = durableMove (dir </> "Pending") (dir </> outcome)
 snapshot dir = dir </> "original"
 
+-- Every supported writer checks Pending under the participant locks before work.
+-- Recovery can replace the whole tree while the same installed binary owns it.
+-- Binary rollback must restore data before admitting the previous application.
 restoreOriginal dir r = do
   let root = source r
       paths = map folder (participants r)
       saved = original r
       snap = snapshot dir
-      copied = [snap </> makeRelative root p | p <- paths]
+      locks = lockPaths root paths
   noLink snap
-  scan snap copied >>= \actual -> verified saved actual snap
+  scan snap locks >>= \actual -> verified saved actual snap
   exe <- canonicalizePath =<< getExecutablePath
   idNow <- fileIdentity exe
   identities <- tryJust synchronous (mapM member paths)
   let owned = installed exe /= Nothing && exe == backend r && idNow == binaryId r &&
               either (const False) (== participants r) identities
-  live <- if owned then scan root paths else pure M.empty
-  let changed = [p | p <- M.keys (M.union live saved), M.lookup p live /= M.lookup p saved]
-      safe = all (\p -> mayChange (temporaryName (operation r)) (M.notMember p saved) (participants r) (root </> p)) changed
-  if owned && safe then do
-    copyTree snap root saved live
-    scan root paths >>= \actual -> verified saved actual root
-    closeRecord dir "RestoredClosed"
-  else do
-    -- Never hand the immutable recovery source itself to an older writer.
-    ident <- UUID.toString <$> UUID.nextRandom
-    let separate = dir </> ("recovered-" ++ ident)
-    privateDirectory separate
-    copyTree snap separate saved M.empty
-    scan separate [separate </> makeRelative root p | p <- paths] >>= \actual -> verified saved actual separate
-    fail ("Cannot establish exclusive recovery ownership of " ++ root ++ ". Live data preserved; verified separate copy: " ++ separate)
+  ensure owned ("Cannot establish exclusive recovery ownership of " ++ root ++ ". Original data verified at " ++ snap)
+  live <- scan root locks
+  copyTree snap root saved live
+  scan root locks >>= \actual -> verified saved actual root
+  closeRecord dir "RestoredClosed"
 
 synchronous :: SomeException -> Maybe SomeException
 synchronous e = case fromException e :: Maybe SomeAsyncException of
@@ -224,32 +196,28 @@ recoverBeforeOpen root lock = do
         restoreOriginal dir r
         fail ("Interrupted migration restored at " ++ source r ++ ". Reopen to retry. Backup: " ++ snapshot dir)
 
--- Only the temporary name from this operation can be removed from a live directory.
-temporaryName ident = ".sapiens-writing-" ++ ident
-
-withMigrationBackup :: FilePath -> [FilePath] -> (FilePath -> IO ()) -> IO ()
+withMigrationBackup :: FilePath -> [FilePath] -> IO () -> IO ()
+-- The caller holds all participant locks and checked Pending under those locks.
 withMigrationBackup root paths convert = do
-  checkNoPending root
   base <- ensureArea root
   ident <- UUID.toString <$> UUID.nextRandom
   let dir = base </> ident
       snap = snapshot dir
-      copied = [snap </> makeRelative root p | p <- paths]
+      locks = lockPaths root paths
   privateDirectory dir
   syncEntry True base
   members <- mapM member paths
   exe <- canonicalizePath =<< getExecutablePath
   exeId <- fileIdentity exe
-  saved <- scan root paths
+  saved <- scan root locks
   privateDirectory snap
   copyTree root snap saved M.empty
-  scan snap copied >>= \actual -> verified saved actual snap
-  scan root paths >>= \actual -> verified saved actual root
-  ensure (not $ M.null saved) ("Empty migration backup: " ++ snap)
+  scan snap locks >>= \actual -> verified saved actual snap
+  scan root locks >>= \actual -> verified saved actual root
   let receipt = Receipt ident root members exe exeId saved
   Types.writeJSON (dir </> "prepared") receipt
   durableMove (dir </> "prepared") (dir </> "Pending")
-  outcome <- tryJust synchronous (convert (temporaryName ident))
+  outcome <- tryJust synchronous convert
   case outcome of
     Right () -> closeRecord dir "Finalized"
     Left cause -> do

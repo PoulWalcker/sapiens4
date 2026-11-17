@@ -13,6 +13,7 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
 import Data.List (isPrefixOf, nub, sort)
 import Data.Char (isAscii, isAlphaNum)
+import Data.IORef (newIORef, writeIORef, readIORef)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.UUID as UUID
@@ -23,7 +24,6 @@ import Network.URI (escapeURIString, isUnreserved)
 import System.Directory
 import System.FilePath
 import System.FileLock
-import System.IO
 import System.IO.Error (ioeGetErrorString, isAlreadyExistsError, isUserError)
 import System.Info (os)
 import qualified SQLiteSchema
@@ -199,9 +199,6 @@ storageError = ioError . userError
 readDataJSON :: FromJSON a => FilePath -> IO a
 readDataJSON path = either (storageError . ("Could not read data: " ++)) pure . eitherDecode =<< L.readFile path
 
-validateDataRoot :: StorageChoice -> FilePath -> IO ()
-validateDataRoot = validateRootFormats AllowExistingConversions
-
 -- The preflight never creates a missing lock or database in the selected tree.
 checkUpdateRoot :: FilePath -> IO ()
 checkUpdateRoot path = do
@@ -219,10 +216,9 @@ validateRootFormats :: StartupFormats -> StorageChoice -> FilePath -> IO ()
 validateRootFormats formats choice root = do
  tree <- storageTree choice root
  let lockChild (_,path) = if formats==CurrentFormatsOnly then withUpdateLock path else withExistingLock path
- foldr lockChild (mapM_ (\(mode,path) -> inspectRoot (formatRequirement formats path) mode path) tree) (drop 1 tree)
+ foldr lockChild (mapM_ (\(mode,path) -> void (inspectRoot formats mode path)) tree) (drop 1 tree)
 
--- Recovery identifies converter writes by their logical paths. An alias into
--- another part of the same root would otherwise write a different inventory entry.
+-- Managed writers must not follow aliases outside their owned storage paths.
 managedDataPath :: FilePath -> FilePath -> IO FilePath
 managedDataPath root path = do
  resolved <- containedPath root path
@@ -286,7 +282,7 @@ openStorageTree formats choice root action = do
  locations <- mapM MigrationFiles.fileIdentity paths
  present <- mapM (regularFileExists . (</> "host.lock")) paths
  unless (and present) $ forM_ tree $ \(mode,path) -> do
-  inspectRoot (formatRequirement formats path) mode path
+  void (inspectRoot formats mode path)
   void (managedDataPath path (path </> "host.lock"))
  bracketOnError (storageLock root) unlockFile $ \owner ->
   let lockChildren [] acquired = do
@@ -295,8 +291,8 @@ openStorageTree formats choice root action = do
        actual <- storageTree choice root
        let descendants = [ident | (AttachChild _ ident,_) <- drop 1 actual]
        unless (null descendants) $ do
-        identity <- managedDataPath root (root </> "corpora-identity.json") >>= readDataJSON
-        when (get identity "corpora_id" `elem` map String descendants) $ storageError "The parent Corpora identity also occurs in its registry."
+        identity <- readCorporaIdentity root
+        when (identity `elem` descendants) $ storageError "The parent Corpora identity also occurs in its registry."
        lockedLocations <- mapM MigrationFiles.fileIdentity paths
        unless (actual==tree && lockedLocations==locations) $ storageError "The registered Corpora changed while opening. Try again."
        action owner ((choice,root,owner):reverse acquired)
@@ -304,8 +300,10 @@ openStorageTree formats choice root action = do
        lockChildren rest ((mode,path,lock):acquired)
   in lockChildren (drop 1 tree) []
 
-inspectRoot :: (String -> IO ()) -> StorageChoice -> FilePath -> IO ()
-inspectRoot legacy choice root = do
+inspectRoot :: StartupFormats -> StorageChoice -> FilePath -> IO Bool
+inspectRoot formats choice root = do
+  changed <- newIORef False
+  let legacy what = formatRequirement formats root what >> writeIORef changed True
   exists <- doesDirectoryExist root
   unless exists $ storageError "This data directory is unavailable. Reconnect the drive or choose another directory."
   names <- listDirectory root
@@ -327,9 +325,8 @@ inspectRoot legacy choice root = do
   current (not pending) "completed storage initialization"
   when pending $ do
    void (managedDataPath root (initializingDirectory root))
-   linked <- pathIsSymbolicLink (initializingDirectory root)
    contents <- listDirectory (initializingDirectory root)
-   unless ("host.lock" `elem` names && not linked && null contents && all bootstrapFile meaningful) $
+   unless ("host.lock" `elem` names && null contents && all bootstrapFile meaningful) $
     storageError "Unexpected files in an unfinished Sapiens Data Root."
   when (choice==StartNew && not (null meaningful) && not pending) $
    storageError "Start fresh requires an empty data directory. Choose Use another folder to open your existing data."
@@ -338,10 +335,7 @@ inspectRoot legacy choice root = do
   current (not initializing || choice `elem` [StartNew,CreateCorpora]) "existing Corpora"
   when (choice==CreateCorpora && not initializing) $ storageError "New Corpora directory contains unexpected data."
   if initializing && choice==CreateCorpora then do
-   identity <- readDataJSON (root </> "corpora-identity.json")
-   case identity of
-    Object fields | Just (Number 1) <- K.lookup "version" fields, Just (String ident) <- K.lookup "corpora_id" fields, Just _ <- UUID.fromText ident -> pure ()
-    _ -> storageError "Invalid new Corpora identity."
+   void (readCorporaIdentity root)
    void (readDataJSON (root </> "corpora-settings.json") :: IO CorporaConfig)
   else unless initializing $ do
    let database=root </> "corpora.sqlite3"
@@ -349,14 +343,10 @@ inspectRoot legacy choice root = do
    hasDatabase <- doesFileExist database
    unless ((hasIdentity || pending && not hasDatabase) && (hasDatabase || pending)) $ storageError "This is not a complete Sapiens Data Root. Select the folder containing corpora-identity.json and corpora.sqlite3."
    when hasIdentity $ do
-    identity <- readDataJSON (root </> "corpora-identity.json")
-    case identity of
-     Object fields | Just (Number 1) <- K.lookup "version" fields,
-                     Just (String ident) <- K.lookup "corpora_id" fields,
-                     Just ident == (UUID.toText <$> UUID.fromText ident) -> case choice of
-                      AttachChild _ expected | ident/=expected -> storageError "Registered Corpora identity changed."
-                      _ -> pure ()
-     _ -> storageError "Invalid CORPORA identity. Restore corpora-identity.json from backup."
+    ident <- readCorporaIdentity root
+    case choice of
+     AttachChild _ expected | ident/=expected -> storageError "Registered Corpora identity changed."
+     _ -> pure ()
    -- A new database can be empty or have only SQLite's WAL-mode header
    -- until the schema transaction commits. Published databases must pass
    -- the normal schema and history checks, including during bootstrap.
@@ -368,10 +358,6 @@ inspectRoot legacy choice root = do
    let beforeSchema = pending && (not hasDatabase || blank)
    when (beforeSchema && any (`elem` names) ["agentpy","workspaces"]) $
     storageError "The unfinished Data Root has agent files without a database."
-   unless beforeSchema $ do
-    header <- withBinaryFile database ReadMode (\h -> B.hGet h 100)
-    unless (B.take 16 header=="SQLite format 3\NUL" && B.length header==100) $
-     storageError "The Corpora database is invalid. Restore it from a backup."
    agents <- if beforeSchema then pure [] else withReadOnlyDatabase root $ \db -> do
     version <- SQLiteSchema.readVersion db
     unless (version > 0 && version <= SQLiteSchema.currentVersion && (not pending || version==SQLiteSchema.currentVersion)) $ storageError "Unsupported Corpora schema. Open these data with a compatible Sapiens version; no migration was performed."
@@ -393,54 +379,52 @@ inspectRoot legacy choice root = do
         _ -> storageError "Invalid routine run count."
        _ -> storageError "Invalid scheduled routine."
     when (null rows && not pending) $ storageError "The Corpora database has no agents. Restore a complete Data Root from backup."
-    preferences <- query_ db "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='preferences'" :: IO [Only Int]
-    when (preferences==[Only 1]) $ do
-     prefs <- query_ db "SELECT value FROM preferences WHERE id=1" :: IO [Only T.Text]
-     current (length prefs==1) "workspace preferences"
-     groupsPresent <- query_ db "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='groups'" :: IO [Only Int]
-     groups <- if groupsPresent==[Only 1] then query_ db "SELECT id FROM groups" else pure []
-     forM_ prefs $ \(Only encoded) -> do
-      doc <- either storageError pure (eitherDecodeStrict (TE.encodeUtf8 encoded))
-      fields <- case doc of Object f -> pure f; _ -> storageError "Invalid workspace preferences."
-      case K.lookup "workspace_revision" fields of
+    prefs <- query_ db "SELECT value FROM preferences WHERE id=1" :: IO [Only T.Text]
+    current (length prefs==1) "workspace preferences"
+    groupsPresent <- query_ db "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='groups'" :: IO [Only Int]
+    groups <- if groupsPresent==[Only 1] then query_ db "SELECT id FROM groups" else pure []
+    forM_ prefs $ \(Only encoded) -> do
+     doc <- either storageError pure (eitherDecodeStrict (TE.encodeUtf8 encoded))
+     fields <- case doc of Object f -> pure f; _ -> storageError "Invalid workspace preferences."
+     case K.lookup "workspace_revision" fields of
+      Nothing -> pure ()
+      Just n | Success rev <- fromJSON n, (rev :: Int)>=0 -> pure ()
+      _ -> storageError "Invalid workspace revision."
+     let browser = K.lookup "browser_version" fields
+     unless (browser `elem` [Nothing, Just (Number 0), Just (Number 1)]) $ storageError "Unsupported browser preferences version."
+     current (browser==Just (Number 1)) "browser preferences v1"
+     ws <- case K.lookup "workspaces" fields of
+      Nothing -> legacy "workspaces" >> pure (Object K.empty)
+      Just v@(Object _) -> pure v
+      _ -> storageError "Invalid workspaces."
+     forM_ (pairs ws) $ \(owner,w) -> do
+      unless (safeId owner && (browser==Just (Number 1) || Only owner `elem` rows ++ groups)) $ storageError "Workspace preferences contain an unknown owner."
+      folder <- managedDataPath root (root </> "workspaces" </> T.unpack owner)
+      entry <- case w of Object f -> pure f; _ -> storageError "Invalid workspace."
+      forM_ ["tabs","bookmarks"] $ \key -> case K.lookup key entry of
+       Nothing -> legacy "workspace tabs and bookmarks"
+       Just (Array elements) -> forM_ elements $ \element -> case element of
+        Object tab | key=="tabs" && browser==Just (Number 1) && any (`K.member` tab) ["type","html","artifact"] ->
+         storageError "Legacy tab payload inside current browser preferences. Restore a compatible profile."
+        Object tab -> when (key=="tabs" && browser/=Just (Number 1)) $ do
+         forM_ ["artifact","type","html","url","path"] $ \field -> case K.lookup field tab of
+          Nothing -> pure ()
+          Just (String _) -> pure ()
+          _ -> storageError "Invalid legacy workspace tab."
+         case K.lookup "artifact" tab of
+          Just (String name) | not (T.null name) -> do
+           artifacts <- managedDataPath root (folder </> "artifacts")
+           void (containedPath artifacts (artifacts </> T.unpack name))
+          _ -> pure ()
+        _ -> storageError "Invalid workspace entry."
+       _ -> storageError "Invalid workspace tabs or bookmarks."
+      case K.lookup "memo_bookmark_seeded" entry of
+       Just (Bool _) -> pure ()
        Nothing -> pure ()
-       Just n | Success rev <- fromJSON n, (rev :: Int)>=0 -> pure ()
-       _ -> storageError "Invalid workspace revision."
-      let browser = K.lookup "browser_version" fields
-      unless (browser `elem` [Nothing, Just (Number 0), Just (Number 1)]) $ storageError "Unsupported browser preferences version."
-      current (browser==Just (Number 1)) "browser preferences v1"
-      ws <- case K.lookup "workspaces" fields of
-       Nothing -> legacy "workspaces" >> pure (Object K.empty)
-       Just v@(Object _) -> pure v
-       _ -> storageError "Invalid workspaces."
-      forM_ (pairs ws) $ \(owner,w) -> do
-       unless (safeId owner && (browser==Just (Number 1) || Only owner `elem` rows ++ groups)) $ storageError "Workspace preferences contain an unknown owner."
-       folder <- managedDataPath root (root </> "workspaces" </> T.unpack owner)
-       entry <- case w of Object f -> pure f; _ -> storageError "Invalid workspace."
-       forM_ ["tabs","bookmarks"] $ \key -> case K.lookup key entry of
-        Nothing -> legacy "workspace tabs and bookmarks"
-        Just (Array elements) -> forM_ elements $ \element -> case element of
-         Object tab | key=="tabs" && browser==Just (Number 1) && any (`K.member` tab) ["type","html","artifact"] ->
-          storageError "Legacy tab payload inside current browser preferences. Restore a compatible profile."
-         Object tab -> when (key=="tabs" && browser/=Just (Number 1)) $ do
-          forM_ ["artifact","type","html","url","path"] $ \field -> case K.lookup field tab of
-           Nothing -> pure ()
-           Just (String _) -> pure ()
-           _ -> storageError "Invalid legacy workspace tab."
-          case K.lookup "artifact" tab of
-           Just (String name) | not (T.null name) -> do
-            artifacts <- managedDataPath root (folder </> "artifacts")
-            void (containedPath artifacts (artifacts </> T.unpack name))
-           _ -> pure ()
-         _ -> storageError "Invalid workspace entry."
-        _ -> storageError "Invalid workspace tabs or bookmarks."
-       case K.lookup "memo_bookmark_seeded" entry of
-        Just (Bool _) -> pure ()
-        Nothing -> pure ()
-        _ -> storageError "Invalid Notes bookmark flag."
-      current (all (\(Only agent) -> get (get ws agent) "memo_bookmark_seeded"==Bool True) rows) "Notes bookmarks"
-      current (not (K.member "work_views" fields)) "preferences"
-      current (get doc "panel" `notElem` map String ["mindmap","cron","log"]) "panel preferences"
+       _ -> storageError "Invalid Notes bookmark flag."
+     current (all (\(Only agent) -> get (get ws agent) "memo_bookmark_seeded"==Bool True) rows) "Notes bookmarks"
+     current (not (K.member "work_views" fields)) "preferences"
+     current (get doc "panel" `notElem` map String ["mindmap","cron","log"]) "panel preferences"
     pure (map fromOnly rows)
    unless (null agents) $ do
     dirPath <- managedDataPath root (root </> "agentpy/corpora/directory.json")
@@ -474,11 +458,7 @@ inspectRoot legacy choice root = do
        void (regularFileExists backup)
       forM_ ["Notes.html","Notes.yaml","Notes.md"] $ \name -> do
        note <- managedDataPath work (work </> name)
-       exists <- doesPathExist note
-       when exists $ do
-        file <- doesFileExist note
-        linked <- pathIsSymbolicLink (work </> name)
-        unless (file && not linked) $ storageError ("Invalid Notes file: " ++ note)
+       void (regularFileExists note)
       notes <- doesFileExist (work </> "Notes.html")
       unless notes $ do
        legacy "Notes.html"
@@ -502,6 +482,7 @@ inspectRoot legacy choice root = do
      _ -> storageError "Unsupported or mismatched agent state. Restore compatible data from backup."
    settingsExist <- regularFileExists (root </> "corpora-settings.json")
    when settingsExist $ void (readDataJSON (root </> "corpora-settings.json") :: IO CorporaConfig)
+  readIORef changed
 
 -- Only files produced before first-agent publication can accompany the marker.
 bootstrapFile :: FilePath -> Bool
@@ -512,9 +493,16 @@ bootstrapFile name = name `elem` [".sapiens-initializing","corpora-identity.json
 safeId :: T.Text -> Bool
 safeId ident = not (T.null ident) && T.all (\c -> isAscii c && (isAlphaNum c || c `elem` ("_-"::String))) ident
 
+readCorporaIdentity :: FilePath -> IO T.Text
+readCorporaIdentity root = do
+ identity <- managedDataPath root (root </> "corpora-identity.json") >>= readDataJSON
+ case identity of
+  Object fields | Just (Number 1) <- K.lookup "version" fields,
+                  Just (String ident) <- K.lookup "corpora_id" fields,
+                  Just ident == (UUID.toText <$> UUID.fromText ident) -> pure ident
+  _ -> storageError "Invalid CORPORA identity. Restore corpora-identity.json from backup."
+
 checkRegisteredIdentity :: FilePath -> T.Text -> IO ()
 checkRegisteredIdentity child ident = do
- path <- containedPath child (child </> "corpora-identity.json")
- identity <- readDataJSON path
- unless (case identity of Object fields -> K.lookup "corpora_id" fields==Just (String ident); _ -> False) $
-  storageError "A registered Corpora identity does not match its directory. Restore it from backup."
+ saved <- readCorporaIdentity child
+ unless (saved==ident) $ storageError "A registered Corpora identity does not match its directory. Restore it from backup."

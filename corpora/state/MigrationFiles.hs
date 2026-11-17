@@ -1,14 +1,13 @@
 {-# LANGUAGE CPP, ForeignFunctionInterface #-}
 module MigrationFiles
-  ( openExclusive, privateDirectory, fileIdentity, describeFile, copyEntry, syncEntry, durableMove ) where
+  ( privateDirectory, fileIdentity, describeFile, copyEntry, preserveAccess, syncEntry, durableMove ) where
 
 import Control.Exception
 import Control.Monad
 import System.Directory
 import System.FilePath
-import System.IO (Handle)
 #ifdef mingw32_HOST_OS
-import System.IO (IOMode(ReadWriteMode), openBinaryFile)
+import Control.Concurrent (threadDelay)
 import Data.Bits
 import Data.Word
 import Foreign hiding (void)
@@ -18,11 +17,6 @@ import System.Exit
 import System.Process
 import qualified System.Win32.File as W
 import qualified System.Win32.Types as W
-
--- Deny rename/delete until the GHC I/O manager has opened the same new file.
-openExclusive path = bracket
-  (W.createFile path 0 (W.fILE_SHARE_READ .|. W.fILE_SHARE_WRITE) Nothing W.cREATE_NEW
-    W.fILE_ATTRIBUTE_NORMAL Nothing) W.closeHandle (const (openBinaryFile path ReadWriteMode))
 
 withNode path access = bracket
   (W.createFile path access (W.fILE_SHARE_READ .|. W.fILE_SHARE_WRITE .|. W.fILE_SHARE_DELETE)
@@ -44,6 +38,8 @@ foreign import stdcall unsafe "SetSecurityDescriptorControl" setControl
 foreign import stdcall unsafe "ConvertSecurityDescriptorToStringSecurityDescriptorW" securityText
   :: Ptr Word8 -> Word32 -> Word32 -> Ptr CWString -> Ptr Word32 -> IO Int32
 foreign import stdcall unsafe "LocalFree" localFree :: Ptr a -> IO (Ptr a)
+foreign import stdcall unsafe "MoveFileExW" moveFile
+  :: CWString -> CWString -> Word32 -> IO Int32
 
 withSecurity path use = withCWString path $ \name -> alloca $ \size -> do
   poke size 0
@@ -83,6 +79,9 @@ privateDirectory path = do
 
 copyEntry dir src dst = do
   unless dir $ W.copyFile src dst True
+  preserveAccess src dst
+
+preserveAccess src dst = do
   withSecurity src $ \original -> withSecurity dst $ \current -> do
     wanted <- descriptor 7 original
     previous <- descriptor 7 current
@@ -101,7 +100,17 @@ copyEntry dir src dst = do
   W.getFileAttributes src >>= W.setFileAttributes dst
 
 syncEntry dir path = unless dir $ withNode path 0x40000000 W.flushFileBuffers
-durableMove src dst = W.moveFileEx src (Just dst) (W.mOVEFILE_REPLACE_EXISTING .|. 8)
+durableMove src dst = withCWString src $ \s -> withCWString dst $ \d -> do
+  let move attempts = do
+        result <- moveFile s d (W.mOVEFILE_REPLACE_EXISTING .|. 8)
+        when (result == 0) $ do
+          code <- W.getLastError
+          -- Win32's wrapper retries only sharing violations; a reader denying
+          -- delete sharing can also produce access denied during replacement.
+          if code `elem` [5,32] && attempts > (0 :: Int)
+            then threadDelay 100000 >> move (attempts-1)
+            else W.failWith ("MoveFileEx " ++ src ++ " -> " ++ dst) code
+  move 20
 #else
 import qualified System.Posix as P
 #ifdef darwin_HOST_OS
@@ -131,11 +140,18 @@ import System.Process (readProcess)
 accessRules path = readProcess "getfacl" ["-cpn","--",path] ""
 copyEntry dir src dst
   | dir = do
-      status <- P.getFileStatus src
-      P.setOwnerAndGroup dst (P.fileOwner status) (P.fileGroup status)
-      P.setFileMode dst (P.fileMode status)
-      accessRules src >>= void . readProcess "setfacl" ["--set-file=-","--",dst]
+      preserveAccess src dst
   | otherwise = void $ readProcess "cp" ["-a","--",src,dst] ""
+#endif
+preserveAccess src dst = do
+  status <- P.getFileStatus src
+  P.setOwnerAndGroup dst (P.fileOwner status) (P.fileGroup status)
+  P.setFileMode dst (P.fileMode status)
+#ifdef darwin_HOST_OS
+  withFilePath src $ \s -> withFilePath dst $ \d ->
+    throwErrnoPathIfMinus1_ "copyfile ACL" dst $ copyfile s d nullPtr 0xc0001
+#else
+  accessRules src >>= void . readProcess "setfacl" ["--set-file=-","--",dst]
 #endif
 describeFile path = do
   s <- P.getSymbolicLinkStatus path
@@ -145,9 +161,6 @@ describeFile path = do
   acl <- accessRules path
   pure (kind, show (P.fileMode s,P.fileOwner s,P.fileGroup s) ++ " " ++ acl)
 
-openExclusive path = bracketOnError
-  (P.openFd path P.WriteOnly P.defaultFileFlags { P.creat = Just 0o600, P.exclusive = True })
-  P.closeFd P.fdToHandle
 privateDirectory path = P.createDirectory path 0o700
 fileIdentity path = do
   s <- P.getSymbolicLinkStatus path
@@ -159,10 +172,10 @@ durableMove src dst = do
   when (takeDirectory src /= takeDirectory dst) $ syncEntry True (takeDirectory src)
 #endif
 
-openExclusive :: FilePath -> IO Handle
 privateDirectory :: FilePath -> IO ()
 fileIdentity :: FilePath -> IO String
 describeFile :: FilePath -> IO (Char,String)
 copyEntry :: Bool -> FilePath -> FilePath -> IO ()
+preserveAccess :: FilePath -> FilePath -> IO ()
 syncEntry :: Bool -> FilePath -> IO ()
 durableMove :: FilePath -> FilePath -> IO ()
