@@ -33,7 +33,6 @@ foreign import ccall safe "sapiens_update_publish" cPublish :: CWString -> CWStr
 foreign import ccall safe "sapiens_update_copy" cCopy :: CWString -> CWString -> IO Word32
 foreign import ccall safe "sapiens_update_metadata" cMetadata :: CWString -> Ptr Word8 -> Word32 -> IO Word32
 foreign import ccall safe "sapiens_update_copy_metadata" cCopyMetadata :: CWString -> CWString -> IO Word32
-foreign import ccall safe "sapiens_update_trust" cTrust :: CWString -> CWString -> IO Word32
 foreign import ccall safe "sapiens_update_job" cJob :: Ptr () -> CInt -> IO Word32
 
 check :: String -> Word32 -> IO ()
@@ -68,9 +67,6 @@ metadata path = withCWString path $ \p -> allocaBytes 65536 $ \buffer -> do
  count <- cMetadata p buffer 65536
  when (count == 0 || count > 65536) (fail ("Unsupported or unreadable Windows metadata: " ++ path))
  B.packCStringLen (castPtr buffer,fromIntegral count)
-verifyPublisher :: FilePath -> FilePath -> IO ()
-verifyPublisher current payload = withCWString current $ \s -> withCWString payload $ \p -> cTrust s p >>= check "Publisher signature verification"
-
 showUpdateError :: String -> IO ()
 showUpdateError message = withCWString message $ \body -> withCWString "Sapiens update" $ \title -> void (cMessageBox nullPtr body title 0x10)
 

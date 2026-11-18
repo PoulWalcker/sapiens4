@@ -2,9 +2,6 @@
 #include <windows.h>
 #include <aclapi.h>
 #include <sddl.h>
-#include <wintrust.h>
-#include <softpub.h>
-#include <wincrypt.h>
 #include <bcrypt.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -221,33 +218,6 @@ DWORD sapiens_update_metadata(const wchar_t *path, BYTE *out, DWORD capacity) {
     return used;
  failed: return 0;
 #undef APPEND
-}
-static DWORD trusted(const wchar_t *path, PCCERT_CONTEXT *identity) {
-    WINTRUST_FILE_INFO file = {0}; file.cbStruct = sizeof(file); file.pcwszFilePath = path;
-    WINTRUST_DATA data = {0}; data.cbStruct = sizeof(data); data.dwUIChoice = WTD_UI_NONE;
-    data.fdwRevocationChecks = WTD_REVOKE_WHOLECHAIN; data.dwUnionChoice = WTD_CHOICE_FILE; data.pFile = &file;
-    data.dwStateAction = WTD_STATEACTION_VERIFY; data.dwProvFlags = WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT;
-    GUID policy = WINTRUST_ACTION_GENERIC_VERIFY_V2;
-    LONG status = WinVerifyTrust(NULL, &policy, &data);
-    if (!status) {
-        CRYPT_PROVIDER_DATA *provider = WTHelperProvDataFromStateData(data.hWVTStateData);
-        CRYPT_PROVIDER_SGNR *signer = provider ? WTHelperGetProvSignerFromChain(provider,0,FALSE,0) : NULL;
-        CRYPT_PROVIDER_CERT *cert = signer ? WTHelperGetProvCertFromChain(signer,0) : NULL;
-        if (!cert || !(*identity = CertDuplicateCertificateContext(cert->pCert))) status = TRUST_E_SUBJECT_NOT_TRUSTED;
-    }
-    data.dwStateAction = WTD_STATEACTION_CLOSE; WinVerifyTrust(NULL,&policy,&data);
-    return (DWORD)status;
-}
-DWORD sapiens_update_trust(const wchar_t *current, const wchar_t *payload) {
-    PCCERT_CONTEXT a = NULL, b = NULL;
-    DWORD error = trusted(current,&a);
-    if (!error) error = trusted(payload,&b);
-    if (!error && (!CertCompareCertificateName(X509_ASN_ENCODING,&a->pCertInfo->Subject,&b->pCertInfo->Subject) ||
-        !CertComparePublicKeyInfo(X509_ASN_ENCODING,&a->pCertInfo->SubjectPublicKeyInfo,&b->pCertInfo->SubjectPublicKeyInfo)))
-        error = TRUST_E_SUBJECT_NOT_TRUSTED;
-    if (a) CertFreeCertificateContext(a);
-    if (b) CertFreeCertificateContext(b);
-    return error;
 }
 DWORD sapiens_update_job(void *job, int commit) {
     if (commit) {

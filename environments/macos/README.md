@@ -17,8 +17,9 @@ git submodule update --init --recursive
 (cd .build/release-local && shasum -a 256 -c SHA256SUMS)
 ```
 
-Public signing: set `SAPIENS_MAC_SIGN_IDENTITY` and `SAPIENS_MAC_NOTARY_PROFILE`,
-then add `--release`.
+Automatic updates verify the SHA-256 digest published by GitHub for the release
+asset. To sign and notarize a release, add `--release` and set
+`SAPIENS_MAC_SIGN_IDENTITY` and `SAPIENS_MAC_NOTARY_PROFILE`.
 Data/config: `~/Library/Application Support/Sapiens4/{data,config}`.
 Startup log: `config/desktop-server.log`.
 [Remote control](../../docs/remote.md) · [Tests](../../docs/testing.md)

@@ -7,8 +7,7 @@ import Control.Exception
 import Control.Monad
 import qualified Data.ByteString as B
 import Data.Char (toLower)
-import Data.List (isPrefixOf, stripPrefix)
-import Data.Maybe (mapMaybe)
+import Data.List (isPrefixOf)
 import Foreign hiding (void)
 import Foreign.C
 import System.Directory hiding (executable)
@@ -104,25 +103,6 @@ appBundle = takeDirectory . takeDirectory . takeDirectory
 
 verifyBundle :: FilePath -> IO ()
 verifyBundle path = callProcess "/usr/bin/codesign" ["--verify","--deep","--strict",path]
-
-verifyPublisher :: FilePath -> FilePath -> IO ()
-verifyPublisher current payload = do
- let installedApp = appBundle current
- verifyBundle installedApp
- (_,_,description) <- readProcessWithExitCode "/usr/bin/codesign" ["-d","--verbose=4",installedApp] ""
- team <- case mapMaybe (stripPrefix "TeamIdentifier=") (lines description) of
-  [value] | length value == 10 && all (`elem` ['A'..'Z']++['0'..'9']) value -> pure value
-  _ -> fail "Automatic updates require an installed Developer ID signed app"
- let image = takeExtension payload == ".dmg"
-     target = if image then payload else appBundle payload
- callProcess "/usr/bin/codesign" ["--verify","--deep","--strict","-R=anchor apple generic and certificate leaf[subject.OU] = \""++team++"\" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists",target]
- unless image $ do
-  (_,_,requirement) <- readProcessWithExitCode "/usr/bin/codesign" ["-d","-r-",installedApp] ""
-  dr <- case mapMaybe (stripPrefix "designated => ") (lines requirement) of
-   [value] -> pure value
-   _ -> fail "Installed app has no designated requirement"
-  callProcess "/usr/bin/codesign" ["--verify","--strict","-R="++dr,target]
-  callProcess "/usr/sbin/spctl" ["--assess","--type","execute",target]
 
 stagePayload :: FilePath -> FilePath -> IO ()
 stagePayload payload destination = do

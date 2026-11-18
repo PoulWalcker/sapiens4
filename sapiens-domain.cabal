@@ -94,7 +94,7 @@ common host
     hs-source-dirs: environments/windows
     other-modules: Installation, UpdatePlatform
     c-sources: environments/windows/Update.c
-    extra-libraries: user32, advapi32, bcrypt, crypt32, wintrust
+    extra-libraries: user32, advapi32, bcrypt
 
   if os(osx)
     hs-source-dirs: environments/macos
@@ -176,7 +176,7 @@ common windows-host
     UpdateBackup
   if os(windows)
     c-sources: environments/windows/WebView.c, environments/windows/Update.c
-    extra-libraries: user32, ole32, dwmapi, comdlg32, kernel32, advapi32, bcrypt, crypt32, wintrust
+    extra-libraries: user32, ole32, dwmapi, comdlg32, kernel32, advapi32, bcrypt
   else
     buildable: False
 
@@ -195,7 +195,7 @@ executable sapiens-starter
   other-modules: Installation, UpdateState, UpdatePlatform
   if os(windows)
     c-sources: environments/windows/Update.c
-    extra-libraries: user32, advapi32, bcrypt, crypt32, wintrust
+    extra-libraries: user32, advapi32, bcrypt
     ghc-options: -optl-mwindows
   else
     buildable: False

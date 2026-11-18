@@ -3,6 +3,7 @@ module Update (UpdateCache, UpdateBusy(..), withUpdateCache, updateAndRestartCac
 
 import Control.Exception
 import Control.Monad
+import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as B
 #ifdef UPDATE_FIXTURE
 import qualified Data.ByteString.Lazy as BSL
@@ -10,12 +11,13 @@ import qualified Data.ByteString.Lazy as BSL
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
 import Data.Char (isSpace)
-import Data.List (isPrefixOf)
+import Data.List (stripPrefix)
 import Data.IORef
 import Data.Maybe (isNothing)
 import Text.Read (readMaybe)
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS
+import Numeric (showHex)
 import System.Directory hiding (executable)
 import System.Environment
 import System.Exit (exitFailure)
@@ -56,7 +58,11 @@ updateAndRestartWithProgress :: IO () -> (String -> IO String) -> IO () -> IO ()
 updateAndRestartWithProgress preparing command flushPreferences stop dataDirectory configDirectory =
  withUpdateCache $ \cache -> updateAndRestartCached cache preparing command flushPreferences stop dataDirectory configDirectory
 
-type Release = ([Integer],String)
+data Release = Release
+ { releaseVersion :: [Integer]
+ , releaseURL :: String
+ , releaseDigest :: Maybe String
+ } deriving Eq
 newtype UpdateCache = UpdateCache (IORef (Maybe (Maybe Release,FilePath)))
 
 withUpdateCache :: (UpdateCache -> IO a) -> IO a
@@ -100,7 +106,6 @@ requestUpdate :: UpdateCache -> FilePath -> Version -> IO Version
 requestUpdate cache@(UpdateCache ref) root owner = do
  nonce <- freshVersion
  let destination = versionPath root nonce
-     publisher = verifyPublisher (versionExecutable root owner)
  validatePath (root </> "versions")
 #ifdef UPDATE_FIXTURE
  fixture <- lookupEnv "SAPIENS_UPDATE_FIXTURE_PAYLOAD"
@@ -120,23 +125,35 @@ requestUpdate cache@(UpdateCache ref) root owner = do
    writeIORef ref (Just (release,path))
    case (fixture,release) of
     (Just file,_) -> copyFile file path
-    (Nothing,Just (_,url)) -> do
-     transfer <- parseRequest url
+    (Nothing,Just available) -> do
+     transfer <- parseRequest (releaseURL available)
      withResponse transfer manager $ \result -> withBinaryFile path WriteMode $ \file ->
       let loop = do chunk <- brRead (responseBody result); unless (B.null chunk) (B.hPut file chunk >> loop)
       in loop
     _ -> fail "No update payload is available"
    pure path
  validatePath payload
- when (isNothing fixture) (publisher payload)
+ when (isNothing fixture) $ do
+  expected <- maybe (fail "Missing update payload SHA-256") pure (release >>= releaseDigest)
+  verifyPayloadDigest expected payload
  (do
   stagePayload payload destination
-  when (isNothing fixture) (publisher (versionExecutable root nonce))
-  forM_ release $ \(available,_) -> do
+  forM_ release $ \available -> do
    staged <- installedVersion root nonce
-   unless (staged == available) (fail "Signed payload version differs from the release tag"))
+   unless (staged == releaseVersion available) (fail "Update payload version differs from the release tag"))
   `onException` removePathForcibly destination
  pure nonce
+
+verifyPayloadDigest :: String -> FilePath -> IO ()
+verifyPayloadDigest expected path = do
+ digest <- withBinaryFile path ReadMode $ \file ->
+  let readChunks context = do
+       chunk <- B.hGetSome file 65536
+       if B.null chunk then pure (SHA256.finalize context)
+        else readChunks (SHA256.update context chunk)
+  in readChunks SHA256.init
+ let hex byte = let digits = showHex byte "" in replicate (2 - length digits) '0' ++ digits
+ unless (concatMap hex (B.unpack digest) == expected) (fail "Update payload SHA-256 differs from the release")
 
 updateAvailable :: IO Bool
 updateAvailable = do
@@ -149,10 +166,10 @@ updateAvailable = do
 installedVersion :: FilePath -> Version -> IO [Integer]
 installedVersion root version = readFile (versionPath root version </> "sapiens-release.version") >>= parseReleaseVersion
 
-discoverRelease :: Manager -> FilePath -> Version -> IO ([Integer],String)
+discoverRelease :: Manager -> FilePath -> Version -> IO Release
 discoverRelease manager root owner = do
  installedRelease <- installedVersion root owner
- let repository = "aleski-green/sapiens4"
+ let repository = "PoulWalcker/sapiens4"
      latest = do
       request <- parseRequest ("https://api.github.com/repos/" ++ repository ++ "/releases/latest")
       responseBody <$> httpLbs request {requestHeaders=[("User-Agent","Sapiens4-Updater"),("Accept","application/vnd.github+json")]} manager
@@ -160,6 +177,7 @@ discoverRelease manager root owner = do
  fixture <- lookupEnv "SAPIENS_UPDATE_FIXTURE_RELEASE"
  body <- maybe latest (fmap BSL.fromStrict . B.readFile) fixture
 #else
+ let fixture = Nothing :: Maybe FilePath
  body <- latest
 #endif
  value <- either fail pure (eitherDecode body)
@@ -167,11 +185,13 @@ discoverRelease manager root owner = do
  available <- parseReleaseVersion tag
  unless (available > installedRelease) (fail "Sapiens is already up to date.")
  assets <- either fail pure (parseEither (withObject "release" (\o -> o .: "assets")) value) :: IO [Value]
- let asset = withObject "release asset" $ \o -> (,) <$> o .: "name" <*> o .: "browser_download_url"
- urls <- forM assets (either fail pure . parseEither asset) :: IO [(String,String)]
- url <- maybe (fail "No update payload for this platform is available in the latest release") pure (lookup payloadName urls)
- unless (("https://github.com/" ++ repository ++ "/releases/download/" ++ tag ++ "/") `isPrefixOf` url) (fail "Unexpected update download origin")
- pure (available,url)
+ let asset = withObject "release asset" $ \o -> (,) <$> o .: "name" <*> ((,) <$> o .: "browser_download_url" <*> o .:? "digest")
+ entries <- forM assets (either fail pure . parseEither asset) :: IO [(String,(String,Maybe String))]
+ (url,publishedDigest) <- maybe (fail "No update payload for this platform is available in the latest release") pure (lookup payloadName entries)
+ unless (url == "https://github.com/" ++ repository ++ "/releases/download/" ++ tag ++ "/" ++ payloadName) (fail "Unexpected update download origin")
+ let digest = publishedDigest >>= stripPrefix "sha256:"
+ when (maybe (isNothing fixture) (not . validDigest) digest) (fail "Missing or invalid update payload SHA-256")
+ pure (Release available url digest)
 
 parseReleaseVersion :: String -> IO [Integer]
 parseReleaseVersion input = do

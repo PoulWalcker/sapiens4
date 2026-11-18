@@ -15,7 +15,9 @@ git submodule update --init --recursive
 .\environments\windows\build.ps1 -Runtime win-x64 -Version 0.1.0 -OutputDirectory .build\release-x64
 ```
 
-Signing: install signtool, set `SAPIENS_WINDOWS_CERT_THUMBPRINT`, add `-PublicRelease`.
+Automatic updates verify the SHA-256 digest published by GitHub for the release
+asset. To sign a release, install signtool, set `SAPIENS_WINDOWS_CERT_THUMBPRINT`,
+and add `-PublicRelease`.
 `win-arm64` requires a matching toolchain; device qualification is pending.
 Regenerate changed icons with `.\environments\windows\regenerate-icons.ps1`.
 [Remote control](../../docs/remote.md) · [Tests](../../docs/testing.md)
