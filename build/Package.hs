@@ -236,9 +236,9 @@ packageMac :: FilePath -> String -> FilePath -> Bool -> IO ()
 packageMac root version outputInput public = do
  unless (os=="darwin" && arch=="aarch64") $ fail "macOS ARM64 build host required"
  unless (length (splitVersion version)==3 && all (\v -> not (null v) && all isDigit v) (splitVersion version)) $ fail "Version must be MAJOR.MINOR.PATCH"
- identity <- if public then lookupEnv "SAPIENS_MAC_SIGN_IDENTITY" else pure Nothing
- profile <- if public then lookupEnv "SAPIENS_MAC_NOTARY_PROFILE" else pure Nothing
- unless ((not public || isJust identity && isJust profile) && isJust identity==isJust profile && maybe True (not . null) identity && maybe True (not . null) profile) $ fail "Set both signing identity and notary profile for a public release, or neither for a local build"
+ identity <- if public then mfilter (not . null) <$> lookupEnv "SAPIENS_MAC_SIGN_IDENTITY" else pure Nothing
+ profile <- if public then mfilter (not . null) <$> lookupEnv "SAPIENS_MAC_NOTARY_PROFILE" else pure Nothing
+ unless (isJust identity==isJust profile) $ fail "Set both the signing identity and notary profile, or leave both unset"
  output <- makeAbsolute outputInput
  exists output >>= flip when (fail "Output must be a new directory")
  when (inside output root) $ fail "Output must not contain the source checkout"

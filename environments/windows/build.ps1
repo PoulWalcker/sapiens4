@@ -10,7 +10,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Version must be MAJOR.MINOR.PATCH' }
-if ($PublicRelease -and ($CertificateThumbprint -notmatch '^[a-fA-F0-9]{40}$' -or $TimestampUrl -notmatch '^https?://[A-Za-z0-9./:_-]+$')) { throw 'Public release requires a valid signing certificate and timestamp URL' }
+$signRelease = $PublicRelease -and $CertificateThumbprint
+if ($signRelease -and ($CertificateThumbprint -notmatch '^[a-fA-F0-9]{40}$' -or $TimestampUrl -notmatch '^https?://[A-Za-z0-9./:_-]+$')) { throw 'Signing requires a valid certificate thumbprint and timestamp URL' }
 $target = & ghc --print-target-platform
 if ($LASTEXITCODE -ne 0) { throw 'Cannot determine the GHC target' }
 $ghcRuntime = switch -Regex ($target) {
@@ -94,7 +95,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $package 'sapiens-release.version'), $Version)
     Copy-Item -LiteralPath (Join-Path $repo '.build/bin/sapiens-starter.exe') -Destination (Join-Path $package 'sapiens-starter.exe')
     Audit-Payload $package
-    if ($PublicRelease) {
+    if ($signRelease) {
         Get-ChildItem -LiteralPath $package -Recurse -File | Where-Object { $_.Extension -in @('.exe','.dll') } | ForEach-Object {
             & signtool sign /sha1 $CertificateThumbprint /fd SHA256 /tr $TimestampUrl /td SHA256 $_.FullName
             if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed: $($_.FullName)" }
@@ -105,7 +106,7 @@ try {
     New-Item -ItemType Directory -Path $product | Out-Null
     $arguments = @('/DPackageName=Sapiens4','/DPackageId=com.sapiens4.desktop','/Qp',("/DSourceDir=$package"),("/DOutputDir=$product"),("/DAppVersion=$Version"),("/DFileVersion=$Version"),("/DPackageArchitecture=$installerArchitecture"),("/DArtifactBaseName="+[IO.Path]::GetFileNameWithoutExtension($artifactName)))
     $arguments += '/DInitialVersion=' + [guid]::NewGuid().ToString()
-    if ($PublicRelease) {
+    if ($signRelease) {
         $arguments += '/DPublisherSign'
         $arguments += ('/Ssapiens=signtool.exe sign /sha1 '+$CertificateThumbprint+' /fd SHA256 /tr '+$TimestampUrl+' /td SHA256 $f')
     }
@@ -118,7 +119,7 @@ try {
         & $compiler @compileArguments (Join-Path $repo 'build/package/windows-installer.iss')
         if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed: $name" }
         $installer = Join-Path $product $name
-        if ($PublicRelease) { Verify-Signature $installer }
+        if ($signRelease) { Verify-Signature $installer }
         $checksum = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
         $checksums += "$checksum  $name"
     }
