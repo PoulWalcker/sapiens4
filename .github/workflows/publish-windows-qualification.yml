@@ -1,0 +1,43 @@
+name: Stage Windows upgrade qualification releases
+on:
+  push:
+    branches: [codex/windows-qualification-publish]
+
+permissions:
+  contents: write
+
+jobs:
+  stage-releases:
+    if: github.repository == 'PoulWalcker/sapiens4'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Fetch test build inputs
+        shell: bash
+        run: |
+          git init .
+          git remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git checkout --detach FETCH_HEAD
+          sha256sum --check SHA256SUMS
+      - name: Upload test packages to GitHub Releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          while IFS=$'\t' read -r slot version base source; do
+            tag="v$version"
+            published_ref="$(git ls-remote --tags origin "refs/tags/$tag" | cut -f1)"
+            test "$published_ref" = "$source"
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              exit 1
+            fi
+            title="Windows updater QA $slot — $tag"
+            notes="Windows x64 test package for the A → B → C → D → E updater qualification. Built on the Windows QA server. Source: $source. Production base: $base. Test use only."
+            if [ "$slot" = A ]; then
+              gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --title "$title" --notes "$notes" packages/A/Sapiens-Setup-win-x64.exe
+            else
+              gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "$title" --notes "$notes" "packages/$slot/Sapiens-Payload-win-x64.exe"
+            fi
+          done < release-provenance.tsv
