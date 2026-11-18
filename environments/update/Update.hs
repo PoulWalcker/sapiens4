@@ -170,7 +170,7 @@ installedVersion root version = readFile (versionPath root version </> "sapiens-
 discoverRelease :: Manager -> FilePath -> Version -> IO Release
 discoverRelease manager root owner = do
  installedRelease <- installedVersion root owner
- let repository = "aleski-green/sapiens4"
+ let repository = "PoulWalcker/sapiens4"
      latest = do
       request <- parseRequest ("https://api.github.com/repos/" ++ repository ++ "/releases/latest")
       responseBody <$> httpLbs request {requestHeaders=[("User-Agent","Sapiens4-Updater"),("Accept","application/vnd.github+json")]} manager
