@@ -342,3 +342,13 @@ pickDirectory owner = withGuid "{DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7}" $ \class
         bracket (getValue dialog 20) release $ \item -> do
           getName <- method item 5
           Just <$> bracket (alloca $ \out -> invokeIntPtr getName item 0x80058000 out >>= check >> peek out) coFree readWide
+
+foreign import ccall unsafe "QueryInformationJobObject" queryJobAccounting
+  :: Object -> Word32 -> Ptr Word8 -> Word32 -> Ptr Word32 -> IO Int32
+
+jobIsEmpty :: Object -> IO Bool
+jobIsEmpty job = allocaBytes 48 $ \accounting -> do
+  -- JOBOBJECT_BASIC_ACCOUNTING_INFORMATION.ActiveProcesses on Windows x64/ARM64.
+  ok <- queryJobAccounting job 1 accounting 48 nullPtr
+  when (ok == 0) $ fail "Cannot inspect the backend job."
+  (== 0) <$> (peekByteOff accounting 40 :: IO Word32)

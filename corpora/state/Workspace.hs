@@ -22,22 +22,49 @@ import System.FilePath
 import System.Info (os)
 import System.IO (IOMode(ReadMode), withBinaryFile)
 import Types
+import DataRoot (managedDataPath, safeId)
+import RuntimePaths (containedPath)
 import qualified Memo
 import qualified Store as DB
 
 migrateWorkspaces :: Service -> IO ()
 migrateWorkspaces s = do
  prefs <- DB.singleton s DB.Preferences
- let complete = obj [(owner,completeWorkspace workspace) | (owner,workspace) <- pairs (get prefs "workspaces")]
+ void (decodeValue 500 prefs :: IO Object)
+ forM_ [get prefs "workspace_revision" | has prefs "workspace_revision"] $ \value -> do
+  revision <- decodeValue 500 value :: IO Int
+  require (revision >= 0) 500 "Invalid workspace revision"
+ require (not (has prefs "browser_version") || get prefs "browser_version" `elem` map num [0,1]) 500 "Unsupported browser preferences version"
+ saved <- if has prefs "workspaces" then decodeValue 500 (get prefs "workspaces") else pure Map.empty :: IO (Map.Map Text Object)
+ owners <- map (`at` "id") <$> ((++) <$> DB.agents s <*> DB.values s DB.Groups)
+ let current = get prefs "browser_version" == num 1
+     entries = [(owner,Object workspace) | (owner,workspace) <- Map.toList saved]
+ forM_ entries $ \(owner,workspace) -> do
+  require (safeId owner && (current || owner `elem` owners)) 500 "Workspace preferences contain an unknown owner"
+  folder <- managedDataPath (serviceRoot s) (workspaceRoot s owner)
+  forM_ ["tabs","bookmarks"] $ \key -> when (has workspace key) $ do
+   entries <- decodeValue 500 (get workspace key) :: IO [Object]
+   when (key == "tabs") $ forM_ (map Object entries) $ \tab ->
+    if current then require (not (any (has tab) ["type","html","artifact"])) 500 "Legacy tab inside current browser preferences"
+    else do
+     forM_ ["artifact","type","html","url","path"] $ \field ->
+      when (has tab field) $ void (decodeValue 500 (get tab field) :: IO Text)
+     unless (T.null (at tab "artifact")) $ do
+      artifacts <- managedDataPath (serviceRoot s) (folder </> "artifacts")
+      void (containedPath artifacts (artifacts </> T.unpack (at tab "artifact")))
+  when (has workspace "memo_bookmark_seeded") $ void (decodeValue 500 (get workspace "memo_bookmark_seeded") :: IO Bool)
+ let complete = obj [(owner,completeWorkspace workspace) | (owner,workspace) <- entries]
      save workspaces = DB.saveSingleton s DB.Preferences (merge prefs (obj [("workspaces",workspaces),("browser_version",num 1),("workspace_revision",num (int (get prefs "workspace_revision")+1))]))
- when (get prefs "browser_version"==num 1 && complete/=get prefs "workspaces") $ save complete
- unless (get prefs "browser_version"==num 1) $ do
-  workspaces <- forM (pairs (get prefs "workspaces")) $ \(owner,workspace) -> do
+ when (current && complete/=get prefs "workspaces") $ save complete
+ unless current $ do
+  workspaces <- forM entries $ \(owner,workspace) -> do
    tabs <- forM (items workspace "tabs") $ \tab -> do
     converted <- if not (T.null (at tab "artifact")) then pure (put "path" (str (T.pack (workspaceRoot s owner </> "artifacts" </> T.unpack (at tab "artifact")))) tab) else
      if at tab "type"=="html" then do
       identity <- newId
       let path=workspaceRoot s owner </> ("saved-tab-"++T.unpack identity++".html")
+      occupied <- doesPathExist path
+      require (not occupied) 409 "The saved tab destination already exists."
       writeText path (at tab "html")
       pure (put "path" (str (T.pack path)) tab)
      else pure tab

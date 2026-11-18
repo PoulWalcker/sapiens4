@@ -27,6 +27,8 @@ import System.Environment
 import System.Exit
 import System.FilePath
 import System.Info
+import qualified MigrationBackup
+import qualified Installation
 import System.IO
 import System.Process
 #ifndef mingw32_HOST_OS
@@ -46,7 +48,7 @@ main = run `catches` [Handler (\(code::ExitCode) -> throwIO code), Handler repor
   hPutStrLn stderr detail
   exitFailure
 run :: IO ()
-run = do
+run = Installation.withInstallation $ \_ -> do
  setLocaleEncoding utf8
  mapM_ (`hSetEncoding` utf8) [stdin,stdout,stderr]
  hSetBuffering stdout LineBuffering
@@ -54,6 +56,7 @@ run = do
  root <- repository
  setEnv "SAPIENS_REPOSITORY" root
  case args of
+  ["restore-data", path, operation] -> canonicalizePath path >>= \directory -> MigrationBackup.restoreData directory operation
   ["build-ui"] -> buildUI root
   ["control",config,payload] -> jsonCommand $ do
    value <- either (failure 400 . T.pack) pure (eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack payload))))
@@ -110,9 +113,28 @@ hostMain root args = do
   finished <- newEmptyMVar
   let shutdown=void (tryPutMVar finished ())
   installShutdown shutdown
-  when ("--desktop" `elem` args) (void (forkIO ((void getLine `catch` \(_::IOException)->pure ()) >> shutdown)))
+  when ("--desktop" `elem` args) (void (forkIO (desktopControl host shutdown)))
   when ("--open" `elem` args) (void (createProcess (proc (if os=="darwin" then "open" else if os=="mingw32" then "explorer" else "xdg-open") [url])))
   takeMVar finished
+
+desktopControl :: Host -> IO () -> IO ()
+desktopControl host shutdown = loop
+ where
+ loop = do
+  eof <- hIsEOF stdin
+  if eof then shutdown else do
+   command <- getLine
+   case command of
+    "stop" -> shutdown
+    "stop-for-update" -> do
+     result <- (Right <$> hostStopForUpdate host) `catches`
+      [Handler (\(APIError _ message) -> pure (Left (T.unpack message))),
+       Handler (\(err::IOException) -> pure (Left (displayException err)))]
+     case result of
+      Right UpdateStopping -> putStrLn "update: stopping" >> shutdown
+      Right UpdateBusy -> putStrLn "update: busy" >> loop
+      Left reason -> putStrLn ("update: refused " ++ unwords (lines reason)) >> loop
+    _ -> putStrLn "update: refused unknown command" >> loop
 
 parseIntegerOption :: String -> String -> [String] -> Validation Int
 parseIntegerOption key def args = case reads (option key def args) of

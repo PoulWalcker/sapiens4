@@ -29,7 +29,7 @@ import Network.Wai.Handler.WebSockets (websocketsOr)
 import qualified Network.WebSockets as WS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import System.Directory (doesFileExist)
+import System.Directory (doesDirectoryExist,listDirectory)
 import System.FilePath ((</>))
 import Network.HTTP.Types
 import Network.Wai
@@ -37,7 +37,7 @@ import Network.Wai.Handler.Warp
 import qualified Network.Socket as Socket
 
 
-data Host = Host { hostPort :: Int, hostService :: Service, hostBridge :: Bridge, hostStop :: IO () }
+data Host = Host { hostPort :: Int, hostService :: Service, hostBridge :: Bridge, hostStop :: IO (), hostStopForUpdate :: IO UpdateStop }
 listenLoopback :: Int -> IO (Socket.Socket,Int)
 listenLoopback port = Socket.withSocketsDo $ do
  sock <- Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol
@@ -50,23 +50,22 @@ listenLoopback port = Socket.withSocketsDo $ do
 startHost :: Maybe Bool -> FilePath -> Int -> Bool -> IO Host
 startHost consent root requested managed = do
  mode <- lookupEnv "SAPIENS_STORAGE_MODE"
- exists <- doesFileExist (root </> "corpora-identity.json")
- startHostWith consent (if managed || mode==Just "existing" || mode==Nothing && exists then AttachExisting else StartNew) root requested managed
-
-startHostWith :: Maybe Bool -> StorageChoice -> FilePath -> Int -> Bool -> IO Host
-startHostWith = startHostUsing Nothing
+ directory <- doesDirectoryExist root
+ names <- if directory then listDirectory root else pure []
+ let existing = managed || mode==Just "existing" || mode==Nothing && not (null (filter (/="host.lock") names))
+ startHostUsing Nothing consent (if existing then AttachExisting else StartNew) root requested managed
 
 startHostUsing :: Maybe Telemetry.Telemetry -> Maybe Bool -> StorageChoice -> FilePath -> Int -> Bool -> IO Host
 startHostUsing inherited consent choice root requested managed = mask $ \restore -> do
  args <- getArgs
  desktopPid <- lookupEnv "SAPIENS_DESKTOP_PID"
  let desktop = "--desktop" `elem` args || desktopPid/=Nothing
- reporter <- if managed then pure inherited else Just <$> Telemetry.openTelemetry (if desktop then Telemetry.Desktop else Telemetry.Headless) consent
- flip onException (unless managed (mapM_ Telemetry.closeTelemetry reporter)) $ restore $ do
-  mode <- lookupEnv "SAPIENS_STORAGE_MODE"
-  let report phase = when (not managed && mode `elem` [Just "new",Just "existing"]) (putStrLn phase)
-  report openingStorage
-  bracketOnError (Service.openService choice root) Service.closeService $ \service -> do
+ mode <- lookupEnv "SAPIENS_STORAGE_MODE"
+ let report phase = when (not managed && mode `elem` [Just "new",Just "existing"]) (putStrLn phase)
+ report openingStorage
+ bracketOnError (restore (Service.openService choice root)) Service.closeService $ \service -> do
+  reporter <- if managed then pure inherited else Just <$> Telemetry.openTelemetry (if desktop then Telemetry.Desktop else Telemetry.Headless) consent
+  flip onException (unless managed (mapM_ Telemetry.closeTelemetry reporter)) $ restore $ do
    writeIORef (serviceTelemetry service) reporter
    report openedStorage >> start reporter service
  where
@@ -107,7 +106,7 @@ startHostUsing inherited consent choice root requested managed = mask $ \restore
         void (waitCatch worker)
         Socket.close socket
         pure True
-   pure (Host port service bridge stop)
+   pure (Host port service bridge stop (maybe (failure 409 "Only the desktop root can stop for update") tryStopForUpdate registry))
 localRequest :: Int -> Bool -> RequestHeaders -> Validation ()
 localRequest port write headers = do
  let host = lookup hHost headers
@@ -161,7 +160,7 @@ updatesSocket s pending = do
   race_ (send (-1)) (void (WS.receiveDataMessage conn))
 
 httpApplication :: Service -> Bridge -> Maybe Registry -> Maybe O.Onboarding -> Int -> Application
-httpApplication service bridge registry onboarding port req respond = respond =<< respondError (do
+httpApplication service bridge registry onboarding port req respond = respond =<< respondError (withAdmission service $ do
  let method = TE.decodeUtf8 (requestMethod req)
      path = TE.decodeUtf8 (rawPathInfo req)
      target = requestTarget req

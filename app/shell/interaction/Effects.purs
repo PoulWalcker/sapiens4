@@ -9,6 +9,7 @@ import Data.Maybe (Maybe(..), maybe)
 import Data.Tuple (Tuple(..))
 import Effect.Aff (Aff, Milliseconds(..), delay, try, throwError)
 import Effect.Class (liftEffect)
+import Sapiens.DesktopUpdate (Slots)
 import Sapiens.Updates as Updates
 import Effect.Exception (Error, error, message)
 import Halogen as H
@@ -25,7 +26,7 @@ import Sapiens.Workspace as W
 import Sapiens.Update as U
 import Sapiens.Telemetry as Telemetry
 
-type UI = H.HalogenM M.Model Action () Void Aff
+type UI = H.HalogenM M.Model Action Slots Void Aff
 type Dispatch = Action -> UI Unit
 
 later :: Number -> UI Unit -> UI Unit

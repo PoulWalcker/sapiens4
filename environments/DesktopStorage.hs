@@ -19,7 +19,7 @@ import System.Timeout (timeout)
 import Types (readJSON, get, boolean)
 import Telemetry (startupConsentArguments)
 
-data WorkspaceSignal = Navigated | WorkspaceReady deriving (Eq)
+data WorkspaceSignal = Navigated | WorkspaceReady Text
 
 bootstrapConsentScript :: IO Text
 bootstrapConsentScript = do
@@ -30,19 +30,23 @@ bootstrapConsentScript = do
   pure ("window.setTelemetryConsent?.(" <> TE.decodeUtf8 (BL.toStrict (encode enabled)) <> ")")
 
 saveWhenReady :: IORef (Maybe WorkspaceSignal) -> WorkspaceSignal -> IORef (Maybe a)
-              -> (a -> FilePath) -> (String -> IO ()) -> (a -> IO ()) -> IO ()
+              -> (a -> FilePath) -> (String -> IO ()) -> (a -> Text -> IO ()) -> IO ()
 saveWhenReady first signal pending directory recover opened = do
   previous <- readIORef first
   case previous of
     Nothing -> writeIORef first (Just signal)
-    Just seen | seen /= signal -> do
+    Just seen | Just corpora <- ready seen signal -> do
       selection <- readIORef pending
       forM_ selection $ \value -> do
         result <- try (saveDataDirectory (directory value))
         case result of
           Left (e :: SomeException) -> recover ("Could not save your storage selection: " ++ storageMessage e)
-          Right () -> writeIORef pending Nothing >> opened value
+          Right () -> writeIORef pending Nothing >> opened value corpora
     _ -> pure ()
+  where
+    ready Navigated (WorkspaceReady corpora) = Just corpora
+    ready (WorkspaceReady corpora) Navigated = Just corpora
+    ready _ _ = Nothing
 
 storageMode :: StorageChoice -> String
 storageMode StartNew = "new"

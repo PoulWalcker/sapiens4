@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module Host (Host(..), prepareHost, startHost, closeHost, watchHost, desktopArgs) where
+module Host (Host(..), prepareHost, startHost, closeHost, watchHost, desktopArgs, stopForUpdate, serverRunning) where
 
+import qualified DesktopUpdate as Update
+import Native (jobIsEmpty)
+import System.Exit (ExitCode(ExitSuccess))
 import DesktopStorage (storageMode, awaitServerAddress, startupConsentArguments)
 import Control.Concurrent
 import Control.Concurrent.Async
@@ -36,6 +39,7 @@ data ServerProcess = ServerProcess
   { processHandle :: ProcessHandle
   , processInput :: Handle
   , processOutput :: Handle
+  , updateReplies :: MVar String
   , processErrors :: Handle
   , outputReader :: Maybe (Async ())
   , exitWatcher :: Maybe (Async ())
@@ -96,7 +100,8 @@ launchHost :: Host -> CreateProcess -> IO String
 launchHost host command = mask $ \restore -> do
   closeHost host
   (Just input, Just output, Just errors, child) <- createProcess command
-  let owned = ServerProcess child input output errors Nothing Nothing Nothing
+  replies <- newEmptyMVar
+  let owned = ServerProcess child input output replies errors Nothing Nothing Nothing
   writeIORef (serverProcess host) (Just owned)
   (do
     mapM_ (\stream -> hSetEncoding stream utf8 >> hSetNewlineMode stream universalNewlineMode) [input, output, errors]
@@ -114,7 +119,7 @@ launchHost host command = mask $ \restore -> do
       putMVar readiness result
       case result of
         Left _ -> pure ()
-        Right _ -> (forever (void $ hGetLine output)) `catch` \(_ :: IOException) -> pure ()
+        Right _ -> (forever (hGetLine output >>= Update.recordReply replies)) `catch` \(_ :: IOException) -> pure ()
     writeIORef (serverProcess host) (Just owned {outputReader=Just drain,errorReader=Just collect})
     restore (takeMVar readiness >>= either (\e -> do
       void (timeout 250000 (waitCatch collect))
@@ -190,3 +195,18 @@ stopServer server = mask_ $ do
 
 closeStream :: Handle -> IO ()
 closeStream stream = hClose stream `catch` \(_ :: IOException) -> pure ()
+
+stopForUpdate :: Host -> IO ()
+stopForUpdate host = do
+  current <- readIORef (serverProcess host)
+  forM_ current $ \server -> do
+    Update.stopIdle (processInput server) (updateReplies server)
+    let process = processHandle server
+        waitForJob = do
+          done <- withProcessHandle process $ \state -> case state of
+            OpenExtHandle _ job -> jobIsEmpty job
+            _ -> fail "Cannot confirm that every backend process stopped."
+          unless done (threadDelay 50000 >> waitForJob)
+    status <- timeout 10000000 (waitForJob >> waitForProcess process)
+    unless (status == Just ExitSuccess) $ fail "The backend job did not shut down cleanly."
+    closeHost host

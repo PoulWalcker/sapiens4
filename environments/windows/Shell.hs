@@ -18,6 +18,7 @@ import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Aeson.Key as K
 import qualified Crypto.Hash.SHA256 as SHA
 import DataRoot
+import qualified DesktopUpdate as Update
 import qualified DesktopStorage
 import Network.URI (URI(..), URIAuth(..), parseURI, escapeURIString, isUnreserved, unEscapeString)
 import System.Directory (canonicalizePath, doesFileExist, doesDirectoryExist)
@@ -36,19 +37,20 @@ import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as L
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import qualified Data.Text.IO as TIO
 
 runDesktop :: Bool -> IO ()
 runDesktop probe = runInBoundThread $
   -- Release callbacks only after COM has finished releasing its references.
   (bracket newArena freeArena $ \memory ->
-    bracket_ (check =<< coInitialize nullPtr 2) coUninitialize (desktopSession memory probe))
+    bracket_ (check =<< coInitialize nullPtr 2) coUninitialize (Update.withDesktopUpdate (desktopSession memory probe)))
   `catch` \(e :: SomeException) -> case fromException e :: Maybe SomeAsyncException of
     Just _ -> throwIO e
     Nothing -> withWide (storageMessage e ++ "\n\nClose the application and relaunch after correcting the error.") $ \message ->
       withWide "Sapiens4 could not start" $ \title -> void (messageBox nullPtr message title 0x10)
 
-desktopSession :: Arena -> Bool -> IO ()
-desktopSession memory probe = do
+desktopSession :: Arena -> Bool -> Maybe Update.DesktopUpdate -> IO ()
+desktopSession memory probe update = do
   void $ setDpiAwareness (-4)
   args <- desktopArgs <$> getArgs
   host <- prepareHost args
@@ -81,6 +83,7 @@ desktopSession memory probe = do
   firstSignal <- newIORef Nothing
   storageAttempt <- newIORef (0 :: Integer)
   selectedRoot <- newIORef Nothing
+  updateView <- newIORef Update.NoOffer
   preferenceScript <- newIORef Nothing
   preferenceValues <- newIORef KM.empty
   let resize hwnd = do
@@ -180,6 +183,44 @@ desktopSession memory probe = do
             void $ showWindow label 5
             mapM_ (\button -> void (showWindow button 5)) setupButtons
           storageScript source = readIORef shellRef >>= mapM_ (\view -> execute memory view source (const $ pure ()))
+          displayUpdate state = do
+            writeIORef updateView state
+            storageScript (T.unpack (Update.viewScript state))
+          reportUpdate message = withWide message $ \detail -> withWide "Sapiens4 update" $ \title ->
+            void (messageBox hwnd detail title 0x30)
+          startUpdate requested = do
+            state <- readIORef updateView
+            case (update,state) of
+              (Just updater, Update.Offered release) | requested == T.pack (Update.releaseVersion release) -> do
+                busy <- readIORef starting
+                unless busy $ do
+                  writeIORef starting True
+                  displayUpdate (Update.Installing release "Downloading…")
+                  session <- readIORef (origin host)
+                  root <- traverse (const $ readIORef activeRoot) session
+                  void $ forkIO $ do
+                    result <- tryJust Update.updateError (Update.installRelease updater release (stopForUpdate host) root configRoot)
+                    case result of
+                      Left reason -> post $ do
+                        writeIORef starting False
+                        displayUpdate (Update.Offered release)
+                        running <- readIORef (serverProcess host) >>= serverRunning
+                        if isNothing root || running then reportUpdate reason else recoverStartup reason
+                      Right (Update.SelectionChanged next) -> post $ do
+                        writeIORef starting False
+                        displayUpdate (maybe Update.NoOffer Update.Offered next)
+                        reportUpdate "The offered release changed."
+                      Right (Update.WorkerStarted process) -> do
+                        post (displayUpdate (Update.Installing release "Updating…"))
+                        failure <- Update.workerFailure updater process
+                        forM_ failure $ \outcome -> post $ case outcome of
+                          Update.PreviousAvailable reason -> do
+                            writeIORef starting False
+                            displayUpdate (Update.Offered release)
+                            if isNothing root then reportUpdate reason else recoverStartup reason
+                          Update.InstallationIncomplete reason ->
+                            displayUpdate (Update.Installing release "Update stopped") >> reportUpdate reason
+              _ -> pure ()
           storageError :: String -> IO ()
           storageError message = do
             closeHost host
@@ -221,7 +262,8 @@ desktopSession memory probe = do
                 writeJSON (preferencesPath directory) next
                 writeIORef preferenceValues next
           commitWorkspace signal =
-            DesktopStorage.saveWhenReady firstSignal signal selectedRoot fst recoverStartup $ \(_,url) -> do
+            DesktopStorage.saveWhenReady firstSignal signal selectedRoot fst recoverStartup $ \(directory,url) corpora -> do
+              forM_ update $ \updater -> Update.workspaceOpened updater directory corpora
               atomicModifyIORef' workerRef (\old -> (Nothing,old)) >>= mapM_ cancel
               writeIORef starting False
               storageScript "window.dispatchEvent(new Event('sapiens-preferences-ready'))"
@@ -231,7 +273,11 @@ desktopSession memory probe = do
             let current action = readIORef storageAttempt >>= \n -> when (n==attempt) action
             writeIORef firstSignal Nothing
             writeIORef selectedRoot (Just (dataDirectory selected,url))
-            watchHost selected (post . current . recoverStartup)
+            watchHost selected $ \reason -> post $ current $ do
+              state <- readIORef updateView
+              case state of
+                Update.Installing _ _ -> pure ()
+                _ -> recoverStartup reason
             async (threadDelay 35000000 >> post (current $ do
               selection <- readIORef selectedRoot
               when (selection==Just (dataDirectory selected,url)) $ recoverStartup "Your workspace did not load within 35 seconds. Your saved storage selection is unchanged.")) >>= writeIORef workerRef . Just
@@ -342,9 +388,17 @@ desktopSession memory probe = do
                 case decodeStrict (TE.encodeUtf8 $ T.pack raw) of
                   Nothing -> pure ()
                   Just message
-                    | isNothing base && bootstrapSource source && bootstrapSource current -> chooseStorage message
+                    | field "desktopUpdateReady" message == Bool True
+                    , (isNothing base && bootstrapSource source && bootstrapSource current) || (Navigation.trusted base source && Navigation.trusted base current) ->
+                        readIORef updateView >>= storageScript . T.unpack . Update.viewScript
+                    | isNothing base && bootstrapSource source && bootstrapSource current ->
+                        case field "updateAndRestart" message of
+                          String version -> startUpdate version
+                          _ -> chooseStorage message
                     | Navigation.trusted base source && Navigation.trusted base current -> do
-                        when (field "workspaceReady" message==Bool True) $ commitWorkspace DesktopStorage.WorkspaceReady
+                        forM_ [version | String version <- [field "updateAndRestart" message]] startUpdate
+                        forM_ [corpora | String corpora <- [field "workspaceReady" message], not (T.null corpora)] $
+                          commitWorkspace . DesktopStorage.WorkspaceReady
                         applyWindowTheme hwnd light dark lastTheme message
                         case field "clientPreferences" message of
                           input@(JSON.Object _) -> savePreferences input
@@ -357,6 +411,7 @@ desktopSession memory probe = do
                   void $ showWindow label 0
                   current <- getString (core view) 4
                   if bootstrapSource current then do
+                    TIO.readFile (runtimeDirectory host </> ".build/web/bootstrap.js") >>= storageScript . T.unpack
                     DesktopStorage.bootstrapConsentScript >>= storageScript . T.unpack
                     atomicModifyIORef' workerRef (\old -> (Nothing,old)) >>= mapM_ cancel
                     recovered <- atomicModifyIORef' recoveryError (\value -> (Nothing,value))
@@ -420,7 +475,15 @@ desktopSession memory probe = do
       void $ showWindow hwnd 5
       void $ updateWindow hwnd
       void $ foregroundWindow hwnd
-      pumpMessages memory
+      forM_ update $ \updater -> Update.startupNotice updater >>= mapM_ (post . reportUpdate)
+      let watch updater = Update.watchReleases updater $ \result -> post $ do
+            current <- readIORef updateView
+            case current of
+              Update.Installing _ _ -> pure ()
+              _ -> displayUpdate (either (const Update.NoOffer) (maybe Update.NoOffer Update.Offered) result)
+      case update of
+        Just updater | not probe -> withAsync (watch updater) (const (pumpMessages memory))
+        _ -> pumpMessages memory
 
 createMainWindow :: Arena -> Object -> FunPtr WindowProc -> IO Window
 createMainWindow memory instanceHandle procedure = do

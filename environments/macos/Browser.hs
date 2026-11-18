@@ -210,7 +210,7 @@ history browser tab predicate action = do
         let done = pending { tabAwaiting = False }
         save browser done; report browser done
 
-receive browser message onPreferences onReady = do
+receive browser message onPreferences onReady onUpdate onUpdateReady = do
     sh <- readIORef (shell browser)
     sourceView <- obj0 message "webView"
     frame <- obj0 message "frameInfo"
@@ -224,8 +224,11 @@ receive browser message onPreferences onReady = do
         valid <- booleanArgument raw "isKindOfClass:" dictionary
         body <- if valid then jsonObject raw else pure Nothing
         forM_ body $ \input -> do
-          when (bool (field "workspaceReady" input)) onReady
-          if field "clientPreferences" input /= Null then onPreferences (field "clientPreferences" input)
+          let corpora = text (field "workspaceReady" input)
+          unless (T.null corpora) (onReady corpora)
+          if bool (field "desktopUpdateReady" input) then onUpdateReady
+          else if field "updateAndRestart" input /= Null then onUpdate (text (field "updateAndRestart" input))
+          else if field "clientPreferences" input /= Null then onPreferences (field "clientPreferences" input)
           else if bool (field "pickFile" input) then do
             panel <- new "NSOpenPanel"
             void (obj1 panel "setCanChooseDirectories:" (int 0)); void (obj1 panel "setAllowsMultipleSelection:" (int 1)); void (obj1 panel "setShowsHiddenFiles:" (int 1))

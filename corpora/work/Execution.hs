@@ -4,6 +4,7 @@
 module Execution where
 
 import Control.Concurrent
+import Control.Concurrent.STM (readTVarIO)
 import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
@@ -301,10 +302,7 @@ startExecution s = modifyMVar_ (serviceWorker s) $ \existing -> case existing of
  loop = do
   t <- milliseconds
   deadlines <- newIORef (M.fromList [(f,t+periodMillis f) | f <- [minBound..maxBound]])
-  let step = do
-       stopped <- readIORef (serviceStopping s)
-       unless stopped $ do
-        locked s $ do
+  let tick = do
          config <- corporaSettings s
          pulse <- readIORef (servicePulse s)
          let active=corporaStatus config==Active
@@ -321,6 +319,12 @@ startExecution s = modifyMVar_ (serviceWorker s) $ \existing -> case existing of
            writeIORef (servicePulse s) (put "numbers" numbers current)
            DB.saveSingleton s DB.SystemPulse (obj [("pulse",str identity),("numbers",numbers)])
            onPulse s (Pulse identity frequency number)
+      step = do
+       stopped <- readIORef (serviceStopping s)
+       unless stopped $ do
+        locked s $ do
+         admission <- readTVarIO (serviceAdmission s)
+         when (admission /= StoppingForUpdate) tick
         threadDelay 50000
         step
   step

@@ -91,6 +91,20 @@ try {
     Copy-Item -LiteralPath (Join-Path $repo '.build/bin/sapiens-windows.exe') -Destination (Join-Path $package 'Sapiens4.exe')
     Copy-Item -LiteralPath (Join-Path $repo '.build/bin/WebView2Loader.dll'),(Join-Path $repo '.build/bin/WebView2-LICENSE.txt') -Destination $package
     [IO.File]::WriteAllText((Join-Path $package 'sapiens-installation.id'), 'com.sapiens4.desktop')
+    $updateFeed = $env:SAPIENS_UPDATE_FEED
+    if ($updateFeed) {
+        $uri = $null
+        if (-not $PublicRelease -or -not [uri]::TryCreate($updateFeed, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne 'https' -or $uri.UserInfo -or $uri.Fragment) {
+            throw 'Windows updates require a publisher-signed release and a valid HTTPS metadata URL.'
+        }
+        $metadata = @{ version=$Version; feed=$updateFeed; platform=$Runtime; publisher=$CertificateThumbprint }
+        [IO.File]::WriteAllText((Join-Path $package 'runtime/desktop-update.json'), ($metadata | ConvertTo-Json -Compress))
+        $driver = Join-Path $package 'apply.ps1'
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'apply.ps1') -Destination $driver
+        $certificate = Get-Item -LiteralPath ("Cert:/CurrentUser/My/" + $CertificateThumbprint)
+        $signed = Set-AuthenticodeSignature -FilePath $driver -Certificate $certificate -TimestampServer $TimestampUrl -HashAlgorithm SHA256
+        if ($signed.Status -ne 'Valid') { throw "Could not sign the update worker: $($signed.Status)" }
+    }
     Audit-Payload $package
     if ($PublicRelease) {
         Get-ChildItem -LiteralPath $package -Recurse -File | Where-Object { $_.Extension -in @('.exe','.dll') } | ForEach-Object {
@@ -102,6 +116,7 @@ try {
     $product = Join-Path $staging 'product'
     New-Item -ItemType Directory -Path $product | Out-Null
     $arguments = @('/DPackageName=Sapiens4','/DPackageId=com.sapiens4.desktop','/Qp',("/DSourceDir=$package"),("/DOutputDir=$product"),("/DAppVersion=$Version"),("/DFileVersion=$Version"),("/DPackageArchitecture=$installerArchitecture"),("/DArtifactBaseName="+[IO.Path]::GetFileNameWithoutExtension($artifactName)))
+    if ($updateFeed) { $arguments += "/DUpdatePlatform=$Runtime" }
     if ($PublicRelease) {
         $arguments += '/DPublisherSign'
         $arguments += ('/Ssapiens=signtool.exe sign /sha1 '+$CertificateThumbprint+' /fd SHA256 /tr '+$TimestampUrl+' /td SHA256 $f')

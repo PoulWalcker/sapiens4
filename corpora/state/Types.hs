@@ -1,15 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE ForeignFunctionInterface #-}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Types (module Types, module Domain) where
 
 import Domain
+import qualified MigrationFiles
 import qualified Telemetry
 
 import Control.Concurrent
-import Control.Concurrent.STM (TVar, atomically, modifyTVar')
+import Control.Concurrent.STM (TVar, atomically, modifyTVar', readTVar, readTVarIO, writeTVar, throwSTM)
 import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
@@ -38,16 +37,6 @@ import System.FileLock
 import System.FilePath
 import System.IO
 import System.Process
-#ifdef mingw32_HOST_OS
-import Foreign.C
-import System.IO.Error (isPermissionError)
-foreign import ccall unsafe "_wopen" syncOpen :: CWString -> CInt -> CInt -> IO CInt
-foreign import ccall unsafe "_commit" syncCommit :: CInt -> IO CInt
-foreign import ccall unsafe "_close" syncClose :: CInt -> IO CInt
-#else
-import qualified System.Posix.IO as Posix
-import qualified System.Posix.Unistd as Posix
-#endif
 
 
 data APIError = APIError Int Text deriving (Show, Typeable)
@@ -73,7 +62,9 @@ instance ToJSON ModelSelection where
  toJSON choice = obj [("provider",str (providerName (selectionProvider choice))),("model",str (selectionModel choice)),("effort",str (selectionEffort choice))]
 
 data Run = Run { runOwner :: AgentId, runId :: RunId, runSlot :: Int, runCancel :: IORef Bool, runProcess :: MVar (Maybe ProcessHandle), runActivity :: IORef Value, runDeadline :: Word64, runModelConfig :: ModelSelection }
-data Service = Service { serviceRoot :: FilePath, repositoryRoot :: FilePath, serviceGuard :: MVar (), serviceFileLock :: FileLock, serviceStopping :: IORef Bool, serviceWorker :: MVar (Maybe (Async ())), serviceRuns :: MVar (Map RunId Run), serviceLease :: IORef (Maybe (AgentId, RunId)), serviceEndpoint :: IORef Text, servicePulse :: IORef Value, serviceActors :: MVar (Map ThreadId (Text,Maybe Text)), serviceDatabase :: MVar (Maybe Connection), serviceStates :: MVar (Map Text CachedAgentState)
+data ServiceAdmission = Serving Int | StoppingForUpdate deriving (Eq)
+data UpdateStop = UpdateBusy | UpdateStopping deriving (Eq)
+data Service = Service { serviceRoot :: FilePath, repositoryRoot :: FilePath, serviceGuard :: MVar (), serviceFileLock :: FileLock, serviceStopping :: IORef Bool, serviceAdmission :: TVar ServiceAdmission, serviceWorker :: MVar (Maybe (Async ())), serviceRuns :: MVar (Map RunId Run), serviceLease :: IORef (Maybe (AgentId, RunId)), serviceEndpoint :: IORef Text, servicePulse :: IORef Value, serviceActors :: MVar (Map ThreadId (Text,Maybe Text)), serviceDatabase :: MVar (Maybe Connection), serviceStates :: MVar (Map Text CachedAgentState)
  , serviceRevision :: TVar Integer, updateSubscribers :: TVar Int, snapshotFiles :: IORef (Set FilePath)
  , serviceTelemetry :: IORef (Maybe Telemetry.Telemetry), serviceCorporaId :: Text }
 
@@ -176,31 +167,38 @@ readJSON p def = do
  if exists then either (throwIO . userError) pure . eitherDecode =<< BL.readFile p else pure def
 atomicBytes :: FilePath -> BL.ByteString -> IO ()
 atomicBytes p bytes = do
- createDirectoryIfMissing True (takeDirectory p)
- bracketOnError (openBinaryTempFile (takeDirectory p) ".writing-") (\(f,h) -> do
+ let parent = takeDirectory p
+ createDirectoryIfMissing True parent
+ bracketOnError (openBinaryTempFile parent ".writing-") (\(f,h) -> do
   hClose h `catch` (\(_::IOException) -> pure ())
   removeFile f `catch` (\(_::IOException) -> pure ())) $ \(f,h) -> do
   BL.hPut h bytes
-  hFlush h
-#ifdef mingw32_HOST_OS
   hClose h
-  withCWString f $ \name -> bracket (syncOpen name 32770 0) (void . syncClose) $ \fd -> do
-   require (fd >= 0) 500 "Cannot open durable temporary file"
-   code <- syncCommit fd
-   require (code == 0) 500 "Cannot synchronize temporary file"
-  let replace attempt = renameFile f p `catch` \(e::IOException) ->
-       if isPermissionError e && attempt < (100::Int) then threadDelay 10000 >> replace (attempt+1) else throwIO e
-  replace 0
-#else
-  fd <- Posix.handleToFd h
-  Posix.fileSynchronise fd `finally` Posix.closeFd fd
-  renameFile f p
-  bracket (Posix.openFd (takeDirectory p) Posix.ReadOnly Posix.defaultFileFlags) Posix.closeFd Posix.fileSynchronise
-#endif
+  existing <- doesFileExist p
+  when existing (MigrationFiles.preserveAccess p f)
+  MigrationFiles.syncEntry False f
+  MigrationFiles.durableMove f p
+
 writeJSON :: ToJSON a => FilePath -> a -> IO ()
 writeJSON p = atomicBytes p . encode
 locked :: Service -> IO a -> IO a
 locked s = withMVar (serviceGuard s) . const
+requireAdmission :: Service -> IO ()
+requireAdmission s = do
+ admission <- readTVarIO (serviceAdmission s)
+ when (admission == StoppingForUpdate) $ failure 409 "Desktop update in progress"
+
+-- Covers requests that can mutate outside serviceGuard (onboarding, relay and telemetry).
+withAdmission :: Service -> IO a -> IO a
+withAdmission s = bracket_ enter leave
+ where
+ gate = serviceAdmission s
+ enter = atomically $ readTVar gate >>= \state -> case state of
+  Serving n -> writeTVar gate (Serving (n+1))
+  StoppingForUpdate -> throwSTM (APIError 409 "Desktop update in progress")
+ leave = atomically $ modifyTVar' gate $ \state -> case state of
+  Serving n -> Serving (n-1)
+  StoppingForUpdate -> StoppingForUpdate
 agentRoot :: Service -> Text -> FilePath
 agentRoot s a = serviceRoot s </> "agentpy/agents" </> T.unpack a
 workspaceRoot :: Service -> Text -> FilePath

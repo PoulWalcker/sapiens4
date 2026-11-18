@@ -39,9 +39,10 @@ data Routine = Routine
 instance FromJSON Routine where
  parseJSON = withObject "Scheduled Routine" $ \o -> do
   due <- o .: "nextDue" >>= maybe (fail "Invalid routine due time") pure . parseTime
-  count <- o .:? "runCount" .!= 0
+  count <- if KM.member "runCount" o then o .: "runCount" else pure 0
   unless (count >= 0) (fail "Invalid routine run count")
-  Routine <$> o .: "id" <*> o .: "owner" <*> o .: "prompt" <*> o .: "minutes" <*> pure due <*> pure count <*> o .:? "paused" .!= False <*> pure (foldr KM.delete o ["id","owner","prompt","minutes","runCount","paused"])
+  paused <- if KM.member "paused" o then o .: "paused" else pure False
+  Routine <$> o .: "id" <*> o .: "owner" <*> o .: "prompt" <*> o .: "minutes" <*> pure due <*> pure count <*> pure paused <*> pure (foldr KM.delete o ["id","owner","prompt","minutes","runCount","paused"])
 -- The persisted due-time spelling participates in deterministic occurrence IDs.
 -- Retain it until the deadline changes, including legacy fractional precision.
 instance ToJSON Routine where
@@ -56,10 +57,12 @@ initializeRoutines s = do
  routines <- DB.values s DB.ScheduledRoutines
  works <- DB.values s DB.Workloads
  groups <- DB.values s DB.Groups
- forM_ routines $ \r -> unless (has r "runCount") $ do
-  let group=findId (at r "owner") groups
-      count=case group of Just g->length [t | t<-items g "tasks",get t "routine"==get r "id"]; Nothing->length [w | w<-works,get (get w "origin") "routine"==get r "id"]
-  void (DB.saveRoutine s (merge r (obj [("runCount",num count),("paused",Bool (count>=1000))])))
+ forM_ routines $ \r -> do
+  void (decodeValue 500 r :: IO Routine)
+  unless (has r "runCount") $ do
+   let group=findId (at r "owner") groups
+       count=case group of Just g->length [t | t<-items g "tasks",get t "routine"==get r "id"]; Nothing->length [w | w<-works,get (get w "origin") "routine"==get r "id"]
+   void (DB.saveRoutine s (merge r (obj [("runCount",num count),("paused",Bool (count>=1000))])))
 data RoutineEdit = AddRoutine (Maybe Text) | EditRoutine Text (Maybe Int)
 data RoutineWrite = NewRoutine (Maybe Text) | ReviseRoutine Value
 data RoutineSelection = RoutineReplay Value | RoutineChange RoutineWrite

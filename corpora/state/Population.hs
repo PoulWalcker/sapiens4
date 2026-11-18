@@ -2,7 +2,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Population where
 
-import Control.Exception
 import Control.Monad
 import Data.Aeson hiding (pairs)
 import qualified Data.Map.Strict as Map
@@ -18,6 +17,8 @@ import System.Environment
 import System.FilePath
 import System.Info
 import Types
+import DataRoot (managedDataPath, safeId)
+import RuntimePaths (containedPath)
 import qualified Store as DB
 import Memo
 import Workspace (seedMemoBookmark)
@@ -29,7 +30,13 @@ retired s a = (/= Null) . (`get` "retired_at") <$> settings s a
 requireActive :: Service -> Text -> IO ()
 requireActive s a = DB.agent s a >> retired s a >>= \r -> require (not r) 409 "This Sapi is retired. Ask the chief to rehire it before assigning or running work."
 directory :: Service -> IO Value
-directory s = readJSON (serviceRoot s </> "agentpy/corpora/directory.json") empty
+directory s = do
+ entries <- readJSON (serviceRoot s </> "agentpy/corpora/directory.json") Map.empty :: IO (Map.Map Text Object)
+ forM_ (Map.elems entries) $ \entry -> case get (Object entry) "parent" of
+  Null -> pure ()
+  String _ -> pure ()
+  _ -> failure 500 "Invalid saved Sapi manager"
+ pure (toJSON entries)
 saveDirectory :: Service -> Value -> IO ()
 saveDirectory s = writeJSON (serviceRoot s </> "agentpy/corpora/directory.json")
 resolve :: Service -> Text -> Bool -> IO Text
@@ -71,27 +78,43 @@ assignManager s a parent = do
  saveDirectory s (put a (put "parent" parent entry) d)
  when (old /= parent) $ DB.record s [a] a "sapi.manager.changed" (obj [("previous",old),("manager",parent)]) "admin" Nothing
 ensureAgent :: Service -> Value -> IO ()
-ensureAgent s row = do
+ensureAgent s row = migrateAgent s row >> setManifests s row
+
+migrateAgent :: Service -> Value -> IO ()
+migrateAgent s row = do
+ validateAgentPaths s row
  let a = at row "id"; root = agentRoot s a; work = workspaceRoot s a; p = root </> "state.json"
- createDirectoryIfMissing True work
- ensureMemo work (at row "name") (at row "role") `catch` (\(_::APIError) -> pure ())
- seedMemoBookmark s a
  v <- readJSON p Null
  require (get v "schema_version" `elem` map num [1,2,3]) 500 "Unsupported agent state schema"
  require (at v "agid" == a) 500 "Agent ID does not match saved state"
+ case get v "initial_manager" of
+  Null -> pure ()
+  String _ -> pure ()
+  _ -> failure 500 "Invalid saved Sapi manager"
+ migrated <- if get v "schema_version" == num 3 then decodeValue 500 v else validated (migrateAgentState (int (get v "schema_version")) v)
  when (int (get v "schema_version") < 3) $ do
-  let version = int (get v "schema_version"); backup = root </> ("legacy-state-v" ++ show version ++ ".json")
-  migrated <- validated (migrateAgentState version v)
-  backed <- doesFileExist backup
-  unless backed $ copyFile p backup
   saveState s a migrated
+ createDirectoryIfMissing True work
+ ensureMemo work (at row "name") (at row "role")
+ seedMemoBookmark s a
  d <- directory s
- unless (has d a) $ saveDirectory s (put a (obj [("parent",get v "initial_manager"),("scope",str "")]) d)
+ let entry = get d a `fallback` obj [("scope",str "")]
+ unless (has entry "parent") $ saveDirectory s (put a (put "parent" (get v "initial_manager") entry) d)
  when (get v "schema_version"==num 3 && has v "initial_manager") $
   writeJSON p (remove ["initial_manager"] v)
- setManifests s row
+
+validateAgentPaths :: Service -> Value -> IO ()
+validateAgentPaths s row = do
+ let a = at row "id"; root = serviceRoot s; home = agentRoot s a; work = workspaceRoot s a
+     archive = root </> "agentpy/corpora/archive" </> T.unpack a
+ require (safeId a) 500 "Invalid saved Sapi identity"
+ mapM_ (managedDataPath root) [home </> "state.json",work]
+ forM_ ([archive,archive </> "turns",work </> "Notes.history.json"] ++
+        [home </> "manifests" </> name | name <- ["identity.md","computer-use.md","corpora-scope.md"]]) $ void . containedPath root
+
 setManifests :: Service -> Value -> IO ()
 setManifests s row = do
+ validateAgentPaths s row
  let a = at row "id"; root = agentRoot s a </> "manifests"
  identity <- prompt s "identity"
  writeText (root </> "identity.md") (render identity [(k,at row k) | k <- ["name","role","face"]])

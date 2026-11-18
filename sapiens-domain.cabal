@@ -17,7 +17,10 @@ common runtime
     sqlite-simple, filelock, uuid, base64-bytestring, network-uri, regex-tdfa,
     http-client, http-client-tls, http-types, network, wai, warp, wai-websockets,
     websockets, wuss, cryptohash-sha256, random, tagsoup ==0.14.8
-  if !os(windows)
+  if os(windows)
+    build-depends: Win32
+    extra-libraries: advapi32
+  else
     build-depends: unix
 
 executable sapiens-domain
@@ -33,12 +36,16 @@ common host
   other-modules:
     Command,
     Domain,
+    Installation,
     RuntimePaths,
     Telemetry,
     TelemetryDevice,
     TelemetryWire,
     Paths_sapiens_domain,
     DataRoot,
+    SQLiteSchema,
+    MigrationFiles,
+    MigrationBackup,
     Assets,
     BuildUI,
     Computer,
@@ -95,13 +102,18 @@ executable sapiens-macos
   hs-source-dirs: environments/macos, environments, corpora/state, corpora/telemetry
   other-modules:
     Domain,
+    Installation,
     RuntimePaths,
     Telemetry,
     TelemetryDevice,
     TelemetryWire,
     Paths_sapiens_domain,
     DataRoot,
+    SQLiteSchema,
+    MigrationFiles,
     DesktopStorage,
+    DesktopUpdate,
+    MigrationBackup,
     Types,
     Application,
     Browser,
@@ -119,13 +131,18 @@ common windows-host
   import: runtime
   other-modules:
     Domain,
+    Installation,
     RuntimePaths,
     Telemetry,
     TelemetryDevice,
     TelemetryWire,
     Paths_sapiens_domain,
     DataRoot,
+    SQLiteSchema,
+    MigrationFiles,
     DesktopStorage,
+    DesktopUpdate,
+    MigrationBackup,
     Types,
     Browser,
     Host,
