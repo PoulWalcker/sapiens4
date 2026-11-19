@@ -29,9 +29,9 @@ private def approvePairing (authority device : Host) (pairing peer : Json) : IO 
 
 def approveOneDeviceThenRevokeItsMailbox : IO Unit := withRelay fun relay admin =>
   IO.FS.withTempDir fun authorityDir => IO.FS.withTempDir fun deviceDir => do
-    withCryptoHost authorityDir fun authority => do
+    withHost authorityDir fun authority => do
       let marker := "UnlistedReviewer"
-      discard <| authority.agent marker
+      let owner ← authority.agent marker
       let identity ← IO.ofExcept <| stringField (← authority.api "GET" "/api/corpora") "id"
       let qr ← invitationFor authority relay admin
       let mailbox ← IO.ofExcept <| stringField qr "room"
@@ -49,7 +49,7 @@ def approveOneDeviceThenRevokeItsMailbox : IO Unit := withRelay fun relay admin 
         requireThat "discovery leaked private data" ([marker, admin, token, secret].all (!discover.body.contains ·))
         requireThat "invitation exposed relay administration" (!qr.compress.contains admin)
       let route := "/api/host/corpora/" ++ identity
-      withCryptoHost deviceDir fun device => do
+      withHost deviceDir fun device => do
         let (pairing, pending) ← requestPairing authority device qr
         let registry := do IO.ofExcept <| (← device.api "GET" "/api/host").getObjVal? "corpora"
         let before ← registry
@@ -76,15 +76,34 @@ def approveOneDeviceThenRevokeItsMailbox : IO Unit := withRelay fun relay admin 
             (← after.getObjVal? "fingerprint") [marker, admin, token, secret]
         let hidden ← request relay "GET" discoveryPath
         IO.ofExcept <| requireThat "paired device remained discoverable" (hidden.status == 404)
-      withCryptoHost deviceDir fun device => do
+      withHost deviceDir fun device => do
         let saved ← device.api "GET" (route ++ "/api/corpora")
         IO.ofExcept <| fieldsMatch saved (json% {id: $(identity)})
+        let message := "Review release readiness through the remote host"
+        let replies ← mcpSession device.url #[
+          tool 1 "send" (json% {corpora: $(identity), sapi: $(owner), text: $(message)}),
+          tool 2 "chat" (json% {corpora: $(identity), sapi: $(owner), limit: 1, wait: 30})]
+        let turnId ← IO.ofExcept do
+          let submitted ← toolBody replies[0]!
+          let turnId ← submitted.getObjVal? "id"
+          let turn ← uniqueRecord (← toolBody replies[1]!) "id" turnId
+          fieldsMatch turn (json% {input: $(message), output: "The review is ready.", status: "done"})
+          return turnId
+        IO.ofExcept <| fieldsMatch (← authority.awaitTurn turnId "done")
+          (json% {agent: $(owner), input: $(message), output: "The review is ready."})
         let revoked ← authority.api "POST" "/api/remote/revoke" (json% {})
         IO.ofExcept <| fieldsMatch revoked (json% {revoked: true, relay_deleted: true})
+        let beforeTurns ← IO.ofExcept <| (← authority.state).getObjVal? "turns"
+        let refused ← mcpSession device.url #[
+          tool 1 "send" (json% {corpora: $(identity), sapi: $(owner), text: "Do not execute after revocation"})]
+        let afterTurns ← IO.ofExcept <| (← authority.state).getObjVal? "turns"
+        IO.ofExcept do
+          fieldsMatch (refused[0]!.getObjValD "result") (json% {isError: true})
+          requireThat "revoked MCP command created work" (afterTurns == beforeTurns)
         let before ← authority.api "GET" "/api/corpora"
         let denied ← request relay "GET" ("/api/rooms/" ++ mailbox ++ "/messages") none #[s!"Authorization: Bearer {token}"]
         IO.ofExcept <| verifyDenial "revoked mailbox" 401 denied before (← authority.api "GET" "/api/corpora") [marker, admin, token, secret]
-    withCryptoHost authorityDir fun authority => do
+    withHost authorityDir fun authority => do
       IO.ofExcept <| fieldsMatch (← authority.api "GET" "/api/remote") (json% {paired: false, enabled: false, invitation: null})
 
 def withdrawConsentBeforeTheOtherDeviceApproves : IO Unit := withRelay fun relay admin =>

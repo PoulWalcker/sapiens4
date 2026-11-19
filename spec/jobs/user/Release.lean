@@ -23,30 +23,6 @@ def retainModelSettingsAcrossRestart : IO Unit := IO.FS.withTempDir fun director
     IO.ofExcept <| fieldsMatch inherited (json% {defaults: $(defaults), overrides: {}})
     discard <| host.completedMessage owner "Use the corpora default again"
 
-private def mcpSession (url : String) (requests : Array Json) : IO (Array Json) := do
-  let root ← repoRoot
-  let handshake := json% {jsonrpc: "2.0", id: 0, method: "initialize", params: {
-    protocolVersion: "2025-11-25", capabilities: {}, clientInfo: {name: "spec", version: "1"}}}
-  let input := String.intercalate "\n" ((#[handshake] ++ requests).toList.map Json.compress) ++ "\n"
-  let output ← IO.Process.output {cmd := (binary root "sapiens4").toString, args := #["mcp", "--url", url], cwd := root} (some input)
-  unless output.exitCode == 0 do throw <| IO.userError s!"MCP failed: {output.stderr}"
-  let replies ← IO.ofExcept <| (output.stdout.trimAscii.toString.splitOn "\n").toArray.mapM Json.parse
-  IO.ofExcept do
-    requireThat "missing MCP replies" (replies.size == requests.size + 1)
-    fieldsMatch (replies[0]!.getObjValD "result") (json% {protocolVersion: "2025-11-25"})
-    for index in [:replies.size] do
-      fieldsMatch replies[index]! (json% {id: $(index)})
-  return replies.extract 1 replies.size
-
-private def tool (id : Nat) (name : String) (arguments : Json := json% {}) : Json :=
-  json% {jsonrpc: "2.0", id: $(id), method: "tools/call", params: {name: $(name), arguments: $(arguments)}}
-
-private def toolBody (reply : Json) : Except String Json := do
-  let result ← reply.getObjVal? "result"
-  fieldsMatch result (json% {isError: false})
-  let content ← result.getObjValAs? (Array Json) "content"
-  Json.parse (← stringField content[0]! "text")
-
 def completeWorkThroughMcp : IO Unit := IO.FS.withTempDir fun directory => do
   withHost directory fun host => do
     let owner ← host.chief

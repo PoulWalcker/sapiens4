@@ -31,12 +31,12 @@ def headlessJobs : List Job := [
   ("Retain attachment and file ownership", SystemJobs.keepFilePreviewsAndAttachmentsWithTheirOwner),
   ("Scope and lifecycle authority across retries", Founder.retainControlOverScopeAndSuspendedWork),
   ("Corpora and draft isolation across restart", SystemJobs.keepLocalCorporaSeparateAcrossRestart),
-  ("Cancelled audio cleanup and stale retries", SystemJobs.eraseCancelledVoiceDraftsAcrossRestart)]
+  ("Cancelled audio cleanup and stale retries", SystemJobs.eraseCancelledVoiceDraftsAcrossRestart),
+  ("Headless remote MCP pairing, work and revocation", Founder.approveOneDeviceThenRevokeItsMailbox)]
 def browserJobs : List Job := [
   ("Browser bindings, crypto and onboarding", SystemJobs.preserveBrowserApplicationBehavior),
   ("Deduplicate remote work across restart", Founder.processRedeliveredRemoteWorkOnce),
-  ("Consent withdrawal before pairing approval", Founder.withdrawConsentBeforeTheOtherDeviceApproves),
-  ("Remote device approval, reconnection and revocation", Founder.approveOneDeviceThenRevokeItsMailbox)]
+  ("Consent withdrawal before pairing approval", Founder.withdrawConsentBeforeTheOtherDeviceApproves)]
 
 def desktopJobs : List Job := [
   ("Desktop messaging and reply persistence", User.sendAndReadOneDesktopReply),

@@ -32,12 +32,12 @@ def fixtureEnvironment (directory : FilePath) : IO (Array (String × Option Stri
   return #[("SAPIENS_TEST_PROMPTS", (directory / "fixture-prompts").toString), ("SAPIENS_CODEX_BINARY", provider.toString),
     ("SAPIENS_REPOSITORY", (root / ".build/spec").toString), ("SAPIENS_WHISPER_URL", "http://127.0.0.1:9")]
 
-def withHost (directory : FilePath) (use : Host → IO α) : IO α := do
+def withHost (directory : FilePath) (use : Host → IO α) : IO α := IO.FS.withTempDir fun config => do
   let root ← repoRoot
   let child ← IO.Process.spawn {
     cmd := (binary root "sapiens4").toString
-    args := #["--desktop", "--port", "0", "--data-dir", directory.toString]
-    cwd := root, env := ← fixtureEnvironment directory, stdin := .piped, stdout := .piped }
+    args := #["--desktop", "--port", "0", "--data-dir", directory.toString, "--telemetry-consent", "false"]
+    cwd := root, env := (← fixtureEnvironment directory).push ("SAPIENS_CONFIG_DIR", some config.toString), stdin := .piped, stdout := .piped }
   try
     let greeting ← IO.asTask child.stdout.getLine .dedicated
     let line ← untilSome "host startup" do
@@ -107,5 +107,29 @@ def Host.awaitTurn (host : Host) (turnId : Json) (expected : String) : IO Json :
 
 def Host.completedMessage (host : Host) (owner message : String) : IO Json := do
   host.awaitTurn (← host.submit owner message) "done"
+
+def mcpSession (url : String) (requests : Array Json) : IO (Array Json) := do
+  let root ← repoRoot
+  let handshake := json% {jsonrpc: "2.0", id: 0, method: "initialize", params: {
+    protocolVersion: "2025-11-25", capabilities: {}, clientInfo: {name: "spec", version: "1"}}}
+  let input := String.intercalate "\n" ((#[handshake] ++ requests).toList.map Json.compress) ++ "\n"
+  let output ← IO.Process.output {cmd := (binary root "sapiens4").toString, args := #["mcp", "--url", url], cwd := root} (some input)
+  unless output.exitCode == 0 do throw <| IO.userError s!"MCP failed: {output.stderr}"
+  let replies ← IO.ofExcept <| (output.stdout.trimAscii.toString.splitOn "\n").toArray.mapM Json.parse
+  IO.ofExcept do
+    requireThat "missing MCP replies" (replies.size == requests.size + 1)
+    fieldsMatch (replies[0]!.getObjValD "result") (json% {protocolVersion: "2025-11-25"})
+    for index in [:replies.size] do
+      fieldsMatch replies[index]! (json% {id: $(index)})
+  return replies.extract 1 replies.size
+
+def tool (id : Nat) (name : String) (arguments : Json := json% {}) : Json :=
+  json% {jsonrpc: "2.0", id: $(id), method: "tools/call", params: {name: $(name), arguments: $(arguments)}}
+
+def toolBody (reply : Json) : Except String Json := do
+  let result ← reply.getObjVal? "result"
+  fieldsMatch result (json% {isError: false})
+  let content ← result.getObjValAs? (Array Json) "content"
+  Json.parse (← stringField content[0]! "text")
 
 end Spec
