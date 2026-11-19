@@ -5,6 +5,7 @@ import qualified Telemetry
 import Crypto
 import Transport
 import Control.Concurrent.MVar
+import Control.Concurrent.STM (atomically, isEmptyTMVar)
 import Control.Concurrent.Async (AsyncCancelled)
 import Control.Exception
 import Control.Monad
@@ -17,6 +18,7 @@ import Data.Text (Text)
 import qualified Data.UUID as UUID
 import System.Info
 import System.Environment
+import System.Timeout (timeout)
 
 
 data ClientTransport = Disconnected | Connected Text SocketClient
@@ -37,7 +39,9 @@ exchange c payload duration = withMVar (clientGuard c) $ \_ -> do
  currentSocket <- readMVar (clientSocket c)
  connection <- case currentSocket of
   Disconnected -> newId
-  Connected identity _ -> pure identity
+  Connected identity socket -> do
+   alive <- atomically (isEmptyTMVar (socketEnded socket))
+   if alive then pure identity else closeClient c >> newId
  ident <- newId
  time <- seconds
  hostname <- maybe "" T.pack <$> lookupEnv "HOSTNAME"
@@ -51,34 +55,44 @@ exchange c payload duration = withMVar (clientGuard c) $ \_ -> do
              ("device_info",obj [("name",str hostname),("platform",str (T.pack os)),("client",str "Sapiens4 desktop")])] ++ [("telemetry_context",toJSON context) | at payload "kind"=="pair"])) outgoing
  frame <- pack (get config "private") (get config "desktop") (at config "room") PhoneToDesktop body
  let transport action = action `catch` \(APIError _ message) -> ioError (userError $ T.unpack message)
-     unreachable (errorValue::SomeException) = case fromException errorValue :: Maybe SomeAsyncException of
+     unreachable again (errorValue::SomeException) = case fromException errorValue :: Maybe SomeAsyncException of
       Just _ -> throwIO errorValue
       Nothing -> case fromException errorValue :: Maybe AsyncCancelled of
        Just _ -> throwIO errorValue
-       Nothing -> closeClient c >> failure 503 "This device is unreachable. Try again later."
- (do
-  socket <- transport $ modifyMVar (clientSocket c) $ \existing -> case existing of
-   Connected _ socket -> pure (existing,socket)
-   Disconnected -> do
-    socket <- openSocket config
-    pure (Connected connection socket,socket)
-  nowRevoked <- readIORef (clientRevoked c)
-  when nowRevoked (closeClient c >> failure 410 "Remote connection was revoked")
-  void $ transport $ socketCall socket (SendFrame frame)
-  let wait = do
-       nowTime <- seconds
-       unless (nowTime < time+duration) $ ioError (userError "Host did not respond")
-       incoming <- transport (socketReceive socket)
-       case incoming of
-        Nothing -> wait
-        Just item -> do
-         decoded <- try (unpack (get config "private") (get config "desktop") (at config "room") DesktopToPhone (get item "frame"))
-         void $ transport $ socketCall socket (AckMessage (get item "id"))
-         case responseDecision ident decoded of
-          IgnoreResponse -> wait
-          AcceptResponse result -> pure result
-          RejectResponse reason -> failure 409 reason
-  wait) `catches` [Handler (\(e::APIError) -> throwIO e),Handler unreachable]
+       Nothing -> do
+        closeClient c
+        nowRevoked <- readIORef (clientRevoked c)
+        require (not nowRevoked) 410 "Remote connection was revoked"
+        nowTime <- seconds
+        if again && nowTime < time+duration then attempt False
+         else failure 503 "This device is unreachable. Try again later."
+     attempt again = (do
+      socket <- transport $ modifyMVar (clientSocket c) $ \existing -> case existing of
+       Connected _ socket -> pure (existing,socket)
+       Disconnected -> do
+        socket <- openSocket config
+        pure (Connected connection socket,socket)
+      nowRevoked <- readIORef (clientRevoked c)
+      when nowRevoked (closeClient c >> failure 410 "Remote connection was revoked")
+      void $ transport $ socketCall socket (SendFrame frame)
+      let wait = do
+           nowTime <- seconds
+           unless (nowTime < time+duration) $ ioError (userError "Host did not respond")
+           incoming <- transport (socketReceive socket)
+           case incoming of
+            Nothing -> wait
+            Just item -> do
+             decoded <- try (unpack (get config "private") (get config "desktop") (at config "room") DesktopToPhone (get item "frame"))
+             void $ transport $ socketCall socket (AckMessage (get item "id"))
+             case responseDecision ident decoded of
+              IgnoreResponse -> wait
+              AcceptResponse result -> pure result
+              RejectResponse reason -> failure 409 reason
+      wait) `catches` [Handler (\(e::APIError) -> throwIO e),Handler (unreachable again)]
+ nowTime <- seconds
+ result <- timeout (max 0 (ceiling ((time+duration-nowTime)*1000000))) (attempt True) `onException` closeClient c
+ maybe (closeClient c >> failure 503 "This device is unreachable. Try again later.") pure result
+
 data ResponseDecision = IgnoreResponse | AcceptResponse Value | RejectResponse Text
 responseDecision :: Text -> Either APIError Value -> ResponseDecision
 responseDecision identity decoded = case decoded of
