@@ -6,7 +6,6 @@ import jobs.user.Release
 import jobs.system.Access
 import jobs.system.PrivateData
 import jobs.system.Recovery
-import jobs.system.RemoteCrypto
 import jobs.system.Browser
 import jobs.founder.Governance
 import jobs.founder.DeviceConsent
@@ -35,8 +34,6 @@ def headlessJobs : List Job := [
   ("Cancelled audio cleanup and stale retries", SystemJobs.eraseCancelledVoiceDraftsAcrossRestart)]
 def browserJobs : List Job := [
   ("Browser bindings, crypto and onboarding", SystemJobs.preserveBrowserApplicationBehavior),
-  ("Remote crypto requires an open browser", SystemJobs.requireAnOpenBrowserForRemoteCrypto),
-  ("Resume remote work after reopening", Founder.resumeRemoteWorkWhenBrowserReopens),
   ("Deduplicate remote work across restart", Founder.processRedeliveredRemoteWorkOnce),
   ("Consent withdrawal before pairing approval", Founder.withdrawConsentBeforeTheOtherDeviceApproves),
   ("Remote device approval, reconnection and revocation", Founder.approveOneDeviceThenRevokeItsMailbox)]

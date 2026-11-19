@@ -68,7 +68,6 @@ foreign import decodeURI :: String -> String
 foreign import base64Encode :: String -> String
 foreign import base64Decode :: String -> Json
 foreign import byteKey :: Json -> String
-foreign import startHostCrypto :: Effect (Promise Unit)
 foreign import byteLength :: String -> Int
 foreign import parseTime :: String -> Number
 foreign import formatDate :: String -> Json -> String -> String

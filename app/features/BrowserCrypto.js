@@ -12,4 +12,4 @@ export const sealBytes = message => nonce => peer => secret => { try { return gl
 export const openBytes = message => nonce => peer => secret => { try { return globalThis.RemoteVendor.nacl.box.open(message,nonce,peer,secret); } finally { secret.fill(0); } };
 export const attemptValue = action => { try { return action(); } catch { return null; } };
 export const failValue = message => { throw new Error(message); };
-export const publish = api => () => { globalThis.SapiensCrypto=Object.freeze({keyPair:api.keyPair,publicKey:api.publicKey,randomBytes:n=>api.randomBytes(n)(),box:(t,n,p,s)=>api.box(t)(n)(p)(s),unbox:(t,n,p,s)=>api.unbox(t)(n)(p)(s),perform:(op,input)=>api.perform(op)(input)(),startHost:api.startHost}); };
+export const publish = api => () => { globalThis.SapiensCrypto=Object.freeze({keyPair:api.keyPair,publicKey:api.publicKey,randomBytes:n=>api.randomBytes(n)(),box:(t,n,p,s)=>api.box(t)(n)(p)(s),unbox:(t,n,p,s)=>api.unbox(t)(n)(p)(s),perform:(op,input)=>api.perform(op)(input)()}); };

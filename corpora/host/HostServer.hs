@@ -13,7 +13,6 @@ import qualified Service as Service
 import Assets
 import HTTP
 import Bridge
-import BrowserCrypto
 import Registry
 import qualified Onboarding as O
 import Voice (startTranscriber)
@@ -28,7 +27,7 @@ import Data.IORef
 import qualified Data.Map.Strict as M
 import Data.Aeson (encode,Value(..))
 import System.Directory (getModificationTime)
-import Network.Wai.Handler.WebSockets (websocketsOr, isWebSocketsReq)
+import Network.Wai.Handler.WebSockets (websocketsOr)
 import qualified Network.WebSockets as WS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -66,14 +65,13 @@ startHost consent root port preparing = mask $ \restore -> do
        Just _ -> pure ()
        Nothing -> Telemetry.openTelemetry context consent >>= writeIORef reporter . Just
      closeReporter = readIORef reporter >>= mapM_ Telemetry.closeTelemetry
- browser <- newBrowserCrypto
  unless preparing startReporter
- (assigned,host) <- restore (openLocal gate reporter browser (not preparing) choice root port False) `onException` closeReporter
+ (assigned,host) <- restore (openLocal gate reporter (not preparing) choice root port False) `onException` closeReporter
  let service = registryService (localRegistry host)
      activate = do
       assertDataAvailable (serviceRoot service)
       startReporter
-      openedHosts host >>= mapM_ startLocal
+      startLocal host
       openAdmission gate
      prepare = do
       closeAdmission gate
@@ -91,8 +89,8 @@ startHost consent root port preparing = mask $ \restore -> do
       pure (not occupied)
  pure (Host assigned service (stopLocal host `finally` closeReporter) activate busyHosts (quiesce `onException` openAdmission gate) (openAdmission gate) prepare)
 
-openLocal :: Admission -> IORef (Maybe Telemetry.Telemetry) -> BrowserCrypto -> Bool -> StorageChoice -> FilePath -> Int -> Bool -> IO (Int,LocalHost)
-openLocal gate reporterRef browser startWorkers choice root requested managed = do
+openLocal :: Admission -> IORef (Maybe Telemetry.Telemetry) -> Bool -> StorageChoice -> FilePath -> Int -> Bool -> IO (Int,LocalHost)
+openLocal gate reporterRef startWorkers choice root requested managed = do
  mode <- lookupEnv "SAPIENS_STORAGE_MODE"
  let report phase = when (not managed && mode `elem` [Just "new",Just "existing"]) (putStrLn phase)
  report openingStorage
@@ -106,11 +104,11 @@ openLocal gate reporterRef browser startWorkers choice root requested managed = 
   (socket,port) <- listenLoopback requested
   flip onException (Socket.close socket) $ do
    Service.attachEndpoint service ("http://127.0.0.1:"<>T.pack (show port))
-   bridge <- newBridge browser service
+   bridge <- newBridge service
    activated <- newMVar False
    let child selection path = do
         running <- readMVar activated
-        snd <$> openLocal gate reporterRef browser running selection path 0 True
+        snd <$> openLocal gate reporterRef running selection path 0 True
    registry <- newRegistry service bridge child
    onboarding <- if managed then pure Nothing else Just <$> O.openOnboarding (repositoryRoot service)
    shutdown <- newEmptyMVar
@@ -121,6 +119,7 @@ openLocal gate reporterRef browser startWorkers choice root requested managed = 
    heartbeat <- newMVar Nothing
    transcriber <- newMVar (pure ())
    let activate = modifyMVar_ activated $ \done -> if done then pure True else do
+        Service.prepareService service
         startRegistry registry
         Service.startService service
         unless managed $ do
@@ -131,6 +130,7 @@ openLocal gate reporterRef browser startWorkers choice root requested managed = 
           threadDelay (floor (nominalDiffTimeToSeconds Telemetry.heartbeatInterval * 1000000))
           forM_ reporter $ \telemetry -> Telemetry.emit telemetry Telemetry.PulseId Nothing KM.empty)
          modifyMVar_ heartbeat (const (pure (Just task)))
+        readIORef (registryLocals registry) >>= mapM_ startLocal
         startBridge bridge
         startTranscriber service >>= \stopVoice -> modifyMVar_ transcriber (const (pure stopVoice))
         pure True
@@ -147,7 +147,7 @@ openLocal gate reporterRef browser startWorkers choice root requested managed = 
         void (waitCatch worker)
         Socket.close socket
         pure True
-   (if startWorkers then Service.prepareService service >> activate else prepareRegistry registry) `onException` stop
+   (prepareRegistry registry >> when startWorkers activate) `onException` stop
    pure (port,LocalHost registry activate stop)
 localRequest :: Int -> Bool -> RequestHeaders -> Validation ()
 localRequest port write headers = do
@@ -160,19 +160,6 @@ localRequest port write headers = do
 
 application :: Service -> Bridge -> Maybe Registry -> Maybe O.Onboarding -> Int -> Application
 application service bridge registry onboarding port req respond
- | ["api","host","crypto"] <- pathInfo req = do
-    result <- try $ do
-     validated (localRequest port False (requestHeaders req))
-     require (requestMethod req == "GET" && B.null (rawQueryString req)) 403 "Local crypto endpoint required"
-     when (isWebSocketsReq req) $
-      require (lookup hOrigin (requestHeaders req) /= Nothing) 403 "Same-origin crypto window required"
-    case result of
-     Left (APIError code message) -> respond (jsonResponse code (obj [("error",str message)]))
-     Right () -> websocketsOr WS.defaultConnectionOptions
-      {WS.connectionMessageDataSizeLimit=WS.SizeLimit 24000000,WS.connectionFramePayloadSizeLimit=WS.SizeLimit 24000000}
-      (cryptoSocket (bridgeCrypto bridge)) (\_ send -> do
-       connected <- browserConnected (bridgeCrypto bridge)
-       send (jsonResponse 200 (obj [("browser_crypto",Bool True),("connected",Bool connected)]))) req respond
  | ["api","host","corpora",owner,"api","updates"] <- pathInfo req = do
     let headers = requestHeaders req
     result <- try $ admitted service False $ do

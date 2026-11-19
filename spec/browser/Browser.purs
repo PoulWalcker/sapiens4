@@ -351,7 +351,6 @@ main = do
     messages <- Ref.new []
     w <- window
     set w "webkit" {messageHandlers: {browser: {postMessage: mkEffectFn1 \value -> Ref.modify_ (_ <> [value]) messages}}}
-    launchAff_ $ toAffE N.startHostCrypto
     N.listen "#spec-request" "input" $ const do
       raw <- property "#spec-request" "value"
       let request = D.parse $ D.str raw

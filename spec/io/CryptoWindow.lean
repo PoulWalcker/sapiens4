@@ -26,8 +26,6 @@ def withBrowserFixture (host : Host) (use : Desktop → CryptoWindow → IO α) 
       "--no-default-browser-check", "--disable-background-networking", "--disable-extensions",
       "--force-renderer-accessibility", "--app=" ++ host.url ++ "/workspace/#spec"] #[] fun desktop => do
       discard <| desktop.fixtureField "Fixture request"
-      discard <| untilSome "crypto connection" do
-        return if (← host.api "GET" "/api/host/crypto").getObjValD "connected" == toJson true then some () else none
       let serial ← IO.mkRef (0 : Nat)
       let call := fun (input : Json) => do
         serial.modify (· + 1)

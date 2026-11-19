@@ -117,8 +117,9 @@ hostMain root args = do
    if source then
     lookupEnv "SAPIENS_DATA_DIR" >>= maybe (pure (root</>".sapiens4")) (\path -> if null path then fail "SAPIENS_DATA_DIR must not be empty" else makeAbsolute path)
     else defaultDataDirectory
- void (asset root "/")
- void (asset root "/workspace/app.js")
+ when ("--desktop" `elem` args || "--open" `elem` args) $ do
+  void (asset root "/")
+  void (asset root "/workspace/app.js")
 #if defined(mingw32_HOST_OS) || defined(darwin_HOST_OS)
  preparing <- checkCandidateData directory
  config <- configDirectory

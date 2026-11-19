@@ -114,7 +114,7 @@ registryRoute registry identity method path input = do
     Just value -> pure value
     Nothing -> do
      reporter <- readIORef (serviceTelemetry (registryService registry))
-     value <- newClient (bridgeCrypto (registryBridge registry)) (get (get saved "remotes") identity) >>= \client -> pure client {clientTelemetry=reporter}
+     value <- newClient (get (get saved "remotes") identity) >>= \client -> pure client {clientTelemetry=reporter}
      modifyIORef' (registryClients registry) (M.insert identity value)
      pure value
    pure (RemoteTarget client)
@@ -227,7 +227,7 @@ canApprovePairing closed pending = not closed && maybe False (not . pairCancelle
 beginPair :: Registry -> Value -> IO Value
 beginPair registry input = do
  reporter <- readIORef (serviceTelemetry (registryService registry))
- client <- invitation (bridgeCrypto (registryBridge registry)) input >>= \value -> pure value {clientTelemetry=reporter}
+ client <- invitation input >>= \value -> pure value {clientTelemetry=reporter}
  identity <- newId
  config <- readMVar (clientConfig client)
  code <- confirmationCode (get input "desktop") (get config "public") (at input "room")

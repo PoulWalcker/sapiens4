@@ -39,6 +39,7 @@ common macos-update
 
 common host
   import: macos-update
+  build-depends: crypton, crypton-box
   hs-source-dirs: corpora, corpora/state, corpora/work, corpora/work/schedule, corpora/host, corpora/telemetry, remote/relay, remote/control, remote/protocol, build, environments/update
   other-modules:
     Command,
@@ -71,7 +72,6 @@ common host
     Bridge,
     Client,
     Crypto,
-    BrowserCrypto,
     Mailboxes,
     Registry,
     Receipt,

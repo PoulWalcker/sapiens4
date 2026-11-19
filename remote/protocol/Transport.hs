@@ -41,7 +41,7 @@ request relay path bearer method body = do
 data SocketClient = SocketClient { socketConnection :: WS.Connection, socketReader :: Async (), socketMessages :: TBQueue Value, socketResults :: TQueue Value, socketEnded :: TMVar SomeException, socketSerial :: IORef Int, socketGuard :: MVar () }
 
 openSocket :: Value -> IO SocketClient
-openSocket config = do
+openSocket config = mask $ \restore -> do
  relay <- parseRelayOrigin (get config "relay")
  let secure = relaySecure relay
      port = relayPort relay
@@ -71,8 +71,8 @@ openSocket config = do
        else atomically (writeTQueue results frame)
      connect = if secure then Wuss.runSecureClientWith host (fromIntegral port) "/api/socket" options headers application
                          else WS.runClientWith host port "/api/socket" options headers application
- worker <- async (connect `catch` \(e::SomeException) -> void (tryPutMVar ready (Left e)) >> atomically (void (tryPutTMVar ended e)))
- result <- timeout 6000000 (takeMVar ready)
+ worker <- async (restore connect `catch` \(e::SomeException) -> void (tryPutMVar ready (Left e)) >> atomically (void (tryPutTMVar ended e)))
+ result <- restore (timeout 6000000 (takeMVar ready)) `onException` cancel worker
  case result of
   Just (Right conn) -> pure (SocketClient conn worker messages results ended serial guard)
   Just (Left e) -> cancel worker >> throwIO e

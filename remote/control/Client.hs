@@ -3,7 +3,6 @@ module Client where
 import Types
 import qualified Telemetry
 import Crypto
-import BrowserCrypto
 import Transport
 import Control.Concurrent.MVar
 import Control.Concurrent.Async (AsyncCancelled)
@@ -21,9 +20,9 @@ import System.Environment
 
 
 data ClientTransport = Disconnected | Connected Text SocketClient
-data Client = Client { clientCrypto :: BrowserCrypto, clientConfig :: MVar Value, clientSocket :: MVar ClientTransport, clientGuard :: MVar (), clientRevoked :: IORef Bool, clientTelemetry :: Maybe Telemetry.Telemetry }
-newClient :: BrowserCrypto -> Value -> IO Client
-newClient browser config = Client browser <$> newMVar config <*> newMVar Disconnected <*> newMVar () <*> newIORef False <*> pure Nothing
+data Client = Client { clientConfig :: MVar Value, clientSocket :: MVar ClientTransport, clientGuard :: MVar (), clientRevoked :: IORef Bool, clientTelemetry :: Maybe Telemetry.Telemetry }
+newClient :: Value -> IO Client
+newClient config = Client <$> newMVar config <*> newMVar Disconnected <*> newMVar () <*> newIORef False <*> pure Nothing
 closeClient :: Client -> IO ()
 closeClient c = modifyMVar_ (clientSocket c) $ \transport -> do
  case transport of Disconnected -> pure (); Connected _ socket -> closeSocket socket
@@ -50,7 +49,7 @@ exchange c payload duration = withMVar (clientGuard c) $ \_ -> do
  context <- if at payload "kind"=="pair" then maybe (pure Nothing) Telemetry.nativeClientContext (clientTelemetry c) else pure Nothing
  let body = merge (obj ([("id",str ident),("expires",toJSON (time+duration)),("corpora_id",get (get config "corpora") "id"),("connection_id",str connection),
              ("device_info",obj [("name",str hostname),("platform",str (T.pack os)),("client",str "Sapiens4 desktop")])] ++ [("telemetry_context",toJSON context) | at payload "kind"=="pair"])) outgoing
- frame <- pack (clientCrypto c) (get config "private") (get config "desktop") (at config "room") PhoneToDesktop body
+ frame <- pack (get config "private") (get config "desktop") (at config "room") PhoneToDesktop body
  let transport action = action `catch` \(APIError _ message) -> ioError (userError $ T.unpack message)
      unreachable (errorValue::SomeException) = case fromException errorValue :: Maybe SomeAsyncException of
       Just _ -> throwIO errorValue
@@ -73,10 +72,7 @@ exchange c payload duration = withMVar (clientGuard c) $ \_ -> do
        case incoming of
         Nothing -> wait
         Just item -> do
-         decoded <- try (unpack (clientCrypto c) (get config "private") (get config "desktop") (at config "room") DesktopToPhone (get item "frame"))
-         case decoded of
-          Left err@(APIError 503 _) -> closeClient c >> throwIO err
-          _ -> pure ()
+         decoded <- try (unpack (get config "private") (get config "desktop") (at config "room") DesktopToPhone (get item "frame"))
          void $ transport $ socketCall socket (AckMessage (get item "id"))
          case responseDecision ident decoded of
           IgnoreResponse -> wait
@@ -108,12 +104,12 @@ validateInvitation time value = do
  void (decodeBase64 (get value "desktop") (Just 32))
  pure relay
 
-invitation :: BrowserCrypto -> Value -> IO Client
-invitation browser value = do
+invitation :: Value -> IO Client
+invitation value = do
  time <- seconds
  relay <- validated (validateInvitation time value)
- (private,public) <- keypair browser
- newClient browser (obj [("relay",str relay),("room",get value "room"),("token",get value "token"),("desktop",get value "desktop"),("private",str private),("public",str public)])
+ (private,public) <- keypair
+ newClient (obj [("relay",str relay),("room",get value "room"),("token",get value "token"),("desktop",get value "desktop"),("private",str private),("public",str public)])
 pairClient :: Client -> Value -> IO Value
 pairClient c value = do
  time <- seconds

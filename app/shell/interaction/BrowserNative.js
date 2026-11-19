@@ -54,7 +54,6 @@ const b64=b=>btoa(Array.from(b,x=>String.fromCharCode(x)).join(''));
 export const base64Encode = value => b64(new TextEncoder().encode(value));
 export const base64Decode = value => {try{return new TextDecoder().decode(bytes(value));}catch{return null;}};
 export const byteKey = value => typeof value==='string'?value:b64(bytes(value));
-export const startHostCrypto = () => SapiensCrypto.startHost();
 export const byteLength = value => {try{return bytes(value).length;}catch{return -1;}};
 export const parseTime = value => {const n=Date.parse(value);return Number.isFinite(n)?n:0;};
 export const formatDate = locale => options => value => {const d=new Date(value);return Number.isFinite(d.getTime())?d.toLocaleString(locale||undefined,options):'';};
