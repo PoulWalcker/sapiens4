@@ -98,7 +98,7 @@ openTelemetry runtime choice = do
  let context = HostContext (T.pack (showVersion version)) nativeOS (T.pack arch) runtime
  let telemetry = Telemetry saved file state active epoch queue flush Nothing context device request http
  mask $ \restore -> do
-  restore (forM_ choice (void . saveConsent False telemetry))
+  restore (forM_ choice (void . saveConsent telemetry))
   task <- asyncWithUnmask (\unmask -> unmask (sender telemetry))
   pure telemetry {senderThread=Just task}
 
@@ -158,13 +158,19 @@ disable telemetry reason = atomically $ do
  stopReporting telemetry
 
 setConsent :: Telemetry -> Bool -> IO (Either Text ())
-setConsent telemetry True = saveConsent True telemetry True
+setConsent telemetry True = do
+ saved <- saveConsent telemetry True
+ forM_ saved $ mapM_ $ \epoch -> (do
+  time <- floor <$> getPOSIXTime
+  row <- eventRecord time (TelemetryConsentChanged True)
+  enqueue telemetry epoch row) `catch` \(_::IOException) -> pure ()
+ pure (() <$ saved)
 setConsent telemetry False = mask $ \restore -> do
  sent <- try (restore (notifyConsentOff telemetry))
- saved <- saveConsent False telemetry False
+ saved <- saveConsent telemetry False
  case sent of
   Left (errorValue::SomeException) -> throwIO errorValue
-  Right () -> pure saved
+  Right () -> pure (() <$ saved)
 
 notifyConsentOff :: Telemetry -> IO ()
 notifyConsentOff telemetry = void $ timeout 1000000 $ do
@@ -177,8 +183,8 @@ notifyConsentOff telemetry = void $ timeout 1000000 $ do
    context <- batchContext telemetry auth
    sendBatch telemetry epoch auth (Batch context [row])
 
-saveConsent :: Bool -> Telemetry -> Bool -> IO (Either Text ())
-saveConsent explicit telemetry on = mask $ \restore -> do
+saveConsent :: Telemetry -> Bool -> IO (Either Text (Maybe Integer))
+saveConsent telemetry on = mask_ $ do
  requested <- atomically $ do
   unless on (stopReporting telemetry)
   readTVar (consentEpoch telemetry)
@@ -198,18 +204,12 @@ saveConsent explicit telemetry on = mask $ \restore -> do
      epoch <- readTVar (consentEpoch telemetry)
      if on && epoch /= requested then pure Nothing else do
       writeTVar (consent telemetry) (on && status/=Closed)
-      pure (Just (epoch,previous/=on && explicit))
+      pure (if previous/=on then Just epoch else Nothing)
     pure (updated,outcome))
   `onException` disable telemetry "Telemetry settings were not committed"
- case result of
-  Left (e::IOException) -> pure (Left (T.pack (displayException e)))
-  Right outcome -> do
-   restore $ forM_ outcome $ \(epoch,changed) -> when (changed && on) $ (do
-    time <- floor <$> getPOSIXTime
-    row <- eventRecord time (TelemetryConsentChanged True)
-    enqueue telemetry epoch row)
-    `catch` \(_::IOException) -> pure ()
-   pure (Right ())
+ pure $ case result of
+  Left (e::IOException) -> Left (T.pack (displayException e))
+  Right changed -> Right changed
 
 consentView :: Telemetry -> IO ConsentView
 consentView telemetry = atomically $ do
