@@ -235,7 +235,7 @@ httpApplication service bridge registry onboarding port req respond = respond =<
     reporter <- readIORef (serviceTelemetry service) >>= maybe (failure 503 "Telemetry configuration unavailable") pure
     on <- case get data_ "enabled" of Bool value -> pure value; _ -> failure 400 "Expected enabled boolean"
     saved <- Telemetry.setConsent reporter on
-    either (\(Telemetry.ConsentError message) -> failure 500 message) pure saved
+    either (failure 500) pure saved
     jsonResponse 200 . toJSON <$> Telemetry.consentView reporter
    ("POST",["","api","host","telemetry","heartbeat"]) -> do
     reporter <- readIORef (serviceTelemetry service)

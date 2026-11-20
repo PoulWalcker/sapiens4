@@ -34,8 +34,6 @@ data ClientContext = ClientContext
 heartbeatInterval :: NominalDiffTime
 heartbeatInterval = 60 * 60
 
-newtype ConsentError = ConsentError Text deriving (Eq, Show)
-
 newtype CorporaId = CorporaId Text deriving (Eq, Show)
 
 data AttachmentCounts = AttachmentCounts
