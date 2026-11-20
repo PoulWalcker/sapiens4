@@ -1,5 +1,5 @@
 module TelemetryWire
- ( Saved(..), ConsentView(..), encodeSaved, decodeSaved, decodeCredentials, encodeBatch, recordFits
+ ( Saved(..), ConsentView(..), encodeSaved, decodeSaved, decodeCredentials, encodeBatches, recordFits
  , parseClientContext, clientContextValue, parseHeartbeat
  ) where
 
@@ -16,7 +16,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.UUID as UUID
 import TelemetryModel
-import TelemetryProtocol (Credentials(..), requestByteLimit)
+import TelemetryProtocol (Credentials(..), batchLimit, requestByteLimit)
 
 data Saved = Saved Bool (Maybe Credentials)
 instance ToJSON Saved where
@@ -167,15 +167,20 @@ hostFields context =
  ["app_version" .= appVersion context,"host_os" .= osName (hostOS context),"host_arch" .= hostArch context
  ,"runtime_kind" .= (case hostRuntime context of Desktop -> "desktop"; Headless -> "headless" :: Text)]
 
-encodeBatch :: Batch -> Maybe BL.ByteString
-encodeBatch (Batch context events) =
- let body = encode $ object
-      ["context" .= object (hostFields (batchHost context) ++ ["installation_id" .= batchInstallation context] ++ deviceFields "host_" (batchDevice context))
-      ,"events" .= map recordValue events]
- in if BL.length body<=fromIntegral requestByteLimit then Just body else Nothing
+encodeBatch :: Batch -> BL.ByteString
+encodeBatch (Batch context events) = encode $ object
+ ["context" .= object (hostFields (batchHost context) ++ ["installation_id" .= batchInstallation context] ++ deviceFields "host_" (batchDevice context))
+ ,"events" .= map recordValue events]
 
-eventByteLimit :: Int
-eventByteLimit = 6 * 1024
+encodeBatches :: Batch -> [Either UUID.UUID BL.ByteString]
+encodeBatches (Batch _ []) = []
+encodeBatches batch@(Batch context events)
+ | length events<=batchLimit && BL.length body<=fromIntegral requestByteLimit = [Right body]
+ | otherwise = case events of
+    [record] -> [Left (eventId record)]
+    _ -> let (first,rest) = splitAt (length events `div` 2) events
+         in encodeBatches (Batch context first) ++ encodeBatches (Batch context rest)
+ where body = encodeBatch batch
 
 recordFits :: EventRecord -> Bool
-recordFits record = BL.length (encode (recordValue record))<=fromIntegral eventByteLimit
+recordFits record = BL.length (encode (recordValue record))<=fromIntegral requestByteLimit

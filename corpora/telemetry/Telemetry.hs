@@ -20,6 +20,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock.POSIX (getPOSIXTime)
+import Data.UUID (UUID)
 import qualified Data.UUID.V4 as UUID
 import Data.Version (showVersion)
 import Network.HTTP.Client hiding (path)
@@ -174,7 +175,7 @@ notifyConsentOff telemetry = void $ timeout 1000000 $ do
    time <- floor <$> getPOSIXTime
    row <- eventRecord time (TelemetryConsentChanged False)
    context <- batchContext telemetry auth
-   void (sendBatch telemetry epoch auth (Batch context [row]))
+   sendBatch telemetry epoch auth (Batch context [row])
 
 saveConsent :: Bool -> Telemetry -> Bool -> IO (Either Text ())
 saveConsent explicit telemetry on = mask $ \restore -> do
@@ -225,10 +226,17 @@ emit telemetry event = do
   eventRecord time event >>= enqueue telemetry epoch
 
 enqueue :: Telemetry -> Integer -> EventRecord -> IO ()
-enqueue telemetry epoch row = when (recordFits row) $ atomically $ do
+enqueue telemetry epoch row
+ | not (recordFits row) = logOversized (eventId row)
+ | otherwise = atomically $ do
   active <- permitted telemetry epoch
   queue <- readTVar (pendingEvents telemetry)
   when (active && Seq.length queue<queueLimit) (writeTVar (pendingEvents telemetry) (queue Seq.|> row))
+
+logOversized :: UUID -> IO ()
+logOversized identity = hPutStrLn stderr
+ ("Telemetry event "<>show identity<>" exceeds the "<>show requestByteLimit<>" byte request limit; dropped")
+ `catch` \(_::IOException) -> pure ()
 
 eventRecord :: Int64 -> Event -> IO EventRecord
 eventRecord time event = EventRecord <$> UUID.nextRandom <*> pure time <*> pure event
@@ -272,11 +280,17 @@ enroll :: Telemetry -> Integer -> IO (Delivery (Maybe Credentials))
 enroll telemetry epoch = post telemetry epoch enrollPath Nothing "{}" $ \body ->
  decodeCredentials <$> brReadSome body (fromIntegral requestByteLimit)
 
-sendBatch :: Telemetry -> Integer -> Credentials -> Batch -> IO (Delivery ())
-sendBatch telemetry epoch credentials batch = case encodeBatch batch of
- Nothing -> pure Unavailable
- Just body -> post telemetry epoch eventsPath (Just credentials) body $ \response ->
-  void (brReadSome response (fromIntegral requestByteLimit))
+sendBatch :: Telemetry -> Integer -> Credentials -> Batch -> IO ()
+sendBatch telemetry epoch credentials batch = send (encodeBatches batch)
+ where
+ send [] = pure ()
+ send (Left identity:rest) = logOversized identity >> send rest
+ send (Right body:rest) = do
+  result <- post telemetry epoch eventsPath (Just credentials) body $ \response ->
+   void (brReadSome response (fromIntegral requestByteLimit))
+  case result of
+   Rejected -> disableAt telemetry epoch "Telemetry authentication rejected until restart"
+   _ -> send rest
 
 credentialsFor :: Telemetry -> Integer -> IO (Maybe Credentials)
 credentialsFor telemetry epoch = do
@@ -313,8 +327,7 @@ sender telemetry = (forever $ do
   credentials <- credentialsFor telemetry epoch
   forM_ credentials $ \auth -> do
    context <- batchContext telemetry auth
-   result <- sendBatch telemetry epoch auth (Batch context batch)
-   when (case result of Rejected -> True; _ -> False) (disableAt telemetry epoch "Telemetry authentication rejected until restart"))
+   sendBatch telemetry epoch auth (Batch context batch))
  `catch` \(e::SomeException) -> case fromException e :: Maybe SomeAsyncException of
   Just _ -> throwIO e
   Nothing -> disable telemetry (T.pack (displayException e))
