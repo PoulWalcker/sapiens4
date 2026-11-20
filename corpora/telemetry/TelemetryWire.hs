@@ -10,12 +10,13 @@ import Data.Aeson.Types (Pair, parseMaybe)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
+import Data.List (find)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.UUID as UUID
 import TelemetryModel
-import TelemetryProtocol (Credentials(..), batchLimit, requestByteLimit)
+import TelemetryProtocol (Credentials(..), requestByteLimit)
 
 -- Persistence and HTTP representations stay here; the runtime keeps typed data.
 data Saved = Saved Bool (Maybe Credentials)
@@ -70,11 +71,21 @@ osName platform = case platform of
  IPadOS -> "ipados"
  UnknownOS -> "unknown"
 
--- Missing, malformed and future categories retain the protocol's "unknown" behavior.
-category :: a -> [(Text,a)] -> Value -> a
-category unknown choices value = case value of
- String name -> fromMaybe unknown (lookup name choices)
- _ -> unknown
+modeName :: UIMode -> Text
+modeName mode = case mode of
+ LocalUI -> "local"
+ RemoteControl -> "remote_control"
+ UnknownUIMode -> "unknown"
+
+targetName :: TargetLocation -> Text
+targetName target = case target of
+ LocalTarget -> "local"
+ RemoteTarget -> "remote"
+ UnknownTarget -> "unknown"
+
+parseCategory :: (Enum a, Bounded a) => (a -> Text) -> Value -> Maybe a
+parseCategory name (String value) = find ((==value) . name) [minBound..maxBound]
+parseCategory _ _ = Nothing
 
 field :: Key -> Object -> Value
 field key = fromMaybe Null . KM.lookup key
@@ -82,14 +93,13 @@ field key = fromMaybe Null . KM.lookup key
 parseClientContext :: Value -> Maybe ClientContext
 parseClientContext (Object fields) = Just (ClientContext kind family platform identity)
  where
- kind = category UnknownClient [("native",Native),("browser",Browser),("installed_webapp",InstalledWebApp)] (field "client_kind" fields)
- family = category UnknownFamily [("desktop",DesktopDevice),("phone",Phone),("tablet",Tablet)] (field "client_device_family" fields)
- platform = category UnknownOS [("windows",Windows),("macos",MacOS),("linux",Linux),("android",Android),("ios",IOS),("ipados",IPadOS)] (field "client_os" fields)
+ kind = fromMaybe UnknownClient (parseCategory clientKindName (field "client_kind" fields))
+ family = fromMaybe UnknownFamily (parseCategory familyName (field "client_device_family" fields))
+ platform = fromMaybe UnknownOS (parseCategory osName (field "client_os" fields))
  identity = do
   guard (kind==Native)
   String key <- pure (field "source_device_id" fields)
-  String name <- pure (field "source_device_id_source" fields)
-  source <- lookup name [(deviceSourceName value,value) | value <- [MacPlatformUUID,WindowsSMBIOSUUID,LinuxMachineID]]
+  source <- parseCategory deviceSourceName (field "source_device_id_source" fields)
   guard (T.length key==64 && T.all (`elem` ("0123456789abcdef"::String)) key)
   pure (DeviceIdentity source key)
 parseClientContext _ = Nothing
@@ -116,8 +126,8 @@ parseHeartbeat corpora context value@(Object fields) = do
  let selected = do
       String ident <- pure (field "corpora_id" fields)
       CorporaId . UUID.toText <$> UUID.fromText ident
-     mode = category UnknownUIMode [("local",LocalUI),("remote_control",RemoteControl)] (field "ui_mode" fields)
-     target = category UnknownTarget [("local",LocalTarget),("remote",RemoteTarget)] (field "target_location" fields)
+     mode = fromMaybe UnknownUIMode (parseCategory modeName (field "ui_mode" fields))
+     target = fromMaybe UnknownTarget (parseCategory targetName (field "target_location" fields))
  pure (HeartbeatDetails (corpora <|> selected) context mode target (parseMaybe parseJSON (field "timestamp" fields)))
 parseHeartbeat _ _ _ = Nothing
 
@@ -146,8 +156,6 @@ eventFields event = case event of
  named name fields = ("event_type" .= (name::Text)):fields
  scoped (CorporaId ident) fields = ("corpora_id" .= ident):fields
  transportName transport = case transport of Direct -> "direct"; Remote -> "remote"; UnknownTransport -> "unknown" :: Text
- modeName mode = case mode of LocalUI -> "local"; RemoteControl -> "remote_control"; UnknownUIMode -> "unknown" :: Text
- targetName target = case target of LocalTarget -> "local"; RemoteTarget -> "remote"; UnknownTarget -> "unknown" :: Text
 
 attachmentFields :: AttachmentCounts -> [Pair]
 attachmentFields counts =
@@ -160,13 +168,15 @@ hostFields context =
  ["app_version" .= appVersion context,"host_os" .= osName (hostOS context),"host_arch" .= hostArch context
  ,"runtime_kind" .= (case hostRuntime context of Desktop -> "desktop"; Headless -> "headless" :: Text)]
 
-encodeBatch :: Batch -> BL.ByteString
-encodeBatch (Batch context events) = encode $ object
- ["context" .= object (hostFields (batchHost context) ++ ["installation_id" .= batchInstallation context] ++ deviceFields "host_" (batchDevice context))
- ,"events" .= map recordValue events]
+encodeBatch :: Batch -> Maybe BL.ByteString
+encodeBatch (Batch context events) =
+ let body = encode $ object
+      ["context" .= object (hostFields (batchHost context) ++ ["installation_id" .= batchInstallation context] ++ deviceFields "host_" (batchDevice context))
+      ,"events" .= map recordValue events]
+ in if BL.length body<=fromIntegral requestByteLimit then Just body else Nothing
 
-recordFits :: HostContext -> EventRecord -> Bool
-recordFits context record = BL.length (encode (recordValue record))<=fromIntegral limit
- where
- -- Preserve the existing per-event budget, including room for installation/device context.
- limit = (requestByteLimit - fromIntegral (BL.length (encode (object ["context" .= object (hostFields context),"events" .= ([]::[Value])]))) - 384 - batchLimit) `div` batchLimit
+eventByteLimit :: Int
+eventByteLimit = 6 * 1024
+
+recordFits :: EventRecord -> Bool
+recordFits record = BL.length (encode (recordValue record))<=fromIntegral eventByteLimit

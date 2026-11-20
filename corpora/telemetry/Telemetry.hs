@@ -1,7 +1,7 @@
 module Telemetry
  ( Telemetry, RuntimeKind(..), Event(..), CorporaId(..), RequestDetails(..), AttachmentCounts(..)
  , RequestTransport(..), ClientContext, HeartbeatDetails
- , openTelemetry, openTelemetryWith, closeTelemetry, enabled, setConsent, consentView
+ , openTelemetry, closeTelemetry, enabled, setConsent, consentView
  , emit, heartbeatInterval, startupConsentOption, localClientContext, nativeClientContext
  ) where
 
@@ -54,7 +54,7 @@ data Pending = Pending { pendingAt :: Integer, pendingRecord :: EventRecord }
 data Telemetry = Telemetry
  { savedSettings :: MVar Saved, settingsPath :: Maybe FilePath, senderStatus :: TVar SenderStatus
  , consent :: TVar Bool, consentEpoch :: TVar Integer, pendingEvents :: TVar (Seq.Seq Pending), senderThread :: Maybe (Async ())
- , hostContext :: HostContext, nativeDevice :: TVar DeviceLookup, origin :: Maybe Request, manager :: IO Manager }
+ , hostContext :: HostContext, nativeDevice :: TVar DeviceLookup, origin :: Maybe Request, manager :: Manager }
 
 readSaved :: FilePath -> IO Saved
 readSaved path = catchJust (guard . isDoesNotExistError)
@@ -71,13 +71,7 @@ writeSaved path value = do
    renameFile temporary path
 
 openTelemetry :: RuntimeKind -> Maybe Bool -> IO Telemetry
-openTelemetry = openTelemetryUsing (newManager tlsManagerSettings)
-
-openTelemetryWith :: Manager -> RuntimeKind -> Maybe Bool -> IO Telemetry
-openTelemetryWith = openTelemetryUsing . pure
-
-openTelemetryUsing :: IO Manager -> RuntimeKind -> Maybe Bool -> IO Telemetry
-openTelemetryUsing create runtime choice = do
+openTelemetry runtime choice = do
  loaded <- try $ do
   path <- (</> "telemetry.json") <$> configDirectory
   value <- readSaved path
@@ -100,10 +94,7 @@ openTelemetryUsing create runtime choice = do
  state <- newTVarIO status
  queue <- newTVarIO Seq.empty
  device <- newTVarIO Unchecked
- connection <- newMVar Nothing
- let http = modifyMVar connection $ \cached -> do
-      value <- maybe create pure cached
-      pure (Just value,value)
+ http <- newManager tlsManagerSettings
  let context = HostContext (T.pack (showVersion version)) nativeOS (T.pack arch) runtime
  let telemetry = Telemetry saved file state active epoch queue Nothing context device request http
  mask $ \restore -> do
@@ -115,12 +106,12 @@ closeTelemetry :: Telemetry -> IO ()
 closeTelemetry telemetry = mask_ $ do
  atomically $ do
   writeTVar (senderStatus telemetry) Closed
-  invalidate telemetry False
+  stopReporting telemetry
  mapM_ cancel (senderThread telemetry)
 
-invalidate :: Telemetry -> Bool -> STM ()
-invalidate telemetry on = do
- writeTVar (consent telemetry) on
+stopReporting :: Telemetry -> STM ()
+stopReporting telemetry = do
+ writeTVar (consent telemetry) False
  modifyTVar' (consentEpoch telemetry) (+1)
  writeTVar (pendingEvents telemetry) Seq.empty
 
@@ -141,7 +132,7 @@ nativeClientContext :: Telemetry -> IO (Maybe ClientContext)
 nativeClientContext telemetry = atomically $ do
  active <- reporting telemetry
  cached <- readTVar (nativeDevice telemetry)
- let identity = case cached of Unchecked -> Nothing; Checked value -> value
+ let identity = cachedIdentity cached
  pure (if active then Just (ClientContext Native DesktopDevice nativeOS identity) else Nothing)
 
 localClientContext :: Telemetry -> Maybe ClientContext -> IO (Maybe ClientContext)
@@ -151,15 +142,19 @@ localClientContext telemetry value = case value of
   active <- enabled telemetry
   pure (if active then context else Nothing)
 
+cachedIdentity :: DeviceLookup -> Maybe DeviceIdentity
+cachedIdentity Unchecked = Nothing
+cachedIdentity (Checked identity) = identity
+
 batchContext :: Telemetry -> Credentials -> IO BatchContext
 batchContext telemetry credentials = do
- context <- nativeClientContext telemetry
- pure (BatchContext (hostContext telemetry) (installationId credentials) (context >>= clientDevice))
+ identity <- cachedIdentity <$> readTVarIO (nativeDevice telemetry)
+ pure (BatchContext (hostContext telemetry) (installationId credentials) identity)
 
 disable :: Telemetry -> Text -> IO ()
 disable telemetry reason = atomically $ do
  modifyTVar' (senderStatus telemetry) (\status -> if status==Closed then Closed else Disabled reason)
- invalidate telemetry False
+ stopReporting telemetry
 
 setConsent :: Telemetry -> Bool -> IO (Either Text ())
 setConsent telemetry True = saveConsent True telemetry True
@@ -185,14 +180,14 @@ notifyConsentOff telemetry = void $ timeout 1000000 $ do
 saveConsent :: Bool -> Telemetry -> Bool -> IO (Either Text ())
 saveConsent explicit telemetry on = mask $ \restore -> do
  requested <- atomically $ do
-  unless on (invalidate telemetry False)
+  unless on (stopReporting telemetry)
   readTVar (consentEpoch telemetry)
  result <- try $ modifyMVarMasked (savedSettings telemetry) $ \saved@(Saved previous credentials) ->
   (do
    pending <- atomically $ do
     epoch <- readTVar (consentEpoch telemetry)
     active <- readTVar (consent telemetry)
-    when (not on && active) (invalidate telemetry False)
+    when (not on && active) (stopReporting telemetry)
     pure (not on || epoch == requested)
    if not pending then pure (saved,Nothing) else do
     path <- maybe (fail "Telemetry configuration unavailable until restart") pure (settingsPath telemetry)
@@ -233,7 +228,7 @@ emit telemetry event = do
 enqueue :: Telemetry -> Integer -> EventRecord -> IO ()
 enqueue telemetry epoch row = do
  tick <- toInteger <$> getMonotonicTimeNSec
- when (recordFits (hostContext telemetry) row) $ atomically $ do
+ when (recordFits row) $ atomically $ do
   active <- permitted telemetry epoch
   queue <- readTVar (pendingEvents telemetry)
   when (active && Seq.length queue<queueLimit) (writeTVar (pendingEvents telemetry) (queue Seq.|> Pending tick row))
@@ -271,9 +266,8 @@ post telemetry epoch route credentials body consume = case origin telemetry of
   let authorized = maybe id (\(Credentials ident password) -> applyBasicAuth (TE.encodeUtf8 ident) (TE.encodeUtf8 password)) credentials
       outgoing = authorized request {HTTP.path=BC.pack route,method="POST",requestBody=RequestBodyLBS body,requestHeaders=[("Content-Type","application/json")],responseTimeout=responseTimeoutMicro requestTimeoutMicros,redirectCount=0,checkResponse = \_ _ -> pure ()}
   let send = timeout requestTimeoutMicros $ (do
-       http <- manager telemetry
        active <- atomically $ permitted telemetry epoch
-       if not active then pure Unavailable else withResponse outgoing http $ \response -> do
+       if not active then pure Unavailable else withResponse outgoing (manager telemetry) $ \response -> do
         let code = statusCode (responseStatus response)
         if code `elem` [401,403] then pure Rejected
         else if code>=200 && code<300 then Received <$> consume (responseBody response) else pure Unavailable)
@@ -286,9 +280,10 @@ enroll telemetry epoch = post telemetry epoch enrollPath Nothing "{}" $ \body ->
  decodeCredentials <$> brReadSome body (fromIntegral requestByteLimit)
 
 sendBatch :: Telemetry -> Integer -> Credentials -> Batch -> IO (Delivery ())
-sendBatch telemetry epoch credentials batch =
- post telemetry epoch eventsPath (Just credentials) (encodeBatch batch) $ \body ->
-  void (brReadSome body (fromIntegral requestByteLimit))
+sendBatch telemetry epoch credentials batch = case encodeBatch batch of
+ Nothing -> pure Unavailable
+ Just body -> post telemetry epoch eventsPath (Just credentials) body $ \response ->
+  void (brReadSome response (fromIntegral requestByteLimit))
 
 credentialsFor :: Telemetry -> Integer -> IO (Maybe Credentials)
 credentialsFor telemetry epoch = do
@@ -334,4 +329,4 @@ sender telemetry = (forever $ do
 disableAt :: Telemetry -> Integer -> Text -> IO ()
 disableAt telemetry epoch reason = atomically $ do
  active <- permitted telemetry epoch
- when active $ writeTVar (senderStatus telemetry) (Disabled reason) >> invalidate telemetry False
+ when active $ writeTVar (senderStatus telemetry) (Disabled reason) >> stopReporting telemetry

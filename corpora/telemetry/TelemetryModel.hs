@@ -8,13 +8,13 @@ import Domain (AgentId, Flow)
 
 data RuntimeKind = Desktop | Headless deriving (Eq, Show)
 data RequestTransport = Direct | Remote | UnknownTransport deriving (Eq, Show)
-data ClientKind = Native | Browser | InstalledWebApp | UnknownClient deriving (Eq, Show)
-data DeviceFamily = DesktopDevice | Phone | Tablet | UnknownFamily deriving (Eq, Show)
-data ClientOS = Windows | MacOS | Linux | Android | IOS | IPadOS | UnknownOS deriving (Eq, Show)
-data UIMode = LocalUI | RemoteControl | UnknownUIMode deriving (Eq, Show)
-data TargetLocation = LocalTarget | RemoteTarget | UnknownTarget deriving (Eq, Show)
+data ClientKind = Native | Browser | InstalledWebApp | UnknownClient deriving (Eq, Show, Enum, Bounded)
+data DeviceFamily = DesktopDevice | Phone | Tablet | UnknownFamily deriving (Eq, Show, Enum, Bounded)
+data ClientOS = Windows | MacOS | Linux | Android | IOS | IPadOS | UnknownOS deriving (Eq, Show, Enum, Bounded)
+data UIMode = LocalUI | RemoteControl | UnknownUIMode deriving (Eq, Show, Enum, Bounded)
+data TargetLocation = LocalTarget | RemoteTarget | UnknownTarget deriving (Eq, Show, Enum, Bounded)
 
-data DeviceSource = MacPlatformUUID | WindowsSMBIOSUUID | LinuxMachineID deriving (Eq, Show)
+data DeviceSource = MacPlatformUUID | WindowsSMBIOSUUID | LinuxMachineID deriving (Eq, Show, Enum, Bounded)
 data DeviceIdentity = DeviceIdentity DeviceSource Text deriving (Eq, Show)
 
 -- These stable tags are also part of the device identity's HMAC namespace.
