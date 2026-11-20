@@ -18,7 +18,6 @@ import qualified Data.UUID as UUID
 import TelemetryModel
 import TelemetryProtocol (Credentials(..), requestByteLimit)
 
--- Persistence and HTTP representations stay here; the runtime keeps typed data.
 data Saved = Saved Bool (Maybe Credentials)
 instance ToJSON Saved where
  toJSON (Saved on credentials) = object $ ["enabled" .= on] ++ case credentials of

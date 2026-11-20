@@ -159,7 +159,6 @@ disable telemetry reason = atomically $ do
 setConsent :: Telemetry -> Bool -> IO (Either Text ())
 setConsent telemetry True = saveConsent True telemetry True
 setConsent telemetry False = mask $ \restore -> do
- -- The opt-out notification bypasses batching. Disable even if delivery is interrupted.
  sent <- try (restore (notifyConsentOff telemetry))
  saved <- saveConsent False telemetry False
  case sent of
@@ -234,7 +233,6 @@ enqueue telemetry epoch row = when (recordFits row) $ atomically $ do
 eventRecord :: Int64 -> Event -> IO EventRecord
 eventRecord time event = EventRecord <$> UUID.nextRandom <*> pure time <*> pure event
 
--- Wake the sender without doing network work in the host's minute loop.
 requestFlush :: Telemetry -> IO ()
 requestFlush telemetry = atomically $ do
  active <- reporting telemetry

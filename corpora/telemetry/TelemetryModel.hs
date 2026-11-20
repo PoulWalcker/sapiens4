@@ -17,7 +17,6 @@ data TargetLocation = LocalTarget | RemoteTarget | UnknownTarget deriving (Eq, S
 data DeviceSource = MacPlatformUUID | WindowsSMBIOSUUID | LinuxMachineID deriving (Eq, Show, Enum, Bounded)
 data DeviceIdentity = DeviceIdentity DeviceSource Text deriving (Eq, Show)
 
--- These stable tags are also part of the device identity's HMAC namespace.
 deviceSourceName :: DeviceSource -> Text
 deviceSourceName source = case source of
  MacPlatformUUID -> "macos_platform_uuid"
