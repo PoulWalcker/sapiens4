@@ -4,7 +4,6 @@ module Registry where
 import Types
 import Admission (admissionOpen)
 import qualified Telemetry
-import qualified TelemetryWire
 import DataRoot
 import System.FileLock (unlockFile)
 import qualified Service as Service
@@ -123,12 +122,6 @@ registryRoute registry identity method path input = do
    selected <- local registry identity
    pure (LocalTarget (registryService selected) (registryBridge selected))
  require ("/api/" `T.isPrefixOf` path && not ("/api/host" `T.isPrefixOf` path) && not (T.any (=='%') $ T.takeWhile (/='?') path) && not (".." `T.isInfixOf` path) && not (T.any (=='\\') path)) 400 "Invalid corpora API path"
- prepared <- forM input $ \value -> case (target,method,T.splitOn "/" (T.takeWhile (/='?') path)) of
-  (LocalTarget _ _,"POST",["","api","agents",_,"messages"]) -> do
-   reporter <- readIORef (serviceTelemetry (registryService registry))
-   context <- maybe (pure Nothing) (\telemetry -> Telemetry.localClientContext telemetry (TelemetryWire.parseClientContext (get value "client_context"))) reporter
-   pure (put "client_context" (TelemetryWire.clientContextValue context) value)
-  _ -> pure value
  if "/api/remote" `T.isPrefixOf` path then case target of
   RemoteTarget _ -> failure 403 "Pairing approval is available on the host only"
   LocalTarget _ bridge -> do
@@ -137,9 +130,9 @@ registryRoute registry identity method path input = do
     else failure 404 "Not found"
    pure (200,encode value,"application/json")
  else case target of
-  LocalTarget service _ -> Service.dispatch Telemetry.Direct service method path prepared
+  LocalTarget service _ -> Service.dispatch Telemetry.Direct service method path input
   RemoteTarget client -> do
-   result@(status,body,_) <- clientRequest client method path prepared
+   result@(status,body,_) <- clientRequest client method path input
    registryLock registry $ do
     saved <- readIORef (registrySaved registry)
     clients <- readIORef (registryClients registry)

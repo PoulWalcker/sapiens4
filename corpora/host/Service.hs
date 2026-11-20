@@ -264,7 +264,15 @@ dispatch transport s method target body = locked s $ do
   ("POST",["api","groups",gid,"calls",rid,action]) -> json 200 (GC.actionGroup s gid rid action)
   ("POST",["api","agents"]) -> json 201 $ do row<-createAgent s d; Mgt.prepare s (at row "id"); pure row
   ("PUT",["api","agents",a]) -> json 200 (updateAgent s a d)
-  ("POST",["api","agents",a,"messages"]) -> json 202 (E.submitTurn transport s a d)
+  ("POST",["api","agents",a,"messages"]) -> json 202 $ do
+   let supplied = TelemetryWire.parseClientContext (get d "client_context")
+   context <- case transport of
+    Telemetry.Direct -> do
+     reporter <- readIORef (serviceTelemetry s)
+     maybe (pure Nothing) (\telemetry -> Telemetry.localClientContext telemetry supplied) reporter
+    Telemetry.Remote -> pure supplied
+    Telemetry.UnknownTransport -> pure supplied
+   E.submitTurn transport context s a d
   ("POST",["api","agents",a,"control"]) -> json 200 (withActor s a Nothing (Mgt.control s a d))
   ("POST",["api","agents",a,"turns",tid,action]) -> json 200 (E.turnAction s a tid action)
   ("PUT",["api","preferences"]) -> json 200 (savePreferences s d)
