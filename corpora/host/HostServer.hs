@@ -5,7 +5,6 @@ import Admission
 import qualified Telemetry
 import qualified TelemetryWire
 import System.Environment (getArgs)
-import Data.Time (nominalDiffTimeToSeconds)
 import DataRoot
 import UpdateState (assertDataAvailable)
 import System.Environment (lookupEnv)
@@ -127,9 +126,12 @@ openLocal gate reporterRef browser startWorkers choice root requested managed = 
          reporter <- readIORef (serviceTelemetry service)
          forM_ reporter $ \telemetry -> Telemetry.emit telemetry Telemetry.AppStarted
          when (choice==StartNew) (emitTelemetry service Telemetry.CorporaCreated)
-         task <- async (forever $ do
-          threadDelay (floor (nominalDiffTimeToSeconds Telemetry.heartbeatInterval * 1000000))
-          forM_ reporter $ \telemetry -> Telemetry.emit telemetry Telemetry.PulseId)
+         let heartbeatMinutes = round (Telemetry.heartbeatInterval / 60) :: Int
+         task <- async $ forM_ (cycle [1..heartbeatMinutes]) $ \minute -> do
+          threadDelay (60 * 1000000)
+          forM_ reporter $ \telemetry -> do
+           when (minute==heartbeatMinutes) (Telemetry.emit telemetry Telemetry.PulseId)
+           Telemetry.requestFlush telemetry
          modifyMVar_ heartbeat (const (pure (Just task)))
         startBridge bridge
         startTranscriber service >>= \stopVoice -> modifyMVar_ transcriber (const (pure stopVoice))

@@ -2,7 +2,7 @@ module Telemetry
  ( Telemetry, RuntimeKind(..), Event(..), CorporaId(..), RequestDetails(..), AttachmentCounts(..)
  , RequestTransport(..), ClientContext, HeartbeatDetails
  , openTelemetry, closeTelemetry, enabled, setConsent, consentView
- , emit, heartbeatInterval, startupConsentOption, localClientContext, nativeClientContext
+ , emit, requestFlush, heartbeatInterval, startupConsentOption, localClientContext, nativeClientContext
  ) where
 
 import Control.Concurrent.Async
@@ -22,7 +22,6 @@ import qualified Data.Text.Encoding as TE
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Data.UUID.V4 as UUID
 import Data.Version (showVersion)
-import GHC.Clock (getMonotonicTimeNSec)
 import Network.HTTP.Client hiding (path)
 import qualified Network.HTTP.Client as HTTP (path)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
@@ -41,19 +40,18 @@ import TelemetryProtocol
 import TelemetryWire
 import TelemetryDevice
 
-queueLimit, batchDelayMicros, requestTimeoutMicros :: Int
+queueLimit, requestTimeoutMicros :: Int
 queueLimit = 100
-batchDelayMicros = 10 * 1000000
 requestTimeoutMicros = 10 * 1000000
 startupConsentOption :: String
 startupConsentOption = "--telemetry-consent"
 
 data SenderStatus = Running | Disabled Text | Closed deriving Eq
 data DeviceLookup = Unchecked | Checked (Maybe DeviceIdentity) deriving Eq
-data Pending = Pending { pendingAt :: Integer, pendingRecord :: EventRecord }
 data Telemetry = Telemetry
  { savedSettings :: MVar Saved, settingsPath :: Maybe FilePath, senderStatus :: TVar SenderStatus
- , consent :: TVar Bool, consentEpoch :: TVar Integer, pendingEvents :: TVar (Seq.Seq Pending), senderThread :: Maybe (Async ())
+ , consent :: TVar Bool, consentEpoch :: TVar Integer, pendingEvents :: TVar (Seq.Seq EventRecord)
+ , flushRequested :: TVar Bool, senderThread :: Maybe (Async ())
  , hostContext :: HostContext, nativeDevice :: TVar DeviceLookup, origin :: Maybe Request, manager :: Manager }
 
 readSaved :: FilePath -> IO Saved
@@ -93,10 +91,11 @@ openTelemetry runtime choice = do
  epoch <- newTVarIO 0
  state <- newTVarIO status
  queue <- newTVarIO Seq.empty
+ flush <- newTVarIO False
  device <- newTVarIO Unchecked
  http <- newManager tlsManagerSettings
  let context = HostContext (T.pack (showVersion version)) nativeOS (T.pack arch) runtime
- let telemetry = Telemetry saved file state active epoch queue Nothing context device request http
+ let telemetry = Telemetry saved file state active epoch queue flush Nothing context device request http
  mask $ \restore -> do
   restore (forM_ choice (void . saveConsent False telemetry))
   task <- asyncWithUnmask (\unmask -> unmask (sender telemetry))
@@ -114,6 +113,7 @@ stopReporting telemetry = do
  writeTVar (consent telemetry) False
  modifyTVar' (consentEpoch telemetry) (+1)
  writeTVar (pendingEvents telemetry) Seq.empty
+ writeTVar (flushRequested telemetry) False
 
 permitted :: Telemetry -> Integer -> STM Bool
 permitted telemetry epoch = do
@@ -226,37 +226,32 @@ emit telemetry event = do
   eventRecord time event >>= enqueue telemetry epoch
 
 enqueue :: Telemetry -> Integer -> EventRecord -> IO ()
-enqueue telemetry epoch row = do
- tick <- toInteger <$> getMonotonicTimeNSec
- when (recordFits row) $ atomically $ do
+enqueue telemetry epoch row = when (recordFits row) $ atomically $ do
   active <- permitted telemetry epoch
   queue <- readTVar (pendingEvents telemetry)
-  when (active && Seq.length queue<queueLimit) (writeTVar (pendingEvents telemetry) (queue Seq.|> Pending tick row))
+  when (active && Seq.length queue<queueLimit) (writeTVar (pendingEvents telemetry) (queue Seq.|> row))
 
 eventRecord :: Int64 -> Event -> IO EventRecord
 eventRecord time event = EventRecord <$> UUID.nextRandom <*> pure time <*> pure event
 
+-- Wake the sender without doing network work in the host's minute loop.
+requestFlush :: Telemetry -> IO ()
+requestFlush telemetry = atomically $ do
+ active <- reporting telemetry
+ queue <- readTVar (pendingEvents telemetry)
+ when (active && not (Seq.null queue)) (writeTVar (flushRequested telemetry) True)
+
 nextBatch :: Telemetry -> IO (Integer,[EventRecord])
-nextBatch telemetry = do
- first <- atomically $ do
-  active <- reporting telemetry
-  queue <- readTVar (pendingEvents telemetry)
-  check (active && not (Seq.null queue))
-  pure (Seq.index queue 0)
- now <- toInteger <$> getMonotonicTimeNSec
- timer <- registerDelay (fromInteger (max 0 (toInteger batchDelayMicros - (now-pendingAt first) `div` 1000)))
- batch <- atomically $ do
-  queue <- readTVar (pendingEvents telemetry)
-  active <- reporting telemetry
-  elapsed <- readTVar timer
-  if not active || Seq.null queue || pendingAt (Seq.index queue 0)/=pendingAt first then pure Nothing
-  else do
-   check (Seq.length queue>=batchLimit || elapsed)
-   let (taken,rest) = Seq.splitAt batchLimit queue
-   epoch <- readTVar (consentEpoch telemetry)
-   writeTVar (pendingEvents telemetry) rest
-   pure (Just (epoch,map pendingRecord (toList taken)))
- maybe (nextBatch telemetry) pure batch
+nextBatch telemetry = atomically $ do
+ active <- reporting telemetry
+ queue <- readTVar (pendingEvents telemetry)
+ flush <- readTVar (flushRequested telemetry)
+ check (active && not (Seq.null queue) && (Seq.length queue>=batchLimit || flush))
+ let (taken,rest) = Seq.splitAt batchLimit queue
+ epoch <- readTVar (consentEpoch telemetry)
+ writeTVar (pendingEvents telemetry) rest
+ writeTVar (flushRequested telemetry) (flush && not (Seq.null rest))
+ pure (epoch,toList taken)
 
 data Delivery a = Unavailable | Rejected | Received a
 post :: Telemetry -> Integer -> String -> Maybe Credentials -> BL.ByteString -> (BodyReader -> IO a) -> IO (Delivery a)
