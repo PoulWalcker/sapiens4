@@ -3,17 +3,12 @@ module Collector where
 import Control.Concurrent.MVar
 import Control.Exception
 import Control.Monad (unless)
-import Crypto.Hash (SHA256)
-import Crypto.MAC.HMAC (HMAC, hmac)
 import Data.Aeson
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Aeson.Key as K
 import Data.Aeson.Types (parseEither)
 import Data.Int (Int64)
-import qualified Data.ByteArray as BA
-import Data.ByteArray.Encoding (Base(Base16), convertToBase)
 import qualified Data.ByteString as B
-import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Set as S
@@ -21,8 +16,6 @@ import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import Data.Time (NominalDiffTime, defaultTimeLocale, formatTime)
 import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime, posixSecondsToUTCTime)
-import qualified Data.UUID as UUID
-import qualified Data.UUID.V4 as UUID
 import qualified Data.Vector as V
 import Network.HTTP.Types
 import Network.Wai
@@ -63,25 +56,12 @@ type Row = Object
 data Buffer = Buffer { bufferedRows :: [Row], bufferedCount :: Int, bufferedBytes :: Int, bufferedColumns :: S.Set K.Key, firstRowAt :: Maybe POSIXTime }
 emptyBuffer :: Buffer
 emptyBuffer = Buffer [] 0 0 S.empty Nothing
-data Collector = Collector { collectorConfig :: Config, collectorSecret :: B.ByteString, collectorBuffer :: MVar Buffer }
+data Collector = Collector { collectorConfig :: Config, collectorBuffer :: MVar Buffer }
 
-newCollector :: Config -> B.ByteString -> IO Collector
-newCollector config secret = do
+newCollector :: Config -> IO Collector
+newCollector config = do
  createDirectoryIfMissing True (outputDirectory config </> "logs")
- Collector config secret <$> newMVar emptyBuffer
-
-passwordFor :: B.ByteString -> Text -> B.ByteString
-passwordFor secret ident = convertToBase Base16 (hmac secret ("sapiens4 telemetry installation v1\0" <> TE.encodeUtf8 ident) :: HMAC SHA256)
-
-authenticate :: B.ByteString -> Maybe B.ByteString -> Maybe Text
-authenticate secret header = do
- encoded <- header >>= B.stripPrefix "Basic "
- decoded <- either (const Nothing) Just (Base64.decode encoded)
- let (user,rest) = BC.break (==':') decoded
- ident <- either (const Nothing) Just (TE.decodeUtf8' user)
- parsed <- UUID.fromText ident
- let canonical = UUID.toText parsed
- if not (B.null rest) && ident==canonical && BA.constEq (B.drop 1 rest) (passwordFor secret ident) then Just ident else Nothing
+ Collector config <$> newMVar emptyBuffer
 
 normalizeRows :: POSIXTime -> Text -> Object -> [Object] -> [Row]
 normalizeRows received ident context = map (\row -> KM.union reserved (KM.union commonContext (KM.union row context)))
@@ -177,24 +157,17 @@ collectorApplication collector req respond = do
      errorReply status reason = reply status (object ["error" .= (reason::Text)])
      config = collectorConfig collector
  if requestMethod req/="POST" then errorReply status405 "POST required"
- else if rawPathInfo req==BC.pack enrollPath then do
-  ident <- UUID.toText <$> UUID.nextRandom
-  reply status201 (toJSON (Credentials ident (TE.decodeUtf8 (passwordFor (collectorSecret collector) ident))))
  else if rawPathInfo req/=BC.pack eventsPath then errorReply status404 "Not found"
- else case authenticate (collectorSecret collector) (lookup hAuthorization (requestHeaders req)) of
-  Nothing -> errorReply status401 "Invalid installation credentials"
-  Just ident | S.member ident (blockedInstallations config) -> errorReply status403 "Installation blocked"
-  Just ident -> do
-   body <- readBounded req
-   case body of
-    Left () -> errorReply status413 "Request too large"
-    Right raw -> case eitherDecode raw >>= parseEither envelope of
-     Left _ -> errorReply status400 "Invalid telemetry envelope"
-     Right (context,events)
-      | KM.lookup "installation_id" context/=Just (String ident) -> errorReply status403 "Installation ID does not match credentials"
-      | otherwise -> case KM.lookup "app_version" context of
-       Just (String version) | S.member version (blockedVersions config) -> errorReply status403 "Version blocked"
-       _ -> do
-        now <- getPOSIXTime
-        accepted <- admit collector now (normalizeRows now ident context events)
-        if accepted then reply status202 (object ["accepted" .= length events]) else errorReply status503 "Telemetry buffer full"
+ else do
+  body <- readBounded req
+  case body of
+   Left () -> errorReply status413 "Request too large"
+   Right raw -> case eitherDecode raw >>= parseEither envelope of
+    Left _ -> errorReply status400 "Invalid telemetry envelope"
+    Right (ident,context,events)
+     | S.member ident (blockedInstallations config) -> errorReply status403 "Installation blocked"
+     | Just (String version) <- KM.lookup "app_version" context, S.member version (blockedVersions config) -> errorReply status403 "Version blocked"
+     | otherwise -> do
+      now <- getPOSIXTime
+      accepted <- admit collector now (normalizeRows now ident context events)
+      if accepted then reply status202 (object ["accepted" .= length events]) else errorReply status503 "Telemetry buffer full"

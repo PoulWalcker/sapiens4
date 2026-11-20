@@ -9,8 +9,8 @@ common collector
   ghc-options: -Wall -threaded -rtsopts -O1 -Werror=incomplete-patterns -Werror=missing-fields
   hs-source-dirs: ., ../../corpora/telemetry
   build-depends: base >=4.20 && <5, aeson >=2.1 && <2.3, bytestring, text,
-    containers, vector, time, directory, filepath, uuid, crypton >=2.2.6 && <2.3,
-    ram, base64-bytestring, wai, warp, http-types, unix, wireform-parquet ==0.1.0.0
+    containers, vector, time, directory, filepath, uuid,
+    wai, warp, http-types, unix, wireform-parquet ==0.1.0.0
   other-modules: Collector, TelemetryProtocol
 
 executable sapiens-telemetry

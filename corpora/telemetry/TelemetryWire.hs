@@ -1,5 +1,5 @@
 module TelemetryWire
- ( Saved(..), ConsentView(..), encodeSaved, decodeSaved, decodeCredentials, encodeBatches, recordFits
+ ( Saved(..), ConsentView(..), encodeSaved, decodeSaved, encodeBatches, recordFits
  , parseClientContext, clientContextValue, parseHeartbeat
  ) where
 
@@ -16,28 +16,24 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.UUID as UUID
 import TelemetryModel
-import TelemetryProtocol (Credentials(..), batchLimit, requestByteLimit)
+import TelemetryProtocol (uuidText, batchLimit, requestByteLimit)
 
-data Saved = Saved Bool (Maybe Credentials)
+data Saved = Saved Bool (Maybe Text)
 instance ToJSON Saved where
- toJSON (Saved on credentials) = object $ ["enabled" .= on] ++ case credentials of
+ toJSON (Saved on installation) = object $ ["enabled" .= on] ++ case installation of
   Nothing -> []
-  Just (Credentials ident password) -> ["installation_id" .= ident,"password" .= password]
+  Just ident -> ["installation_id" .= ident]
 instance FromJSON Saved where
  parseJSON = withObject "telemetry settings" $ \fields -> do
   on <- fields .: "enabled"
-  credentials <- if KM.member "installation_id" fields || KM.member "password" fields
-   then Just <$> parseJSON (Object fields) else pure Nothing
-  pure (Saved on credentials)
+  installation <- fields .:? "installation_id" >>= traverse uuidText
+  pure (Saved on installation)
 
 encodeSaved :: Saved -> BL.ByteString
 encodeSaved = encode
 
 decodeSaved :: BL.ByteString -> Either String Saved
 decodeSaved = eitherDecode
-
-decodeCredentials :: BL.ByteString -> Maybe Credentials
-decodeCredentials = decode
 
 data ConsentView = ConsentView
  { consentEnabled :: Bool, consentAvailable :: Bool, consentError :: Text }
