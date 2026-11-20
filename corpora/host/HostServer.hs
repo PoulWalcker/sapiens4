@@ -3,8 +3,8 @@ module HostServer where
 import Types
 import Admission
 import qualified Telemetry
+import qualified TelemetryWire
 import System.Environment (getArgs)
-import qualified Data.Aeson.KeyMap as KM
 import Data.Time (nominalDiffTimeToSeconds)
 import DataRoot
 import UpdateState (assertDataAvailable)
@@ -26,7 +26,7 @@ import Control.Monad
 import qualified Data.ByteString as B
 import Data.IORef
 import qualified Data.Map.Strict as M
-import Data.Aeson (encode,Value(..))
+import Data.Aeson (encode,toJSON,Value(..))
 import System.Directory (getModificationTime)
 import Network.Wai.Handler.WebSockets (websocketsOr, isWebSocketsReq)
 import qualified Network.WebSockets as WS
@@ -125,11 +125,11 @@ openLocal gate reporterRef browser startWorkers choice root requested managed = 
         Service.startService service
         unless managed $ do
          reporter <- readIORef (serviceTelemetry service)
-         forM_ reporter $ \telemetry -> Telemetry.emit telemetry Telemetry.AppStarted Nothing KM.empty
-         when (choice==StartNew) (emitTelemetry service Telemetry.CorporaCreated KM.empty)
+         forM_ reporter $ \telemetry -> Telemetry.emit telemetry Telemetry.AppStarted
+         when (choice==StartNew) (emitTelemetry service Telemetry.CorporaCreated)
          task <- async (forever $ do
           threadDelay (floor (nominalDiffTimeToSeconds Telemetry.heartbeatInterval * 1000000))
-          forM_ reporter $ \telemetry -> Telemetry.emit telemetry Telemetry.PulseId Nothing KM.empty)
+          forM_ reporter $ \telemetry -> Telemetry.emit telemetry Telemetry.PulseId)
          modifyMVar_ heartbeat (const (pure (Just task)))
         startBridge bridge
         startTranscriber service >>= \stopVoice -> modifyMVar_ transcriber (const (pure stopVoice))
@@ -230,18 +230,18 @@ httpApplication service bridge registry onboarding port req respond = respond =<
    ("GET",["","api","host","computer"]) -> maybe (failure 404 "Local setup unavailable") (fmap (jsonResponse 200) . O.computerView) onboarding
    ("GET",["","api","host","telemetry"]) -> do
     reporter <- readIORef (serviceTelemetry service)
-    jsonResponse 200 <$> maybe (pure (obj [("enabled",Bool False),("available",Bool False)])) Telemetry.consentView reporter
+    jsonResponse 200 <$> maybe (pure (obj [("enabled",Bool False),("available",Bool False)])) (fmap toJSON . Telemetry.consentView) reporter
    ("PUT",["","api","host","telemetry"]) -> do
     reporter <- readIORef (serviceTelemetry service) >>= maybe (failure 503 "Telemetry configuration unavailable") pure
     on <- case get data_ "enabled" of Bool value -> pure value; _ -> failure 400 "Expected enabled boolean"
     saved <- Telemetry.setConsent reporter on
-    either (failure 500) pure saved
-    jsonResponse 200 <$> Telemetry.consentView reporter
+    either (\(Telemetry.ConsentError message) -> failure 500 message) pure saved
+    jsonResponse 200 . toJSON <$> Telemetry.consentView reporter
    ("POST",["","api","host","telemetry","heartbeat"]) -> do
     reporter <- readIORef (serviceTelemetry service)
     forM_ reporter $ \telemetry -> do
-     context <- Telemetry.localClientContext telemetry data_
-     Telemetry.uiHeartbeat telemetry Nothing context data_
+     context <- Telemetry.localClientContext telemetry (TelemetryWire.parseClientContext data_)
+     mapM_ (Telemetry.emit telemetry . Telemetry.UIHeartbeat) (TelemetryWire.parseHeartbeat Nothing context data_)
     pure (jsonResponse 202 empty)
    ("POST",["","api","host","computer"]) -> maybe (failure 404 "Local setup unavailable") (fmap (jsonResponse 200) . flip O.computerAction data_) onboarding
    ("GET",["","api","host","onboarding"]) -> maybe (failure 404 "Local setup unavailable") (fmap (jsonResponse 200) . O.onboardingView) onboarding

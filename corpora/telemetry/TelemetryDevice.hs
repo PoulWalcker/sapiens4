@@ -1,11 +1,8 @@
 module TelemetryDevice
- ( DeviceSource(..), DeviceIdentity, nativeOS, readNativeDevice, parseDeviceIdentity, deviceFields ) where
+ ( nativeOS, readNativeDevice ) where
 
 import Control.Exception
 import Crypto.Hash.SHA256 (hmac)
-import Data.Aeson
-import qualified Data.Aeson.Key as K
-import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as B
 import Data.Char (isHexDigit)
 import Data.Maybe (listToMaybe, mapMaybe)
@@ -19,29 +16,10 @@ import System.Exit (ExitCode(..))
 import System.Info (os)
 import System.Process
 import System.Timeout (timeout)
+import TelemetryModel
 
-data DeviceSource = MacPlatformUUID | WindowsSMBIOSUUID | LinuxMachineID deriving (Eq, Show)
-data DeviceIdentity = DeviceIdentity DeviceSource Text deriving Eq
-
-sourceName :: DeviceSource -> Text
-sourceName source = case source of
- MacPlatformUUID -> "macos_platform_uuid"
- WindowsSMBIOSUUID -> "windows_smbios_uuid"
- LinuxMachineID -> "linux_machine_id"
-
-nativeOS :: Text
-nativeOS = case os of "darwin" -> "macos"; "mingw32" -> "windows"; "linux" -> "linux"; _ -> "unknown"
-
-deviceFields :: Text -> Maybe DeviceIdentity -> Object
-deviceFields prefix identity = KM.fromList
- [(K.fromText (prefix<>"device_id"),maybe Null (\(DeviceIdentity _ key) -> String key) identity)
- ,(K.fromText (prefix<>"device_id_source"),maybe Null (\(DeviceIdentity source _) -> String (sourceName source)) identity)]
-
-parseDeviceIdentity :: Value -> Value -> Maybe DeviceIdentity
-parseDeviceIdentity (String key) (String name) = do
- source <- lookup name [(sourceName source,source) | source <- [MacPlatformUUID,WindowsSMBIOSUUID,LinuxMachineID]]
- if T.length key==64 && T.all (`elem` ("0123456789abcdef"::String)) key then Just (DeviceIdentity source key) else Nothing
-parseDeviceIdentity _ _ = Nothing
+nativeOS :: ClientOS
+nativeOS = case os of "darwin" -> MacOS; "mingw32" -> Windows; "linux" -> Linux; _ -> UnknownOS
 
 deviceNamespace :: B.ByteString
 deviceNamespace = "sapiens4.telemetry.device.v1:"
@@ -51,7 +29,7 @@ deriveDevice source input = do
  normalized <- if source==LinuxMachineID then Just (T.toLower (T.strip input))
   else T.filter (/='-') . UUID.toText <$> UUID.fromText (T.strip input)
  if T.length normalized/=32 || not (T.all isHexDigit normalized) || T.all (=='0') normalized || T.all (=='f') normalized then Nothing
- else let digest = hmac (TE.encodeUtf8 normalized) (deviceNamespace<>TE.encodeUtf8 (sourceName source))
+ else let digest = hmac (TE.encodeUtf8 normalized) (deviceNamespace<>TE.encodeUtf8 (deviceSourceName source))
           hex byte = let value=showHex byte "" in if length value==1 then '0':value else value
       in Just (DeviceIdentity source (T.pack (concatMap hex (B.unpack digest))))
 

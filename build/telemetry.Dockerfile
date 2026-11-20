@@ -4,7 +4,7 @@ ENV CABAL_DIR=/cache
 WORKDIR /app/remote/telemetry
 COPY remote/telemetry/cabal.project remote/telemetry/telemetry.cabal ./
 COPY remote/telemetry/Main.hs remote/telemetry/Collector.hs ./
-COPY corpora/telemetry/TelemetryWire.hs /app/corpora/telemetry/
+COPY corpora/telemetry/TelemetryProtocol.hs /app/corpora/telemetry/
 RUN cabal user-config init && sed -i 's|url: http://hackage.haskell.org/|url: https://hackage-content.haskell.org/|' /cache/config && cabal update && cabal build exe:sapiens-telemetry -j1 && cp "$(cabal list-bin exe:sapiens-telemetry)" /usr/local/bin/sapiens-telemetry
 
 FROM debian:bookworm-slim

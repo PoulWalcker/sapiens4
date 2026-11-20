@@ -34,7 +34,7 @@ import System.FilePath
 import System.IO
 import System.IO.Error (isAlreadyExistsError)
 import System.Posix.Files (createLink)
-import TelemetryWire
+import TelemetryProtocol
 
 data Config = Config
  { bindAddress :: String, listenPort :: Int, outputDirectory :: FilePath

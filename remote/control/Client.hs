@@ -2,6 +2,7 @@ module Client where
 
 import Types
 import qualified Telemetry
+import qualified TelemetryWire
 import Crypto
 import BrowserCrypto
 import Transport
@@ -44,12 +45,12 @@ exchange c payload duration = withMVar (clientGuard c) $ \_ -> do
  hostname <- maybe "" T.pack <$> lookupEnv "HOSTNAME"
  outgoing <- case (at payload "method",T.splitOn "/" (T.takeWhile (/='?') (at payload "path"))) of
   ("POST",["","api","agents",_,"messages"]) -> do
-   source <- maybe (pure Nothing) (\reporter -> Telemetry.localClientContext reporter (get (get payload "data") "client_context")) (clientTelemetry c)
-   pure (put "data" (put "client_context" (toJSON source) (get payload "data")) payload)
+   source <- maybe (pure Nothing) (\reporter -> Telemetry.localClientContext reporter (TelemetryWire.parseClientContext (get (get payload "data") "client_context"))) (clientTelemetry c)
+   pure (put "data" (put "client_context" (TelemetryWire.clientContextValue source) (get payload "data")) payload)
   _ -> pure payload
  context <- if at payload "kind"=="pair" then maybe (pure Nothing) Telemetry.nativeClientContext (clientTelemetry c) else pure Nothing
  let body = merge (obj ([("id",str ident),("expires",toJSON (time+duration)),("corpora_id",get (get config "corpora") "id"),("connection_id",str connection),
-             ("device_info",obj [("name",str hostname),("platform",str (T.pack os)),("client",str "Sapiens4 desktop")])] ++ [("telemetry_context",toJSON context) | at payload "kind"=="pair"])) outgoing
+             ("device_info",obj [("name",str hostname),("platform",str (T.pack os)),("client",str "Sapiens4 desktop")])] ++ [("telemetry_context",TelemetryWire.clientContextValue context) | at payload "kind"=="pair"])) outgoing
  frame <- pack (clientCrypto c) (get config "private") (get config "desktop") (at config "room") PhoneToDesktop body
  let transport action = action `catch` \(APIError _ message) -> ioError (userError $ T.unpack message)
      unreachable (errorValue::SomeException) = case fromException errorValue :: Maybe SomeAsyncException of

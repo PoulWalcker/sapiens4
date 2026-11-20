@@ -79,10 +79,10 @@ data Service = Service { serviceAdmission :: Admission, serviceRoot :: FilePath,
  , serviceVoicePieces :: IORef (Map (Text,Text) Word64)
  , serviceTelemetry :: IORef (Maybe Telemetry.Telemetry), serviceCorporaId :: Text }
 
-emitTelemetry :: Service -> Telemetry.Event -> Object -> IO ()
-emitTelemetry s event fields = do
+emitTelemetry :: Service -> (Telemetry.CorporaId -> Telemetry.Event) -> IO ()
+emitTelemetry s event = do
  telemetry <- readIORef (serviceTelemetry s)
- forM_ telemetry $ \reporter -> Telemetry.emit reporter event (Just (serviceCorporaId s)) fields
+ forM_ telemetry $ \reporter -> Telemetry.emit reporter (event (Telemetry.CorporaId (serviceCorporaId s)))
 
 notifyChange :: Service -> IO ()
 notifyChange s = atomically $ modifyTVar' (serviceRevision s) (+1)

@@ -4,6 +4,7 @@ module Registry where
 import Types
 import Admission (admissionOpen)
 import qualified Telemetry
+import qualified TelemetryWire
 import DataRoot
 import System.FileLock (unlockFile)
 import qualified Service as Service
@@ -16,7 +17,6 @@ import Control.Concurrent.Async (Async, async, cancel, poll)
 import Control.Exception
 import Control.Monad
 import Data.Aeson hiding (pairs)
-import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
 import Data.IORef
 import Data.List (find, nub)
@@ -126,8 +126,8 @@ registryRoute registry identity method path input = do
  prepared <- forM input $ \value -> case (target,method,T.splitOn "/" (T.takeWhile (/='?') path)) of
   (LocalTarget _ _,"POST",["","api","agents",_,"messages"]) -> do
    reporter <- readIORef (serviceTelemetry (registryService registry))
-   context <- maybe (pure Nothing) (\telemetry -> Telemetry.localClientContext telemetry (get value "client_context")) reporter
-   pure (put "client_context" (toJSON context) value)
+   context <- maybe (pure Nothing) (\telemetry -> Telemetry.localClientContext telemetry (TelemetryWire.parseClientContext (get value "client_context"))) reporter
+   pure (put "client_context" (TelemetryWire.clientContextValue context) value)
   _ -> pure value
  if "/api/remote" `T.isPrefixOf` path then case target of
   RemoteTarget _ -> failure 403 "Pairing approval is available on the host only"
@@ -194,7 +194,7 @@ registryCreate registry input = do
    writeJSON (registryPath registry) updated
    writeIORef (registrySaved registry) updated
    modifyIORef' (registryLocals registry) (M.insert identity child)
-  emitTelemetry service Telemetry.CorporaCreated KM.empty
+  emitTelemetry service Telemetry.CorporaCreated
   pure $ put "location" (str "Local") metadata
 
 data Pairing = Pairing Text Text PairingProgress

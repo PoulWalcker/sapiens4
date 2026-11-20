@@ -160,7 +160,7 @@ hostMain root args = do
          Just Update.PrepareReady -> finishUpdate (hostPrepareReady host) Update.Prepared (pure ())
          Just Update.Activate -> finishUpdate (hostActivate host) Update.Active $ do
           reporters <- readIORef (serviceTelemetry (hostService host))
-          void $ tryJust synchronous $ forM_ reporters $ \reporter -> Telemetry.emit reporter Telemetry.AppUpdated Nothing mempty
+          void $ tryJust synchronous $ forM_ reporters $ \reporter -> Telemetry.emit reporter Telemetry.AppUpdated
          Nothing | verb == Update.hostStopLine -> shutdown
                  | otherwise -> commands
    commands `catch` \(_::IOException) -> shutdown

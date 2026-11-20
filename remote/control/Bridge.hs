@@ -2,6 +2,7 @@ module Bridge where
 
 import Types
 import qualified Telemetry
+import qualified TelemetryWire
 import qualified Service as Service
 import Crypto
 import BrowserCrypto
@@ -128,7 +129,7 @@ pairingProof time proof config peer message = do
  check (at message "kind"=="pair" && expiry (get config "expires")>time && has message "secret" && proof) 400 "Invalid pairing proof"
  let pending = get config "pending"
  check (pending==Null || get pending "peer"==peer) 400 "Another phone is awaiting approval"
- pure (put "pending" (obj [("peer",peer),("id",get message "id"),("device_info",cleanDeviceInfo (get message "device_info")),("telemetry_context",toJSON (Telemetry.parseClientContext (get message "telemetry_context")))]) config)
+ pure (put "pending" (obj [("peer",peer),("id",get message "id"),("device_info",cleanDeviceInfo (get message "device_info")),("telemetry_context",TelemetryWire.clientContextValue (TelemetryWire.parseClientContext (get message "telemetry_context")))]) config)
 
 approvePairing :: Bridge -> Value -> IO Value
 approvePairing b input = modifyMVar (bridgeConfig b) $ \config -> do
@@ -140,7 +141,7 @@ approvePairing b input = modifyMVar (bridgeConfig b) $ \config -> do
  accept <- replyFrame b paired (approvalRequest approval) (obj [("paired",Bool True),("corpora",identity)])
  let updated = put "accept" accept paired
  saveConfig b updated
- emitTelemetry (bridgeService b) Telemetry.RemotePaired (Telemetry.clientContextFields (Telemetry.parseClientContext (get (get config "pending") "telemetry_context")))
+ emitTelemetry (bridgeService b) (\corpora -> Telemetry.RemotePaired corpora (TelemetryWire.parseClientContext (get (get config "pending") "telemetry_context")))
  pure (updated,obj [("approved",Bool True)])
 deleteRoom :: Value -> IO Bool
 deleteRoom config = (request (at config "relay") ("/api/rooms/"<>at config "room") (at config "token") "DELETE" Nothing >> pure True)

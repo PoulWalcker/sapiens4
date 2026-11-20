@@ -7,4 +7,4 @@
 !remote/telemetry/cabal.project
 !corpora/
 !corpora/telemetry/
-!corpora/telemetry/TelemetryWire.hs
+!corpora/telemetry/TelemetryProtocol.hs
