@@ -86,3 +86,4 @@ packageMac root binary = do
    callProcess "install_name_tool" ["-change",dependency,"@loader_path/../../submodules/libs4/haskell/.runtime/"<>takeFileName dependency,binary]
   _ -> pure ()
  callProcess "codesign" ["--force","--sign","-",binary]
+-- lint4 new-only probe
