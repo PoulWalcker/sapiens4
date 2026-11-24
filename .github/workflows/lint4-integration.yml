@@ -8,8 +8,8 @@ permissions:
   contents: read
 jobs:
   lint4:
-    uses: sapiens4ai/lint4/.github/workflows/check.yml@38718022488973a259e49fda0c112d9d5448e529
+    uses: sapiens4ai/lint4/.github/workflows/check.yml@main
     with:
-      auditor-ref: 38718022488973a259e49fda0c112d9d5448e529
+      auditor-ref: main
       target: ci-probe
       lean-project: ''
