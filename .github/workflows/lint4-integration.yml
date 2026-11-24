@@ -1,0 +1,15 @@
+name: Lint4 integration
+on:
+  push:
+    branches: ['codex/lint4-*']
+  pull_request:
+    branches: [codex/lint4-integration-base]
+permissions:
+  contents: read
+jobs:
+  lint4:
+    uses: sapiens4ai/lint4/.github/workflows/check.yml@38718022488973a259e49fda0c112d9d5448e529
+    with:
+      auditor-ref: 38718022488973a259e49fda0c112d9d5448e529
+      target: ci-probe
+      lean-project: ''
