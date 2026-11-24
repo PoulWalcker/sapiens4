@@ -1,1 +1,1 @@
-theorem integrationProbeFixed : True := by sorry
+theorem integrationProbeFixed : True := by trivial
