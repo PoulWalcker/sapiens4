@@ -55,3 +55,4 @@ Dependencies retain their own layout under `submodules/`.
 Sapiens4 is source-available under the [Sustainable Use License 1.0](license/LICENSE.md).
 See [licensing and commercial services](license/LICENSING.md).
 Commercial inquiries: [license@sapiens4.ai](mailto:license@sapiens4.ai).
+
