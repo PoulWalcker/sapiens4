@@ -1,4 +1,4 @@
-module Receipt (legacyJSON) where
+module LegacyReceipt (matchesLegacyReceipt) where
 
 import Control.Applicative ((<|>))
 import Data.Aeson (Value(String), eitherDecodeStrict)
@@ -115,3 +115,11 @@ shortest number = choose 1
  normalize coefficient scale
   | coefficient `mod` 10 == 0 = normalize (coefficient `div` 10) (scale + 1)
   | otherwise = let digits = map digitToInt $ show coefficient in (digits, length digits + scale)
+
+-- Old hashes cannot be rewritten without the original request plaintext.
+-- Keep the frozen comparison here until the imported receipt is retired.
+matchesLegacyReceipt :: (B.ByteString -> T.Text) -> T.Text -> T.Text -> B.ByteString -> Bool
+matchesLegacyReceipt digest saved current plaintext =
+ saved == current || saved == "v2:" <> current ||
+ (not ("v2:" `T.isPrefixOf` saved) && B.length plaintext <= 4096 &&
+  either (const False) ((==saved) . digest) (legacyJSON plaintext))

@@ -6,11 +6,11 @@ module Voice
  ( Pcm, pcmBytes, pcmFromWav, wavFromPcm
  , Progress(..), Cut(..), PiecePlan(..), startProgress, planPiece
  , receivePiece, cancelRecording, retryTranscription, draftable
- , startTranscriber, busyVoice
+ , recoverVoice, startTranscriber, busyVoice
  ) where
 
 import Admission (admissionOpen, withAdmission)
-import Control.Concurrent (threadDelay, MVar, newMVar, modifyMVar_, withMVar, swapMVar)
+import Control.Concurrent (MVar, newMVar, modifyMVar_, withMVar, swapMVar)
 import Control.Concurrent.Async (asyncWithUnmask, cancel, AsyncCancelled(..))
 import Control.Exception (IOException, SomeException, SomeAsyncException, fromException, try, tryJust, throwIO, finally, mask_)
 import Control.Monad
@@ -35,6 +35,8 @@ import System.Directory
 import System.Environment (lookupEnv)
 import System.FilePath
 import System.IO (hPutStrLn, stderr)
+import qualified AppStorage as A
+import qualified Clock
 import Types
 import qualified Store as DB
 
@@ -116,10 +118,10 @@ planPiece progress index final size
 -- Safe to retry at every step. A piece is applied in this order:
 --   1. save each finished voice message once (keyed by recording and part number)
 --   2. write the leftover audio to a NEW buffer file for the next piece
---   3. save progress.json  ← the commit point
---   4. delete the old buffer file
--- A crash before step 3 leaves the previous progress and its buffer untouched, so the
--- resent piece replays exactly; step 1 then finds the parts already saved and reuses them.
+--   3. commit progress and attachment metadata together through Append4
+--   4. delete the old buffer only after that commit
+-- A crash before step 3 leaves the previous progress and its buffer untouched.
+-- A retry after commit finds the saved parts and does not duplicate them.
 receivePiece :: Service -> Text -> Value -> IO Value
 receivePiece s a d = do
  let recording = at d "recording"
@@ -132,9 +134,8 @@ receivePiece s a d = do
  wav <- either (const (failure 400 "Invalid voice data")) pure (B64.decode (TE.encodeUtf8 (at d "data")))
  pcm <- either (failure 400) pure (pcmFromWav wav)
  let dir = recordingDir s a recording
-     progressFile = dir </> "progress.json"
  createDirectoryIfMissing True dir
- progress <- readProgress progressFile
+ progress <- readProgress s a recording
  case planPiece progress index final (BS.length (pcmBytes pcm)) of
   Left problem -> failure 409 problem
   -- The phone resent a piece because the first reply was lost: answer with the voice
@@ -150,10 +151,11 @@ receivePiece s a d = do
    (rows, leftover) <- foldM (saveCut s a recording index saved) ([], audio) cuts
    atomicBytes (bufferFile dir (nextPiece next)) (BL.fromStrict leftover)
    mask_ $ do
-    atomicBytes progressFile (encode (progressJSON next))
+    saveValue s (progressKey a recording) (progressJSON next)
     notePiece s a recording (finished next)
-   removeIfPresent (bufferFile dir (nextPiece progress))
-   when (finished next) $ removeIfPresent (bufferFile dir (nextPiece next))
+   afterCommit s $ do
+    removeIfPresent (bufferFile dir (nextPiece progress))
+    when (finished next) $ removeIfPresent (bufferFile dir (nextPiece next))
    pure (reply recording False (filter draftable (reverse rows)))
  where
  reply recording duplicate rows = obj [("recording",str recording),("duplicate",Bool duplicate),("messages",arr rows)]
@@ -203,17 +205,19 @@ cancelRecording s a recording = do
  let dir = recordingDir s a recording
  createDirectoryIfMissing True dir
  mask_ $ do
-  atomicBytes (dir </> "progress.json") (encode (progressJSON startProgress { finished = True }))
+  saveValue s (progressKey a recording) (put "cancelled" (Bool True) (progressJSON startProgress { finished = True }))
   notePiece s a recording True
  buffers <- filter (\name -> takeExtension name == ".pcm") <$> listDirectory dir
- forM_ buffers (removeIfPresent . (dir </>))
- drafts <- filter draftable <$> recordingParts s a recording
+ parts <- recordingParts s a recording
+ let drafts=filter draftable parts
  forM_ drafts $ \row -> DB.updateAttachment s (put "cancelled" (Bool True) row)
  DB.dropDrafts s a drafts
- forM_ drafts $ \row -> do
-  let audio = T.unpack (at row "value")
-  removeIfPresent audio
-  void (try (removeDirectory (takeDirectory audio)) :: IO (Either IOException ()))
+ afterCommit s $ do
+  forM_ buffers (removeIfPresent . (dir </>))
+  forM_ (filter (not . boolean . (`get` "sent")) parts) $ \row -> do
+   let audio = T.unpack (at row "value")
+   removeIfPresent audio
+   void (try (removeDirectory (takeDirectory audio)) :: IO (Either IOException ()))
  pure (obj [("recording",str recording),("cancelled",arr (map (`get` "id") drafts))])
 
 -- | Try a failed transcription again: the voice message goes back to "pending" and the
@@ -237,22 +241,20 @@ progressJSON p = obj [("next_piece",num (nextPiece p)),("next_part",num (nextPar
 
 -- | Read saved progress strictly. Damaged or impossible state is an explicit error (logged),
 -- never silently turned into zeros, because it decides piece order and voice message numbers.
-readProgress :: FilePath -> IO Progress
-readProgress path = do
- exists <- doesFileExist path
- if not exists then pure startProgress else do
-  decoded <- eitherDecodeStrict <$> BS.readFile path
-  case decoded of
-   Right p | sane p -> pure p
-   Right p -> damaged ("impossible values " <> show p)
-   Left problem -> damaged problem
- where
- damaged problem = do
-  hPutStrLn stderr ("Voice recording state is damaged (" <> path <> "): " <> take 300 problem)
-  failure 500 "Voice recording state is damaged"
- sane p = nextPiece p >= 0 && nextPart p >= 0 && nextPart p <= maxParts
-       && buffered p >= 0 && buffered p < messageLimit && even (buffered p)
-       && (not (finished p) || buffered p == 0)
+progressKey :: Text -> Text -> Text
+progressKey owner recording = "voice/"<>owner<>"/"<>recording
+readProgress :: Service -> Text -> Text -> IO Progress
+readProgress s owner recording = do
+ p <- loadValue s (progressKey owner recording) (progressJSON startProgress) >>= decodeValue 500
+ require (nextPiece p>=0 && nextPart p>=0 && nextPart p<=maxParts && buffered p>=0 && buffered p<messageLimit && even (buffered p) && (not (finished p) || buffered p==0)) 500 "Voice recording state is damaged"
+ pure p
+
+-- Finish an interrupted cancellation before accepting new voice work.
+recoverVoice :: Service -> IO ()
+recoverVoice s = do
+ saved <- A.recordsAt 2 (serviceStore s) "voice/"
+ forM_ [(owner,recording) | (key,v)<-saved,boolean (get v "cancelled"),["voice",owner,recording]<-[T.splitOn "/" key]] $ \(owner,recording) ->
+  void (cancelRecording s owner recording)
 
 readIfPresent :: FilePath -> IO BS.ByteString
 readIfPresent path = doesFileExist path >>= \exists -> if exists then BS.readFile path else pure BS.empty
@@ -279,7 +281,13 @@ startTranscriber s = mask_ $ do
   , H.managerIdleConnectionCount = 0
   , H.managerRawConnection = H.rawConnectionModifySocket register
   }
- worker <- asyncWithUnmask (\unmask -> unmask (transcribeLoop s gate manager))
+ base <- maybe "http://127.0.0.1:8178" id <$> lookupEnv "SAPIENS_WHISPER_URL"
+ worker <- Clock.subscribe (serviceClock s) $ \_ -> do
+  outcome <- tryTranscription (admissionOpen (serviceAdmission s) >>= \open -> if open then transcribeNext s gate manager base else pure False)
+   `finally` modifyMVar_ gate (pure . fmap (const []))
+  case outcome of
+   Left problem -> hPutStrLn stderr ("Voice transcription failed: "<>take 500 (show problem))
+   Right _ -> pure ()
  pure $ mask_ $ do
   sockets <- swapMVar gate Nothing
   forM_ sockets $ mapM_ $ \socket -> do
@@ -291,22 +299,6 @@ tryTranscription :: IO a -> IO (Either SomeException a)
 tryTranscription = tryJust $ \problem -> case fromException problem :: Maybe SomeAsyncException of
  Just _ -> Nothing
  Nothing -> Just problem
-
-transcribeLoop :: Service -> MVar (Maybe [Socket.Socket]) -> H.Manager -> IO ()
-transcribeLoop s gate manager = do
- base <- maybe "http://127.0.0.1:8178" id <$> lookupEnv "SAPIENS_WHISPER_URL"
- hPutStrLn stderr ("Voice transcription: using " <> base)
- let go = do
-      stopping <- readIORef (serviceStopping s)
-      unless stopping $ do
-       outcome <- tryTranscription (admissionOpen (serviceAdmission s) >>= \open -> if open then transcribeNext s gate manager base else pure False)
-        `finally` modifyMVar_ gate (pure . fmap (const []))
-       case outcome of
-        -- Never fail silently: report the problem in the host log, then retry calmly.
-        Left problem -> hPutStrLn stderr ("Voice transcription failed: " <> take 500 (show problem)) >> threadDelay 10000000
-        Right worked -> threadDelay (if worked then 100000 else 2000000)
-       go
- go
 
 -- | Transcribe the next pending voice message. True when one was handled.
 transcribeNext :: Service -> MVar (Maybe [Socket.Socket]) -> H.Manager -> String -> IO Bool

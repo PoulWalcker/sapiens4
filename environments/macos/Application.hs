@@ -299,13 +299,14 @@ installMethods application = do
                 when (loaded && isNothing problem) $ script view "window.showStorageSetup?.()"
                 unless (loaded || isJust problem) $ do
                     accepted <- termsAccepted
-                    if not accepted then script view "window.showStorageSetup?.()" else do
-                        explicit <- lookupEnv "SAPIENS_DATA_DIR"
-                        selection <- try (startupDataDirectory explicit)
-                        case selection of
-                            Left (e :: IOException) -> showStorageError application (T.pack (storageMessage e))
-                            Right Nothing -> script view "window.showStorageSetup?.()"
-                            Right (Just directory) -> startSelected application (Just AttachExisting) directory
+                    explicit <- lookupEnv "SAPIENS_DATA_DIR"
+                    selection <- try (startupDataDirectory explicit)
+                    case selection of
+                        Left (e :: IOException) -> showStorageError application (T.pack (storageMessage e))
+                        Right Nothing -> script view "window.showStorageSetup?.()"
+                        Right (Just directory) ->
+                            if accepted then startSelected application (Just AttachExisting) directory
+                            else script view ("window.storagePicked?.(" <> jsonText (String (T.pack directory)) <> ");window.showStorageSetup?.()")
             sh <- withBrowser (readIORef . shell)
             readyAddress <- readIORef (address application)
             trusted <- obj0 view "URL" >>= (\u -> withBrowser (sameOrigin u . origin))

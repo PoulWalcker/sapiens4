@@ -127,7 +127,6 @@ private structure Mailbox where
   relay : String
   path : String
   deviceToken : String
-  hostToken : String
 
 private def Mailbox.entries (box : Mailbox) (token : String) : IO (Array Json) := do
   let reply ← request box.relay "GET" box.path none #[s!"Authorization: Bearer {token}"]
@@ -149,22 +148,42 @@ private def Mailbox.awaitEnvelope (box : Mailbox) (token : String) (privateText 
       requireThat "private content visible to relay" (privateText.all (!message.compress.contains ·))
       return some frame
 
+-- The fixture owns its phone keys. Tests never read the application's saved
+-- credentials or depend on their storage representation.
+private def Mailbox.acknowledge (box : Mailbox) : IO Unit := do
+  for entry in ← box.entries box.deviceToken do
+    let id ← IO.ofExcept <| entry.getObjVal? "id"
+    let reply ← request box.relay "DELETE" (box.path ++ "/" ++ id.compress) none
+      #[s!"Authorization: Bearer {box.deviceToken}"]
+    IO.ofExcept <| requireThat "relay refused acknowledgement" (reply.status == 200)
+
+private def fixturePhone (authority : Host) (browser : CryptoWindow) (qr : Json) : IO (Mailbox × Json × String) := do
+  let keys ← browser (json% {operation: "keypair"})
+  let config := (qr.setObjVal! "private" (keys.getObjValD "secretKey")).setObjVal! "public" (keys.getObjValD "publicKey")
+  let box ← IO.ofExcept do
+    return Mailbox.mk (← stringField qr "relay")
+      ("/api/rooms/" ++ (← stringField qr "room") ++ "/messages") (← stringField qr "token")
+  let frame ← browser (json% {operation: "request", config: $(config), body: {kind: "pair", secret: $(qr.getObjValD "secret")}})
+  let sent ← request box.relay "POST" box.path frame #["Content-Type: application/json", s!"Authorization: Bearer {box.deviceToken}"]
+  IO.ofExcept <| requireThat "relay refused pairing" (sent.status == 200)
+  discard <| untilSome "fixture phone consent" do
+    let pending := (← authority.api "GET" "/api/remote").getObjValD "pending"
+    return if pending.getObjValD "peer" == keys.getObjValD "publicKey" then some () else none
+  discard <| authority.api "POST" "/api/remote/approve" (json% {peer: $(keys.getObjValD "publicKey")})
+  let accepted ← box.awaitEnvelope box.deviceToken []
+  let plain ← browser (json% {operation: "response", config: $(config), frame: $(accepted)})
+  IO.ofExcept <| fieldsMatch (plain.getObjValD "result") (json% {paired: true})
+  box.acknowledge
+  let identity ← IO.ofExcept <| stringField (← authority.api "GET" "/api/corpora") "id"
+  return (box,config,identity)
+
 def processRedeliveredRemoteWorkOnce : IO Unit := withRelay fun relay admin =>
   IO.FS.withTempDir fun hostDir => IO.FS.withTempDir fun deviceDir =>
     withHost deviceDir fun device => withCryptoSession device fun browser => do
       let message := "Private review 9831"
-      let (box, identity, path) ← withCryptoHost hostDir fun authority => do
-        let qr ← invitationFor authority relay admin
-        let (pairing, pending) ← requestPairing authority device qr
-        approvePairing authority device pairing (← IO.ofExcept <| pending.getObjVal? "peer")
-        let config ← IO.ofExcept <| Json.parse (← IO.FS.readFile (hostDir / "remote-device.json"))
-        let (box, identity) ← IO.ofExcept do
-          let path := "/api/rooms/" ++ (← stringField qr "room") ++ "/messages"
-          return (Mailbox.mk relay path (← stringField qr "token") (← stringField config "token"),
-            ← stringField config "corpora_id")
-        return (box, identity, "/api/agents/" ++ (← authority.chief) ++ "/messages")
-      let saved ← IO.ofExcept <| Json.parse (← IO.FS.readFile (deviceDir / "host-corpora.json"))
-      let config ← IO.ofExcept do (← saved.getObjVal? "remotes").getObjVal? identity
+      let (box, config, identity, path) ← withHost hostDir fun authority => do
+        let (box, config, identity) ← fixturePhone authority browser (← invitationFor authority relay admin)
+        return (box, config, identity, "/api/agents/" ++ (← authority.chief) ++ "/messages")
       -- A browser request with a five-minute validity window survives fixture restarts.
       let frame ← browser (json% {operation: "request", config: $(config), body: {
         kind: "request", op: "api", method: "POST", path: $(path), corpora_id: $(identity), data: {text: $(message)}}})
@@ -173,9 +192,7 @@ def processRedeliveredRemoteWorkOnce : IO Unit := withRelay fun relay admin =>
           #["Content-Type: application/json", s!"Authorization: Bearer {box.deviceToken}"]
         IO.ofExcept <| requireThat "relay refused encrypted delivery" (queued.status == 200)
       enqueue
-      IO.ofExcept <| requireThat "relay changed the encrypted envelope"
-        ((← box.awaitEnvelope box.hostToken [message, "/api/agents/", admin]) == frame)
-      let (turnId, original) ← withCryptoHost hostDir fun authority => do
+      let (turnId, original) ← withHost hostDir fun authority => do
         let response ← box.awaitEnvelope box.deviceToken [message, admin]
         let plain ← browser (json% {operation: "response", config: $(config), frame: $(response)})
         let result ← IO.ofExcept <| plain.getObjVal? "result"
@@ -184,15 +201,10 @@ def processRedeliveredRemoteWorkOnce : IO Unit := withRelay fun relay admin =>
         let turn ← authority.awaitTurn turnId "done"
         IO.ofExcept <| fieldsMatch turn (json% {input: $(message), output: "The review is ready."})
         return (turnId, response)
-      let entries ← box.entries box.deviceToken
-      for entry in entries do
-        let id ← IO.ofExcept <| entry.getObjVal? "id"
-        let ack ← request relay "DELETE" (box.path ++ "/" ++ id.compress) none
-          #[s!"Authorization: Bearer {box.deviceToken}"]
-        IO.ofExcept <| requireThat "relay refused acknowledgement" (ack.status == 200)
+      box.acknowledge
       IO.ofExcept <| requireThat "original receipt was not acknowledged" (← box.entries box.deviceToken).isEmpty
       enqueue
-      withCryptoHost hostDir fun authority => do
+      withHost hostDir fun authority => do
         let replayed ← box.awaitEnvelope box.deviceToken [message, "The review is ready.", admin]
         IO.ofExcept <| requireThat "redelivery did not return the stored encrypted receipt" (replayed == original)
         let turns ← IO.ofExcept <| (← authority.state).getObjValAs? (Array Json) "turns"

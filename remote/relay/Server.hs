@@ -20,7 +20,9 @@ import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Text (Text)
-import Database.SQLite.Simple
+import qualified AppStorage as A
+import qualified Clock
+import qualified Migrations
 import Network.HTTP.Types
 import Network.URI hiding (query)
 import Network.Wai
@@ -29,13 +31,17 @@ import qualified Network.WebSockets as WS
 import System.Timeout
 
 
-data Relay = Relay { relayDB :: FilePath, relayOrigin :: Text, relayAdmin :: Text, relayBeta :: Bool, relayRepo :: FilePath, relayPeers :: MVar (M.Map (Text,Text) (Text,WS.Connection)), relayCount :: MVar Int }
+data Relay = Relay { relayDB :: A.Store, relayClock :: Clock.Clock, relayClose :: IO (), relayOrigin :: Text, relayAdmin :: Text, relayBeta :: Bool, relayRepo :: FilePath, relayPeers :: MVar (M.Map (Text,Text) (Text,WS.Connection)), relayCount :: MVar Int }
 newRelay :: FilePath -> FilePath -> Text -> Text -> Bool -> IO Relay
 newRelay repo path admin url beta = do
  require (T.length admin >= 32 && T.all isAscii admin) 400 "SAPIENS_RELAY_ADMIN_TOKEN must contain at least 32 ASCII characters"
  approved <- origin (str url)
- openMailboxes path
- Relay path approved admin beta repo <$> newMVar M.empty <*> newMVar 0
+ clock <- Clock.start
+ store <- Migrations.openRelay path `onException` Clock.stop clock
+ cleanup <- Clock.subscribe clock (\tick -> when (tick `mod` 120==0) (A.transaction store (seconds >>= expire store)))
+  `onException` (A.closeStore store `finally` Clock.stop clock)
+ let close = cancel cleanup >> (A.closeStore store `finally` Clock.stop clock)
+ Relay store clock close approved admin beta repo <$> newMVar M.empty <*> newMVar 0
 relayApplication :: Relay -> Application
 relayApplication relay req respond = do
  let target = TE.decodeUtf8 (rawPathInfo req)
@@ -127,14 +133,14 @@ socketApp relay pending = do
     sendGuard <- newMVar ()
     let send = withMVar sendGuard . const . WS.sendTextData conn . encode
         current = withMVar (relayPeers relay) (pure . maybe False ((==identity).fst) . M.lookup key)
-        deliver = forever $ do
+        deliver = bracket (Clock.subscribe (relayClock relay) (const deliverTick)) cancel wait
+        deliverTick = do
          active <- current
          unless active (failure 401 "Connected in another tab")
          result <- transact (relayDB relay) "GET" path bearer empty (relayAdmin relay) False
-         live <- withDB (relayDB relay) (\db -> query db "SELECT id FROM messages WHERE room=?" (Only room)) :: IO [Only Int]
-         batch <- modifyMVar inflight (pure . deliveryBatch (S.fromList [i | Only i<-live]) result)
+         live <- roomMessages (relayDB relay) room
+         batch <- modifyMVar inflight (pure . deliveryBatch (S.fromList [int (get v "id") | v<-live]) result)
          forM_ batch (send . put "type" (str "messages"))
-         threadDelay 100000
         receive = forever $ do
          value <- readFrame conn
          active <- current

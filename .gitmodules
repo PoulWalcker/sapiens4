@@ -2,3 +2,7 @@
 	path = submodules/blindly4
 	url = https://github.com/aleski-green/blindly4.git
 	branch = main
+[submodule "submodules/append4"]
+	path = submodules/append4
+	url = https://github.com/aleski-green/append4.git
+	branch = codex/single-key-storage

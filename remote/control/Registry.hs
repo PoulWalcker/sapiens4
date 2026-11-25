@@ -5,7 +5,6 @@ import Types
 import Admission (admissionOpen)
 import qualified Telemetry
 import DataRoot
-import System.FileLock (unlockFile)
 import qualified Service as Service
 import Bridge
 import Client
@@ -50,22 +49,22 @@ data Registry = Registry
  , registryCleanup :: MVar (Maybe (Async ()))
  }
 
-registryPath :: Registry -> FilePath
-registryPath registry = serviceRoot (registryService registry) </> "host-corpora.json"
 localAvailable :: Bool
 localAvailable = os `elem` ["darwin", "mingw32", "linux"]
 registryLock :: Registry -> IO a -> IO a
 registryLock registry = withMVar (registryGuard registry) . const
 saveRegistry :: Registry -> IO ()
-saveRegistry registry = readIORef (registrySaved registry) >>= writeJSON (registryPath registry)
+saveRegistry registry = readIORef (registrySaved registry) >>= saveValue (registryService registry) "local/registry"
 
 newRegistry :: Service -> Bridge -> (StorageChoice -> FilePath -> IO LocalHost) -> IO Registry
 newRegistry service bridge openChild = do
- saved <- readJSON (serviceRoot service </> "host-corpora.json") (obj [("locals",arr []),("remotes",empty)])
+ saved <- loadValue service "local/registry" (obj [("locals",arr []),("remotes",empty)])
  void (Service.corporaIdentity service)
- Registry service bridge openChild <$> newMVar () <*> newIORef saved
+ registry <- Registry service bridge openChild <$> newMVar () <*> newIORef saved
    <*> newIORef M.empty <*> newIORef M.empty
    <*> newIORef M.empty <*> newIORef M.empty <*> newIORef False <*> newMVar Nothing
+ recoverRelays registry
+ pure registry
 
 local :: Registry -> Text -> IO Registry
 local registry identity | identity == serviceCorporaId (registryService registry) = pure registry
@@ -84,7 +83,7 @@ local registry identity = do
     let bridge = registryBridge (localRegistry child)
     ownRelay <- savedRelay bridge
     mainRelay <- savedRelay (registryBridge registry)
-    when (ownRelay == empty && mainRelay /= empty) $ writeJSON (relayPath bridge) mainRelay
+    when (ownRelay == empty && mainRelay /= empty) $ saveRelay bridge mainRelay
     modifyIORef' (registryLocals registry) (M.insert identity child)
     pure (localRegistry child)
 
@@ -179,19 +178,19 @@ registryCreate registry input = do
  makePrivateDirectory folder
  writeJSON (folder </> "corpora-identity.json") $ obj [("version",num 1),("corpora_id",str identity)]
  mainIdentity <- Service.corporaIdentity (registryService registry)
- writeJSON (folder </> "corpora-settings.json") $ obj [("name",str $ T.strip name),("scope",str $ T.strip $ text scope),("device",get mainIdentity "device"),("status",str "paused"),("revision",num 1),("operations",empty)]
  bracketOnError (registryOpenChild registry CreateCorpora folder) stopLocal $ \child -> do
   let selected = localRegistry child
       service = registryService selected
       bridge = registryBridge selected
+  locked service $ saveValue service "corpora-settings" $ obj [("name",str $ T.strip name),("scope",str $ T.strip $ text scope),("device",get mainIdentity "device"),("status",str "paused"),("revision",num 1),("operations",empty)]
   metadata <- Service.corporaIdentity service
   registryLock registry $ mask_ $ do
    ownRelay <- savedRelay bridge
    mainRelay <- savedRelay (registryBridge registry)
-   when (ownRelay==empty && mainRelay/=empty) $ writeJSON (relayPath bridge) mainRelay
+   when (ownRelay==empty && mainRelay/=empty) $ saveRelay bridge mainRelay
    saved <- readIORef (registrySaved registry)
    let updated = put "locals" (arr $ items saved "locals" ++ [str identity]) saved
-   writeJSON (registryPath registry) updated
+   saveValue (registryService registry) "local/registry" updated
    writeIORef (registrySaved registry) updated
    modifyIORef' (registryLocals registry) (M.insert identity child)
   emitTelemetry service Telemetry.CorporaCreated KM.empty
@@ -285,41 +284,15 @@ closeRegistry registry = do
  opened <- readIORef (registryLocals registry)
  mapM_ stopLocal opened
 
-resetSavedConnections :: FilePath -> [Value] -> Value -> IO ()
-resetSavedConnections root identities connection = do
- children <- forM identities $ \value -> do
-  let ident = text value
-  folder <- childPath root ident
-  checkRegisteredIdentity folder ident
-  pure folder
- destinations <- forM (root:children) $ \folder -> do
-  device <- containedPath folder (folder </> "remote-device.json")
-  relay <- containedPath folder (folder </> "remote-relay.json")
-  pure (device, relay)
- forM_ destinations $ \(device,relay) -> do
-  exists <- doesFileExist device
-  when exists $ removeFile device
-  writeJSON relay connection
-
-withSavedCorporaLocks :: FilePath -> [Text] -> IO a -> IO a
-withSavedCorporaLocks _ [] action = action
-withSavedCorporaLocks root (identity:rest) action = do
- require (isJust $ UUID.fromText identity) 409 "Invalid Corpora identity in registry."
- folder <- childPath root identity
- exists <- doesDirectoryExist folder
- require exists 409 "A registered Corpora is unavailable. Restore the complete Data Root."
- bracket (acquireStorage (AttachChild root identity) folder) unlockFile $ \_ -> withSavedCorporaLocks root rest action
-
-recoverRelays :: FilePath -> IO ()
-recoverRelays root = do
- let path = root </> "host-corpora.json"
- saved <- readJSON path empty
- let state = get saved "relay_servers"
- when (boolean $ get state "reset_pending") $ do
-  selected <- maybe (failure 409 "Selected relay is unavailable") pure $ findId (at state "selected") (items state "servers")
-  withSavedCorporaLocks root (map text $ items saved "locals") $
-   resetSavedConnections root (items saved "locals") (get selected "connection")
-  writeJSON path $ put "remotes" empty $ put "relay_servers" (remove ["reset_pending"] state) saved
+recoverRelays :: Registry -> IO ()
+recoverRelays registry = do
+ saved <- readIORef (registrySaved registry)
+ let state=get saved "relay_servers"
+ when (boolean (get state "reset_pending")) $ do
+  selected <- maybe (failure 409 "Selected relay is unavailable") pure (findId (at state "selected") (items state "servers"))
+  resetConnections registry (get selected "connection")
+  writeIORef (registrySaved registry) (put "remotes" empty (put "relay_servers" (remove ["reset_pending"] state) saved))
+  saveRegistry registry
 
 relayState :: Registry -> IO Value
 relayState registry = do
@@ -327,20 +300,7 @@ relayState registry = do
  if has saved "relay_servers" then pure (get saved "relay_servers") else do
   let builtin identity name relay available = obj [("id",str identity),("name",str name),("address",str $ relay <> "/beta"),("available",Bool available),("archived",Bool False),("builtin",Bool True),("connection",obj [("format",str connectionFormat),("relay",str relay),("beta",Bool True)])]
       initial = [builtin "sapiens-beta" "Sapiens4 beta" "https://remote-relay.sapiens4.ai" True, builtin "utana-beta" "Utana beta" "https://remote-relay.utana.group" False]
-      root = serviceRoot (registryService registry)
-      folders = root : [root </> "corporas" </> T.unpack (text identity) | identity <- items saved "locals"]
-  (rows,selected) <- foldM (\(rows,selected) folder -> do
-    old <- try $ readConnection (folder </> "remote-relay.json")
-    case old of
-     Left (_::SomeException) -> pure (rows,selected)
-     Right connection -> do
-      row <- case find ((== connection) . (`get` "connection")) rows of
-       Just existing -> pure existing
-       Nothing -> do
-        identity <- newId
-        pure $ obj [("id",str identity),("name",str $ if folder == root then "My relay" else "Imported relay"),("connection",connection),("available",Bool True),("archived",Bool False),("builtin",Bool False)]
-      pure (if row `elem` rows then rows else rows ++ [row], if folder == root then get row "id" else selected)) (initial,str "sapiens-beta") folders
-  let state = obj [("servers",arr rows),("selected",selected),("revision",num 1),("beta_accepted",Bool False)]
+  let state = obj [("servers",arr initial),("selected",str "sapiens-beta"),("revision",num 1),("beta_accepted",Bool False)]
   writeIORef (registrySaved registry) (put "relay_servers" state saved)
   saveRegistry registry
   pure state
@@ -416,11 +376,10 @@ queueRelayCleanup :: Registry -> IO ()
 queueRelayCleanup registry = do
  saved <- readIORef (registrySaved registry)
  identity <- Service.corporaIdentity (registryService registry)
- let root = serviceRoot (registryService registry)
-     folders = (root,at identity "id") : [(root </> "corporas" </> T.unpack (text key),text key) | key <- items saved "locals"]
- entries <- forM folders $ \(folder,key) -> (do
-  config <- readJSON (folder </> "remote-device.json") Null
-  if all (has config) ["relay","room","token"] then pure $ Just $ obj [("relay",get config "relay"),("room",get config "room"),("token",get config "token"),("corpora_id",fallback (get config "corpora_id") $ str key)] else pure Nothing) `catch` \(_::SomeException) -> pure Nothing
+ entries <- forM (get identity "id":items saved "locals") $ \key -> do
+  selected <- local registry (text key)
+  config <- loadValue (registryService selected) "local/device" Null
+  pure $ if all (has config) ["relay","room","token"] then Just (obj [("relay",get config "relay"),("room",get config "room"),("token",get config "token"),("corpora_id",key)]) else Nothing
  writeIORef (registrySaved registry) $ put "relay_cleanup" (arr $ nub $ items saved "relay_cleanup" ++ catMaybes entries) saved
 
 cleanupRelays :: (IO () -> IO ()) -> Registry -> Maybe Text -> Maybe Text -> IO ()
@@ -442,12 +401,11 @@ resetConnections registry connection = do
  clients <- atomicModifyIORef' (registryClients registry) (\current -> (M.empty,current))
  pending <- readIORef (registryPairClients registry)
  mapM_ revokeClient (M.elems clients ++ M.elems pending)
- opened <- readIORef (registryLocals registry)
- forM_ (registry : map localRegistry (M.elems opened)) $ \r -> void (revokeBridge (registryBridge r) False)
  saved <- readIORef (registrySaved registry)
- let unopened=filter (`M.notMember` opened) (map text $ items saved "locals")
- withSavedCorporaLocks (serviceRoot $ registryService registry) unopened $
-  resetSavedConnections (serviceRoot $ registryService registry) (items saved "locals") connection
+ children <- mapM (local registry . text) (items saved "locals")
+ forM_ (registry:children) $ \r -> do
+  void (revokeBridge (registryBridge r) False)
+  saveRelay (registryBridge r) connection
  startRegistry registry
 
 startRegistry :: Registry -> IO ()

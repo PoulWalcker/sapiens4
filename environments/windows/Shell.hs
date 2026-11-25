@@ -464,10 +464,12 @@ desktopSession memory probe args host configRoot = do
                         unless first $ storageScript "window.showStorageSetup?.()"
                         when first $ do
                           accepted <- DesktopStorage.termsAccepted
-                          if not accepted then storageScript "window.showStorageSetup?.()" else case saved of
+                          case saved of
                               Left e -> storageError (storageMessage e)
                               Right Nothing -> storageScript "window.showStorageSetup?.()"
-                              Right (Just directory) -> startSelected (Just AttachExisting) directory
+                              Right (Just directory) ->
+                                if accepted then startSelected (Just AttachExisting) directory
+                                else storageScript ("window.storagePicked?.(" ++ jsonString directory ++ ");window.showStorageSetup?.()")
                   else do
                     selection <- readIORef selectedRoot
                     forM_ selection $ \(directory,url) -> when (current==url) $ do

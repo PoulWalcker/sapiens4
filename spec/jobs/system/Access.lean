@@ -27,7 +27,7 @@ def rejectUntrustedRequestsWithoutDisclosingLocalState : IO Unit :=
     for (name, path, headers, status) in [
       ("opaque origin", "/api/state", #["Origin: null"], 403),
       ("unrecognized host", "/api/state", #["Host: other.invalid"], 403),
-      ("private database", "/corpora.sqlite3", #[], 404)] do
+      ("private database", "/corpora.lmdb", #[], 404)] do
       let reply ← request host.url "GET" path none headers
       IO.ofExcept <| verifyDenial name status reply before (← roster) [marker]
 

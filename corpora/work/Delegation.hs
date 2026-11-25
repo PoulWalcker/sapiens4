@@ -243,7 +243,7 @@ conversation s a turn state = do
  where takeLast n xs = drop (length xs-n) xs
 recordDecision :: Service -> Text -> Value -> IO ()
 recordDecision s a record = do
- writeJSON (archivePath s a ("decisions/"<>at record "decisionId")) record
+ writeArchive s a ("decisions/"<>at record "decisionId") record
  (w,_) <- field 500 record "callId" >>= getWork s
  let update d = if get d "decisionId" == get record "decisionId" then merge d (selectPresent ["accepted","response","error","transition"] record) else d
  saveWork s (setWorkField "decisions" (arr (map update (workItems w "decisions"))) w)
@@ -272,7 +272,7 @@ decide s run turn state node logs = do
       record = obj [("decisionId",str i),("callId",toJSON (turnId turn)),("node",toJSON node),("template",get source "template"),("promptHash",str digest),("templatePath",get source "path"),("renderedPrompt",str rendered),("provider",str (providerName (selectionProvider config))),("model",str (selectionModel config)),("effort",str (selectionEffort config)),("created",str t),("accepted",Bool False)]
       summary = merge (select ["decisionId","callId","node","promptHash","accepted"] record) (obj [("agent",str (agentIdText (runOwner run))),("promptTemplate",get record "template")])
   saveWork s (setWorkField "decisions" (arr (workItems w "decisions"++[summary])) w)
-  writeJSON (archivePath s (agentIdText (runOwner run)) ("decisions/"<>i)) record
+  writeArchive s (agentIdText (runOwner run)) ("decisions/"<>i) record
   pure (rendered,record)
  logIndex <- length <$> readIORef logs
  modifyIORef' logs (++[obj [("role",toJSON node),("prompt",str rendered),("session",Null)]])
@@ -329,7 +329,7 @@ applyDecision s owner current decision = do
  identity <- maybe (failure 409 "Delegation requires this call's recorded Delegation decision") pure current
  (w,c) <- getWork s (RunId identity)
  require (callNode c==Delegation && any (\d -> at d "decisionId"==decision && at d "callId"==identity && at d "node"=="Delegation") (workItems w "decisions")) 409 "Delegation requires this call's recorded Delegation decision"
- record <- readJSON (archivePath s owner ("decisions/"<>decision)) empty
+ record <- readArchive s owner ("decisions/"<>decision)
  require (get record "error"==Null && at (get record "response") "event"=="HandoffPrepared") 409 "Delegation decision has not produced a valid response"
  existing <- case find ((==Just (RunId identity)) . callParent) (workCalls w) of
   Just child -> pure child
@@ -438,7 +438,7 @@ runDecision s run turn state = do
    (work,_) <- getWork s (turnId turn)
    case listToMaybe (reverse [d | d<-workItems work "decisions",get d "callId"==toJSON (turnId turn)]) of
     Just summary | not (boolean (get summary "accepted")) -> do
-     record <- readJSON (archivePath s (agentIdText (runOwner run)) ("decisions/"<>at summary "decisionId")) empty
+     record <- readArchive s (agentIdText (runOwner run)) ("decisions/"<>at summary "decisionId")
      recordDecision s (agentIdText (runOwner run)) (put "error" (str (exceptionText e)) record)
     _ -> pure ()
   readIORef logs >>= throwIO . RunFailure (exceptionText e))
@@ -507,7 +507,7 @@ workTasks s a full = do
  works <- readWorks s
  rows <- forM [w | w <- works,workTracked w,any ((==AgentId a) . callOwner) (workCalls w)] $ \w -> do
   let lastCall=NE.last (workCalls w)
-  decisions <- forM (workItems w "decisions") $ \d -> if full then merge d <$> readJSON (archivePath s (at d "agent") ("decisions/"<>at d "decisionId")) empty else pure d
+  decisions <- forM (workItems w "decisions") $ \d -> if full then merge d <$> readArchive s (at d "agent") ("decisions/"<>at d "decisionId") else pure d
   pure $ mergeFields [("execution",obj [("state",toJSON (callState lastCall)),("owner",toJSON (callOwner lastCall)),("currentCall",toJSON (callIdentity lastCall)),("attempt",callField lastCall "attempt")]),("decisions",arr decisions)] (select ["task","workloadId","originalIntent","calls","outcome"] (toJSON w))
  pure (obj [("tasks",arr rows)])
 taskList :: Service -> Text -> IO Value

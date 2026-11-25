@@ -4,16 +4,14 @@ import Types
 import qualified Telemetry
 import qualified Service as Service
 import Crypto
-import Receipt (legacyJSON)
+import LegacyReceipt (matchesLegacyReceipt)
 import Setup
 import Transport
-import Mailboxes (withDB)
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
 import Data.Aeson hiding (pairs)
-import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Char
 import Data.IORef
@@ -21,16 +19,11 @@ import Data.List (sortOn)
 import qualified Data.Set as S
 import qualified Data.Text as T
 import Data.Text (Text)
-import Database.SQLite.Simple
-import System.Directory
-import System.FilePath
 
 
 data Bridge = Bridge { bridgeService :: Service, bridgeConfig :: MVar Value, bridgeError :: IORef Text, bridgeContact :: IORef Value, bridgeConnections :: IORef (S.Set Text), bridgeThread :: MVar (Maybe (Async ())) }
-configPath :: Bridge -> FilePath
-configPath b = serviceRoot (bridgeService b) </> "remote-device.json"
-relayPath :: Bridge -> FilePath
-relayPath b = serviceRoot (bridgeService b) </> "remote-relay.json"
+saveRelay :: Bridge -> Value -> IO ()
+saveRelay b = saveValue (bridgeService b) "local/relay"
 expiry :: Value -> Double
 expiry (Number n) = realToFrac n
 expiry _ = 0
@@ -39,9 +32,8 @@ newBridge service = do
  config <- newMVar Null
  b <- Bridge service config <$> newIORef "" <*> newIORef Null <*> newIORef S.empty <*> newMVar Nothing
  loaded <- try $ do
-  exists <- doesFileExist (configPath b)
-  saved <- readJSON (configPath b) Null
-  if not exists then pure Null else do
+  saved <- loadValue service "local/device" Null
+  if saved==Null then pure Null else do
    identity <- Service.corporaIdentity service
    require (get saved "corpora_id" == Null || get saved "corpora_id" == get identity "id") 400 "Pairing belongs to another CORPORA"
    void (origin (get saved "relay"))
@@ -61,12 +53,9 @@ startBridge b = modifyMVar_ (bridgeThread b) $ \existing -> case existing of
  Just _ -> pure existing
  Nothing -> Just <$> async (runBridge b)
 saveConfig :: Bridge -> Value -> IO ()
-saveConfig b Null = removeFile (configPath b) `catch` \(e::IOException) -> do
- exists <- doesFileExist (configPath b)
- when exists (throwIO e)
-saveConfig b v = writeJSON (configPath b) v
+saveConfig b = saveValue (bridgeService b) "local/device"
 savedRelay :: Bridge -> IO Value
-savedRelay b = readConnection (relayPath b) `catch` \(errorValue::SomeException) -> rethrowAsync errorValue >> pure empty
+savedRelay b = loadValue (bridgeService b) "local/relay" empty
 bridgeStatus :: Bridge -> IO Value
 bridgeStatus b = withMVar (bridgeConfig b) $ \config -> do
  identity <- Service.corporaIdentity (bridgeService b)
@@ -107,7 +96,7 @@ createPairing b input = modifyMVar (bridgeConfig b) $ \current -> do
  let invitation = obj [("v",str protocol),("relay",str relay),("room",get room "room"),("token",get room "phone"),("desktop",str public),("secret",str secret),("expires",toJSON expires),("public_id",str address)]
      config = obj [("relay",str relay),("room",get room "room"),("token",get room "desktop"),("corpora_id",get identity "id"),("private",str private),("public",str public),("secret",str secret),("expires",toJSON expires),("peer",Null),("pending",Null),("invitation",invitation)]
  saveConfig b config
- writeJSON (relayPath b) connection
+ saveRelay b connection
  writeIORef (bridgeError b) ""
  pure (config,obj [("qr",invitation)])
 replyFrame :: Value -> Text -> Value -> IO Value
@@ -212,29 +201,26 @@ processFrame b config frame = admitted (bridgeService b) True $ do
    reply <- if at message "op"=="resume" then replyFrame current (at message "id") (obj [("paired",Bool True),("corpora",identity)])
     else if at message "op"=="api" && at message "method"=="GET" then executeReply b current message
     else do
-     let path = serviceRoot (bridgeService b) </> "remote-receipts.sqlite3"
-         currentDigest = hash (BL.toStrict (encode (obj (sortOn fst (pairs message)))))
-         -- New receipts and matching pre-v2 canonical receipts never need legacyJSON.
-         -- Limit the slow Python-era fallback to 4 KiB during the one-day migration
-         -- window. Oversized mismatches are rejected without parsing or re-execution.
-         stored = "v2:" <> currentDigest
-         legacyDigest = either (const currentDigest) hash (legacyJSON plaintext)
-         matches saved = if "v2:" `T.isPrefixOf` saved then saved == stored
-          else saved == currentDigest || (BS.length plaintext <= 4096 && saved == legacyDigest)
-         room = at current "room"; ident = at message "id"
-     receipt <- withDB path $ \db -> withTransaction db $ do
-      execute_ db "CREATE TABLE IF NOT EXISTS receipts (room TEXT,id TEXT,hash TEXT,reply TEXT,created REAL,PRIMARY KEY(room,id))"
-      execute db "DELETE FROM receipts WHERE created < ?" (Only (time-86400))
-      rows <- query db "SELECT hash,reply FROM receipts WHERE room=? AND id=?" (room,ident) :: IO [(Text,Maybe Text)]
-      when (null rows) (execute db "INSERT INTO receipts VALUES (?,?,?,NULL,?)" (room,ident,stored,time))
-      pure rows
+     let service=bridgeService b
+         digest=hash (BL.toStrict (encode (obj (sortOn fst (pairs message)))))
+         ident=at message "id"
+         key="receipts/"<>at current "room"<>"/"<>ident
+     receipt <- locked service $ do
+      saved <- loadValue service key Null
+      if saved/=Null then pure (Just saved) else do
+       saveValue service key (obj [("hash",str digest),("reply",Null)])
+       pure Nothing
      case receipt of
-      (saved,raw):_ -> do
-       require (matches saved) 400 "Request ID was reused"
-       maybe (replyFrame current ident (obj [("error",str "Outcome uncertain after interruption. Check desktop history before sending again.")])) (pure . parseJSONText) raw
-      [] -> do
+      Just saved -> do
+       let stored = at saved "hash"
+           matches = stored==digest || boolean (get saved "legacy") &&
+            matchesLegacyReceipt hash stored digest plaintext
+       require matches 400 "Request ID was reused"
+       if get saved "reply"==Null then replyFrame current ident (obj [("error",str "Outcome uncertain after interruption. Check desktop history before sending again.")])
+        else pure (get saved "reply")
+      Nothing -> do
        result <- executeReply b current message
-       withDB path (\db -> execute db "UPDATE receipts SET reply=? WHERE room=? AND id=?" (jsonText result,room,ident))
+       locked service (saveValue service key (obj [("hash",str digest),("reply",result)]))
        pure result
    pure (current,Just reply)
 runBridge :: Bridge -> IO ()

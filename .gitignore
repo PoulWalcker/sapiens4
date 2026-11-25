@@ -14,13 +14,13 @@ DerivedData/
 # Logs
 *.log
 
-# Local UI database, runtime state, agent artifacts and Python caches
+# Local runtime state, workspace artifacts and caches
 .sapiens4/
 .sapiens4-relay/
 .agentpy/
-*.sqlite3
-*.sqlite3-wal
-*.sqlite3-shm
+*.lmdb
+*.lmdb.lock
+*.lmdb-lock
 __pycache__/
 .venv/
 .test-output/
@@ -40,3 +40,11 @@ spec/.lake/
 
 .spago/
 build/purescript/output/
+# Retained migration inputs and private staging databases
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+*.lmdb.migrating*
+*.lmdb.migration.lock
+.migration-notes-*

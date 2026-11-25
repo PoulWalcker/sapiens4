@@ -18,6 +18,7 @@ import qualified Data.Text.Encoding as TE
 import System.Directory
 import System.FilePath
 import Types
+import NoteTemplate (renderMemo)
 
 escape :: Text -> Text
 escape = T.concatMap (\c -> fromMaybe (T.singleton c) (lookup c [('&',"&amp;"),('<',"&lt;"),('>',"&gt;"),('"',"&quot;"),('\'',"&#x27;")]))
@@ -35,25 +36,8 @@ ensureMemo root name purpose = do
  link <- pathIsSymbolicLink p `catch` (\(_ :: IOException) -> pure False)
  unless (exists || link) $ do
   createDirectoryIfMissing True root
-  sources <- filterM doesPathExist [root </> "Notes.yaml",root </> "Notes.md"]
-  content <- case listToMaybe sources of
-   Nothing -> pure "notes: []"
-   Just source -> do
-    validate root source
-    old <- readText source
-    pure (if takeExtension source == ".md" then "notes: " <> jsonText (str old) else old)
-  writeText p (migratedMemo name purpose content)
+  writeText p (renderMemo name purpose "notes: []")
 
-migratedMemo :: Text -> Text -> Text -> Text
-migratedMemo name purpose content =
- ("<section id=\"about\"><pre><code class=\"language-yaml\">" <> escape about <> "</code></pre></section>\n<section id=\"map\"><nav>" <> links <> "</nav></section>\n<section id=\"content\">" <> snippets <> "</section>\n")
- where
- about = "who: " <> jsonText (str name) <> "\npurpose: " <> jsonText (str purpose)
- chunks = foldl (\acc line -> if not (T.null line) && (isAlpha (T.head line) || T.head line == '_') && T.any (== ':') line then acc ++ [line] else case reverse acc of [] -> [line]; x:xs -> reverse xs ++ [x <> "\n" <> line]) [] (T.lines content)
- values = filter (not . T.null . T.strip) chunks
- title x = let t = T.takeWhile (\c -> isAlphaNum c || c `elem` ['_','-']) x in if T.isPrefixOf ":" (T.drop (T.length t) x) then t else "remembered"
- links = T.concat ["<a href=\"#entry-" <> T.pack (show i) <> "\">" <> escape (title x) <> "</a> — saved " <> escape (title x) <> "<br>" | (i,x) <- zip [0::Int ..] values]
- snippets = T.concat ["<article id=\"entry-" <> T.pack (show i) <> "\"><pre><code class=\"language-yaml\">" <> escape x <> "</code></pre></article>\n" | (i,x) <- zip [0::Int ..] values]
 memoMetadata :: FilePath -> IO Value
 memoMetadata root = work `catch` (\(APIError _ e) -> pure (obj [("path",str (T.pack p)),("error",str e),("revision",str "invalid")]))
  where

@@ -11,6 +11,7 @@ import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Exception
 import Control.Monad
+import qualified V00_02_03Files as TypedFiles
 import Data.Aeson
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
@@ -126,17 +127,11 @@ data Telemetry = Telemetry
 
 readSaved :: FilePath -> IO Saved
 readSaved path = catchJust (guard . isDoesNotExistError)
- (BL.readFile path >>= either fail pure . eitherDecode)
+ (TypedFiles.readValue path (Saved False Nothing))
  (const (pure (Saved False Nothing)))
 
 writeSaved :: FilePath -> Saved -> IO ()
-writeSaved path value = do
- createDirectoryIfMissing True (takeDirectory path)
- bracketOnError (openBinaryTempFile (takeDirectory path) ".telemetry.tmp")
-  (\(temporary,handle) -> hClose handle `finally` removeFile temporary) $ \(temporary,handle) -> do
-   BL.hPut handle (encode value)
-   hClose handle
-   renameFile temporary path
+writeSaved = TypedFiles.writeValue
 
 openTelemetry :: RuntimeKind -> Maybe Bool -> IO Telemetry
 openTelemetry = openTelemetryUsing (newManager tlsManagerSettings)

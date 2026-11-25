@@ -22,6 +22,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Clock
 import System.Directory
+import qualified Clock
 import Types
 import qualified Telemetry
 import qualified Store as DB
@@ -61,7 +62,7 @@ trimConversation :: Service -> Text -> IO ()
 trimConversation s a = do
  state <- stateJSON <$> agentState s a
  let Retention final archives = retainConversation state
- forM_ archives $ \(ConversationArchive field rows) -> newId >>= \i -> writeJSON (archivePath s a (field<>"/"<>i)) (arr rows)
+ forM_ archives $ \(ConversationArchive field rows) -> newId >>= \i -> writeArchive s a (field<>"/"<>i) (arr rows)
  when (final/=state) (decodeValue 500 final >>= saveState s a)
 submitTurn :: Telemetry.RequestTransport -> Service -> Text -> Value -> IO Value
 submitTurn transport s a d = do
@@ -185,7 +186,7 @@ finish s run turn outcome = do
  let a=agentIdText (runOwner run); i=runIdText (runId run)
      completed=runOutcome stop outcome
      (output,logs,failureText)=outcomeFields completed
- writeJSON (archivePath s a ("runs/"<>i)) (obj [("output",str output),("logs",arr logs),("error",maybe Null str failureText)])
+ writeArchive s a ("runs/"<>i) (obj [("output",str output),("logs",arr logs),("error",maybe Null str failureText)])
  state <- agentState s a
  time <- now
  ids <- decodeValue 500 (turnField turn "batch_members" `fallback` toJSON [turnId turn]) :: IO [RunId]
@@ -221,8 +222,8 @@ launch s a batch tick slot batching = do
  modifyMVar_ (serviceRuns s) (pure . M.insert i run)
  DB.pulseCall s tick a "chatInput" slot (nub [at (turnField t "origin") "group" | t <- NE.toList batch,has (turnField t "origin") "group"])
  DB.project s a
- void $ forkIO $ do
-  result <- try (withActor s a (Just "chatInput") (if has (turnField execution "origin") "group" then G.runGroup s run execution else D.runDecision s run execution snapshot))
+ afterCommit s $ void $ forkIOWithUnmask $ \unmask -> do
+  result <- try (unmask $ withActor s a (Just "chatInput") (if has (turnField execution "origin") "group" then G.runGroup s run execution else D.runDecision s run execution snapshot))
   locked s $ finish s run execution result `finally` do
    lease <- readIORef (serviceLease s)
    when (lease==Just (AgentId a,i)) $ writeIORef (serviceLease s) Nothing
@@ -235,8 +236,7 @@ publish :: Service -> Text -> Pulse -> IO ()
 publish s a tick = forM_ [1,2] $ \slot -> do
  state <- agentState s a
  let document=stateJSON state
-     scheduled=pulseFrequency tick==Bph60
-     eligible item=has (get item "origin") "routine" == scheduled
+     eligible _=True
  case find eligible (items document "output_buffer") of
   Nothing -> pure ()
   Just item -> do
@@ -261,69 +261,38 @@ data Admission = Admission (NonEmpty Turn) Int Bool
 admission :: AgentId -> [(AgentId,Int)] -> AgentState -> Pulse -> Maybe Admission
 admission owner runs state tick
  | owner `notElem` owners && length owners>=4 = Nothing
- | first:_ <- legacy, null mine, not scheduled = Just (Admission (first :| []) 0 False)
- | slot:_ <- available, Just batch <- NE.nonEmpty queued, all (/=0) mine = Just (Admission (if scheduled then NE.head batch :| [] else batch) slot True)
+ | first:_ <- legacy, null mine = Just (Admission (first :| []) 0 False)
+ | slot:_ <- available, Just batch <- NE.nonEmpty queued, all (/=0) mine = Just (Admission (if has (turnField (NE.head batch) "origin") "routine" then NE.head batch :| [] else NE.fromList (filter (not . (\t -> has (turnField t "origin") "routine")) (NE.toList batch))) slot True)
  | otherwise = Nothing
  where
  owners=nub (map fst runs)
  mine=[slot | (agent,slot)<-runs,agent==owner]
  available=[n | n<-[1,2],n `notElem` mine]
- scheduled=pulseFrequency tick==Bph60
- queued=[t | t<-agentTurns state,turnStatus t==Queued,boolean (turnField t "batchable"),has (turnField t "origin") "routine"==scheduled]
+ queued=[t | t<-agentTurns state,turnStatus t==Queued,boolean (turnField t "batchable")]
  legacy=[t | t<-agentTurns state,turnStatus t==Queued,not (boolean (turnField t "batchable"))]
 onPulse :: Service -> Pulse -> IO ()
 onPulse s tick = do
  R.dispatch s tick
- when (pulseFrequency tick==Bph60 || (pulseFrequency tick==Bpm60 && even (pulseNumber tick))) $ do
-  D.pendingWorks s
-  G.reconcileGroups s
-  G.projectQueuedGroups s
-  rows <- DB.agents s
-  forM_ rows $ \row -> do
-   let a=at row "id"
-   inactive <- retired s a
-   unless inactive $ do
-    publish s a tick
-    admit s a tick
-    when (pulseFrequency tick==Bph60) $ admit s a tick
-advanceDeadline :: Frequency -> Int -> Int -> (Int,Int)
-advanceDeadline frequency time due = (elapsed,due+elapsed*interval)
- where
- interval=periodMillis frequency
- elapsed=(time-due) `div` interval+1
-
-milliseconds :: IO Int
-milliseconds = fromIntegral . (`div` 1000000) <$> getMonotonicTimeNSec
+ D.pendingWorks s
+ G.reconcileGroups s
+ G.projectQueuedGroups s
+ rows <- DB.agents s
+ forM_ rows $ \row -> do
+  let a=at row "id"
+  inactive <- retired s a
+  unless inactive $ publish s a tick >> admit s a tick
 startExecution :: Service -> IO ()
 startExecution s = modifyMVar_ (serviceWorker s) $ \existing -> case existing of
  Just _ -> pure existing
- Nothing -> Just <$> async loop
- where
- loop = do
-  t <- milliseconds
-  deadlines <- newIORef (M.fromList [(f,t+periodMillis f) | f <- [minBound..maxBound]])
-  let step = do
-       stopped <- readIORef (serviceStopping s)
-       unless stopped $ do
-        void $ withAdmission (serviceAdmission s) True $ locked s $ do
-         config <- corporaSettings s
-         pulse <- readIORef (servicePulse s)
-         let active=corporaStatus config==Active
-         writeIORef (servicePulse s) (put "running" (Bool active) pulse)
-         time <- milliseconds
-         if not active then writeIORef deadlines (M.fromList [(f,time+periodMillis f) | f <- [minBound..maxBound]]) else forM_ [minBound..maxBound] $ \frequency -> do
-          let key=wireName frequency
-          due <- fromMaybe time . M.lookup frequency <$> readIORef deadlines
-          when (time>=due) $ do
-           let (elapsed,next)=advanceDeadline frequency time due
-           modifyIORef' deadlines (M.insert frequency next)
-           current <- readIORef (servicePulse s)
-           let number=int (get (get current "numbers") key)+elapsed; numbers=put key (num number) (get current "numbers"); identity=at current "id"
-           writeIORef (servicePulse s) (put "numbers" numbers current)
-           DB.saveSingleton s DB.SystemPulse (obj [("pulse",str identity),("numbers",numbers)])
-           onPulse s (Pulse identity frequency number)
-        threadDelay 50000
-        step
-  step
+ Nothing -> Just <$> Clock.subscribe (serviceClock s) (\number -> do
+  stopped <- readIORef (serviceStopping s)
+  unless stopped $ void $ withAdmission (serviceAdmission s) True $ locked s $ do
+   config <- corporaSettings s
+   pulse <- readIORef (servicePulse s)
+   let active=corporaStatus config==Active
+       identity=at pulse "id"
+       numbers=obj [("bpm120",toJSON number)]
+   writeIORef (servicePulse s) (merge pulse (obj [("running",Bool active),("numbers",numbers)]))
+   when active $ onPulse s (Pulse identity Bpm120 (fromIntegral number)))
 stopRuns :: Service -> IO ()
 stopRuns s = readMVar (serviceRuns s) >>= mapM_ (\run -> writeIORef (runCancel run) True) . M.elems
