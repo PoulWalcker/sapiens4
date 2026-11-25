@@ -14,6 +14,7 @@ import System.FilePath
 import System.FileLock
 import UpdatePlatform
 import UpdateState
+import qualified Migrations
 
 data EntryKind = FileEntry | DirectoryEntry deriving Eq
 data TreeEntry = TreeEntry { relativePath :: FilePath, entryKind :: EntryKind } deriving Eq
@@ -41,13 +42,12 @@ backupRoots destination = UpdateRoots {dataRoot=destination </> "0", configRoot=
 managedChildren :: FilePath -> IO [FilePath]
 managedChildren root = do
  validatePath root
- let path = root </> "host-corpora.json"
- exists <- pathPresent path
- if not exists then pure [] else do
-  names <- B.readFile path >>= either fail pure . (eitherDecodeStrict >=> parseEither registry)
-  forM names $ \name -> case canonicalUUID name of
-   Just _ -> pure (root </> "corporas" </> T.unpack name)
-   _ -> fail "Invalid registered child Corpora"
+ -- The registry can be SQLite-era JSON or current LMDB during an upgrade.
+ saved <- Migrations.readRegistry root
+ names <- maybe (pure []) (either fail pure . parseEither registry) saved
+ forM names $ \name -> case canonicalUUID name of
+  Just _ -> pure (root </> "corporas" </> T.unpack name)
+  _ -> fail "Invalid registered child Corpora"
  where registry = withObject "Corpora registry" (\o -> o .:? "locals" .!= [])
 
 managedRoots :: FilePath -> IO [FilePath]
@@ -136,7 +136,8 @@ inventories resolve live source = do
  let dataPath = dataRoot source
      locks = map (makeRelative dataPath . (</> "host.lock")) corpora
      relative child = if child == dataPath then "" else makeRelative dataPath child
-     profiles = [relative child </> profile | child <- corpora, profile <- reservationName:profileExclusions]
+     profiles = [relative child </> profile | child <- corpora,
+       profile <- reservationName:"corpora.lmdb.lock":"corpora.lmdb-lock":"corpora.lmdb.migration.lock":"corpora.lmdb.migrating.lock":"corpora.lmdb.migrating-lock":profileExclusions]
      configExcluded = configOwnerName:configWriterLockName:profileExclusions
  skippedData <- resolve dataPath (locks ++ profiles)
  savedData <- Inventory (dataRoot live) locks profiles <$> inventory dataPath skippedData

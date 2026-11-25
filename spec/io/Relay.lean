@@ -18,7 +18,7 @@ def withRelay (use : String → String → IO α) : IO α := IO.FS.withTempDir f
     cmd := (binary root "sapiens4").toString, cwd := root, stdout := .piped
     env := #[("SAPIENS_RELAY_ADMIN_TOKEN", none), ("RAILWAY_ENVIRONMENT_ID", none), ("SAPIENS_RELAY_BETA", none)]
     args := #["relay", "--bind", "127.0.0.1", "--port", toString port, "--origin", url,
-      "--db", (directory / "relay.sqlite3").toString, "--connection-file", config.toString] }
+      "--db", (directory / "relay.lmdb").toString, "--connection-file", config.toString] }
   try
     let startup ← IO.asTask (do
       discard child.stdout.getLine

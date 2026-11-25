@@ -1,5 +1,6 @@
 module HostServer where
 
+import qualified Clock
 import Types
 import Admission
 import qualified Telemetry
@@ -65,9 +66,10 @@ startHost consent root port preparing = mask $ \restore -> do
        Just _ -> pure ()
        Nothing -> Telemetry.openTelemetry context consent >>= writeIORef reporter . Just
      closeReporter = readIORef reporter >>= mapM_ Telemetry.closeTelemetry
+ clock <- Clock.start
  browser <- newBrowserCrypto
  unless preparing startReporter
- (assigned,host) <- restore (openLocal gate reporter browser (not preparing) choice root port False) `onException` closeReporter
+ (assigned,host) <- restore (openLocal clock gate reporter browser (not preparing) choice root port False) `onException` (closeReporter `finally` Clock.stop clock)
  let service = registryService (localRegistry host)
      activate = do
       assertDataAvailable (serviceRoot service)
@@ -88,20 +90,19 @@ startHost consent root port preparing = mask $ \restore -> do
       occupied <- busyHosts
       when occupied (openAdmission gate)
       pure (not occupied)
- pure (Host assigned service (stopLocal host `finally` closeReporter) activate busyHosts (quiesce `onException` openAdmission gate) (openAdmission gate) prepare)
+ pure (Host assigned service (stopLocal host `finally` (closeReporter `finally` Clock.stop clock)) activate busyHosts (quiesce `onException` openAdmission gate) (openAdmission gate) prepare)
 
-openLocal :: Admission -> IORef (Maybe Telemetry.Telemetry) -> BrowserCrypto -> Bool -> StorageChoice -> FilePath -> Int -> Bool -> IO (Int,LocalHost)
-openLocal gate reporterRef browser startWorkers choice root requested managed = do
+openLocal :: Clock.Clock -> Admission -> IORef (Maybe Telemetry.Telemetry) -> BrowserCrypto -> Bool -> StorageChoice -> FilePath -> Int -> Bool -> IO (Int,LocalHost)
+openLocal clock gate reporterRef browser startWorkers choice root requested managed = do
  mode <- lookupEnv "SAPIENS_STORAGE_MODE"
  let report phase = when (not managed && mode `elem` [Just "new",Just "existing"]) (putStrLn phase)
  report openingStorage
- bracketOnError (Service.openService gate reporterRef choice root) Service.closeService $ \service -> do
+ bracketOnError (Service.openService clock gate reporterRef choice root) Service.closeService $ \service -> do
   opened@(_,host) <- start service
   report openedStorage `onException` stopLocal host
   pure opened
  where
  start service = do
-  unless managed (recoverRelays root)
   (socket,port) <- listenLoopback requested
   flip onException (Socket.close socket) $ do
    Service.attachEndpoint service ("http://127.0.0.1:"<>T.pack (show port))
@@ -109,7 +110,7 @@ openLocal gate reporterRef browser startWorkers choice root requested managed = 
    activated <- newMVar False
    let child selection path = do
         running <- readMVar activated
-        snd <$> openLocal gate reporterRef browser running selection path 0 True
+        snd <$> openLocal clock gate reporterRef browser running selection path 0 True
    registry <- newRegistry service bridge child
    onboarding <- if managed then pure Nothing else Just <$> O.openOnboarding (repositoryRoot service)
    shutdown <- newEmptyMVar
@@ -126,11 +127,11 @@ openLocal gate reporterRef browser startWorkers choice root requested managed = 
          reporter <- readIORef (serviceTelemetry service)
          forM_ reporter $ \telemetry -> Telemetry.emit telemetry Telemetry.AppStarted
          when (choice==StartNew) (emitTelemetry service Telemetry.CorporaCreated)
-         let heartbeatMinutes = round (Telemetry.heartbeatInterval / 60) :: Int
-         task <- async $ forM_ (cycle [1..heartbeatMinutes]) $ \minute -> do
-          threadDelay (60 * 1000000)
+         let ticksPerMinute = 120
+             heartbeatTicks = ticksPerMinute * round (Telemetry.heartbeatInterval / 60)
+         task <- Clock.subscribe clock $ \tick -> when (tick `mod` ticksPerMinute==0) $
           forM_ reporter $ \telemetry -> do
-           when (minute==heartbeatMinutes) (Telemetry.emit telemetry Telemetry.PulseId)
+           when (tick `mod` heartbeatTicks==0) (Telemetry.emit telemetry Telemetry.PulseId)
            Telemetry.requestFlush telemetry
          modifyMVar_ heartbeat (const (pure (Just task)))
         startBridge bridge
@@ -191,15 +192,16 @@ application service bridge registry onboarding port req respond
 
 -- One metadata sampler per service, asleep when no window is subscribed.
 watchSnapshotFiles :: Service -> IO ()
-watchSnapshotFiles s = loop M.empty
- where
- loop previous = do
-  atomically $ readTVar (updateSubscribers s) >>= STM.check . (>0)
-  files <- readIORef (snapshotFiles s)
-  current <- M.traverseWithKey (\path _ -> (Just <$> getModificationTime path) `catch` (\(_::IOException) -> pure Nothing)) (M.fromSet (const ()) files)
-  when (previous /= current) (notifyChange s)
-  threadDelay 1000000
-  loop current
+watchSnapshotFiles s = do
+ previous <- newIORef M.empty
+ let sample _ = do
+      count <- readTVarIO (updateSubscribers s)
+      when (count>0) $ do
+       files <- readIORef (snapshotFiles s)
+       current <- M.traverseWithKey (\path _ -> (Just <$> getModificationTime path) `catch` (\(_::IOException) -> pure Nothing)) (M.fromSet (const ()) files)
+       old <- atomicModifyIORef' previous (\old -> (current,old))
+       when (old/=current) (notifyChange s)
+ bracket (Clock.subscribe (serviceClock s) sample) cancel wait
 
 updatesSocket :: Service -> WS.ServerApp
 updatesSocket s pending = do
@@ -207,8 +209,6 @@ updatesSocket s pending = do
  let count f = atomically (modifyTVar' (updateSubscribers s) f)
      send previous = do
       atomically $ readTVar (serviceRevision s) >>= STM.check . (/= previous)
-      -- Provider events can arrive in bursts. Send one revision for the batch.
-      when (previous >= 0) $ threadDelay 250000
       revision <- readTVarIO (serviceRevision s)
       WS.sendTextData conn (encode revision)
       send revision

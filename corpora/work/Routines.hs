@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Routines
- ( Minutes, Routine(..), readRoutines, storeRoutine, initializeRoutines
+ ( Minutes, Routine(..), readRoutines, storeRoutine
  , RoutineEdit(..), save, setPaused, command, receipt, acknowledge, dispatch
  ) where
 
@@ -51,15 +51,6 @@ readRoutines s = DB.values s DB.ScheduledRoutines >>= traverse (decodeValue 500)
 storeRoutine :: Service -> Routine -> IO Value
 storeRoutine s = DB.saveRoutine s . toJSON
 
-initializeRoutines :: Service -> IO ()
-initializeRoutines s = do
- routines <- DB.values s DB.ScheduledRoutines
- works <- DB.values s DB.Workloads
- groups <- DB.values s DB.Groups
- forM_ routines $ \r -> unless (has r "runCount") $ do
-  let group=findId (at r "owner") groups
-      count=case group of Just g->length [t | t<-items g "tasks",get t "routine"==get r "id"]; Nothing->length [w | w<-works,get (get w "origin") "routine"==get r "id"]
-  void (DB.saveRoutine s (merge r (obj [("runCount",num count),("paused",Bool (count>=1000))])))
 data RoutineEdit = AddRoutine (Maybe Text) | EditRoutine Text (Maybe Int)
 data RoutineWrite = NewRoutine (Maybe Text) | ReviseRoutine Value
 data RoutineSelection = RoutineReplay Value | RoutineChange RoutineWrite
@@ -163,7 +154,7 @@ pauseRoutine time paused routine = routine
  , routineFields=KM.insert "updated" (str (timestamp time)) (routineFields routine) }
 
 dispatch :: Service -> Pulse -> IO ()
-dispatch s tick = when (pulseFrequency tick == Bph60) $ do
+dispatch s _ = do
  t <- getCurrentTime
  routines <- readRoutines s
  forM_ routines $ \routine -> do

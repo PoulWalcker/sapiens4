@@ -75,12 +75,12 @@ instance FromJSON CorporaConfig where
  parseJSON = withObject "Corpora settings" $ \o -> CorporaConfig <$> o .:? "name" <*> o .: "device" <*> o .: "scope" <*> o .: "status" <*> o .: "revision" <*> o .:? "operations" .!= M.empty
 instance ToJSON CorporaConfig where
  toJSON config = object ["name" .= corporaName config, "device" .= corporaDevice config, "scope" .= corporaScope config, "status" .= corporaStatus config, "revision" .= corporaRevision config, "operations" .= corporaOperations config]
-data Frequency = Bpm120 | Bpm60 | Bph60 deriving (Eq, Ord, Show, Enum, Bounded)
-instance Wire Frequency where wireName frequency = case frequency of Bpm120 -> "bpm120"; Bpm60 -> "bpm60"; Bph60 -> "bph60"
+data Frequency = Bpm120 deriving (Eq, Ord, Show, Enum, Bounded)
+instance Wire Frequency where wireName frequency = case frequency of Bpm120 -> "bpm120"
 instance FromJSON Frequency where parseJSON = parseWire
 instance ToJSON Frequency where toJSON = String . wireName
 periodMillis :: Frequency -> Int
-periodMillis frequency = case frequency of Bpm120 -> 500; Bpm60 -> 1000; Bph60 -> 60000
+periodMillis frequency = case frequency of Bpm120 -> 500
 data Pulse = Pulse { pulseName :: Text, pulseFrequency :: Frequency, pulseNumber :: Int } deriving (Eq, Show)
 pulseIdentity :: Pulse -> Text
 pulseIdentity pulse = pulseName pulse <> ":" <> wireName (pulseFrequency pulse) <> ":" <> T.pack (show (pulseNumber pulse))

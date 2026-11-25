@@ -115,7 +115,7 @@ readComputer binary supplied maximumSize = do
    remaining <- map (cache</>) . filter ((==".json").takeExtension) <$> listDirectory cache
    dated <- mapM (\p -> (,p) <$> getModificationTime p) remaining
    mapM_ (removeFile . snd) (drop 4 (reverse (sortOn fst dated)))
-   writeJSON (cache</>T.unpack ident<.>"json") snapshot
+   atomicBytes (cache</>T.unpack ident<.>"json") (encode snapshot)
    pure snapshot
  validated (snapshotPage maximumSize offset snapshot)
 

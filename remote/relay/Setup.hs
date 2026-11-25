@@ -37,7 +37,7 @@ provision path relay credential = do
  exists <- doesFileExist path
  secret <- if not (T.null credential) then pure credential else if exists then (`at` "token") <$> readConnection path else token
  value <- validateConnection (obj [("format",str connectionFormat),("relay",str relay),("token",str secret)])
- writeJSON path value
+ atomicBytes path (encode value)
  pure value
 localConnection :: FilePath -> IO Value
 localConnection repo = (do

@@ -1,0 +1,10 @@
+name: lint4
+on:
+  push:
+  pull_request:
+    branches: [main, dev]
+permissions:
+  contents: read
+jobs:
+  lint4:
+    uses: sapiens4ai/lint4/.github/workflows/check.yml@main

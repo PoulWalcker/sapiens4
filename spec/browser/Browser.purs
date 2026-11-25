@@ -298,6 +298,7 @@ verify = do
 
 cryptoRequest :: Json -> Effect Json
 cryptoRequest input = case D.s "operation" input of
+  "keypair" -> Crypto.keyPair
   "verify" -> verify *> pure (D.bool true)
   "request" -> do
     let config = D.get "config" input

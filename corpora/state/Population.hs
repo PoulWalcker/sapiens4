@@ -12,7 +12,6 @@ import System.Random (randomRIO)
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
-import Database.SQLite.Simple (SQLData(..))
 import System.Directory
 import System.Environment
 import System.FilePath
@@ -23,15 +22,15 @@ import Memo
 import Workspace (seedMemoBookmark)
 
 settings :: Service -> Text -> IO Value
-settings s a = readJSON (agentRoot s a </> "host.json") empty
+settings s a = loadValue s ("settings/"<>a) empty
 retired :: Service -> Text -> IO Bool
 retired s a = (/= Null) . (`get` "retired_at") <$> settings s a
 requireActive :: Service -> Text -> IO ()
 requireActive s a = DB.agent s a >> retired s a >>= \r -> require (not r) 409 "This Sapi is retired. Ask the chief to rehire it before assigning or running work."
 directory :: Service -> IO Value
-directory s = readJSON (serviceRoot s </> "agentpy/corpora/directory.json") empty
+directory s = loadValue s "directory" empty
 saveDirectory :: Service -> Value -> IO ()
-saveDirectory s = writeJSON (serviceRoot s </> "agentpy/corpora/directory.json")
+saveDirectory s = saveValue s "directory"
 resolve :: Service -> Text -> Bool -> IO Text
 resolve s name includeRetired = do
  rows <- DB.agents s
@@ -72,23 +71,13 @@ assignManager s a parent = do
  when (old /= parent) $ DB.record s [a] a "sapi.manager.changed" (obj [("previous",old),("manager",parent)]) "admin" Nothing
 ensureAgent :: Service -> Value -> IO ()
 ensureAgent s row = do
- let a = at row "id"; root = agentRoot s a; work = workspaceRoot s a; p = root </> "state.json"
+ let a=at row "id"; work=workspaceRoot s a
+ require (not (T.null a) && T.all (\c -> isAscii c && (isAlphaNum c || c `elem` ("_-"::String))) a) 500 "Invalid saved Sapi identity"
  createDirectoryIfMissing True work
  ensureMemo work (at row "name") (at row "role") `catch` (\(_::APIError) -> pure ())
  seedMemoBookmark s a
- v <- readJSON p Null
- require (get v "schema_version" `elem` map num [1,2,3]) 500 "Unsupported agent state schema"
- require (at v "agid" == a) 500 "Agent ID does not match saved state"
- when (int (get v "schema_version") < 3) $ do
-  let version = int (get v "schema_version"); backup = root </> ("legacy-state-v" ++ show version ++ ".json")
-  migrated <- validated (migrateAgentState version v)
-  backed <- doesFileExist backup
-  unless backed $ copyFile p backup
-  saveState s a migrated
- d <- directory s
- unless (has d a) $ saveDirectory s (put a (obj [("parent",get v "initial_manager"),("scope",str "")]) d)
- when (get v "schema_version"==num 3 && has v "initial_manager") $
-  writeJSON p (remove ["initial_manager"] v)
+ state <- agentState s a
+ require (at (stateJSON state) "agid"==a) 500 "Agent ID does not match saved state"
  setManifests s row
 setManifests :: Service -> Value -> IO ()
 setManifests s row = do
@@ -117,19 +106,6 @@ randomAvatar used = do
  palette <- randomRIO (0,length colors-1)
  suffix <- if null available then ("✦"<>) . T.take 4 <$> newId else pure ""
  pure (choices!!index<>suffix,colors!!palette)
-repairAvatars :: Service -> IO ()
-repairAvatars s = do
- used <- newIORef []
- rows <- DB.agents s
- forM_ rows $ \row -> do
-  known <- readIORef used
-  face <- if at row "face" `elem` known then do
-   (face,color) <- randomAvatar known
-   DB.executeSQL s "UPDATE agents SET face=?,color=? WHERE id=?" [SQLText face,SQLText color,sqlId row]
-   pure face
-   else pure (at row "face")
-  modifyIORef' used (face:)
- where sqlId row=SQLText (at row "id")
 data AgentDraft = AgentDraft
  { draftName :: Text, draftRole :: Text
  , preferredColor :: Maybe Text, preferredFace :: Maybe Text
@@ -158,8 +134,9 @@ createAgent s d = do
  -- Reserve the fresh ID and persist its history before publishing it to readers.
  createDirectoryIfMissing True (serviceRoot s </> "agentpy/agents")
  createDirectory (agentRoot s a)
- writeJSON (agentRoot s a </> "state.json") (obj [("schema_version",num 3),("agid",str a),("revision",num 1),("turns",arr []),("chat",arr []),("events",arr []),("event_sequence",num 0),("last_output",Null),("initial_manager",parent)])
+ saveValue s ("states/"<>a) (obj [("schema_version",num 3),("agid",str a),("revision",num 1),("turns",arr []),("chat",arr []),("events",arr []),("event_sequence",num 0),("last_output",Null),("initial_manager",parent)])
  DB.addAgent s row
+ assignManager s a parent
  ensureAgent s row
  DB.record s [a] a "sapi.created" (put "manager" parent row) "admin" Nothing
  pure row
@@ -177,7 +154,8 @@ updateAgent s a d = do
  state <- agentState s a
  require (not (any ((`elem` [Queued,Running]) . turnStatus) (agentTurns state))) 409 "Wait for this Sapi's current turn before changing its identity"
  when (has d "manager") $ validateManager s a (get d "manager") >>= assignManager s a
- DB.executeSQL s "UPDATE agents SET name=?,role=? WHERE id=?" [SQLText name,SQLText role,SQLText a]
+ row <- DB.agent s a
+ DB.addAgent s (merge row (obj [("name",str name),("role",str role)]))
  DB.record s [a] a "sapi.updated" d "admin" Nothing
  DB.agent s a >>= setManifests s
  pure (obj [("id",str a),("name",str name),("role",str role)])
@@ -237,14 +215,14 @@ changeRetirement s a retire reason = do
    forM_ (pairs d) $ \(child,entry) -> when (at entry "parent" == a) $ retired s child >>= \r -> retirementResult (if r then Right () else Left ActiveReports)
   time <- now
   cfg <- settings s a
-  writeJSON (agentRoot s a </> "host.json") (retirementSettings retire reason time cfg)
+  saveValue s ("settings/"<>a) (retirementSettings retire reason time cfg)
   unless retire $ do
    let parent = at (get d a) "parent"
    unless (T.null parent) $ retired s parent >>= \r -> when r (assignManager s a (str chief))
   DB.record s [a] a (if retire then "sapi.retired" else "sapi.restored") (obj [("reason",str reason)]) "admin" Nothing
   pure (obj [("id",str a),("retired",Bool retire),("changed",Bool True)])
 corporaSettings :: Service -> IO CorporaConfig
-corporaSettings s = readJSON (serviceRoot s </> "corpora-settings.json") (CorporaConfig Nothing "This computer" "" Active 1 mempty)
+corporaSettings s = loadValue s "corpora-settings" (CorporaConfig Nothing "This computer" "" Active 1 mempty)
 corporaIdentity :: Service -> IO Value
 corporaIdentity s = do
  cfg <- corporaSettings s
@@ -270,7 +248,7 @@ instance ToJSON ModelSettingsDraft where
  toJSON draft = obj [("revision",num (modelSettingsRevision draft)),("defaults",toJSON (modelSettingsDefault draft)),("overrides",toJSON (modelSettingsOverrides draft))]
 
 activeModelSettings :: Service -> IO (Maybe ModelSettingsDraft)
-activeModelSettings s = readJSON (serviceRoot s </> "model-settings.json") Nothing
+activeModelSettings s = loadValue s "model-settings" Nothing
 
 readModelSettings :: Service -> IO ModelSettingsDraft
 readModelSettings s = activeModelSettings s >>= maybe ((\configured -> ModelSettingsDraft 0 (providersDefault configured) Map.empty) <$> readProviders (repositoryRoot s)) pure
@@ -312,5 +290,5 @@ saveModelSettings s requested = do
  forM_ (Map.keys (modelSettingsOverrides requested)) $ \owner -> do
   unless (Map.lookup owner (modelSettingsOverrides requested) == Map.lookup owner overrides) $ requireActive s owner
  let saved=requested {modelSettingsRevision=revision+1}
- writeJSON (serviceRoot s </> "model-settings.json") saved
+ saveValue s "model-settings" saved
  pure saved

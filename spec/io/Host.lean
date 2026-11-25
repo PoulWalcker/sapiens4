@@ -32,7 +32,7 @@ def fixtureEnvironment (directory : FilePath) : IO (Array (String × Option Stri
   return #[("SAPIENS_TEST_PROMPTS", (directory / "fixture-prompts").toString), ("SAPIENS_CODEX_BINARY", provider.toString),
     ("SAPIENS_REPOSITORY", (root / ".build/spec").toString), ("SAPIENS_WHISPER_URL", "http://127.0.0.1:9")]
 
-def withHost (directory : FilePath) (use : Host → IO α) : IO α := do
+def withHostMode (crash : Bool) (directory : FilePath) (use : Host → IO α) : IO α := do
   let root ← repoRoot
   let child ← IO.Process.spawn {
     cmd := (binary root "sapiens4").toString
@@ -48,10 +48,11 @@ def withHost (directory : FilePath) (use : Host → IO α) : IO α := do
     let some port := (address.toString.splitOn "/").head!.toNat?
       | throw <| IO.userError "Invalid host port"
     let result ← use ⟨s!"http://127.0.0.1:{port}"⟩
-    child.stdin.putStrLn "stop"
-    child.stdin.flush
+    if crash then child.kill else
+      child.stdin.putStrLn "stop"
+      child.stdin.flush
     let status ← untilSome "clean host shutdown" child.tryWait
-    IO.ofExcept <| requireThat "host shutdown failed" (status == 0)
+    IO.ofExcept <| requireThat "host shutdown failed" (crash || status == 0)
     return result
   catch error =>
     try
@@ -60,6 +61,9 @@ def withHost (directory : FilePath) (use : Host → IO α) : IO α := do
         discard child.wait
     catch _ => pure ()
     throw error
+
+def withHost (directory : FilePath) (use : Host → IO α) : IO α := withHostMode false directory use
+def withCrashedHost (directory : FilePath) (use : Host → IO α) : IO α := withHostMode true directory use
 
 def request (url method path : String) (payload : Option Json := none)
     (headers : Array String := #["Content-Type: application/json", "X-Sapiens-Local: 1"]) : IO Reply := do

@@ -10,6 +10,7 @@ import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Exception hiding (handle)
 import Control.Monad
+import qualified V00_02_03Files as TypedFiles
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as BC
@@ -29,7 +30,6 @@ import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
 import Paths_sapiens_domain (version)
 import RuntimePaths (configDirectory)
-import System.Directory
 import System.Environment (lookupEnv)
 import System.FilePath
 import System.Info (arch)
@@ -57,17 +57,11 @@ data Telemetry = Telemetry
 
 readSaved :: FilePath -> IO Saved
 readSaved path = catchJust (guard . isDoesNotExistError)
- (BL.readFile path >>= either fail pure . decodeSaved)
+ (TypedFiles.readValue path (Saved False Nothing))
  (const (pure (Saved False Nothing)))
 
 writeSaved :: FilePath -> Saved -> IO ()
-writeSaved path value = do
- createDirectoryIfMissing True (takeDirectory path)
- bracketOnError (openBinaryTempFile (takeDirectory path) ".telemetry.tmp")
-  (\(temporary,handle) -> hClose handle `finally` removeFile temporary) $ \(temporary,handle) -> do
-   BL.hPut handle (encodeSaved value)
-   hClose handle
-   renameFile temporary path
+writeSaved = TypedFiles.writeValue
 
 openTelemetry :: RuntimeKind -> Maybe Bool -> IO Telemetry
 openTelemetry runtime choice = do

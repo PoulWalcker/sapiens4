@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module RuntimePaths (configDirectory, defaultDataDirectory, externalStoragePath, containedPath) where
 
+import qualified V00_02_03Files as TypedFiles
 import Data.Aeson
 import Control.Monad
 import Data.Char (toLower)
@@ -100,6 +101,7 @@ configDirectory = do
  forM_ owner $ \_ -> do
   installed <- getExecutablePath >>= installationOf
   when (null installed) (fail "This Config folder belongs to an installed Sapiens. Choose a separate Config folder.")
+ TypedFiles.migrateConfig directory
  pure directory
 
 defaultDataDirectory :: IO FilePath

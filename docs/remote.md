@@ -24,7 +24,7 @@ Build the app, then run:
 
 ```sh
 .build/bin/sapiens4 relay --origin https://remote.example.com --port 4180 \
-  --db /private/relay/relay.sqlite3
+  --db /private/relay/relay.lmdb
 ```
 
 Put port 4180 behind an HTTPS proxy supporting WebSockets. Keep the database

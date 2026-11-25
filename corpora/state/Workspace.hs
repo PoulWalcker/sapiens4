@@ -25,27 +25,6 @@ import Types
 import qualified Memo
 import qualified Store as DB
 
-migrateWorkspaces :: Service -> IO ()
-migrateWorkspaces s = do
- prefs <- DB.singleton s DB.Preferences
- let complete = obj [(owner,completeWorkspace workspace) | (owner,workspace) <- pairs (get prefs "workspaces")]
-     save workspaces = DB.saveSingleton s DB.Preferences (merge prefs (obj [("workspaces",workspaces),("browser_version",num 1),("workspace_revision",num (int (get prefs "workspace_revision")+1))]))
- when (get prefs "browser_version"==num 1 && complete/=get prefs "workspaces") $ save complete
- unless (get prefs "browser_version"==num 1) $ do
-  workspaces <- forM (pairs (get prefs "workspaces")) $ \(owner,workspace) -> do
-   tabs <- forM (items workspace "tabs") $ \tab -> do
-    converted <- if not (T.null (at tab "artifact")) then pure (put "path" (str (T.pack (workspaceRoot s owner </> "artifacts" </> T.unpack (at tab "artifact")))) tab) else
-     if at tab "type"=="html" then do
-      identity <- newId
-      let path=workspaceRoot s owner </> ("saved-tab-"++T.unpack identity++".html")
-      writeText path (at tab "html")
-      pure (put "path" (str (T.pack path)) tab)
-     else pure tab
-    identity <- newId
-    let url=if not (T.null (at converted "path")) then fileURL (T.unpack (at converted "path")) else if T.null (at converted "url") then "about:blank" else at converted "url"
-    pure (merge (remove ["type","artifact","html"] converted) (obj [("url",str url),("zoom",num 1),("command",obj [("seq",str identity),("action",str "navigate")])]))
-   pure (owner,merge workspace (obj [("tabs",arr tabs),("bookmarks",get workspace "bookmarks" `fallback` arr [])]))
-  save (obj workspaces)
 httpURL :: Text -> Bool
 httpURL s = case parseURI (T.unpack s) of
  Just u -> uriScheme u `elem` ["http:","https:"] && maybe False (\a -> not (null (uriRegName a)) && null (uriUserInfo a)) (uriAuthority u)

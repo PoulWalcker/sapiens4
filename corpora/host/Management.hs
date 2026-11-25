@@ -40,7 +40,7 @@ prepare s a = do
  endpoint <- readIORef (serviceEndpoint s)
  unless (T.null endpoint) $ do
   let path=workspaceRoot s a </> "host-control.json"
-  writeJSON path (obj [("url",str (endpoint<>"/api/agents/"<>a<>"/control"))])
+  atomicBytes path (encode (obj [("url",str (endpoint<>"/api/agents/"<>a<>"/control"))]))
   executable <- getExecutablePath
   template <- prompt s "host-control"
   writeText (agentRoot s a </> "manifests/host-control.md") (render template [("command",shellCommand executable <> " control " <> shellQuote path)])
@@ -210,7 +210,7 @@ updateCorpora s d = do
  cfg <- corporaSettings s
  updated <- validated (reviseCorpora d cfg)
  when (boolean (get d "archived")) $ readMVar (serviceRuns s) >>= mapM_ (\r->writeIORef (runCancel r) True) . M.elems
- writeJSON (serviceRoot s </> "corpora-settings.json") updated
+ saveValue s "corpora-settings" updated
  modifyIORef' (servicePulse s) (put "running" (Bool (corporaStatus updated==Active)))
  DB.agents s >>= mapM_ (setManifests s)
  corporaIdentity s
@@ -247,7 +247,7 @@ lifecycle s d = do
  case change of
   LifecycleReplay -> pure ()
   LifecycleApplied updated -> do
-   writeJSON (serviceRoot s </> "corpora-settings.json") updated
+   saveValue s "corpora-settings" updated
    modifyIORef' (servicePulse s) (put "running" (Bool (corporaStatus updated==Active)))
    when (corporaStatus updated==Paused) $ forM_ (M.elems runs) $ \r -> writeIORef (runCancel r) True
  corporaIdentity s

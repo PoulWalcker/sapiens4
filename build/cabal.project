@@ -1,4 +1,4 @@
-packages: ..
+packages: .. ../submodules/append4
 import: dependencies/cabal.project.freeze
 index-state: 2026-10-26T00:00:00Z
 

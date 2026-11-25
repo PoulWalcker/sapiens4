@@ -22,3 +22,6 @@ Windows: `.\build\start.ps1 -Open`.
 Local workspace: http://127.0.0.1:4174/workspace/.
 
 [License](license/LICENSE.md) · [Commercial licensing](license/LICENSING.md)
+
+App version: **v00.02.00**. The previous dev data layout is **v00.01.99**.
+Persistent upgrades run through the [versioned migrations](migrations/README.md).

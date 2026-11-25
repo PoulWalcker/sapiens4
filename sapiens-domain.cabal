@@ -1,6 +1,6 @@
 cabal-version: 3.6
 name: sapiens-domain
-version: 0.2.0.0
+version: 0.2.3
 build-type: Simple
 
 flag linux-desktop
@@ -15,7 +15,7 @@ common runtime
   ghc-options: -threaded -rtsopts -O1 -Wall -Werror=incomplete-patterns -Werror=incomplete-uni-patterns -Werror=missing-fields
   build-depends: base >=4.18 && <5, aeson ==2.3.2.0, bytestring, text, containers,
     directory, filepath, process, time, async, stm, scientific, vector,
-    sqlite-simple, filelock, uuid, base64-bytestring, network-uri, regex-tdfa,
+    append4, sqlite-simple ==0.4.19.0, filelock, uuid, base64-bytestring, network-uri, regex-tdfa,
     http-client, http-client-tls, http-types, network, wai, warp, wai-websockets,
     websockets, wuss, cryptohash-sha256, entropy, memory, random, tagsoup ==0.14.8
   if !os(windows)
@@ -39,8 +39,9 @@ common macos-update
 
 common host
   import: macos-update
-  hs-source-dirs: corpora, corpora/state, corpora/work, corpora/work/schedule, corpora/host, corpora/telemetry, remote/relay, remote/control, remote/protocol, build, environments/update
+  hs-source-dirs: migrations, corpora, corpora/state, corpora/work, corpora/work/schedule, corpora/host, corpora/telemetry, remote/relay, remote/control, remote/protocol, build, environments/update
   other-modules:
+    Clock,
     Command,
     Admission,
     Domain,
@@ -52,6 +53,20 @@ common host
     TelemetryProtocol,
     Paths_sapiens_domain,
     DataRoot,
+    V00_02_00Launcher,
+    Migrations,
+    MigrationPlan,
+    MigrationVersion,
+    V00_01_99,
+    V00_02_00,
+    V00_02_01,
+    V00_02_02,
+    V00_02_02Files,
+    V00_02_03,
+    V00_02_03Files,
+    AppStorage,
+    NoteTemplate,
+    LegacyReceipt,
     UpdateState,
     HostUpdateProtocol,
     Assets,
@@ -76,7 +91,6 @@ common host
     BrowserCrypto,
     Mailboxes,
     Registry,
-    Receipt,
     Server,
     Setup,
     Transport,
@@ -84,6 +98,7 @@ common host
     HostServer,
     Service,
     Store,
+    Clock,
     Types,
     Voice,
     Workspace,
@@ -100,6 +115,13 @@ executable sapiens4
   import: runtime, host
   main-is: Main.hs
 
+executable sapiens-storage-fixture
+  import: runtime, host
+  hs-source-dirs: spec/storage
+  main-is: Fixture.hs
+  if os(windows) || os(osx)
+    other-modules: UpdateBackup
+
 executable sapiens-linux
   import: runtime, host
   hs-source-dirs: environments/linux
@@ -113,7 +135,7 @@ executable sapiens-linux
 
 executable sapiens-macos
   import: runtime, macos-update
-  hs-source-dirs: environments/macos, environments, environments/update, corpora/state, corpora/telemetry
+  hs-source-dirs: migrations, environments/macos, environments, environments/update, corpora/state, corpora/telemetry
   other-modules:
     Admission,
     Domain,
@@ -125,9 +147,24 @@ executable sapiens-macos
     TelemetryProtocol,
     Paths_sapiens_domain,
     DataRoot,
+    V00_02_00Launcher,
+    Migrations,
+    MigrationPlan,
+    MigrationVersion,
+    V00_01_99,
+    V00_02_00,
+    V00_02_01,
+    V00_02_02,
+    V00_02_02Files,
+    V00_02_03,
+    V00_02_03Files,
+    AppStorage,
+    NoteTemplate,
+    LegacyReceipt,
     UpdateState,
     HostUpdateProtocol,
     DesktopStorage,
+    Clock,
     Types,
     Application,
     Browser,
@@ -168,7 +205,22 @@ common windows-host
     TelemetryProtocol,
     Paths_sapiens_domain,
     DataRoot,
+    V00_02_00Launcher,
+    Migrations,
+    MigrationPlan,
+    MigrationVersion,
+    V00_01_99,
+    V00_02_00,
+    V00_02_01,
+    V00_02_02,
+    V00_02_02Files,
+    V00_02_03,
+    V00_02_03Files,
+    AppStorage,
+    NoteTemplate,
+    LegacyReceipt,
     DesktopStorage,
+    Clock,
     Types,
     Browser,
     Host,
@@ -185,7 +237,7 @@ common windows-host
 
 executable sapiens-windows
   import: windows-host
-  hs-source-dirs: environments/windows, environments, environments/update, corpora/state, corpora/telemetry
+  hs-source-dirs: migrations, environments/windows, environments, environments/update, corpora/state, corpora/telemetry
   main-is: WindowsMain.hs
   if os(windows)
     ld-options: .build/haskell/windows-resources.o
@@ -201,3 +253,9 @@ executable sapiens-starter
     ghc-options: -optl-mwindows
   else
     buildable: False
+
+executable sapiens-migration-fixture
+  import: runtime
+  hs-source-dirs: spec/migrations, migrations, corpora/state, environments/update
+  main-is: Main.hs
+  other-modules: Migrations, MigrationPlan, MigrationVersion, V00_01_99, V00_02_00, V00_02_01, V00_02_02, V00_02_02Files, V00_02_03, V00_02_03Files, AppStorage, NoteTemplate, RuntimePaths, UpdateState

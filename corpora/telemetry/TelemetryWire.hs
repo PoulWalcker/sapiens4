@@ -1,5 +1,5 @@
 module TelemetryWire
- ( Saved(..), ConsentView(..), encodeSaved, decodeSaved, encodeBatches, recordFits
+ ( Saved(..), ConsentView(..), encodeBatches, recordFits
  , parseClientContext, clientContextValue, parseHeartbeat
  ) where
 
@@ -28,12 +28,6 @@ instance FromJSON Saved where
   on <- fields .: "enabled"
   installation <- fields .:? "installation_id" >>= traverse uuidText
   pure (Saved on installation)
-
-encodeSaved :: Saved -> BL.ByteString
-encodeSaved = encode
-
-decodeSaved :: BL.ByteString -> Either String Saved
-decodeSaved = eitherDecode
 
 data ConsentView = ConsentView
  { consentEnabled :: Bool, consentAvailable :: Bool, consentError :: Text }

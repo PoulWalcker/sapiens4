@@ -5,6 +5,7 @@ import Types
 #if defined(mingw32_HOST_OS) || defined(darwin_HOST_OS)
 import Installation (checkCandidateData, withConfigAccess, withInstalledVersion)
 #endif
+import MigrationVersion (currentVersion, versionText)
 import DataRoot
 import HostServer
 import qualified HostUpdateProtocol as Update
@@ -47,6 +48,7 @@ main = launch `catches` [Handler (\(code::ExitCode) -> throwIO code), Handler re
  launch = do
   args <- getArgs
   case args of
+   ["--version"] -> putStrLn (T.unpack (versionText currentVersion))
    "mcp":_ -> withInstalledVersion (pure ()) >> run args
    _ -> withInstalledVersion (run args)
  report (e::SomeException) = do
@@ -129,7 +131,7 @@ hostMain root args = do
 #endif
  ownConfig $ bracket (startHost consent directory port preparing) hostStop $ \host -> do
   let url="http://127.0.0.1:"<>show (hostPort host)<>"/workspace/"
-  putStrLn ("Sapiens4: "<>url<>"\nUI database: "<>directory</>"corpora.sqlite3")
+  putStrLn ("Sapiens4: "<>url<>"\nLMDB store: "<>directory</>"corpora.lmdb")
   finished <- newEmptyMVar
   let shutdown=void (tryPutMVar finished ())
   installShutdown shutdown
@@ -179,7 +181,7 @@ relayMain root args = do
  bind <- option "--bind" <$> (fromMaybe "127.0.0.1" <$> lookupEnv "SAPIENS_RELAY_BIND") <*> pure args
  portDefault <- fromMaybe "4180" <$> lookupEnv "PORT"
  port <- validated (parseIntegerOption "--port" portDefault args)
- dbDefault <- fromMaybe ".sapiens4-relay/relay.sqlite3" <$> lookupEnv "SAPIENS_RELAY_DB"
+ dbDefault <- fromMaybe ".sapiens4-relay/relay.lmdb" <$> lookupEnv "SAPIENS_RELAY_DB"
  urlEnv <- lookupEnv "SAPIENS_RELAY_ORIGIN"
  railway <- lookupEnv "RAILWAY_PUBLIC_DOMAIN"
  let database=option "--db" dbDefault args
@@ -198,7 +200,7 @@ relayMain root args = do
  betaEnv <- lookupEnv "SAPIENS_RELAY_BETA"
  relay <- newRelay root database (at config "token") (at config "relay") ("--beta" `elem` args || betaEnv==Just "1")
  let settings=setPort port $ setHost (fromStringHost bind) $ setGracefulCloseTimeout1 1000 $ setInstallShutdownHandler installShutdown $ setBeforeMainLoop (putStrLn ("Relay connection file: "<>connectionPath<>"\nRemote relay ready.")) defaultSettings
- runSettings settings (relayApplication relay)
+ runSettings settings (relayApplication relay) `finally` relayClose relay
  where isPrefixOfPath prefix path=take (length prefix) path==prefix
        fromStringHost = Data.String.fromString
 installShutdown :: IO () -> IO ()
