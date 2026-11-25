@@ -148,8 +148,6 @@ private def Mailbox.awaitEnvelope (box : Mailbox) (token : String) (privateText 
       requireThat "private content visible to relay" (privateText.all (!message.compress.contains ·))
       return some frame
 
--- The fixture owns its phone keys. Tests never read the application's saved
--- credentials or depend on their storage representation.
 private def Mailbox.acknowledge (box : Mailbox) : IO Unit := do
   for entry in ← box.entries box.deviceToken do
     let id ← IO.ofExcept <| entry.getObjVal? "id"
